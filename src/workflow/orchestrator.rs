@@ -20,7 +20,8 @@ use crate::git::commit::{
 };
 use crate::git::is_git_repo;
 use crate::project::artifacts::{
-    artifact_relative_path, write_artifact, ArtifactKind, ArtifactWriteInput,
+    artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact, ArtifactKind,
+    ArtifactWriteInput,
 };
 use crate::project::lifecycle::{load_project_state, save_project_state};
 use crate::project::load_project_config_if_exists;
@@ -383,7 +384,8 @@ impl Orchestrator {
                             iteration = iteration,
                             "implementer responding to review feedback"
                         );
-                        let feedback_rel = feedback_rel_path(loop_number, &loop_slug, iteration);
+                        let feedback_rel =
+                            feedback_rel_path(&project_dir, loop_number, &loop_slug, iteration)?;
                         let feedback_content =
                             read_project_relative_file(&project_dir, &feedback_rel)?;
 
@@ -527,8 +529,12 @@ impl Orchestrator {
 
                     let previous_iteration = state.phase_iteration.saturating_sub(1);
                     let impl_response_content = if previous_iteration > 0 {
-                        let response_rel =
-                            response_rel_path(loop_number, &loop_slug, previous_iteration);
+                        let response_rel = response_rel_path(
+                            &project_dir,
+                            loop_number,
+                            &loop_slug,
+                            previous_iteration,
+                        )?;
                         read_project_relative_file(&project_dir, &response_rel).ok()
                     } else {
                         None
@@ -1217,12 +1223,36 @@ fn collect_review_history(state: &ProjectState, project_dir: &Path) -> Result<St
     Ok(history.join("\n\n"))
 }
 
-fn feedback_rel_path(loop_number: u32, loop_slug: &str, iteration: u32) -> String {
-    format!("loops/{loop_number:03}-{loop_slug}/review-{iteration:03}-feedback.md")
+fn feedback_rel_path(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    iteration: u32,
+) -> Result<String> {
+    let suffix = format!("review-{iteration:03}-feedback.md");
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix)?.ok_or_else(
+        || {
+            RalphError::Orchestration(format!(
+                "missing feedback artifact for loop {loop_number} iteration {iteration}"
+            ))
+        },
+    )
 }
 
-fn response_rel_path(loop_number: u32, loop_slug: &str, iteration: u32) -> String {
-    format!("loops/{loop_number:03}-{loop_slug}/impl-response-{iteration:03}.md")
+fn response_rel_path(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    iteration: u32,
+) -> Result<String> {
+    let suffix = format!("impl-response-{iteration:03}.md");
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix)?.ok_or_else(
+        || {
+            RalphError::Orchestration(format!(
+                "missing implementer response artifact for loop {loop_number} iteration {iteration}"
+            ))
+        },
+    )
 }
 
 fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<String> {

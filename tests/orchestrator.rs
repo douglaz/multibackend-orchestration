@@ -15,6 +15,7 @@ use ralph::prompts::templates::{
 };
 use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
+use regex::Regex;
 use tempfile::TempDir;
 
 fn git_ok(repo: &Path, args: &[&str]) {
@@ -248,6 +249,16 @@ fn run_options(project_id: &str) -> RunOptions {
     }
 }
 
+fn assert_timestamped_artifact(rel_path: &str, suffix: &str) {
+    let suffix = regex::escape(suffix);
+    let pattern = format!(r"^loops/\d{{3}}-[a-z0-9-]+/\d{{14}}-{suffix}$");
+    let re = Regex::new(&pattern).expect("valid regex");
+    assert!(
+        re.is_match(rel_path),
+        "artifact path should be timestamp-prefixed: {rel_path}"
+    );
+}
+
 #[tokio::test]
 async fn runs_full_feature_loop_and_commits() {
     let (_temp, workspace_root, project_id, _script) =
@@ -266,6 +277,23 @@ async fn runs_full_feature_loop_and_commits() {
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     assert!(state.loops[0].commit.is_some());
     assert_eq!(state.current_phase, Phase::Planning);
+    assert_timestamped_artifact(&state.loops[0].artifacts.spec, "spec.md");
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .impl_notes
+            .as_deref()
+            .expect("impl-notes artifact should exist"),
+        "impl-notes.md",
+    );
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .approval
+            .as_deref()
+            .expect("approval artifact should exist"),
+        "review-approved.md",
+    );
 
     let repo_root = workspace_root.parent().expect("repo root");
     let tag = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-1"]);
@@ -329,6 +357,18 @@ async fn executes_completion_flow_until_complete() {
     assert_eq!(
         state.completion_attempts[0].verdict,
         Some(CompletionVerdict::Complete)
+    );
+    assert_timestamped_artifact(
+        &state.completion_attempts[0].artifacts.termination_request,
+        "termination-request.md",
+    );
+    assert_timestamped_artifact(
+        state.completion_attempts[0]
+            .artifacts
+            .verdict
+            .as_deref()
+            .expect("completion verdict artifact should exist"),
+        "completer-verdict.md",
     );
 }
 

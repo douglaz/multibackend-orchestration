@@ -22,22 +22,22 @@ Ralph manages multiple projects within a single workspace. Each project represen
 │   │   ├── state.json               # Project state (current loop, phase, etc.)
 │   │   └── loops/
 │   │       ├── 001-auth/
-│   │       │   ├── spec.md                    # Planner → Implementer
-│   │       │   ├── impl-notes.md              # Implementer → Reviewer (decisions, explanations)
-│   │       │   ├── review-001-feedback.md     # Reviewer → Implementer (suggestions)
-│   │       │   ├── impl-response-001.md       # Implementer → Reviewer (addressed feedback)
-│   │       │   ├── review-002-feedback.md     # Reviewer → Implementer (more suggestions)
-│   │       │   ├── impl-response-002.md       # Implementer → Reviewer (addressed feedback)
-│   │       │   └── review-approved.md         # Reviewer final approval
+│   │       │   ├── {TS}-spec.md                    # Planner → Implementer
+│   │       │   ├── {TS}-impl-notes.md              # Implementer → Reviewer (decisions, explanations)
+│   │       │   ├── {TS}-review-001-feedback.md     # Reviewer → Implementer (suggestions)
+│   │       │   ├── {TS}-impl-response-001.md       # Implementer → Reviewer (addressed feedback)
+│   │       │   ├── {TS}-review-002-feedback.md     # Reviewer → Implementer (more suggestions)
+│   │       │   ├── {TS}-impl-response-002.md       # Implementer → Reviewer (addressed feedback)
+│   │       │   └── {TS}-review-approved.md         # Reviewer final approval
 │   │       │
 │   │       ├── 002-database/
-│   │       │   ├── spec.md
-│   │       │   ├── impl-notes.md
-│   │       │   └── review-approved.md         # Approved on first review
+│   │       │   ├── {TS}-spec.md
+│   │       │   ├── {TS}-impl-notes.md
+│   │       │   └── {TS}-review-approved.md         # Approved on first review
 │   │       │
 │   │       └── 003-completion/                # Special: completion attempt
-│   │           ├── termination-request.md     # Planner → Completer
-│   │           └── completer-verdict.md       # Completer response (continue/complete)
+│   │           ├── {TS}-termination-request.md     # Planner → Completer
+│   │           └── {TS}-completer-verdict.md       # Completer response (continue/complete)
 │   │
 │   ├── 02-alpha/
 │   │   ├── prompt.md
@@ -91,9 +91,12 @@ The following rules are normative and take precedence over examples elsewhere in
    - Project state file is always `state.json`.
    - Feature-loop artifacts are stored only under `.ralph/projects/<project-id>/loops/<NNN>-<slug>/`.
    - Completion-loop artifacts are stored only under `.ralph/projects/<project-id>/loops/<NNN>-completion/`.
-   - Canonical artifact names are `spec.md`, `impl-notes.md`, `review-<III>-feedback.md`, `impl-response-<III>.md`, `review-approved.md`, `termination-request.md`, and `completer-verdict.md`.
+   - Base artifact types are `spec`, `impl-notes`, `review-<III>-feedback`, `impl-response-<III>`, `review-approved`, `termination-request`, and `completer-verdict`.
+   - Persisted artifact filenames are timestamp-prefixed: `<TS>-spec.md`, `<TS>-impl-notes.md`, `<TS>-review-<III>-feedback.md`, `<TS>-impl-response-<III>.md`, `<TS>-review-approved.md`, `<TS>-termination-request.md`, and `<TS>-completer-verdict.md`.
+   - `<TS>` is a UTC timestamp with second precision in `YYYYMMDDHHMMSS` format (for example `20260203055900`).
    - `<III>` is a zero-padded review iteration counter (`001`, `002`, ...), independent of loop number.
-   - In `state.json`, all artifact paths are project-relative (for example `loops/001-user-auth/spec.md`), resolved from `.ralph/projects/<project-id>/`.
+   - In `state.json`, all artifact paths are project-relative (for example `loops/001-user-auth/20260203055900-spec.md`), resolved from `.ralph/projects/<project-id>/`.
+   - Any component that reads review/response artifacts must resolve filenames from `state.json` (or artifact discovery), not by hardcoding legacy non-timestamp names.
 
 2. **Slug generation rules**
    - Slugs are derived from feature names by: lowercasing, replacing spaces/underscores with hyphens, removing non-alphanumeric characters (except hyphens), collapsing consecutive hyphens, trimming leading/trailing hyphens.
@@ -119,7 +122,7 @@ The following rules are normative and take precedence over examples elsewhere in
 
 5. **Commit policy**
    - At most one orchestrator-managed commit is created per approved feature loop.
-   - The orchestrator-managed commit occurs only after `review-approved.md`.
+   - The orchestrator-managed commit occurs only after `<TS>-review-approved.md`.
    - Review iterations may produce diffs and artifact updates, but no orchestrator-managed loop commit is finalized before approval.
    - Completion loops do not create code commits.
    - When `--skip-commit` or `auto_commit=false` is used, approved loops produce no commit or tag. Rollback to such loops falls back to the nearest prior tagged loop (see rollback behavior).
@@ -179,13 +182,19 @@ The following rules are normative and take precedence over examples elsewhere in
     - Valid status values for both `loops[]` and `completion_attempts[]` entries are `pending`, `in_progress`, and `completed`.
     - `pending`: loop allocated but no role artifact has been written yet.
     - `in_progress`: at least one role artifact exists, but terminal artifact does not.
-    - `completed`: terminal artifact exists (`review-approved.md` for feature loops, `completer-verdict.md` for completion loops).
+    - `completed`: terminal artifact exists (`<TS>-review-approved.md` for feature loops, `<TS>-completer-verdict.md` for completion loops).
 
 14. **State locking and concurrent access**
     - Mutating commands (`run`, `rollback`, `config set`, project creation/inheritance) acquire an exclusive advisory lock at `.ralph/projects/<id>/.lock`.
     - Lock is acquired before reading mutable state (`state.json`) and held through all writes for that command.
     - If lock acquisition fails, command exits with a `StateLocked` error and performs no writes.
-    - Read-only commands (`status`, `history`, `project list/show`, `config get/show`) do not require exclusive locks.
+    - Read-only commands (`status`, `history`, `tail`, `project list/show`, `config get/show`) do not require exclusive locks.
+
+15. **Tail stream ordering and follow semantics**
+    - `ralph tail` emits artifacts in chronological order by parsed filename timestamp `<TS>`, then by frontmatter `created_at`, then by artifact path as a deterministic tie-breaker.
+    - By default, `ralph tail` starts from the beginning of project history (oldest known artifact first).
+    - With `-F`/`--follow`, `ralph tail` continuously rescans and prints newly created artifact files, including files that appear after startup.
+    - `-F`/`--follow` must tolerate temporary disappearance/recreation of loop directories and continue streaming when artifacts reappear.
 
 ## Artifacts
 
@@ -196,16 +205,16 @@ Every interaction between roles produces an artifact that is persisted for trace
 ```
 FEATURE LOOP
   prompt.md
-     -> Planner -> spec.md
-     -> Implementer -> code diff + impl-notes.md
+     -> Planner -> <TS>-spec.md
+     -> Implementer -> code diff + <TS>-impl-notes.md
      -> Reviewer
-          -> [if approved] review-approved.md -> commit + tag
-          -> [if suggestions] review-III-feedback.md -> Implementer -> impl-response-III.md -> Reviewer (repeat)
+          -> [if approved] <TS>-review-approved.md -> commit + tag
+          -> [if suggestions] <TS>-review-III-feedback.md -> Implementer -> <TS>-impl-response-III.md -> Reviewer (repeat)
 
 COMPLETION LOOP
   prompt.md + state.json
-     -> Planner -> termination-request.md
-     -> Completer -> completer-verdict.md
+     -> Planner -> <TS>-termination-request.md
+     -> Completer -> <TS>-completer-verdict.md
           -> COMPLETE: project done
           -> CONTINUE: next feature loop
 ```
@@ -215,42 +224,44 @@ COMPLETION LOOP
 | Artifact | Producer | Consumer | Purpose |
 |----------|----------|----------|---------|
 | `prompt.md` | Human | Planner | Master project specification |
-| `spec.md` | Planner | Implementer, Reviewer | Feature specification for this loop |
-| `impl-notes.md` | Implementer | Reviewer | Explains implementation decisions, deviations, trade-offs |
-| `review-III-feedback.md` | Reviewer | Implementer | Suggestions/required changes (iteration III) |
-| `impl-response-III.md` | Implementer | Reviewer | Response to feedback: what was done, what couldn't be done and why |
-| `review-approved.md` | Reviewer | Orchestrator | Final approval, ends the review cycle |
-| `termination-request.md` | Planner | Completer | Request to end project, includes rationale |
-| `completer-verdict.md` | Completer | Orchestrator, Planner | Approve completion or list remaining work |
+| `<TS>-spec.md` | Planner | Implementer, Reviewer | Feature specification for this loop |
+| `<TS>-impl-notes.md` | Implementer | Reviewer | Explains implementation decisions, deviations, trade-offs |
+| `<TS>-review-III-feedback.md` | Reviewer | Implementer | Suggestions/required changes (iteration III) |
+| `<TS>-impl-response-III.md` | Implementer | Reviewer | Response to feedback: what was done, what couldn't be done and why |
+| `<TS>-review-approved.md` | Reviewer | Orchestrator | Final approval, ends the review cycle |
+| `<TS>-termination-request.md` | Planner | Completer | Request to end project, includes rationale |
+| `<TS>-completer-verdict.md` | Completer | Orchestrator, Planner | Approve completion or list remaining work |
 
 ### Artifact Naming Convention
 
 ```
 loops/
 └── {NNN}-{slug}/
-    ├── spec.md                      # Always present
-    ├── impl-notes.md                # Always present after implementation
-    ├── review-{III}-feedback.md     # One per review iteration (001, 002, ...)
-    ├── impl-response-{III}.md       # One per feedback response
-    └── review-approved.md           # Present only when approved
+    ├── {TS}-spec.md                      # Always present
+    ├── {TS}-impl-notes.md                # Always present after implementation
+    ├── {TS}-review-{III}-feedback.md     # One per review iteration (001, 002, ...)
+    ├── {TS}-impl-response-{III}.md       # One per feedback response
+    └── {TS}-review-approved.md           # Present only when approved
 
 # Special completion loop (no feature, just completion check)
 └── {NNN}-completion/
-    ├── termination-request.md
-    └── completer-verdict.md
+    ├── {TS}-termination-request.md
+    └── {TS}-completer-verdict.md
 ```
+
+Where `TS = YYYYMMDDHHMMSS` in UTC (for example `20260203055900`).
 
 ### Example: Loop with 2 Review Iterations
 
 ```
 loops/001-user-auth/
-├── spec.md                    # Planner wrote: "implement user auth with JWT..."
-├── impl-notes.md              # Implementer wrote: "used bcrypt for passwords because..."
-├── review-001-feedback.md     # Reviewer wrote: "missing rate limiting, tests incomplete"
-├── impl-response-001.md       # Implementer wrote: "added rate limiting, here's why tests..."
-├── review-002-feedback.md     # Reviewer wrote: "rate limiting good, but tests still need X"
-├── impl-response-002.md       # Implementer wrote: "added X, couldn't do Y because..."
-└── review-approved.md         # Reviewer wrote: "APPROVED - all criteria met"
+├── 20260203055910-spec.md                  # Planner wrote: "implement user auth with JWT..."
+├── 20260203060722-impl-notes.md            # Implementer wrote: "used bcrypt for passwords because..."
+├── 20260203061203-review-001-feedback.md   # Reviewer wrote: "missing rate limiting, tests incomplete"
+├── 20260203062040-impl-response-001.md     # Implementer wrote: "added rate limiting, here's why tests..."
+├── 20260203062617-review-002-feedback.md   # Reviewer wrote: "rate limiting good, but tests still need X"
+├── 20260203063408-impl-response-002.md     # Implementer wrote: "added X, couldn't do Y because..."
+└── 20260203064055-review-approved.md       # Reviewer wrote: "APPROVED - all criteria met"
 ```
 
 ### Artifact Content Structure
@@ -301,32 +312,32 @@ Backends are abstracted behind a common trait. **Version 1 is scoped to exactly 
 ```
 PLANNER
   Inputs:                         Outputs:
-  ├── prompt.md                   ├── spec.md (normal loop)
+  ├── prompt.md                   ├── <TS>-spec.md (normal loop)
   ├── state.json                  │   OR
-  └── previous specs (context)    └── termination-request.md (completion)
+  └── previous specs (context)    └── <TS>-termination-request.md (completion)
 
 IMPLEMENTER
   Inputs:                         Outputs:
-  ├── spec.md                     ├── Code changes (git diff)
-  ├── Current codebase            ├── impl-notes.md
-  └── review-III-feedback.md *    └── impl-response-III.md *
+  ├── <TS>-spec.md                ├── Code changes (git diff)
+  ├── Current codebase            ├── <TS>-impl-notes.md
+  └── <TS>-review-III-feedback.md *    └── <TS>-impl-response-III.md *
       (* during review iterations)
 
 REVIEWER
   Inputs:                         Outputs:
-  ├── prompt.md                   ├── review-III-feedback.md
-  ├── spec.md                     │   OR
-  ├── git diff                    └── review-approved.md
-  ├── impl-notes.md
-  └── impl-response-III.md *
+  ├── prompt.md                   ├── <TS>-review-III-feedback.md
+  ├── <TS>-spec.md                │   OR
+  ├── git diff                    └── <TS>-review-approved.md
+  ├── <TS>-impl-notes.md
+  └── <TS>-impl-response-III.md *
       (* during review iterations)
 
 COMPLETER
   Inputs:                         Outputs:
-  ├── prompt.md                   └── completer-verdict.md
+  ├── prompt.md                   └── <TS>-completer-verdict.md
   ├── state.json                      ├── COMPLETE: project done
   ├── All specs from project          └── CONTINUE: remaining items
-  └── termination-request.md
+  └── <TS>-termination-request.md
 ```
 
 ### Loop Structure
@@ -389,24 +400,24 @@ Input:
   - prompt.md (the full project specification)
   - state.json (completed features, current status)
 
-Planner Output (stored as `spec.md` by the orchestrator):
+Planner Output (stored as `<TS>-spec.md` by the orchestrator):
   - Feature name and description
   - Acceptance criteria
   - Files to create/modify
   - Dependencies on other features
-  - OR: suggestion that project is complete (stored as `termination-request.md`)
+  - OR: suggestion that project is complete (stored as `<TS>-termination-request.md`)
 ```
 
 ### Phase 2: Implementation
 
 ```
 Input:
-  - spec.md
+  - <TS>-spec.md
   - Current codebase
 
 Implementer Output:
   - Code changes (files created/modified)
-  - `impl-notes.md` body content explaining decisions
+  - `<TS>-impl-notes.md` body content explaining decisions
   - List of any spec items that couldn't be implemented (with reasons)
 ```
 
@@ -415,13 +426,13 @@ Implementer Output:
 ```
 Input:
   - prompt.md
-  - spec.md
+  - <TS>-spec.md
   - Git diff of implementation
-  - impl-notes.md
+  - <TS>-impl-notes.md
 
 Reviewer Output:
-  - `# Review: APPROVED` -> proceed to commit (stored as `review-approved.md`)
-  - `# Review: SUGGESTIONS` -> list of required changes (stored as `review-III-feedback.md`)
+  - `# Review: APPROVED` -> proceed to commit (stored as `<TS>-review-approved.md`)
+  - `# Review: SUGGESTIONS` -> list of required changes (stored as `<TS>-review-III-feedback.md`)
     - Each suggestion includes:
       - What needs to change
       - Why (referencing spec or master prompt)
@@ -434,7 +445,7 @@ If suggestions are returned, Implementer addresses them and Review repeats. Maxi
 After approval:
 1. Stage all changes
 2. Generate commit message using the following precedence:
-   - If `review-approved.md` contains a `## Commit Message` section, use that verbatim
+   - If `<TS>-review-approved.md` contains a `## Commit Message` section, use that verbatim
    - Otherwise, generate from spec using `commit_message_style` from config:
      - `conventional`: `feat(ralph): {feature_name} [loop-{N}]`
      - `descriptive`: `{feature_name}\n\nImplemented via ralph loop {N}.\nBackends: planner={P}, implementer={I}, reviewer={R}`
@@ -449,13 +460,13 @@ When Planner suggests completion:
 ```
 Input:
   - prompt.md
-  - All `spec.md` artifacts generated in feature loops
+  - All `<TS>-spec.md` artifacts generated in feature loops
   - Full project state
   - Planner's completion rationale
 
 Completer (MUST be different backend than Planner):
-  - COMPLETE: project finished (stored as `completer-verdict.md`)
-  - CONTINUE: list of remaining work items (stored as `completer-verdict.md`)
+  - COMPLETE: project finished (stored as `<TS>-completer-verdict.md`)
+  - CONTINUE: list of remaining work items (stored as `<TS>-completer-verdict.md`)
 ```
 
 ## Data Structures
@@ -539,21 +550,21 @@ Field notes:
         "reviewer": "claude"
       },
       "artifacts": {
-        "spec": "loops/001-user-auth/spec.md",
-        "impl_notes": "loops/001-user-auth/impl-notes.md",
+        "spec": "loops/001-user-auth/20260201100000-spec.md",
+        "impl_notes": "loops/001-user-auth/20260201101200-impl-notes.md",
         "reviews": [  // Completed feedback/response cycles; phase_iteration is the next review iteration
           {
             "iteration": 1,
-            "feedback": "loops/001-user-auth/review-001-feedback.md",
-            "response": "loops/001-user-auth/impl-response-001.md"
+            "feedback": "loops/001-user-auth/20260201102000-review-001-feedback.md",
+            "response": "loops/001-user-auth/20260201103200-impl-response-001.md"
           },
           {
             "iteration": 2,
-            "feedback": "loops/001-user-auth/review-002-feedback.md",
-            "response": "loops/001-user-auth/impl-response-002.md"
+            "feedback": "loops/001-user-auth/20260201103800-review-002-feedback.md",
+            "response": "loops/001-user-auth/20260201105200-impl-response-002.md"
           }
         ],
-        "approval": "loops/001-user-auth/review-approved.md"
+        "approval": "loops/001-user-auth/20260201110800-review-approved.md"
       },
       "commit": "abc123",
       "started_at": "ISO8601",
@@ -571,10 +582,10 @@ Field notes:
         "reviewer": "codex"
       },
       "artifacts": {
-        "spec": "loops/002-database/spec.md",
-        "impl_notes": "loops/002-database/impl-notes.md",
+        "spec": "loops/002-database/20260201113500-spec.md",
+        "impl_notes": "loops/002-database/20260201114500-impl-notes.md",
         "reviews": [],
-        "approval": "loops/002-database/review-approved.md"
+        "approval": "loops/002-database/20260201115400-review-approved.md"
       },
       "commit": "ghi789",
       "started_at": "ISO8601",
@@ -592,13 +603,13 @@ Field notes:
         "reviewer": "claude"
       },
       "artifacts": {
-        "spec": "loops/003-api/spec.md",
-        "impl_notes": "loops/003-api/impl-notes.md",
+        "spec": "loops/003-api/20260201122000-spec.md",
+        "impl_notes": "loops/003-api/20260201123200-impl-notes.md",
         "reviews": [
           {
             "iteration": 1,
-            "feedback": "loops/003-api/review-001-feedback.md",
-            "response": "loops/003-api/impl-response-001.md"
+            "feedback": "loops/003-api/20260201124500-review-001-feedback.md",
+            "response": "loops/003-api/20260201130200-impl-response-001.md"
           }
         ],
         "approval": null
@@ -623,7 +634,7 @@ Notes:
 | `current_phase` | `phase_iteration` meaning |
 |-----------------|---------------------------|
 | `planning` | Always `1` (single planner pass for the loop) |
-| `implementing` | Always `1` on initial implementation pass; set to review iteration `N` when implementing response to `review-NNN-feedback.md` |
+| `implementing` | Always `1` on initial implementation pass; set to review iteration `N` when implementing response to `<TS>-review-NNN-feedback.md` |
 | `reviewing` | Next review iteration number to run (starts at `1`, increments after each feedback/response cycle) |
 | `committing` | Always `1` (single commit finalization step) |
 | `completing` | Always `1` (single completer verdict step per completion loop) |
@@ -641,8 +652,8 @@ Example `completion_attempts[]` entry:
     "completer": "claude"
   },
   "artifacts": {
-    "termination_request": "loops/004-completion/termination-request.md",
-    "verdict": "loops/004-completion/completer-verdict.md"
+    "termination_request": "loops/004-completion/20260201151000-termination-request.md",
+    "verdict": "loops/004-completion/20260201152400-completer-verdict.md"
   },
   "verdict": "continue",
   "started_at": "ISO8601",
@@ -652,14 +663,14 @@ Example `completion_attempts[]` entry:
 
 `completion_attempts[]` field notes:
 - `artifacts.verdict` and `completed_at` may be `null` while a completion loop is in progress.
-- `verdict` is `continue` or `complete` once `completer-verdict.md` is written.
+- `verdict` is `continue` or `complete` once `<TS>-completer-verdict.md` is written.
 - `slug` is always the literal string `completion` for completion-attempt loops.
 
 ### Artifact Examples
 
 All persisted artifact files use orchestrator-generated YAML frontmatter for metadata, followed by backend-generated markdown content.
 
-#### `spec.md` (Planner → Implementer)
+#### `<TS>-spec.md` (Planner → Implementer)
 
 ```markdown
 ---
@@ -691,7 +702,7 @@ Implement RESTful API endpoints for user management.
 - Blocks: loop-004-frontend
 ```
 
-#### `impl-notes.md` (Implementer → Reviewer)
+#### `<TS>-impl-notes.md` (Implementer → Reviewer)
 
 ```markdown
 ---
@@ -719,7 +730,7 @@ created_at: 2026-02-05T15:00:00Z
 - Manual testing: `curl http://localhost:8080/api/users`
 ```
 
-#### `review-III-feedback.md` (Reviewer → Implementer)
+#### `<TS>-review-III-feedback.md` (Reviewer → Implementer)
 
 ```markdown
 ---
@@ -751,7 +762,7 @@ created_at: 2026-02-05T15:30:00Z
 - The `HEAD` endpoint addition is good, please add to spec
 ```
 
-#### `impl-response-III.md` (Implementer → Reviewer)
+#### `<TS>-impl-response-III.md` (Implementer → Reviewer)
 
 ```markdown
 ---
@@ -787,7 +798,7 @@ created_at: 2026-02-05T16:00:00Z
 - No commit was created yet; commit happens only after reviewer approval.
 ```
 
-#### `review-approved.md` (Reviewer → Orchestrator)
+#### `<TS>-review-approved.md` (Reviewer → Orchestrator)
 
 ```markdown
 ---
@@ -817,7 +828,7 @@ Note: Request validation middleware deferred - acceptable for this loop.
 feat(api): complete REST user endpoints
 ```
 
-#### `termination-request.md` (Planner → Completer)
+#### `<TS>-termination-request.md` (Planner → Completer)
 
 ```markdown
 ---
@@ -851,7 +862,7 @@ All features specified in the master prompt have been implemented:
 These are enhancements, not requirements from the master prompt.
 ```
 
-#### `completer-verdict.md` (Completer → Orchestrator)
+#### `<TS>-completer-verdict.md` (Completer → Orchestrator)
 
 ```markdown
 ---
@@ -929,8 +940,8 @@ completer = "templates/completer.md"      # Relative to .ralph/
 #   {{opposite_backend}}  - The other backend
 #   {{prompt_content}}    - Full content of prompt.md
 #   {{state_content}}     - Full JSON content of state.json
-#   {{spec_content}}      - Full content of current spec.md
-#   {{impl_notes_content}} - Full content of impl-notes.md
+#   {{spec_content}}      - Full content of current <TS>-spec.md artifact
+#   {{impl_notes_content}} - Full content of current <TS>-impl-notes.md artifact
 #   {{previous_specs}}    - Concatenated previous spec summaries
 #   {{git_diff}}          - Current uncommitted changes
 #   {{review_feedback_content}} - Current reviewer feedback content (for impl response)
@@ -1011,6 +1022,7 @@ COMMANDS:
     run           Start or resume orchestration
     status        Show current project status
     history       Show loop history and decisions
+    tail          Stream loop artifacts in chronological order
     rollback      Rollback to a previous loop state
 
     # Configuration
@@ -1029,6 +1041,7 @@ EXAMPLES:
     ralph run
     ralph run --loops 3
     ralph status
+    ralph tail
 
     # View all projects
     ralph project list
@@ -1131,7 +1144,7 @@ ralph run [OPTIONS]
 OPTIONS:
     --project <ID>        Run specific project (default: active project)
     --loops <N>           Maximum feature loops to complete in this invocation
-    --until-review        Stop after next successful review (after writing review-approved.md, before commit phase)
+    --until-review        Stop after next successful review (after writing <TS>-review-approved.md, before commit phase)
     --until-complete      Run until Completer returns COMPLETE
     --dry-run             Show what would happen without executing
     --backend <BACKEND>   Override starting backend for this run only (highest precedence)
@@ -1175,9 +1188,9 @@ Previous Loops:
   [✓] Loop 2: Database Schema (0 feedback iterations)
 
 Loop artifacts: .ralph/projects/03-beta/loops/
-  • 001-user-auth/spec.md
-  • 002-database/spec.md
-  • 003-api/spec.md (current)
+  • 001-user-auth/20260201100000-spec.md
+  • 002-database/20260201113500-spec.md
+  • 003-api/20260201122000-spec.md (current)
 ```
 
 ### `ralph rollback`
@@ -1198,7 +1211,7 @@ OPTIONS:
 BEHAVIOR:
     - Removes all loop directories after the specified loop number
     - Updates state.json to reflect the rollback
-    - If a completion attempt is in progress (for example `termination-request.md` exists but `completer-verdict.md` does not), rollback removes that partial completion-loop directory and removes the corresponding `completion_attempts[]` entry when `verdict` is `null`.
+    - If a completion attempt is in progress (for example `<TS>-termination-request.md` exists but `<TS>-completer-verdict.md` does not), rollback removes that partial completion-loop directory and removes the corresponding `completion_attempts[]` entry when `verdict` is `null`.
     - With --hard:
       - If target is an approved feature loop with a tag, reset to `ralph/{project_id}/loop-{N}`
       - If target tag is missing (e.g., loop was approved with `--skip-commit`), fall back to the nearest prior tagged loop; if none exists, reset to project branch base commit
@@ -1275,7 +1288,7 @@ Loop 1: User Authentication
   Backends:   planner=claude, implementer=codex, reviewer=claude
   Reviews:    2 feedback iterations
   Commit:     abc123
-  Spec:       loops/001-user-auth/spec.md
+  Spec:       loops/001-user-auth/20260201100000-spec.md
 
 Loop 2: Database Schema
   Started:    2026-02-01T11:35:00Z
@@ -1283,13 +1296,49 @@ Loop 2: Database Schema
   Backends:   planner=codex, implementer=claude, reviewer=codex
   Reviews:    0 feedback iterations
   Commit:     ghi789
-  Spec:       loops/002-database/spec.md
+  Spec:       loops/002-database/20260201113500-spec.md
 
 Loop 3: REST API Endpoints (IN PROGRESS)
   Started:    2026-02-01T12:20:00Z
   Phase:      reviewing (iteration 2)
   Backends:   planner=claude, implementer=codex, reviewer=claude
-  Spec:       loops/003-api/spec.md
+  Spec:       loops/003-api/20260201122000-spec.md
+```
+
+### `ralph tail`
+
+Stream artifact files in chronological order so operators can follow orchestration progress in real time.
+
+```
+ralph tail [OPTIONS]
+
+OPTIONS:
+    --project <ID>            Tail a specific project (default: active project)
+    -n, --last <N>            Show only the last N artifact events (default: all, from beginning)
+    -F, --follow              Continue streaming as new artifact files appear (tail -F semantics)
+    --poll-interval-ms <MS>   Rescan interval while following (default: 1000)
+    --json                    Output one JSON object per emitted artifact event
+
+ORDERING:
+    - Primary: filename timestamp prefix `<TS>` (`YYYYMMDDHHMMSS`)
+    - Secondary: frontmatter `created_at`
+    - Tertiary: artifact relative path (stable tie-break)
+
+FOLLOW (`-F`) BEHAVIOR:
+    - Continues running after initial backlog and prints new artifacts as they are created
+    - Detects files created after startup
+    - Tolerates loop-directory disappearance/recreation and resumes when files reappear
+    - Never mutates state
+
+EXAMPLES:
+    # Print full artifact timeline from beginning
+    ralph tail
+
+    # Follow live events like tail -F
+    ralph tail -F
+
+    # Last 20 events from a specific project, then follow
+    ralph tail --project 03-beta --last 20 -F
 ```
 
 ## Architecture
@@ -1307,6 +1356,7 @@ src/
 │   ├── run.rs                  # Orchestration execution
 │   ├── status.rs               # Status display
 │   ├── history.rs              # History viewing
+│   ├── tail.rs                 # Chronological artifact streaming
 │   └── rollback.rs             # Rollback operations
 ├── backend/
 │   ├── mod.rs                  # Backend trait definition
@@ -1504,7 +1554,7 @@ Given a feature spec, implement it by:
 
 Return markdown body only (no YAML frontmatter).
 
-If this is the first implementation pass, output `impl-notes.md` in this format:
+If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
 # Implementation Notes
 
@@ -1517,7 +1567,7 @@ If this is the first implementation pass, output `impl-notes.md` in this format:
 ## Testing
 - <how to verify the implementation>
 
-If this is a review-response pass, output `impl-response-III.md` in this format:
+If this is a review-response pass, output `<TS>-impl-response-III.md` in this format:
 
 # Implementation Response (Iteration <N>)
 
@@ -1539,9 +1589,9 @@ You are a code reviewer ensuring implementations match specifications.
 
 Given:
 - `prompt.md`
-- `spec.md`
+- `<TS>-spec.md`
 - The implementation diff
-- `impl-notes.md`
+- `<TS>-impl-notes.md`
 
 Review for:
 1. Spec compliance - does it meet all acceptance criteria?

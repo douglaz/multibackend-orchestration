@@ -84,7 +84,7 @@ Given a feature spec, implement it by:
 
 Return markdown body only (no YAML frontmatter).
 
-If this is the first implementation pass, output `impl-notes.md` in this format:
+If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
 # Implementation Notes
 
@@ -99,7 +99,7 @@ If this is the first implementation pass, output `impl-notes.md` in this format:
 
 ---
 
-If this is a review-response pass, output `impl-response-III.md` in this format:
+If this is a review-response pass, output `<TS>-impl-response-III.md` in this format:
 
 # Implementation Response (Iteration {{iteration}})
 
@@ -133,9 +133,9 @@ pub fn default_reviewer_template() -> &'static str {
 
 Given:
 - `prompt.md`
-- `spec.md`
+- `<TS>-spec.md`
 - The implementation diff
-- `impl-notes.md`
+- `<TS>-impl-notes.md`
 
 Review for:
 1. Spec compliance - does it meet all acceptance criteria?

@@ -1,8 +1,11 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::util::time::now_iso8601;
+use crate::util::time::{format_timestamp_yyyymmddhhmmss, now_utc};
 use crate::Result;
+
+pub const ARTIFACT_TIMESTAMP_LEN: usize = 14;
 
 #[derive(Debug, Clone)]
 pub enum ArtifactKind {
@@ -44,6 +47,10 @@ impl ArtifactKind {
         }
     }
 
+    pub fn file_name_with_timestamp(&self, timestamp: &str) -> String {
+        format!("{timestamp}-{}", self.file_name())
+    }
+
     pub fn iteration(&self) -> Option<u32> {
         match self {
             Self::ReviewFeedback { iteration } | Self::ImplResponse { iteration } => {
@@ -77,8 +84,10 @@ pub fn write_artifact(project_dir: &Path, input: ArtifactWriteInput<'_>) -> Resu
     let loop_dir = project_dir.join("loops").join(loop_dir_name);
     fs::create_dir_all(&loop_dir)?;
 
-    let artifact_path = loop_dir.join(input.kind.file_name());
-    let created_at = now_iso8601();
+    let now = now_utc();
+    let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let timestamp = format_timestamp_yyyymmddhhmmss(now);
+    let artifact_path = loop_dir.join(input.kind.file_name_with_timestamp(&timestamp));
     let body = strip_backend_frontmatter(input.body);
 
     let mut fm = String::from("---\n");
@@ -108,6 +117,83 @@ pub fn artifact_relative_path(project_dir: &Path, artifact_path: &Path) -> Strin
         .unwrap_or(artifact_path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+pub fn parse_artifact_filename_timestamp(file_name: &str) -> Option<String> {
+    let (prefix, _) = file_name.split_once('-')?;
+    if prefix.len() == ARTIFACT_TIMESTAMP_LEN && prefix.chars().all(|c| c.is_ascii_digit()) {
+        Some(prefix.to_owned())
+    } else {
+        None
+    }
+}
+
+pub fn resolve_artifact_path_by_suffix(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    suffix: &str,
+) -> Result<Option<String>> {
+    let loop_dir_name = format!("{loop_number:03}-{loop_slug}");
+    let loop_dir = project_dir.join("loops").join(loop_dir_name);
+
+    let read_dir = match fs::read_dir(&loop_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut best: Option<(Option<String>, String)> = None;
+    for entry in read_dir {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+
+        let timestamp = if file_name == suffix {
+            None
+        } else if let Some(prefix) = parse_artifact_filename_timestamp(file_name) {
+            let expected_suffix = format!("-{suffix}");
+            if file_name.ends_with(&expected_suffix) {
+                Some(prefix)
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+
+        let rel = artifact_relative_path(project_dir, &entry.path());
+        match &best {
+            None => best = Some((timestamp, rel)),
+            Some((best_ts, best_rel)) => {
+                if is_candidate_better(timestamp.as_deref(), best_ts.as_deref(), &rel, best_rel) {
+                    best = Some((timestamp, rel));
+                }
+            }
+        }
+    }
+
+    Ok(best.map(|(_, rel)| rel))
+}
+
+fn is_candidate_better(
+    candidate_ts: Option<&str>,
+    best_ts: Option<&str>,
+    candidate_rel: &str,
+    best_rel: &str,
+) -> bool {
+    match (candidate_ts, best_ts) {
+        (Some(c), Some(b)) => c > b || (c == b && candidate_rel > best_rel),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => candidate_rel > best_rel,
+    }
 }
 
 fn strip_backend_frontmatter(raw: &str) -> String {
@@ -140,5 +226,74 @@ fn strip_backend_frontmatter(raw: &str) -> String {
         trimmed.to_owned()
     } else {
         out.trim().to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use regex::Regex;
+    use tempfile::TempDir;
+
+    use super::{
+        resolve_artifact_path_by_suffix, write_artifact, ArtifactKind, ArtifactWriteInput,
+    };
+
+    #[test]
+    fn write_artifact_prefixes_filename_with_timestamp() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_dir = temp.path();
+
+        let path = write_artifact(
+            project_dir,
+            ArtifactWriteInput {
+                project_id: "demo",
+                loop_number: 1,
+                loop_slug: "sample",
+                backend: "claude",
+                role: "planner",
+                kind: ArtifactKind::Spec,
+                body: "# Feature: Demo\n\n## Description\nx\n\n## Acceptance Criteria\n- [ ] x\n\n## Files to Modify/Create\n- `a` - b\n\n## Dependencies\n- Requires: none\n- Blocks: none",
+            },
+        )
+        .expect("write artifact");
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("utf8 file name");
+        let re = Regex::new(r"^\d{14}-spec\.md$").expect("regex");
+        assert!(
+            re.is_match(file_name),
+            "expected timestamp-prefixed filename, got {file_name}"
+        );
+    }
+
+    #[test]
+    fn resolve_artifact_path_by_suffix_prefers_latest_timestamped_file() {
+        let temp = TempDir::new().expect("temp dir");
+        let loop_dir = temp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        std::fs::write(loop_dir.join("review-001-feedback.md"), "legacy").expect("write legacy");
+        std::fs::write(
+            loop_dir.join("20260203055910-review-001-feedback.md"),
+            "old timestamp",
+        )
+        .expect("write old");
+        std::fs::write(
+            loop_dir.join("20260203060159-review-001-feedback.md"),
+            "new timestamp",
+        )
+        .expect("write new");
+
+        let resolved =
+            resolve_artifact_path_by_suffix(temp.path(), 1, "demo", "review-001-feedback.md")
+                .expect("resolve")
+                .expect("path should exist");
+
+        assert_eq!(
+            resolved,
+            "loops/001-demo/20260203060159-review-001-feedback.md"
+        );
     }
 }
