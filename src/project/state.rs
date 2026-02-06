@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -275,5 +276,65 @@ impl ProjectState {
             .chain(self.completion_attempts.iter().map(|c| c.loop_number))
             .max()
             .unwrap_or(0)
+    }
+
+    pub fn validate_invariants(&self) -> std::result::Result<(), String> {
+        if self.phase_iteration == 0 {
+            return Err("phase_iteration must be >= 1".to_owned());
+        }
+
+        let mut seen = HashSet::new();
+
+        for loop_state in &self.loops {
+            if loop_state.loop_type != LoopType::Feature {
+                return Err(format!(
+                    "feature loop {} has invalid loop_type {:?}",
+                    loop_state.loop_number, loop_state.loop_type
+                ));
+            }
+
+            if !seen.insert(loop_state.loop_number) {
+                return Err(format!(
+                    "duplicate loop_number {} found across state arrays",
+                    loop_state.loop_number
+                ));
+            }
+        }
+
+        for attempt in &self.completion_attempts {
+            if attempt.loop_type != LoopType::Completion {
+                return Err(format!(
+                    "completion loop {} has invalid loop_type {:?}",
+                    attempt.loop_number, attempt.loop_type
+                ));
+            }
+
+            if attempt.slug != "completion" {
+                return Err(format!(
+                    "completion loop {} must use slug 'completion', got '{}'",
+                    attempt.loop_number, attempt.slug
+                ));
+            }
+
+            if !seen.insert(attempt.loop_number) {
+                return Err(format!(
+                    "duplicate loop_number {} found across state arrays",
+                    attempt.loop_number
+                ));
+            }
+        }
+
+        if self.current_loop == 0 {
+            if !seen.is_empty() {
+                return Err("current_loop is 0 but loop entries exist".to_owned());
+            }
+        } else if !seen.contains(&self.current_loop) {
+            return Err(format!(
+                "current_loop {} does not refer to any loop entry",
+                self.current_loop
+            ));
+        }
+
+        Ok(())
     }
 }

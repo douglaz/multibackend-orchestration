@@ -344,3 +344,83 @@ fn test_last_loop_number() {
 
     assert_eq!(state.last_loop_number(), 3);
 }
+
+#[test]
+fn test_validate_invariants_rejects_duplicate_loop_numbers() {
+    let mut state = ProjectState::new("test", "Test", "hash", None);
+    state.current_loop = 1;
+    state.status = ProjectStatus::InProgress;
+
+    state.loops.push(FeatureLoopState {
+        loop_number: 1,
+        slug: "feature".to_owned(),
+        feature_name: "Feature".to_owned(),
+        loop_type: LoopType::Feature,
+        status: LoopStatus::InProgress,
+        backends: FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "codex".to_owned(),
+            reviewer: "claude".to_owned(),
+        },
+        artifacts: FeatureLoopArtifacts {
+            spec: "loops/001-feature/spec.md".to_owned(),
+            impl_notes: None,
+            reviews: vec![],
+            approval: None,
+        },
+        commit: None,
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    state.completion_attempts.push(CompletionLoopState {
+        loop_number: 1,
+        slug: "completion".to_owned(),
+        loop_type: LoopType::Completion,
+        status: LoopStatus::InProgress,
+        backends: CompletionLoopBackends {
+            planner: "claude".to_owned(),
+            completer: "codex".to_owned(),
+        },
+        artifacts: CompletionLoopArtifacts {
+            termination_request: "loops/001-completion/termination-request.md".to_owned(),
+            verdict: None,
+        },
+        verdict: None,
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    assert!(state.validate_invariants().is_err());
+}
+
+#[test]
+fn test_validate_invariants_rejects_missing_current_loop_reference() {
+    let mut state = ProjectState::new("test", "Test", "hash", None);
+    state.current_loop = 2;
+    state.status = ProjectStatus::InProgress;
+
+    state.loops.push(FeatureLoopState {
+        loop_number: 1,
+        slug: "feature".to_owned(),
+        feature_name: "Feature".to_owned(),
+        loop_type: LoopType::Feature,
+        status: LoopStatus::InProgress,
+        backends: FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "codex".to_owned(),
+            reviewer: "claude".to_owned(),
+        },
+        artifacts: FeatureLoopArtifacts {
+            spec: "loops/001-feature/spec.md".to_owned(),
+            impl_notes: None,
+            reviews: vec![],
+            approval: None,
+        },
+        commit: None,
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    assert!(state.validate_invariants().is_err());
+}

@@ -34,6 +34,9 @@ pub enum RalphError {
         lock_path: PathBuf,
     },
 
+    #[error("corrupted state at {path}: {reason}")]
+    CorruptedState { path: PathBuf, reason: String },
+
     #[error("backend unavailable: {backend}")]
     BackendUnavailable { backend: String },
 

@@ -31,7 +31,10 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
         "PARENT: {}",
         project_ref.parent_project.as_deref().unwrap_or("none")
     );
-    println!("PROMPT: {}", state.prompt_file);
+    println!(
+        "PROMPT: {} (sha256: {})",
+        state.prompt_file, state.prompt_hash
+    );
     println!();
     println!("LOOP HISTORY:");
 
@@ -72,6 +75,10 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
                     println!(
                         "  Reviews: {} iterations",
                         loop_state.artifacts.reviews.len()
+                    );
+                    println!(
+                        "  Commit: {}",
+                        loop_state.commit.as_deref().unwrap_or("none")
                     );
                     println!("  Spec: {}", loop_state.artifacts.spec);
                 } else {

@@ -124,10 +124,34 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
                 project_meta.parent_project.as_deref().unwrap_or("none")
             );
             println!("Prompt Hash: {}", state.prompt_hash);
+            println!(
+                "Prompt Hash At Loop Start: {}",
+                state.prompt_hash_at_loop_start
+            );
             println!("Current Loop: {}", state.current_loop);
-            println!("Current Phase: {}", phase_label(&state.current_phase));
+            println!(
+                "Current Phase: {} (iteration {})",
+                phase_label(&state.current_phase),
+                state.phase_iteration
+            );
             println!("Feature Loops: {}", state.loops.len());
             println!("Completion Attempts: {}", state.completion_attempts.len());
+
+            if let Some(loop_state) = state.current_feature_loop() {
+                println!("Current Feature: {}", loop_state.feature_name);
+                println!(
+                    "Current Backends: planner={}, implementer={}, reviewer={}",
+                    loop_state.backends.planner,
+                    loop_state.backends.implementer,
+                    loop_state.backends.reviewer
+                );
+            } else if let Some(attempt) = state.current_completion_attempt() {
+                println!("Current Completion Attempt: loop {}", attempt.loop_number);
+                println!(
+                    "Current Backends: planner={}, completer={}",
+                    attempt.backends.planner, attempt.backends.completer
+                );
+            }
             Ok(())
         }
     }

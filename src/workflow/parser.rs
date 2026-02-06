@@ -48,6 +48,10 @@ pub fn parse_planner_output(raw: &str) -> Result<PlannerDecision> {
                 "planner feature heading has empty feature name".to_owned(),
             ));
         }
+        validate_required_section(&body, "## Description", "planner feature spec")?;
+        validate_required_section(&body, "## Acceptance Criteria", "planner feature spec")?;
+        validate_required_section(&body, "## Files to Modify/Create", "planner feature spec")?;
+        validate_required_section(&body, "## Dependencies", "planner feature spec")?;
         return Ok(PlannerDecision::Feature {
             name: trimmed.to_owned(),
             body,
@@ -55,6 +59,9 @@ pub fn parse_planner_output(raw: &str) -> Result<PlannerDecision> {
     }
 
     if first_h1.trim() == "# Project Completion Request" {
+        validate_required_section(&body, "## Rationale", "planner completion request")?;
+        validate_required_section(&body, "## Summary of Work", "planner completion request")?;
+        validate_required_section(&body, "## Remaining Items", "planner completion request")?;
         return Ok(PlannerDecision::CompletionRequest { body });
     }
 
@@ -155,14 +162,26 @@ pub fn parse_completer_output(raw: &str) -> Result<CompleterDecision> {
     };
 
     match first_h1.trim() {
-        "# Verdict: COMPLETE" => Ok(CompleterDecision {
-            verdict: CompletionVerdict::Complete,
-            body,
-        }),
+        "# Verdict: COMPLETE" => {
+            validate_required_line(
+                &body,
+                "The project satisfies all requirements:",
+                "completer complete verdict",
+            )?;
+            Ok(CompleterDecision {
+                verdict: CompletionVerdict::Complete,
+                body,
+            })
+        }
         "# Verdict: CONTINUE" => {
             validate_required_section(
                 &body,
                 "## Missing Requirements",
+                "completer continue verdict",
+            )?;
+            validate_required_section(
+                &body,
+                "## Recommended Next Features",
                 "completer continue verdict",
             )?;
             Ok(CompleterDecision {
@@ -252,6 +271,15 @@ fn validate_required_section(body: &str, section: &str, scope: &str) -> Result<(
     Ok(())
 }
 
+fn validate_required_line(body: &str, line: &str, scope: &str) -> Result<()> {
+    if !body.lines().any(|candidate| candidate.trim() == line) {
+        return Err(RalphError::ParseError(format!(
+            "missing required line '{line}' in {scope}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -263,7 +291,7 @@ mod tests {
 
     #[test]
     fn parses_feature_heading() {
-        let text = "# Feature: User Authentication\n\n## Description\n...";
+        let text = "# Feature: User Authentication\n\n## Description\n...\n\n## Acceptance Criteria\n- [ ] one\n\n## Files to Modify/Create\n- `src/lib.rs` - update\n\n## Dependencies\n- Requires: none\n- Blocks: none";
         let parsed = parse_planner_output(text).expect("expected parse success");
         match parsed {
             PlannerDecision::Feature { name, .. } => assert_eq!(name, "User Authentication"),
@@ -273,7 +301,7 @@ mod tests {
 
     #[test]
     fn parses_completion_heading() {
-        let text = "# Project Completion Request\n\n## Rationale\n...";
+        let text = "# Project Completion Request\n\n## Rationale\n...\n\n## Summary of Work\n...\n\n## Remaining Items\n- None";
         let parsed = parse_planner_output(text).expect("expected parse success");
         match parsed {
             PlannerDecision::CompletionRequest { .. } => {}
@@ -325,9 +353,18 @@ mod tests {
 
     #[test]
     fn parses_completer_verdict() {
-        let text = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. x";
+        let text =
+            "# Verdict: CONTINUE\n\n## Missing Requirements\n1. x\n\n## Recommended Next Features\n1. y";
         let parsed = parse_completer_output(text).expect("parse should succeed");
         assert_eq!(parsed.verdict, CompletionVerdict::Continue);
+    }
+
+    #[test]
+    fn parses_completer_complete_verdict() {
+        let text =
+            "# Verdict: COMPLETE\n\nThe project satisfies all requirements:\n- requirement: done";
+        let parsed = parse_completer_output(text).expect("parse should succeed");
+        assert_eq!(parsed.verdict, CompletionVerdict::Complete);
     }
 
     #[test]

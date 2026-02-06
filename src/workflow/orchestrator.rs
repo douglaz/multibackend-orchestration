@@ -102,7 +102,7 @@ impl Orchestrator {
         let mut state = load_project_state(&project_dir)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
-        if self.workspace.config.git.auto_branch {
+        if !options.dry_run && self.workspace.config.git.auto_branch {
             if let Some(repo_root) = self.workspace.root.parent() {
                 if is_git_repo(repo_root) {
                     let branch =

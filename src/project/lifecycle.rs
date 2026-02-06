@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::Utc;
 
@@ -143,9 +144,107 @@ fn validate_project_id(id: &str) -> Result<()> {
 }
 
 pub fn load_project_state(project_dir: &Path) -> Result<ProjectState> {
-    ProjectState::load(&project_dir.join("state.json"))
+    let state_path = project_dir.join("state.json");
+    let raw = fs::read_to_string(&state_path)?;
+
+    match parse_and_validate_state(&raw) {
+        Ok(state) => Ok(state),
+        Err(reason) => recover_state_from_git(project_dir, &state_path, &reason),
+    }
 }
 
 pub fn save_project_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
+    if let Err(reason) = state.validate_invariants() {
+        return Err(RalphError::Orchestration(format!(
+            "refusing to save invalid state: {reason}"
+        )));
+    }
     state.save(&project_dir.join("state.json"))
+}
+
+fn parse_and_validate_state(raw: &str) -> std::result::Result<ProjectState, String> {
+    let state: ProjectState =
+        serde_json::from_str(raw).map_err(|err| format!("invalid JSON: {err}"))?;
+    state
+        .validate_invariants()
+        .map_err(|reason| format!("invalid invariants: {reason}"))?;
+    Ok(state)
+}
+
+fn recover_state_from_git(
+    project_dir: &Path,
+    state_path: &Path,
+    corruption_reason: &str,
+) -> Result<ProjectState> {
+    let repo_root = find_repo_root(project_dir).ok_or_else(|| RalphError::CorruptedState {
+        path: state_path.to_path_buf(),
+        reason: format!(
+            "{corruption_reason}; recovery failed because project is not inside a git repository"
+        ),
+    })?;
+
+    let rel = state_path
+        .strip_prefix(&repo_root)
+        .map_err(|_| RalphError::CorruptedState {
+            path: state_path.to_path_buf(),
+            reason: format!(
+            "{corruption_reason}; recovery failed because state path is outside repository root"
+        ),
+        })?;
+    let rel = rel.to_string_lossy().replace('\\', "/");
+
+    let git_ref = format!("HEAD:{rel}");
+    let output = Command::new("git")
+        .args(["show", &git_ref])
+        .current_dir(&repo_root)
+        .output()
+        .map_err(|err| RalphError::CorruptedState {
+            path: state_path.to_path_buf(),
+            reason: format!("{corruption_reason}; failed to run git show for recovery: {err}"),
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::CorruptedState {
+            path: state_path.to_path_buf(),
+            reason: format!(
+                "{corruption_reason}; git recovery failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+
+    let recovered_raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let recovered_state = parse_and_validate_state(&recovered_raw).map_err(|recovery_reason| {
+        RalphError::CorruptedState {
+            path: state_path.to_path_buf(),
+            reason: format!(
+                "{corruption_reason}; git-provided state is still invalid: {recovery_reason}"
+            ),
+        }
+    })?;
+
+    fs::write(state_path, recovered_raw)?;
+    eprintln!(
+        "warning: recovered corrupted state from git HEAD at {}",
+        state_path.display()
+    );
+
+    Ok(recovered_state)
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }
