@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Nix
+/result
+
+# Direnv
+/.direnv/
+.envrc
+
+# Editor/OS
+*.swp
+*.swo
+.DS_Store
