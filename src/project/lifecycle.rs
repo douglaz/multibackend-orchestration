@@ -39,7 +39,16 @@ pub fn create_project(workspace: &mut Workspace, options: CreateProjectOptions) 
     validate_project_id(&id)?;
 
     let (prompt_content, parent_project) = match options.source {
-        PromptSource::File(path) => (fs::read_to_string(path)?, None),
+        PromptSource::File(path) => {
+            if !path.exists() {
+                return Err(RalphError::Validation(format!(
+                    "prompt file not found: '{}'\n\
+                     hint: --prompt expects a file path (e.g., --prompt PLAN.md)",
+                    path.display()
+                )));
+            }
+            (fs::read_to_string(&path)?, None)
+        }
         PromptSource::ParentProject(parent_id) => {
             let parent_dir = workspace.project_dir(&parent_id);
             if !parent_dir.exists() {
