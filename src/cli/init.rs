@@ -8,6 +8,8 @@ use crate::prompts::templates::{
 use crate::workspace::Workspace;
 use crate::Result;
 
+/// Execute the `ralph init` command, creating a workspace with default configuration,
+/// index, and template files.
 pub fn execute(args: InitArgs) -> Result<()> {
     let workspace = Workspace::init(&args.dir)?;
 

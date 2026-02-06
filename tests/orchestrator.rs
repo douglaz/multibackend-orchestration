@@ -61,6 +61,8 @@ fn setup_workspace_with_project(
 
     let script_path = repo_root.join("mock_backend.sh");
     write_backend_script(&script_path);
+    git_ok(repo_root, &["add", "mock_backend.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
 
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
@@ -106,6 +108,8 @@ fn setup_workspace_with_project(
 
     let prompt_path = repo_root.join("PROMPT.md");
     fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
     let project_id = "01-poc".to_owned();
     create_project(
@@ -347,6 +351,38 @@ async fn dry_run_does_not_checkout_project_branch() {
 
     let branch_after = git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch_before, branch_after);
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.current_loop, 0);
+    assert_eq!(state.status, ProjectStatus::Pending);
+}
+
+#[tokio::test]
+async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+    let repo_root = workspace_root.parent().expect("repo root");
+
+    fs::write(repo_root.join("scratch.txt"), "dirty\n").expect("write dirty file");
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let result = orchestrator.run(run_options(&project_id)).await;
+
+    assert!(
+        result.is_err(),
+        "run should fail when starting from dirty tree"
+    );
+    let err_message = result.unwrap_err().to_string();
+    assert!(
+        err_message.contains("cannot start a new loop with uncommitted changes outside `.ralph/`"),
+        "unexpected error message: {err_message}"
+    );
+    assert!(
+        err_message.contains("scratch.txt"),
+        "error should list changed path: {err_message}"
+    );
 
     let state = load_project_state(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");

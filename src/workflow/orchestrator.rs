@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tokio::time::sleep;
+use tracing::{debug, info, warn};
 
 use crate::backend::{Backend, BackendRegistry};
 use crate::config::{
@@ -13,7 +14,10 @@ use crate::config::{
 };
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
-use crate::git::commit::{commit_feature_loop, working_tree_diff};
+use crate::git::commit::{
+    changed_paths_excluding_prefixes, commit_feature_loop,
+    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
+};
 use crate::git::is_git_repo;
 use crate::project::artifacts::{
     artifact_relative_path, write_artifact, ArtifactKind, ArtifactWriteInput,
@@ -37,6 +41,20 @@ use crate::workspace::Workspace;
 use crate::Result;
 
 const MAX_PHASE_STEPS_PER_RUN: usize = 500;
+const MAX_DIRTY_PATHS_IN_ERROR: usize = 10;
+
+const PLANNER_GUARDRAILS: &str = r#"- Propose only work that is still missing from the project.
+- Do not re-plan features that are already implemented in baseline code or completed loops.
+- If all requirements are already satisfied, output `# Project Completion Request` instead of another feature."#;
+
+const IMPLEMENTER_GUARDRAILS: &str = r#"- Keep edits scoped to this loop's feature and acceptance criteria.
+- In review responses, address each required change explicitly.
+- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits."#;
+
+const REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
+- Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop.
+- If criteria are already satisfied and no code change is required, return `# Review: APPROVED` with evidence.
+- Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues."#;
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -96,7 +114,9 @@ impl Orchestrator {
 
         let registry = BackendRegistry::new(&effective.global);
         if !options.dry_run {
+            info!("checking backend availability...");
             registry.health_check_all().await?;
+            debug!("all backends available");
         }
 
         let mut state = load_project_state(&project_dir)?;
@@ -144,7 +164,11 @@ impl Orchestrator {
 
             match state.current_phase {
                 Phase::Planning => {
+                    if !state.has_in_progress_loop() {
+                        ensure_clean_start_for_new_loop(&self.workspace.root)?;
+                    }
                     let loop_number = state.next_loop_number();
+                    info!(loop = loop_number, "starting planning phase");
                     let feature_backends = registry.assign_feature_backends(
                         loop_number,
                         &effective.workflow.starting_backend,
@@ -167,6 +191,11 @@ impl Orchestrator {
                         &project_dir,
                     )?;
 
+                    info!(
+                        loop = loop_number,
+                        backend = planner_backend.name(),
+                        "invoking planner..."
+                    );
                     let planner_decision = execute_with_parse_retries(
                         planner_backend,
                         "planner",
@@ -176,10 +205,12 @@ impl Orchestrator {
                         expected_format_template("planner"),
                     )
                     .await?;
+                    debug!(loop = loop_number, "planner responded");
 
                     let now = Utc::now();
                     match planner_decision {
                         PlannerDecision::Feature { name, body } => {
+                            info!(loop = loop_number, feature = %name, "planner created feature spec");
                             let slug = slugify_feature_name(&name);
                             let spec_path = write_artifact(
                                 &project_dir,
@@ -207,6 +238,7 @@ impl Orchestrator {
                             logs.push(format!("loop {loop_number}: planner created feature spec"));
                         }
                         PlannerDecision::CompletionRequest { body } => {
+                            info!(loop = loop_number, "planner requested project completion");
                             let completion_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
@@ -240,6 +272,7 @@ impl Orchestrator {
                     }
                 }
                 Phase::Implementing => {
+                    info!(loop = state.current_loop, "starting implementing phase");
                     let (
                         loop_number,
                         loop_slug,
@@ -294,6 +327,11 @@ impl Orchestrator {
                             &project_dir,
                         )?;
 
+                        info!(
+                            loop = loop_number,
+                            backend = implementer_backend.name(),
+                            "invoking implementer..."
+                        );
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             "implementer",
@@ -303,6 +341,7 @@ impl Orchestrator {
                             expected_format_template("implementer-notes"),
                         )
                         .await?;
+                        debug!(loop = loop_number, "implementer responded");
 
                         let ImplementerDecision::Notes { body } = decision else {
                             return Err(RalphError::ParseError(
@@ -339,6 +378,11 @@ impl Orchestrator {
                         state.phase_iteration = 1;
                         logs.push(format!("loop {loop_number}: implementer wrote impl-notes"));
                     } else {
+                        info!(
+                            loop = loop_number,
+                            iteration = iteration,
+                            "implementer responding to review feedback"
+                        );
                         let feedback_rel = feedback_rel_path(loop_number, &loop_slug, iteration);
                         let feedback_content =
                             read_project_relative_file(&project_dir, &feedback_rel)?;
@@ -358,6 +402,12 @@ impl Orchestrator {
                             &project_dir,
                         )?;
 
+                        info!(
+                            loop = loop_number,
+                            backend = implementer_backend.name(),
+                            iteration = iteration,
+                            "invoking implementer for feedback response..."
+                        );
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             "implementer",
@@ -417,6 +467,11 @@ impl Orchestrator {
                     }
                 }
                 Phase::Reviewing => {
+                    info!(
+                        loop = state.current_loop,
+                        iteration = state.phase_iteration,
+                        "starting review phase"
+                    );
                     let (
                         loop_number,
                         loop_slug,
@@ -494,6 +549,11 @@ impl Orchestrator {
                         &project_dir,
                     )?;
 
+                    info!(
+                        loop = loop_number,
+                        backend = reviewer_backend.name(),
+                        "invoking reviewer..."
+                    );
                     let reviewer_decision = execute_with_parse_retries(
                         reviewer_backend,
                         "reviewer",
@@ -503,9 +563,15 @@ impl Orchestrator {
                         expected_format_template("reviewer"),
                     )
                     .await?;
+                    debug!(loop = loop_number, "reviewer responded");
 
                     match reviewer_decision {
                         ReviewerDecision::Suggestions { body } => {
+                            info!(
+                                loop = loop_number,
+                                iteration = state.phase_iteration,
+                                "reviewer provided suggestions"
+                            );
                             let iteration = state.phase_iteration;
                             let feedback_path = write_artifact(
                                 &project_dir,
@@ -532,6 +598,7 @@ impl Orchestrator {
                             body,
                             commit_message,
                         } => {
+                            info!(loop = loop_number, "reviewer approved changes");
                             let iterations = review_count;
                             let approval_path = write_artifact(
                                 &project_dir,
@@ -587,6 +654,7 @@ impl Orchestrator {
                     }
                 }
                 Phase::Committing => {
+                    info!(loop = state.current_loop, "starting commit phase");
                     let (loop_number, loop_slug, feature_name, approval_rel) = {
                         let loop_state = state.current_feature_loop().ok_or_else(|| {
                             RalphError::Orchestration(
@@ -675,6 +743,7 @@ impl Orchestrator {
                     completed_feature_loops += 1;
                 }
                 Phase::Completing => {
+                    info!(loop = state.current_loop, "starting completion validation phase");
                     let (
                         loop_number,
                         planner_backend_name,
@@ -717,6 +786,11 @@ impl Orchestrator {
                         &previous_specs,
                     )?;
 
+                    info!(
+                        loop = loop_number,
+                        backend = completer_backend.name(),
+                        "invoking completer..."
+                    );
                     let completer_decision: CompleterDecision = execute_with_parse_retries(
                         completer_backend,
                         "completer",
@@ -726,6 +800,7 @@ impl Orchestrator {
                         expected_format_template("completer"),
                     )
                     .await?;
+                    debug!(loop = loop_number, "completer responded");
 
                     let verdict_path = write_artifact(
                         &project_dir,
@@ -976,7 +1051,7 @@ fn build_planner_prompt(
 
     let rendered = render_template(&effective.templates.planner, &vars)?;
     Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
+        "{rendered}\n\n## System Guardrails\n\n{PLANNER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
     ))
 }
 
@@ -1020,7 +1095,7 @@ fn build_implementer_prompt(
 
     let rendered = render_template(&effective.templates.implementer, &vars)?;
     Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Review Feedback\n\n{}\n",
+        "{rendered}\n\n## System Guardrails\n\n{IMPLEMENTER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Review Feedback\n\n{}\n",
         review_feedback.unwrap_or("(none)")
     ))
 }
@@ -1068,7 +1143,7 @@ fn build_reviewer_prompt(
 
     let rendered = render_template(&effective.templates.reviewer, &vars)?;
     Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Latest Implementation Response\n\n{}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n",
+        "{rendered}\n\n## System Guardrails\n\n{REVIEWER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Latest Implementation Response\n\n{}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n",
         impl_response_content.unwrap_or("(none)")
     ))
 }
@@ -1209,6 +1284,43 @@ fn phase_label(phase: &Phase) -> &'static str {
     }
 }
 
+fn ensure_clean_start_for_new_loop(workspace_root: &Path) -> Result<()> {
+    let Some(repo_root) = workspace_root.parent() else {
+        return Ok(());
+    };
+    if !is_git_repo(repo_root) {
+        return Ok(());
+    }
+
+    let mut dirty_paths =
+        changed_paths_excluding_prefixes(repo_root, &[ORCHESTRATION_STATE_PATH_PREFIX])?;
+    if dirty_paths.is_empty() {
+        return Ok(());
+    }
+
+    dirty_paths.sort();
+    dirty_paths.dedup();
+
+    let sample = dirty_paths
+        .iter()
+        .take(MAX_DIRTY_PATHS_IN_ERROR)
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let remainder = if dirty_paths.len() > MAX_DIRTY_PATHS_IN_ERROR {
+        format!(
+            "\n- ... and {} more path(s)",
+            dirty_paths.len() - MAX_DIRTY_PATHS_IN_ERROR
+        )
+    } else {
+        String::new()
+    };
+
+    Err(RalphError::Validation(format!(
+        "cannot start a new loop with uncommitted changes outside `.ralph/`.\ncommit/stash/discard those paths first:\n{sample}{remainder}"
+    )))
+}
+
 fn current_git_diff(workspace_root: &Path) -> Result<String> {
     let Some(repo_root) = workspace_root.parent() else {
         return Ok(String::new());
@@ -1217,7 +1329,7 @@ fn current_git_diff(workspace_root: &Path) -> Result<String> {
         return Ok(String::new());
     }
 
-    working_tree_diff(repo_root)
+    working_tree_diff_excluding_orchestration_state(repo_root)
 }
 
 fn generate_commit_message(
@@ -1298,10 +1410,15 @@ where
     F: Fn(&str) -> Result<T>,
 {
     let first_output =
-        execute_with_timeout_retries(backend.clone(), phase, original_prompt).await?;
+        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
     match parse_fn(&first_output) {
         Ok(parsed) => Ok(parsed),
         Err(parse_error_1) => {
+            warn!(
+                role = role,
+                error = %parse_error_1,
+                "parse failed, requesting reformat (attempt 1/3)"
+            );
             let reformat_prompt = format!(
                 "Your previous response could not be parsed. The error was:\n{}\n\nYour original response was:\n---\n{}\n---\n\nPlease reformat your response following the required structure exactly:\n{}\n",
                 parse_error_1,
@@ -1310,17 +1427,23 @@ where
             );
 
             let second_output =
-                execute_with_timeout_retries(backend.clone(), phase, &reformat_prompt).await?;
+                execute_with_timeout_retries(backend.clone(), role, phase, &reformat_prompt)
+                    .await?;
             if let Ok(parsed) = parse_fn(&second_output) {
                 return Ok(parsed);
             }
 
+            warn!(
+                role = role,
+                "reformat failed, retrying original prompt (attempt 2/3)"
+            );
             let third_output =
-                execute_with_timeout_retries(backend, phase, original_prompt).await?;
+                execute_with_timeout_retries(backend, role, phase, original_prompt).await?;
             if let Ok(parsed) = parse_fn(&third_output) {
                 return Ok(parsed);
             }
 
+            warn!(role = role, "all parse retries exhausted (attempt 3/3)");
             Err(RalphError::ParseRetriesExhausted {
                 role: role.to_owned(),
                 phase: phase.to_owned(),
@@ -1332,6 +1455,7 @@ where
 
 async fn execute_with_timeout_retries(
     backend: Arc<dyn Backend>,
+    role: &str,
     phase: &str,
     prompt: &str,
 ) -> Result<String> {
@@ -1342,6 +1466,11 @@ async fn execute_with_timeout_retries(
                 backend: backend_name,
             }) => {
                 if attempt == 3 {
+                    warn!(
+                        role = role,
+                        backend = %backend_name,
+                        "backend timeout, retries exhausted"
+                    );
                     return Err(RalphError::BackendTimeoutExhausted {
                         backend: backend_name,
                         phase: phase.to_owned(),
@@ -1349,6 +1478,13 @@ async fn execute_with_timeout_retries(
                     });
                 }
                 let backoff = 2_u64.pow((attempt - 1) as u32);
+                warn!(
+                    role = role,
+                    backend = %backend_name,
+                    attempt = attempt,
+                    backoff_secs = backoff,
+                    "backend timeout, retrying..."
+                );
                 sleep(Duration::from_secs(backoff)).await;
             }
             Err(other) => return Err(other),

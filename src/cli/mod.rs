@@ -1,6 +1,6 @@
 mod config;
 mod history;
-mod init;
+pub mod init;
 mod project;
 mod rollback;
 mod run;
