@@ -4,6 +4,9 @@ use crate::error::RalphError;
 use crate::git::{conflicting_files, ensure_git_repo, has_conflicts, run_git, run_git_status};
 use crate::Result;
 
+pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
+pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph/**";
+
 /// Returns the diff of both staged and unstaged changes against HEAD.
 pub fn working_tree_diff(workdir: &Path) -> Result<String> {
     ensure_git_repo(workdir)?;
@@ -24,6 +27,36 @@ pub fn working_tree_diff(workdir: &Path) -> Result<String> {
     run_git(workdir, &["diff", "HEAD"])
 }
 
+/// Returns the diff of both staged and unstaged changes against HEAD,
+/// excluding selected pathspecs.
+pub fn working_tree_diff_excluding(workdir: &Path, excluded_pathspecs: &[&str]) -> Result<String> {
+    ensure_git_repo(workdir)?;
+
+    if excluded_pathspecs.is_empty() {
+        return working_tree_diff(workdir);
+    }
+
+    // In repositories without an initial commit, HEAD does not exist yet.
+    // Build an equivalent working-tree diff by combining staged and unstaged diffs.
+    if !ref_exists(workdir, "HEAD")? {
+        let staged = staged_diff_excluding(workdir, excluded_pathspecs)?;
+        let unstaged = unstaged_diff_excluding(workdir, excluded_pathspecs)?;
+        return Ok(match (staged.is_empty(), unstaged.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => staged,
+            (true, false) => unstaged,
+            (false, false) => format!("{staged}\n\n{unstaged}"),
+        });
+    }
+
+    run_git_with_exclusions(workdir, &["diff", "HEAD"], excluded_pathspecs)
+}
+
+/// Returns the working-tree diff while hiding Ralph runtime state artifacts.
+pub fn working_tree_diff_excluding_orchestration_state(workdir: &Path) -> Result<String> {
+    working_tree_diff_excluding(workdir, &[ORCHESTRATION_STATE_PATHSPEC])
+}
+
 /// Returns only the diff of staged changes.
 pub fn staged_diff(workdir: &Path) -> Result<String> {
     ensure_git_repo(workdir)?;
@@ -34,6 +67,30 @@ pub fn staged_diff(workdir: &Path) -> Result<String> {
 pub fn unstaged_diff(workdir: &Path) -> Result<String> {
     ensure_git_repo(workdir)?;
     run_git(workdir, &["diff"])
+}
+
+/// Returns changed file paths from `git status --porcelain` (including untracked files).
+pub fn changed_paths(workdir: &Path) -> Result<Vec<String>> {
+    ensure_git_repo(workdir)?;
+    let status = run_git(workdir, &["status", "--porcelain"])?;
+    Ok(status
+        .lines()
+        .filter_map(parse_porcelain_status_path)
+        .collect())
+}
+
+/// Returns changed file paths, excluding entries under any provided path prefixes.
+pub fn changed_paths_excluding_prefixes(
+    workdir: &Path,
+    excluded_prefixes: &[&str],
+) -> Result<Vec<String>> {
+    let mut paths = changed_paths(workdir)?;
+    paths.retain(|path| {
+        !excluded_prefixes
+            .iter()
+            .any(|prefix| path_matches_prefix(path, prefix))
+    });
+    Ok(paths)
 }
 
 pub fn commit_feature_loop(
@@ -99,4 +156,58 @@ pub fn rev_parse(workdir: &Path, reference: &str) -> Result<String> {
 pub fn merge_base(workdir: &Path, left: &str, right: &str) -> Result<String> {
     ensure_git_repo(workdir)?;
     run_git(workdir, &["merge-base", left, right])
+}
+
+fn staged_diff_excluding(workdir: &Path, excluded_pathspecs: &[&str]) -> Result<String> {
+    run_git_with_exclusions(workdir, &["diff", "--cached"], excluded_pathspecs)
+}
+
+fn unstaged_diff_excluding(workdir: &Path, excluded_pathspecs: &[&str]) -> Result<String> {
+    run_git_with_exclusions(workdir, &["diff"], excluded_pathspecs)
+}
+
+fn run_git_with_exclusions(
+    workdir: &Path,
+    args: &[&str],
+    excluded_pathspecs: &[&str],
+) -> Result<String> {
+    if excluded_pathspecs.is_empty() {
+        return run_git(workdir, args);
+    }
+
+    let mut argv: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    argv.push("--".to_owned());
+    argv.push(".".to_owned());
+    for pathspec in excluded_pathspecs {
+        argv.push(format!(":(exclude){pathspec}"));
+    }
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_git(workdir, &argv_refs)
+}
+
+fn parse_porcelain_status_path(line: &str) -> Option<String> {
+    let trimmed = line.trim_end();
+    if trimmed.is_empty() || trimmed.starts_with("!! ") {
+        return None;
+    }
+
+    if let Some(path) = trimmed.strip_prefix("?? ") {
+        return Some(path.to_owned());
+    }
+
+    let path_part = trimmed.get(3..)?.trim();
+    if path_part.is_empty() {
+        return None;
+    }
+
+    if let Some((_, new_path)) = path_part.rsplit_once(" -> ") {
+        return Some(new_path.to_owned());
+    }
+
+    Some(path_part.to_owned())
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    let normalized = prefix.trim().trim_end_matches('/');
+    !normalized.is_empty() && (path == normalized || path.starts_with(&format!("{normalized}/")))
 }

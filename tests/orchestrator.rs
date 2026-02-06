@@ -15,6 +15,7 @@ use ralph::prompts::templates::{
 };
 use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
+use regex::Regex;
 use tempfile::TempDir;
 
 fn git_ok(repo: &Path, args: &[&str]) {
@@ -61,6 +62,8 @@ fn setup_workspace_with_project(
 
     let script_path = repo_root.join("mock_backend.sh");
     write_backend_script(&script_path);
+    git_ok(repo_root, &["add", "mock_backend.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
 
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
@@ -106,6 +109,8 @@ fn setup_workspace_with_project(
 
     let prompt_path = repo_root.join("PROMPT.md");
     fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
     let project_id = "01-poc".to_owned();
     create_project(
@@ -244,6 +249,16 @@ fn run_options(project_id: &str) -> RunOptions {
     }
 }
 
+fn assert_timestamped_artifact(rel_path: &str, suffix: &str) {
+    let suffix = regex::escape(suffix);
+    let pattern = format!(r"^loops/\d{{3}}-[a-z0-9-]+/\d{{14}}-{suffix}$");
+    let re = Regex::new(&pattern).expect("valid regex");
+    assert!(
+        re.is_match(rel_path),
+        "artifact path should be timestamp-prefixed: {rel_path}"
+    );
+}
+
 #[tokio::test]
 async fn runs_full_feature_loop_and_commits() {
     let (_temp, workspace_root, project_id, _script) =
@@ -262,6 +277,23 @@ async fn runs_full_feature_loop_and_commits() {
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     assert!(state.loops[0].commit.is_some());
     assert_eq!(state.current_phase, Phase::Planning);
+    assert_timestamped_artifact(&state.loops[0].artifacts.spec, "spec.md");
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .impl_notes
+            .as_deref()
+            .expect("impl-notes artifact should exist"),
+        "impl-notes.md",
+    );
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .approval
+            .as_deref()
+            .expect("approval artifact should exist"),
+        "review-approved.md",
+    );
 
     let repo_root = workspace_root.parent().expect("repo root");
     let tag = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-1"]);
@@ -326,6 +358,18 @@ async fn executes_completion_flow_until_complete() {
         state.completion_attempts[0].verdict,
         Some(CompletionVerdict::Complete)
     );
+    assert_timestamped_artifact(
+        &state.completion_attempts[0].artifacts.termination_request,
+        "termination-request.md",
+    );
+    assert_timestamped_artifact(
+        state.completion_attempts[0]
+            .artifacts
+            .verdict
+            .as_deref()
+            .expect("completion verdict artifact should exist"),
+        "completer-verdict.md",
+    );
 }
 
 #[tokio::test]
@@ -347,6 +391,38 @@ async fn dry_run_does_not_checkout_project_branch() {
 
     let branch_after = git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch_before, branch_after);
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.current_loop, 0);
+    assert_eq!(state.status, ProjectStatus::Pending);
+}
+
+#[tokio::test]
+async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+    let repo_root = workspace_root.parent().expect("repo root");
+
+    fs::write(repo_root.join("scratch.txt"), "dirty\n").expect("write dirty file");
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let result = orchestrator.run(run_options(&project_id)).await;
+
+    assert!(
+        result.is_err(),
+        "run should fail when starting from dirty tree"
+    );
+    let err_message = result.unwrap_err().to_string();
+    assert!(
+        err_message.contains("cannot start a new loop with uncommitted changes outside `.ralph/`"),
+        "unexpected error message: {err_message}"
+    );
+    assert!(
+        err_message.contains("scratch.txt"),
+        "error should list changed path: {err_message}"
+    );
 
     let state = load_project_state(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");

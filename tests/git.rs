@@ -4,8 +4,9 @@ use std::fs;
 use std::process::Command;
 
 use ralph::git::commit::{
-    commit_feature_loop, has_uncommitted_changes, ref_exists, reset_hard, rev_parse, staged_diff,
-    unstaged_diff, working_tree_diff,
+    changed_paths_excluding_prefixes, commit_feature_loop, has_uncommitted_changes, ref_exists,
+    reset_hard, rev_parse, staged_diff, unstaged_diff, working_tree_diff,
+    working_tree_diff_excluding_orchestration_state,
 };
 use ralph::git::{has_conflicts, is_git_repo};
 use tempfile::TempDir;
@@ -134,6 +135,25 @@ fn test_working_tree_diff_without_head_commit() {
 }
 
 #[test]
+fn test_working_tree_diff_excludes_orchestration_state() {
+    let temp_dir = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join(".ralph")).unwrap();
+
+    fs::write(temp_dir.path().join(".ralph/index.json"), "{}\n").unwrap();
+    fs::write(temp_dir.path().join("README.md"), "# Updated").unwrap();
+
+    let diff = working_tree_diff_excluding_orchestration_state(temp_dir.path()).unwrap();
+    assert!(
+        diff.contains("README.md"),
+        "Diff should include non-orchestration file changes"
+    );
+    assert!(
+        !diff.contains(".ralph/index.json"),
+        "Diff should exclude orchestration runtime artifacts"
+    );
+}
+
+#[test]
 fn test_staged_diff_only_staged() {
     let temp_dir = init_test_repo();
 
@@ -209,6 +229,54 @@ fn test_commit_feature_loop_without_tag() {
         commit_feature_loop(temp_dir.path(), "feat: add new feature", None, false).unwrap();
 
     assert!(!commit_hash.is_empty());
+}
+
+#[test]
+fn test_commit_feature_loop_includes_orchestration_state_files() {
+    let temp_dir = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join(".ralph")).unwrap();
+
+    fs::write(temp_dir.path().join(".ralph/index.json"), "{}\n").unwrap();
+    fs::write(temp_dir.path().join("feature.txt"), "new feature").unwrap();
+
+    commit_feature_loop(temp_dir.path(), "feat: add new feature", None, false).unwrap();
+
+    let output = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git show should succeed");
+    let files = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        files.lines().any(|line| line.trim() == "feature.txt"),
+        "Feature file should be committed"
+    );
+    assert!(
+        files.lines().any(|line| line.trim() == ".ralph/index.json"),
+        "Orchestration runtime files should remain committable for project history"
+    );
+}
+
+#[test]
+fn test_changed_paths_excludes_prefixes() {
+    let temp_dir = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join(".ralph")).unwrap();
+
+    fs::write(temp_dir.path().join(".ralph/index.json"), "{}\n").unwrap();
+    fs::write(temp_dir.path().join("notes.md"), "hello\n").unwrap();
+
+    let changed =
+        changed_paths_excluding_prefixes(temp_dir.path(), &[".ralph/"]).expect("status parse");
+    assert!(
+        changed.iter().any(|path| path == "notes.md"),
+        "Non-excluded files should remain visible"
+    );
+    assert!(
+        !changed.iter().any(|path| path.starts_with(".ralph/")),
+        "Excluded prefix files should be filtered out"
+    );
 }
 
 #[test]

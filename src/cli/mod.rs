@@ -1,10 +1,11 @@
 mod config;
 mod history;
-mod init;
+pub mod init;
 mod project;
 mod rollback;
 mod run;
 mod status;
+mod tail;
 
 use std::path::PathBuf;
 
@@ -28,6 +29,7 @@ pub enum Commands {
     Run(RunArgs),
     Status(StatusArgs),
     History(HistoryArgs),
+    Tail(TailArgs),
     Rollback(RollbackArgs),
     Config(ConfigArgs),
 }
@@ -114,6 +116,20 @@ pub struct HistoryArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct TailArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(short = 'n', long = "last", value_parser = parse_positive_usize)]
+    pub last: Option<usize>,
+    #[arg(short = 'F', long)]
+    pub follow: bool,
+    #[arg(long, default_value_t = 1000, value_parser = parse_positive_u64)]
+    pub poll_interval_ms: u64,
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Args)]
 pub struct RollbackArgs {
     pub loop_number: u32,
@@ -174,6 +190,26 @@ pub struct ConfigScopeArgs {
     pub project: Option<String>,
 }
 
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid value '{value}': expected positive integer"))?;
+    if parsed == 0 {
+        return Err("must be greater than 0".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid value '{value}': expected positive integer"))?;
+    if parsed == 0 {
+        return Err("must be greater than 0".to_owned());
+    }
+    Ok(parsed)
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args),
@@ -181,6 +217,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Run(args) => run::execute(args).await,
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
+        Commands::Tail(args) => tail::execute(args).await,
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
     }

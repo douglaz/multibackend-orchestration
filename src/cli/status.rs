@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::StatusArgs;
+use crate::project::artifacts::resolve_artifact_path_by_suffix;
 use crate::project::lifecycle::load_project_state;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
@@ -169,13 +170,16 @@ fn latest_feedback(
     };
 
     let (iteration, rel_path) = if let Some(iteration) = pending_iteration {
-        (
-            iteration,
-            format!(
-                "loops/{:03}-{}/review-{iteration:03}-feedback.md",
-                loop_state.loop_number, loop_state.slug
-            ),
+        let suffix = format!("review-{iteration:03}-feedback.md");
+        let rel = resolve_artifact_path_by_suffix(
+            project_dir,
+            loop_state.loop_number,
+            &loop_state.slug,
+            &suffix,
         )
+        .ok()
+        .flatten()?;
+        (iteration, rel)
     } else if let Some(last) = loop_state.artifacts.reviews.last() {
         (last.iteration, last.feedback.clone())
     } else {

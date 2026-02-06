@@ -20,6 +20,9 @@ Given `prompt.md` and `state.json`, you must:
 1. Analyze what has been completed so far
 2. Identify the next logical feature to implement
 3. Write a detailed specification for that feature
+4. Avoid selecting features that are already implemented in baseline code or completed loops
+
+If all requirements are already satisfied, output `# Project Completion Request` instead of planning another feature.
 
 Return markdown body only (no YAML frontmatter).
 Your output MUST be in this format:
@@ -81,7 +84,7 @@ Given a feature spec, implement it by:
 
 Return markdown body only (no YAML frontmatter).
 
-If this is the first implementation pass, output `impl-notes.md` in this format:
+If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
 # Implementation Notes
 
@@ -96,7 +99,7 @@ If this is the first implementation pass, output `impl-notes.md` in this format:
 
 ---
 
-If this is a review-response pass, output `impl-response-III.md` in this format:
+If this is a review-response pass, output `<TS>-impl-response-III.md` in this format:
 
 # Implementation Response (Iteration {{iteration}})
 
@@ -130,14 +133,18 @@ pub fn default_reviewer_template() -> &'static str {
 
 Given:
 - `prompt.md`
-- `spec.md`
+- `<TS>-spec.md`
 - The implementation diff
-- `impl-notes.md`
+- `<TS>-impl-notes.md`
 
 Review for:
 1. Spec compliance - does it meet all acceptance criteria?
 2. Code quality - is it clean, maintainable, secure?
 3. Consistency - does it follow project patterns?
+4. Scope fidelity - ignore orchestration runtime files under `.ralph/` and focus on product/code changes
+
+If acceptance criteria are already satisfied and no additional code change is required,
+return `# Review: APPROVED` with evidence instead of requesting re-implementation.
 
 Return markdown body only (no YAML frontmatter).
 Your output MUST be:
