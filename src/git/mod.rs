@@ -53,3 +53,50 @@ pub fn ensure_git_repo(workdir: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Check if there are any unresolved merge conflicts in the working tree.
+pub fn has_conflicts(workdir: &Path) -> Result<bool> {
+    ensure_git_repo(workdir)?;
+    let status = read_porcelain_status(workdir)?;
+    // Look for conflict markers: UU (unmerged, both modified), AA (both added), etc.
+    for line in status.lines() {
+        let prefix = line.get(0..2).unwrap_or("");
+        if matches!(prefix, "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Returns the list of files with merge conflicts.
+pub fn conflicting_files(workdir: &Path) -> Result<Vec<String>> {
+    ensure_git_repo(workdir)?;
+    let status = read_porcelain_status(workdir)?;
+    let mut conflicts = Vec::new();
+    for line in status.lines() {
+        let prefix = line.get(0..2).unwrap_or("");
+        if matches!(prefix, "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD") {
+            if let Some(file) = line.get(3..) {
+                conflicts.push(file.to_string());
+            }
+        }
+    }
+    Ok(conflicts)
+}
+
+fn read_porcelain_status(workdir: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workdir)
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to check git status: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}

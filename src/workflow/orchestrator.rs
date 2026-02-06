@@ -966,11 +966,9 @@ fn build_planner_prompt(
     project_dir: &Path,
 ) -> Result<String> {
     let mut vars = base_vars(state, loop_number, "planning", 1, backend, opposite_backend);
+    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
-    vars.insert(
-        "state_json".to_owned(),
-        serde_json::to_string_pretty(state).unwrap_or_default(),
-    );
+    vars.insert("state_content".to_owned(), state_json.clone());
     vars.insert(
         "previous_specs".to_owned(),
         collect_previous_specs(state, project_dir)?,
@@ -978,8 +976,7 @@ fn build_planner_prompt(
 
     let rendered = render_template(&effective.templates.planner, &vars)?;
     Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{}\n```\n",
-        serde_json::to_string_pretty(state).unwrap_or_default()
+        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
     ))
 }
 
@@ -1014,10 +1011,6 @@ fn build_implementer_prompt(
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
     vars.insert(
         "review_feedback_content".to_owned(),
-        review_feedback.unwrap_or("").to_owned(),
-    );
-    vars.insert(
-        "feedback_content".to_owned(),
         review_feedback.unwrap_or("").to_owned(),
     );
     vars.insert(
@@ -1097,21 +1090,18 @@ fn build_completer_prompt(
         backend,
         opposite_backend,
     );
+    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
     vars.insert(
         "termination_request_content".to_owned(),
         termination_request_content.to_owned(),
     );
     vars.insert("previous_specs".to_owned(), previous_specs.to_owned());
-    vars.insert(
-        "state_json".to_owned(),
-        serde_json::to_string_pretty(state).unwrap_or_default(),
-    );
+    vars.insert("state_content".to_owned(), state_json.clone());
 
     let rendered = render_template(&effective.templates.completer, &vars)?;
     Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Completion Request\n\n{termination_request_content}\n\n## Prior Specs\n\n{previous_specs}\n\n## State\n\n```json\n{}\n```\n",
-        serde_json::to_string_pretty(state).unwrap_or_default()
+        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Completion Request\n\n{termination_request_content}\n\n## Prior Specs\n\n{previous_specs}\n\n## State\n\n```json\n{state_json}\n```\n"
     ))
 }
 

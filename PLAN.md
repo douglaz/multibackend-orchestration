@@ -928,12 +928,12 @@ completer = "templates/completer.md"      # Relative to .ralph/
 #   {{backend}}           - Backend executing this role
 #   {{opposite_backend}}  - The other backend
 #   {{prompt_content}}    - Full content of prompt.md
+#   {{state_content}}     - Full JSON content of state.json
 #   {{spec_content}}      - Full content of current spec.md
 #   {{impl_notes_content}} - Full content of impl-notes.md
 #   {{previous_specs}}    - Concatenated previous spec summaries
 #   {{git_diff}}          - Current uncommitted changes
 #   {{review_feedback_content}} - Current reviewer feedback content (for impl response)
-#   {{feedback_content}}        - Alias of {{review_feedback_content}} (legacy template compatibility)
 #   {{impl_response_content}}   - Current implementer response content (for reviewer follow-up iteration)
 #   {{review_history}}          - Concatenated prior review feedback/response pairs for this loop
 #   {{termination_request_content}} - Current termination-request content (for completer role)
@@ -1739,14 +1739,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 async-trait = "0.1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = "0.3"
-git2 = "0.18"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 sha2 = "0.10"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+regex = "1"
+fs2 = "0.4"
+which = "7"
+
+[dev-dependencies]
+tempfile = "3"
 ```
+
+**Implementation Notes:**
+- Git operations use `std::process::Command` to invoke the git CLI rather than `git2` for simplicity
+- No UUID generation is needed; identifiers use timestamps, hashes, or user-provided values
+- `fs2` provides cross-platform file locking for state.json
+- `which` is used for backend health checks (verifying CLI tools exist)
 
 ## Getting Started
 
