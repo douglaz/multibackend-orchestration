@@ -5,6 +5,7 @@ mod project;
 mod rollback;
 mod run;
 mod status;
+mod tail;
 
 use std::path::PathBuf;
 
@@ -28,6 +29,7 @@ pub enum Commands {
     Run(RunArgs),
     Status(StatusArgs),
     History(HistoryArgs),
+    Tail(TailArgs),
     Rollback(RollbackArgs),
     Config(ConfigArgs),
 }
@@ -115,6 +117,20 @@ pub struct HistoryArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct TailArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(short = 'n', long)]
+    pub last: Option<usize>,
+    #[arg(short = 'F', long)]
+    pub follow: bool,
+    #[arg(long, default_value_t = 1000)]
+    pub poll_interval_ms: u64,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct RollbackArgs {
     pub loop_number: u32,
     #[arg(long)]
@@ -181,6 +197,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Run(args) => run::execute(args).await,
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
+        Commands::Tail(args) => tail::execute(args),
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
     }
