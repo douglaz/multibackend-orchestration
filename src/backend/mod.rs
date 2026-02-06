@@ -3,6 +3,7 @@ pub mod codex;
 pub mod mock;
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +49,10 @@ impl CliBackend {
             env,
         }
     }
+
+    fn resolved_command_path(&self) -> PathBuf {
+        which::which(&self.command).unwrap_or_else(|_| PathBuf::from(&self.command))
+    }
 }
 
 #[async_trait]
@@ -57,7 +62,8 @@ impl Backend for CliBackend {
     }
 
     async fn execute(&self, prompt: &str) -> Result<String> {
-        let mut cmd = Command::new(&self.command);
+        let resolved_command = self.resolved_command_path();
+        let mut cmd = Command::new(&resolved_command);
         cmd.args(&self.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -68,7 +74,11 @@ impl Backend for CliBackend {
             .spawn()
             .map_err(|err| RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
-                details: err.to_string(),
+                details: format!(
+                    "{err} (command='{}', resolved='{}')",
+                    self.command,
+                    resolved_command.display()
+                ),
             })?;
 
         if let Some(mut stdin) = child.stdin.take() {

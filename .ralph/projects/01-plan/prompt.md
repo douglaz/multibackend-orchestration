@@ -910,7 +910,7 @@ env = {}  # Optional environment variables
 
 [backends.codex]
 command = "codex"
-args = ["exec", "--dangerously-bypass-approvals-and-sandbox", "-"]
+args = []
 timeout_seconds = 600
 env = {}
 

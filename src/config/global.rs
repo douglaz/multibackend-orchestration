@@ -96,7 +96,11 @@ impl Default for GlobalConfig {
                 },
                 codex: BackendConfig {
                     command: "codex".to_owned(),
-                    args: Vec::new(),
+                    args: vec![
+                        "exec".to_owned(),
+                        "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                        "-".to_owned(),
+                    ],
                     timeout_seconds: 600,
                     env: BTreeMap::new(),
                 },
