@@ -1,50 +1,117 @@
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use tokio::time::{sleep, Duration};
 
 use crate::cli::TailArgs;
 use crate::project::artifacts::parse_artifact_filename_timestamp;
+use crate::project::lifecycle::load_project_state;
+use crate::project::state::{CompletionVerdict, LoopStatus, Phase};
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
+const EVENT_ORDER_ARTIFACT: u8 = 0;
+const EVENT_ORDER_STATE: u8 = 1;
+const EVENT_ORDER_GIT: u8 = 2;
+
+#[derive(Debug, Clone)]
+enum TailEventKind {
+    Artifact {
+        rel_path: String,
+        filename_timestamp: Option<String>,
+        created_at: Option<String>,
+        artifact: Option<String>,
+        loop_number: Option<u32>,
+        iteration: Option<u32>,
+        role: Option<String>,
+        backend: Option<String>,
+        heading: Option<String>,
+        body: String,
+    },
+    StateTransition {
+        description: String,
+        loop_number: Option<u32>,
+        phase: Option<String>,
+    },
+    GitCommit {
+        loop_number: u32,
+        commit_hash: String,
+        tag: Option<String>,
+    },
+}
+
+impl TailEventKind {
+    fn event_type(&self) -> &'static str {
+        match self {
+            Self::Artifact { .. } => "artifact",
+            Self::StateTransition { .. } => "state",
+            Self::GitCommit { .. } => "git",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TailEvent {
-    rel_path: String,
-    filename_timestamp: Option<String>,
-    created_at: Option<String>,
-    artifact: Option<String>,
-    loop_number: Option<u32>,
-    iteration: Option<u32>,
-    role: Option<String>,
-    backend: Option<String>,
-    heading: Option<String>,
+    timestamp: String,
+    sort_epoch_ms: i64,
+    sort_tiebreaker: u8,
     signature: String,
+    kind: TailEventKind,
 }
 
 impl TailEvent {
     fn event_key(&self) -> String {
-        format!("{}::{}", self.rel_path, self.signature)
+        self.signature.clone()
     }
+}
+
+#[derive(Debug, Clone)]
+struct PhaseSnapshot {
+    current_phase: Phase,
+    current_loop: u32,
+    timestamp: String,
+    sort_epoch_ms: i64,
+    state_mtime_ns: u128,
 }
 
 #[derive(Debug, Serialize)]
 struct TailEventOutput<'a> {
     project_id: &'a str,
-    path: &'a str,
+    event_type: &'a str,
+    timestamp: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     filename_timestamp: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     artifact: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     loop_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     iteration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heading: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<&'a str>,
 }
 
 pub async fn execute(args: TailArgs) -> Result<()> {
@@ -64,7 +131,7 @@ pub async fn execute(args: TailArgs) -> Result<()> {
         return Err(RalphError::ProjectNotFound(project_id));
     }
 
-    let mut events = collect_artifact_events(&project_dir)?;
+    let mut events = collect_all_events(&project_dir, &project_id)?;
     sort_events(&mut events);
 
     let mut seen: HashSet<String> = events.iter().map(TailEvent::event_key).collect();
@@ -74,11 +141,19 @@ pub async fn execute(args: TailArgs) -> Result<()> {
         return Ok(());
     }
 
+    let mut phase_snapshot = collect_phase_snapshot(&project_dir);
+
     loop {
         sleep(Duration::from_millis(args.poll_interval_ms)).await;
 
-        let mut rescanned = collect_artifact_events(&project_dir)?;
-        sort_events(&mut rescanned);
+        let mut rescanned = collect_all_events(&project_dir, &project_id)?;
+        let current_phase_snapshot = collect_phase_snapshot(&project_dir);
+        if let (Some(previous), Some(current)) = (&phase_snapshot, &current_phase_snapshot) {
+            if let Some(phase_event) = create_phase_change_event(previous, current) {
+                rescanned.push(phase_event);
+            }
+        }
+        phase_snapshot = current_phase_snapshot;
 
         let mut new_events = Vec::new();
         for event in rescanned {
@@ -86,11 +161,18 @@ pub async fn execute(args: TailArgs) -> Result<()> {
                 new_events.push(event);
             }
         }
+        sort_events(&mut new_events);
 
         if !new_events.is_empty() {
             print_events(&project_id, &new_events, None, args.json)?;
         }
     }
+}
+
+fn collect_all_events(project_dir: &Path, project_id: &str) -> Result<Vec<TailEvent>> {
+    let mut events = collect_artifact_events(project_dir)?;
+    events.extend(collect_state_events(project_dir, project_id));
+    Ok(events)
 }
 
 fn print_events(
@@ -106,42 +188,166 @@ fn print_events(
 
     for event in selected {
         if as_json {
-            let out = TailEventOutput {
-                project_id,
-                path: &event.rel_path,
-                filename_timestamp: event.filename_timestamp.as_deref(),
-                created_at: event.created_at.as_deref(),
-                artifact: event.artifact.as_deref(),
-                loop_number: event.loop_number,
-                iteration: event.iteration,
-                role: event.role.as_deref(),
-                backend: event.backend.as_deref(),
-                heading: event.heading.as_deref(),
-            };
+            let out = event_output(project_id, event);
             println!("{}", serde_json::to_string(&out)?);
         } else {
-            let when = event
-                .created_at
-                .as_deref()
-                .or(event.filename_timestamp.as_deref())
-                .unwrap_or("unknown-time");
-            let artifact = event.artifact.as_deref().unwrap_or("unknown");
-            let role = event.role.as_deref().unwrap_or("unknown");
-            if let Some(heading) = event.heading.as_deref() {
-                println!(
-                    "[{when}] {} | artifact={artifact} role={role} | {heading}",
-                    event.rel_path
-                );
-            } else {
-                println!(
-                    "[{when}] {} | artifact={artifact} role={role}",
-                    event.rel_path
-                );
-            }
+            print_human_event(event);
         }
     }
 
     Ok(())
+}
+
+fn print_human_event(event: &TailEvent) {
+    match &event.kind {
+        TailEventKind::Artifact {
+            rel_path,
+            artifact,
+            loop_number,
+            iteration,
+            role,
+            backend,
+            body,
+            ..
+        } => {
+            println!("--- [{}] {rel_path} ---", event.timestamp);
+            let mut meta = Vec::new();
+            push_meta_str(&mut meta, "artifact", artifact.as_deref());
+            push_meta_u32(&mut meta, "loop", *loop_number);
+            push_meta_u32(&mut meta, "iteration", *iteration);
+            push_meta_str(&mut meta, "role", role.as_deref());
+            push_meta_str(&mut meta, "backend", backend.as_deref());
+            if !meta.is_empty() {
+                println!("{}", meta.join("  "));
+            }
+            if !body.is_empty() {
+                println!();
+                println!("{body}");
+            }
+            println!();
+        }
+        TailEventKind::StateTransition {
+            description,
+            loop_number,
+            phase,
+        } => {
+            println!("--- [{}] state ---", event.timestamp);
+            println!("{description}");
+            let mut meta = Vec::new();
+            push_meta_u32(&mut meta, "loop", *loop_number);
+            push_meta_str(&mut meta, "phase", phase.as_deref());
+            if !meta.is_empty() {
+                println!("{}", meta.join("  "));
+            }
+            println!();
+        }
+        TailEventKind::GitCommit {
+            loop_number,
+            commit_hash,
+            tag,
+        } => {
+            println!("--- [{}] git ---", event.timestamp);
+            if let Some(tag) = tag.as_deref() {
+                println!("loop {loop_number} committed: {commit_hash} (tag: {tag})");
+            } else {
+                println!("loop {loop_number} committed: {commit_hash}");
+            }
+            println!();
+        }
+    }
+}
+
+fn event_output<'a>(project_id: &'a str, event: &'a TailEvent) -> TailEventOutput<'a> {
+    match &event.kind {
+        TailEventKind::Artifact {
+            rel_path,
+            filename_timestamp,
+            created_at,
+            artifact,
+            loop_number,
+            iteration,
+            role,
+            backend,
+            heading,
+            body,
+        } => TailEventOutput {
+            project_id,
+            event_type: event.kind.event_type(),
+            timestamp: &event.timestamp,
+            path: Some(rel_path),
+            filename_timestamp: filename_timestamp.as_deref(),
+            created_at: created_at.as_deref(),
+            artifact: artifact.as_deref(),
+            loop_number: *loop_number,
+            iteration: *iteration,
+            role: role.as_deref(),
+            backend: backend.as_deref(),
+            heading: heading.as_deref(),
+            body: Some(body),
+            description: None,
+            phase: None,
+            commit_hash: None,
+            tag: None,
+        },
+        TailEventKind::StateTransition {
+            description,
+            loop_number,
+            phase,
+        } => TailEventOutput {
+            project_id,
+            event_type: event.kind.event_type(),
+            timestamp: &event.timestamp,
+            path: None,
+            filename_timestamp: None,
+            created_at: None,
+            artifact: None,
+            loop_number: *loop_number,
+            iteration: None,
+            role: None,
+            backend: None,
+            heading: None,
+            body: None,
+            description: Some(description),
+            phase: phase.as_deref(),
+            commit_hash: None,
+            tag: None,
+        },
+        TailEventKind::GitCommit {
+            loop_number,
+            commit_hash,
+            tag,
+        } => TailEventOutput {
+            project_id,
+            event_type: event.kind.event_type(),
+            timestamp: &event.timestamp,
+            path: None,
+            filename_timestamp: None,
+            created_at: None,
+            artifact: None,
+            loop_number: Some(*loop_number),
+            iteration: None,
+            role: None,
+            backend: None,
+            heading: None,
+            body: None,
+            description: None,
+            phase: None,
+            commit_hash: Some(commit_hash),
+            tag: tag.as_deref(),
+        },
+    }
+}
+
+fn push_meta_str(parts: &mut Vec<String>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        parts.push(format!("{key}={value}"));
+    }
+}
+
+fn push_meta_u32(parts: &mut Vec<String>, key: &str, value: Option<u32>) {
+    if let Some(value) = value {
+        parts.push(format!("{key}={value}"));
+    }
 }
 
 fn collect_artifact_events(project_dir: &Path) -> Result<Vec<TailEvent>> {
@@ -200,13 +406,11 @@ fn collect_artifact_events(project_dir: &Path) -> Result<Vec<TailEvent>> {
                 .unwrap_or(&artifact_path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let modified_ns = metadata
-                .modified()
-                .ok()
+            let modified = metadata.modified().ok();
+            let modified_ns = modified
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let signature = format!("{}:{modified_ns}", metadata.len());
 
             let (frontmatter, body) = split_frontmatter(&content);
             let created_at = frontmatter.get("created_at").cloned();
@@ -218,18 +422,29 @@ fn collect_artifact_events(project_dir: &Path) -> Result<Vec<TailEvent>> {
                 .get("iteration")
                 .and_then(|v| v.parse::<u32>().ok());
             let heading = first_h1(&body);
+            let (timestamp, sort_epoch_ms) = normalize_event_time(
+                created_at.as_deref(),
+                filename_timestamp.as_deref(),
+                modified,
+            );
 
             events.push(TailEvent {
-                rel_path,
-                filename_timestamp,
-                created_at,
-                artifact,
-                loop_number,
-                iteration,
-                role,
-                backend,
-                heading,
-                signature,
+                timestamp,
+                sort_epoch_ms,
+                sort_tiebreaker: EVENT_ORDER_ARTIFACT,
+                signature: format!("artifact::{rel_path}::{}:{modified_ns}", metadata.len()),
+                kind: TailEventKind::Artifact {
+                    rel_path,
+                    filename_timestamp,
+                    created_at,
+                    artifact,
+                    loop_number,
+                    iteration,
+                    role,
+                    backend,
+                    heading,
+                    body,
+                },
             });
         }
     }
@@ -237,31 +452,278 @@ fn collect_artifact_events(project_dir: &Path) -> Result<Vec<TailEvent>> {
     Ok(events)
 }
 
+fn collect_state_events(project_dir: &Path, project_id: &str) -> Vec<TailEvent> {
+    let state_path = project_dir.join("state.json");
+    if !state_path.exists() {
+        return Vec::new();
+    }
+
+    let state = match load_project_state(project_dir) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to load state for tail at {}: {err}",
+                state_path.display()
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut events = Vec::new();
+
+    for feature_loop in &state.loops {
+        let (started_ts, started_epoch_ms) = to_timestamp(feature_loop.started_at);
+        events.push(TailEvent {
+            timestamp: started_ts,
+            sort_epoch_ms: started_epoch_ms,
+            sort_tiebreaker: EVENT_ORDER_STATE,
+            signature: format!(
+                "state::feature_started::{}::{}",
+                feature_loop.loop_number,
+                feature_loop
+                    .started_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true)
+            ),
+            kind: TailEventKind::StateTransition {
+                description: format!(
+                    "loop {} ({}) started",
+                    feature_loop.loop_number, feature_loop.feature_name
+                ),
+                loop_number: Some(feature_loop.loop_number),
+                phase: None,
+            },
+        });
+
+        if feature_loop.status == LoopStatus::Completed {
+            if let Some(completed_at) = feature_loop.completed_at {
+                let (completed_ts, completed_epoch_ms) = to_timestamp(completed_at);
+                events.push(TailEvent {
+                    timestamp: completed_ts,
+                    sort_epoch_ms: completed_epoch_ms,
+                    sort_tiebreaker: EVENT_ORDER_STATE,
+                    signature: format!(
+                        "state::feature_completed::{}::{}",
+                        feature_loop.loop_number,
+                        completed_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+                    ),
+                    kind: TailEventKind::StateTransition {
+                        description: format!(
+                            "loop {} ({}) completed",
+                            feature_loop.loop_number, feature_loop.feature_name
+                        ),
+                        loop_number: Some(feature_loop.loop_number),
+                        phase: None,
+                    },
+                });
+            }
+        }
+
+        if let Some(commit_hash) = feature_loop.commit.as_deref() {
+            let commit_time = feature_loop.completed_at.unwrap_or(feature_loop.started_at);
+            let (commit_ts, commit_epoch_ms) = to_timestamp(commit_time);
+            events.push(TailEvent {
+                timestamp: commit_ts,
+                sort_epoch_ms: commit_epoch_ms,
+                sort_tiebreaker: EVENT_ORDER_GIT,
+                signature: format!("git::commit::{}::{commit_hash}", feature_loop.loop_number),
+                kind: TailEventKind::GitCommit {
+                    loop_number: feature_loop.loop_number,
+                    commit_hash: commit_hash.to_owned(),
+                    tag: Some(format!("{project_id}/{}", feature_loop.loop_number)),
+                },
+            });
+        }
+    }
+
+    for completion in &state.completion_attempts {
+        let (started_ts, started_epoch_ms) = to_timestamp(completion.started_at);
+        events.push(TailEvent {
+            timestamp: started_ts,
+            sort_epoch_ms: started_epoch_ms,
+            sort_tiebreaker: EVENT_ORDER_STATE,
+            signature: format!(
+                "state::completion_started::{}::{}",
+                completion.loop_number,
+                completion
+                    .started_at
+                    .to_rfc3339_opts(SecondsFormat::Secs, true)
+            ),
+            kind: TailEventKind::StateTransition {
+                description: format!("loop {} completion check started", completion.loop_number),
+                loop_number: Some(completion.loop_number),
+                phase: None,
+            },
+        });
+
+        if completion.status == LoopStatus::Completed {
+            if let (Some(completed_at), Some(verdict)) =
+                (completion.completed_at, &completion.verdict)
+            {
+                let (completed_ts, completed_epoch_ms) = to_timestamp(completed_at);
+                events.push(TailEvent {
+                    timestamp: completed_ts,
+                    sort_epoch_ms: completed_epoch_ms,
+                    sort_tiebreaker: EVENT_ORDER_STATE,
+                    signature: format!(
+                        "state::completion_verdict::{}::{}::{}",
+                        completion.loop_number,
+                        completed_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                        completion_verdict_label(verdict)
+                    ),
+                    kind: TailEventKind::StateTransition {
+                        description: format!(
+                            "loop {} completion verdict: {}",
+                            completion.loop_number,
+                            completion_verdict_label(verdict)
+                        ),
+                        loop_number: Some(completion.loop_number),
+                        phase: None,
+                    },
+                });
+            }
+        }
+    }
+
+    events
+}
+
+fn collect_phase_snapshot(project_dir: &Path) -> Option<PhaseSnapshot> {
+    let state_path = project_dir.join("state.json");
+    if !state_path.exists() {
+        return None;
+    }
+
+    let state = load_project_state(project_dir).ok()?;
+    let metadata = fs::metadata(&state_path).ok()?;
+    let modified = metadata.modified().ok();
+    let (timestamp, sort_epoch_ms) = normalize_event_time(None, None, modified);
+    let state_mtime_ns = modified
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    Some(PhaseSnapshot {
+        current_phase: state.current_phase,
+        current_loop: state.current_loop,
+        timestamp,
+        sort_epoch_ms,
+        state_mtime_ns,
+    })
+}
+
+fn create_phase_change_event(
+    previous: &PhaseSnapshot,
+    current: &PhaseSnapshot,
+) -> Option<TailEvent> {
+    if previous.current_phase == current.current_phase
+        && previous.current_loop == current.current_loop
+    {
+        return None;
+    }
+
+    let description = if previous.current_loop == current.current_loop {
+        format!(
+            "phase changed: {} -> {} (loop {})",
+            phase_label(&previous.current_phase),
+            phase_label(&current.current_phase),
+            current.current_loop
+        )
+    } else {
+        format!(
+            "phase changed: {} -> {} (loop {} -> {})",
+            phase_label(&previous.current_phase),
+            phase_label(&current.current_phase),
+            previous.current_loop,
+            current.current_loop
+        )
+    };
+
+    Some(TailEvent {
+        timestamp: current.timestamp.clone(),
+        sort_epoch_ms: current.sort_epoch_ms,
+        sort_tiebreaker: EVENT_ORDER_STATE,
+        signature: format!(
+            "state::phase::{}->{}::{}::{}",
+            phase_label(&previous.current_phase),
+            phase_label(&current.current_phase),
+            current.current_loop,
+            current.state_mtime_ns
+        ),
+        kind: TailEventKind::StateTransition {
+            description,
+            loop_number: Some(current.current_loop),
+            phase: Some(phase_label(&current.current_phase).to_owned()),
+        },
+    })
+}
+
+fn phase_label(phase: &Phase) -> &'static str {
+    match phase {
+        Phase::Planning => "planning",
+        Phase::Implementing => "implementing",
+        Phase::Reviewing => "reviewing",
+        Phase::Committing => "committing",
+        Phase::Completing => "completing",
+    }
+}
+
+fn completion_verdict_label(verdict: &CompletionVerdict) -> &'static str {
+    match verdict {
+        CompletionVerdict::Continue => "CONTINUE",
+        CompletionVerdict::Complete => "COMPLETE",
+    }
+}
+
 fn sort_events(events: &mut [TailEvent]) {
     events.sort_by(|left, right| {
-        compare_timestamps(
-            left.filename_timestamp.as_deref(),
-            right.filename_timestamp.as_deref(),
-        )
-        .then_with(|| compare_optional(left.created_at.as_deref(), right.created_at.as_deref()))
-        .then_with(|| left.rel_path.cmp(&right.rel_path))
+        left.sort_epoch_ms
+            .cmp(&right.sort_epoch_ms)
+            .then_with(|| left.sort_tiebreaker.cmp(&right.sort_tiebreaker))
+            .then_with(|| left.signature.cmp(&right.signature))
     });
 }
 
-fn compare_timestamps(left: Option<&str>, right: Option<&str>) -> Ordering {
-    match (left, right) {
-        (Some(l), Some(r)) => l.cmp(r),
-        _ => Ordering::Equal,
+fn normalize_event_time(
+    created_at: Option<&str>,
+    filename_timestamp: Option<&str>,
+    file_mtime: Option<SystemTime>,
+) -> (String, i64) {
+    if let Some(created_at) = created_at {
+        if let Some(parsed) = parse_rfc3339_utc(created_at) {
+            return to_timestamp(parsed);
+        }
     }
+
+    if let Some(filename_timestamp) = filename_timestamp {
+        if let Some(parsed) = filename_ts_to_datetime(filename_timestamp) {
+            return to_timestamp(parsed);
+        }
+    }
+
+    if let Some(file_mtime) = file_mtime {
+        let parsed = DateTime::<Utc>::from(file_mtime);
+        return to_timestamp(parsed);
+    }
+
+    ("unknown-time".to_owned(), 0)
 }
 
-fn compare_optional(left: Option<&str>, right: Option<&str>) -> Ordering {
-    match (left, right) {
-        (Some(l), Some(r)) => l.cmp(r),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn filename_ts_to_datetime(value: &str) -> Option<DateTime<Utc>> {
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
+    Some(DateTime::from_naive_utc_and_offset(parsed, Utc))
+}
+
+fn to_timestamp(dt: DateTime<Utc>) -> (String, i64) {
+    (
+        dt.to_rfc3339_opts(SecondsFormat::Secs, true),
+        dt.timestamp_millis(),
+    )
 }
 
 fn split_frontmatter(raw: &str) -> (BTreeMap<String, String>, String) {
@@ -308,21 +770,126 @@ fn first_h1(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_h1, sort_events, split_frontmatter, TailEvent};
+    use std::fs;
 
-    fn event(path: &str, filename_ts: Option<&str>, created_at: Option<&str>) -> TailEvent {
+    use chrono::{DateTime, Utc};
+    use tempfile::tempdir;
+
+    use super::{
+        collect_state_events, completion_verdict_label, create_phase_change_event, event_output,
+        filename_ts_to_datetime, first_h1, normalize_event_time, phase_label, sort_events,
+        split_frontmatter, PhaseSnapshot, TailEvent, TailEventKind, EVENT_ORDER_ARTIFACT,
+        EVENT_ORDER_GIT, EVENT_ORDER_STATE,
+    };
+    use crate::project::state::{
+        CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState, CompletionVerdict,
+        FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType, Phase,
+        ProjectState, ProjectStatus,
+    };
+
+    fn parse_utc(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn artifact_event(signature: &str, epoch_ms: i64) -> TailEvent {
         TailEvent {
-            rel_path: path.to_owned(),
-            filename_timestamp: filename_ts.map(str::to_owned),
-            created_at: created_at.map(str::to_owned),
-            artifact: None,
-            loop_number: None,
-            iteration: None,
-            role: None,
-            backend: None,
-            heading: None,
-            signature: "s".to_owned(),
+            timestamp: "2026-02-06T21:00:00Z".to_owned(),
+            sort_epoch_ms: epoch_ms,
+            sort_tiebreaker: EVENT_ORDER_ARTIFACT,
+            signature: signature.to_owned(),
+            kind: TailEventKind::Artifact {
+                rel_path: "loops/001-demo/20260206210000-spec.md".to_owned(),
+                filename_timestamp: Some("20260206210000".to_owned()),
+                created_at: Some("2026-02-06T21:00:00Z".to_owned()),
+                artifact: Some("spec".to_owned()),
+                loop_number: Some(1),
+                iteration: None,
+                role: Some("planner".to_owned()),
+                backend: Some("codex".to_owned()),
+                heading: Some("# Demo".to_owned()),
+                body: "# Demo".to_owned(),
+            },
         }
+    }
+
+    fn state_event(signature: &str, epoch_ms: i64) -> TailEvent {
+        TailEvent {
+            timestamp: "2026-02-06T21:00:00Z".to_owned(),
+            sort_epoch_ms: epoch_ms,
+            sort_tiebreaker: EVENT_ORDER_STATE,
+            signature: signature.to_owned(),
+            kind: TailEventKind::StateTransition {
+                description: "loop 1 completed".to_owned(),
+                loop_number: Some(1),
+                phase: None,
+            },
+        }
+    }
+
+    fn git_event(signature: &str, epoch_ms: i64) -> TailEvent {
+        TailEvent {
+            timestamp: "2026-02-06T21:00:00Z".to_owned(),
+            sort_epoch_ms: epoch_ms,
+            sort_tiebreaker: EVENT_ORDER_GIT,
+            signature: signature.to_owned(),
+            kind: TailEventKind::GitCommit {
+                loop_number: 1,
+                commit_hash: "abc123".to_owned(),
+                tag: Some("demo/1".to_owned()),
+            },
+        }
+    }
+
+    fn demo_project_state() -> ProjectState {
+        let mut state = ProjectState::new("demo", "Demo Project", "hash", None);
+        state.current_loop = 2;
+        state.current_phase = Phase::Completing;
+        state.phase_iteration = 1;
+        state.status = ProjectStatus::InProgress;
+
+        state.loops.push(FeatureLoopState {
+            loop_number: 1,
+            slug: "feature-a".to_owned(),
+            feature_name: "Feature A".to_owned(),
+            loop_type: LoopType::Feature,
+            status: LoopStatus::Completed,
+            backends: FeatureLoopBackends {
+                planner: "planner-a".to_owned(),
+                implementer: "impl-a".to_owned(),
+                reviewer: "reviewer-a".to_owned(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: "loops/001-feature-a/spec.md".to_owned(),
+                impl_notes: Some("loops/001-feature-a/impl-notes.md".to_owned()),
+                reviews: Vec::new(),
+                approval: Some("loops/001-feature-a/review-approved.md".to_owned()),
+            },
+            commit: Some("abc123".to_owned()),
+            started_at: parse_utc("2026-02-06T21:00:00Z"),
+            completed_at: Some(parse_utc("2026-02-06T21:05:00Z")),
+        });
+
+        state.completion_attempts.push(CompletionLoopState {
+            loop_number: 2,
+            slug: "completion".to_owned(),
+            loop_type: LoopType::Completion,
+            status: LoopStatus::Completed,
+            backends: CompletionLoopBackends {
+                planner: "planner-a".to_owned(),
+                completer: "completer-a".to_owned(),
+            },
+            artifacts: CompletionLoopArtifacts {
+                termination_request: "loops/002-completion/termination-request.md".to_owned(),
+                verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+            },
+            verdict: Some(CompletionVerdict::Continue),
+            started_at: parse_utc("2026-02-06T21:06:00Z"),
+            completed_at: Some(parse_utc("2026-02-06T21:07:00Z")),
+        });
+
+        state
     }
 
     #[test]
@@ -333,6 +900,7 @@ created_at: 2026-02-06T20:00:00Z
 ---
 
 # Feature: Demo
+## Detail
 "#;
         let (fm, body) = split_frontmatter(raw);
         assert_eq!(fm.get("artifact").map(String::as_str), Some("spec"));
@@ -341,32 +909,173 @@ created_at: 2026-02-06T20:00:00Z
             Some("2026-02-06T20:00:00Z")
         );
         assert_eq!(first_h1(&body).as_deref(), Some("# Feature: Demo"));
+        assert!(body.contains("## Detail"));
     }
 
     #[test]
-    fn sorts_by_filename_timestamp_then_created_at_then_path() {
+    fn parses_filename_timestamp_as_utc() {
+        let parsed = filename_ts_to_datetime("20260206212953").unwrap();
+        assert_eq!(
+            parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "2026-02-06T21:29:53Z"
+        );
+    }
+
+    #[test]
+    fn normalizes_timestamps_preferring_created_at() {
+        let (timestamp, epoch_ms) =
+            normalize_event_time(Some("2026-02-06T21:10:11Z"), Some("20260206220000"), None);
+        assert_eq!(timestamp, "2026-02-06T21:10:11Z");
+        assert_eq!(
+            epoch_ms,
+            parse_utc("2026-02-06T21:10:11Z").timestamp_millis()
+        );
+    }
+
+    #[test]
+    fn sorts_by_epoch_then_type_then_signature() {
         let mut events = vec![
-            event(
-                "loops/001-demo/20260203060110-spec.md",
-                Some("20260203060110"),
-                Some("2026-02-03T06:01:10Z"),
-            ),
-            event(
-                "loops/001-demo/20260203055920-spec.md",
-                Some("20260203055920"),
-                Some("2026-02-03T05:59:20Z"),
-            ),
-            event(
-                "loops/001-demo/legacy.md",
-                None,
-                Some("2026-02-03T05:58:00Z"),
-            ),
+            git_event("git::same-time", 1000),
+            state_event("state::same-time", 1000),
+            artifact_event("artifact::same-time", 1000),
+            artifact_event("artifact::older", 999),
         ];
 
         sort_events(&mut events);
 
-        assert_eq!(events[0].rel_path, "loops/001-demo/legacy.md");
-        assert_eq!(events[1].rel_path, "loops/001-demo/20260203055920-spec.md");
-        assert_eq!(events[2].rel_path, "loops/001-demo/20260203060110-spec.md");
+        let signatures: Vec<&str> = events
+            .iter()
+            .map(|event| event.signature.as_str())
+            .collect();
+        assert_eq!(
+            signatures,
+            vec![
+                "artifact::older",
+                "artifact::same-time",
+                "state::same-time",
+                "git::same-time"
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_state_and_git_events_from_project_state() {
+        let temp = tempdir().unwrap();
+        let state = demo_project_state();
+        state.save(&temp.path().join("state.json")).unwrap();
+
+        let events = collect_state_events(temp.path(), "demo");
+
+        let descriptions: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TailEventKind::StateTransition { description, .. } => Some(description.as_str()),
+                TailEventKind::Artifact { .. } | TailEventKind::GitCommit { .. } => None,
+            })
+            .collect();
+        assert!(descriptions
+            .iter()
+            .any(|item| *item == "loop 1 (Feature A) started"));
+        assert!(descriptions
+            .iter()
+            .any(|item| *item == "loop 1 (Feature A) completed"));
+        assert!(descriptions
+            .iter()
+            .any(|item| *item == "loop 2 completion check started"));
+        assert!(descriptions
+            .iter()
+            .any(|item| *item == "loop 2 completion verdict: CONTINUE"));
+
+        let git = events.iter().find_map(|event| match &event.kind {
+            TailEventKind::GitCommit {
+                loop_number,
+                commit_hash,
+                tag,
+            } => Some((*loop_number, commit_hash.as_str(), tag.as_deref())),
+            TailEventKind::Artifact { .. } | TailEventKind::StateTransition { .. } => None,
+        });
+        assert_eq!(git, Some((1, "abc123", Some("demo/1"))));
+    }
+
+    #[test]
+    fn returns_empty_state_events_when_state_is_missing() {
+        let temp = tempdir().unwrap();
+        let events = collect_state_events(temp.path(), "demo");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn returns_empty_state_events_when_state_is_unreadable() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("state.json"), "{not valid json").unwrap();
+        let events = collect_state_events(temp.path(), "demo");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn emits_phase_change_event_with_new_phase_details() {
+        let previous = PhaseSnapshot {
+            current_phase: Phase::Planning,
+            current_loop: 1,
+            timestamp: "2026-02-06T21:00:00Z".to_owned(),
+            sort_epoch_ms: 1,
+            state_mtime_ns: 11,
+        };
+        let current = PhaseSnapshot {
+            current_phase: Phase::Implementing,
+            current_loop: 1,
+            timestamp: "2026-02-06T21:01:00Z".to_owned(),
+            sort_epoch_ms: 2,
+            state_mtime_ns: 12,
+        };
+
+        let event = create_phase_change_event(&previous, &current).unwrap();
+        match event.kind {
+            TailEventKind::StateTransition {
+                description,
+                loop_number,
+                phase,
+            } => {
+                assert_eq!(
+                    description,
+                    "phase changed: planning -> implementing (loop 1)"
+                );
+                assert_eq!(loop_number, Some(1));
+                assert_eq!(phase.as_deref(), Some("implementing"));
+            }
+            TailEventKind::Artifact { .. } | TailEventKind::GitCommit { .. } => {
+                panic!("expected state transition")
+            }
+        }
+    }
+
+    #[test]
+    fn serializes_json_with_event_specific_fields() {
+        let artifact = artifact_event("artifact::demo", 100);
+        let artifact_json = serde_json::to_value(event_output("demo", &artifact)).unwrap();
+        assert_eq!(artifact_json.get("event_type").unwrap(), "artifact");
+        assert_eq!(artifact_json.get("body").unwrap(), "# Demo");
+        assert!(artifact_json.get("description").is_none());
+
+        let state = state_event("state::demo", 100);
+        let state_json = serde_json::to_value(event_output("demo", &state)).unwrap();
+        assert_eq!(state_json.get("event_type").unwrap(), "state");
+        assert_eq!(state_json.get("description").unwrap(), "loop 1 completed");
+        assert!(state_json.get("commit_hash").is_none());
+
+        let git = git_event("git::demo", 100);
+        let git_json = serde_json::to_value(event_output("demo", &git)).unwrap();
+        assert_eq!(git_json.get("event_type").unwrap(), "git");
+        assert_eq!(git_json.get("commit_hash").unwrap(), "abc123");
+        assert_eq!(git_json.get("tag").unwrap(), "demo/1");
+    }
+
+    #[test]
+    fn labels_use_expected_wire_format() {
+        assert_eq!(phase_label(&Phase::Reviewing), "reviewing");
+        assert_eq!(
+            completion_verdict_label(&CompletionVerdict::Complete),
+            "COMPLETE"
+        );
     }
 }
