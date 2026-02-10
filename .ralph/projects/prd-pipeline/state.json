@@ -5,7 +5,7 @@
   "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "parent_project": null,
-  "current_loop": 5,
+  "current_loop": 6,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -121,7 +121,7 @@
       "slug": "interaction-layer",
       "feature_name": "Interaction Layer",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex)",
@@ -133,8 +133,45 @@
         "reviews": [],
         "approval": "loops/005-interaction-layer/20260210203203-review-approved.md"
       },
-      "commit": null,
+      "commit": "2e5e6207d6067c76077afb5ca79129444f9cdbda",
       "started_at": "2026-02-10T20:26:23.170800546Z",
+      "completed_at": "2026-02-10T20:32:03.120020742Z"
+    },
+    {
+      "loop_number": 6,
+      "slug": "pipeline-non-interactive-happy-path",
+      "feature_name": "Pipeline + Non-Interactive Happy Path",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/006-pipeline-non-interactive-happy-path/20260210203430-spec.md",
+        "impl_notes": "loops/006-pipeline-non-interactive-happy-path/20260210203900-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204156-review-001-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204215-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204440-review-002-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204457-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204719-review-003-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204831-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/006-pipeline-non-interactive-happy-path/20260210205155-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T20:34:30.544122818Z",
       "completed_at": null
     }
   ],

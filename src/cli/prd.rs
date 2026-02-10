@@ -1,10 +1,15 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Args;
 
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
+use crate::prd::{
+    AnswerStore, CacheManager, NonInteractiveInteraction, PlainInteraction, PrdOptions,
+    PrdPipeline,
+};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -49,29 +54,76 @@ pub async fn execute(args: PrdArgs) -> Result<()> {
     let backend = registry.get_or_create_for_spec(&backend_spec)?;
     backend.health_check().await?;
 
+    // Auto-detect TTY mode: non-interactive if --non-interactive or stdin is not a terminal
+    // (unless --interactive is explicitly passed).
     let non_interactive =
         args.non_interactive || (!std::io::stdin().is_terminal() && !args.interactive);
-    let answers_path = args
-        .answers
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "none".to_owned());
 
-    println!("PRD pipeline is not yet implemented.");
-    println!("idea: {}", args.idea);
-    println!("backend: {}", backend.name());
+    println!("Starting PRD pipeline...");
+    println!("  idea: {}", args.idea);
+    println!("  backend: {}", backend.name());
     println!(
-        "mode: {}",
+        "  mode: {}",
         if non_interactive {
             "non-interactive"
         } else {
             "interactive"
         }
     );
-    println!("ask max rounds: {}", args.ask_max);
-    println!("answers file: {answers_path}");
-    println!("resume: {}", args.resume);
-    println!("dry run: {}", args.dry_run);
+    println!("  ask max rounds: {}", args.ask_max);
+    println!("  resume: {}", args.resume);
+    println!();
+
+    // Create cache manager for the idea.
+    let cache = CacheManager::new(&workspace.root, &args.idea)?;
+
+    // Create answer store, loading from --answers if provided.
+    let answers_path = if let Some(ref path) = args.answers {
+        path.clone()
+    } else {
+        cache.cache_dir().join("answers.yaml")
+    };
+
+    let mut answer_store = AnswerStore::new(&answers_path);
+    if args.answers.is_some() {
+        // Pre-load answers from the provided file.
+        answer_store.load()?;
+    }
+
+    // Create interaction layer based on mode.
+    let interaction: Box<dyn crate::prd::UserInteraction> = if non_interactive {
+        Box::new(NonInteractiveInteraction::new())
+    } else {
+        Box::new(PlainInteraction::new())
+    };
+
+    // Create pipeline options.
+    let options = PrdOptions {
+        idea: args.idea.clone(),
+        backend_spec: backend_spec.clone(),
+        ask_max: args.ask_max,
+        resume: args.resume,
+        dry_run: args.dry_run,
+    };
+
+    // Create and run the pipeline.
+    let pipeline = PrdPipeline::new(
+        Arc::clone(&backend) as Arc<dyn crate::backend::Backend>,
+        interaction,
+        cache,
+        answer_store,
+        options,
+    )?;
+
+    let result = pipeline.run().await?;
+
+    // Print summary.
+    println!();
+    println!("PRD pipeline completed successfully!");
+    println!("  PRD written to: {}", result.prd_path.display());
+    println!("  Cache directory: {}", result.cache_dir.display());
+    println!("  {}", result.summary);
+    println!();
 
     Ok(())
 }

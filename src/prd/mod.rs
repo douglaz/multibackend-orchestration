@@ -12,4 +12,5 @@ pub use interaction::{
     InteractionContext, MockInteraction, NonInteractiveInteraction, PlainInteraction,
     UserInteraction,
 };
+pub use pipeline::{PrdOptions, PrdPipeline, PrdResult};
 pub use stages::{check_stage_output, StageOutputCheck, StagePromptBuilder};
