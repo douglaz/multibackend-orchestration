@@ -5,7 +5,7 @@ mod project;
 mod rollback;
 mod run;
 mod status;
-mod tail;
+pub mod tail;
 
 use std::path::PathBuf;
 
@@ -98,6 +98,22 @@ pub struct RunArgs {
     pub on_prompt_change: Option<PromptChangeAction>,
     #[arg(long)]
     pub skip_commit: bool,
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::value_parser!(bool),
+        conflicts_with = "no_tmux"
+    )]
+    pub tmux: Option<bool>,
+    #[arg(
+        long = "no-tmux",
+        num_args = 0..=1,
+        default_missing_value = "false",
+        value_parser = clap::value_parser!(bool),
+        conflicts_with = "tmux"
+    )]
+    pub no_tmux: Option<bool>,
 }
 
 #[derive(Debug, Args)]
@@ -128,6 +144,9 @@ pub struct TailArgs {
     pub poll_interval_ms: u64,
     #[arg(long)]
     pub json: bool,
+    /// Attach to the ralph tmux session instead of showing artifact events
+    #[arg(long)]
+    pub tmux: bool,
 }
 
 #[derive(Debug, Args)]
@@ -220,5 +239,51 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Tail(args) => tail::execute(args).await,
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn parses_run_with_tmux_flag() {
+        let cli = Cli::parse_from(["ralph", "run", "--tmux"]);
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(args.tmux, Some(true));
+        assert_eq!(args.no_tmux, None);
+    }
+
+    #[test]
+    fn parses_run_with_no_tmux_flag() {
+        let cli = Cli::parse_from(["ralph", "run", "--no-tmux"]);
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(args.tmux, None);
+        assert_eq!(args.no_tmux, Some(false));
+    }
+
+    #[test]
+    fn parses_run_without_tmux_flags() {
+        let cli = Cli::parse_from(["ralph", "run"]);
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(args.tmux, None);
+        assert_eq!(args.no_tmux, None);
+    }
+
+    #[test]
+    fn rejects_run_with_conflicting_tmux_flags() {
+        let result = Cli::try_parse_from(["ralph", "run", "--tmux", "--no-tmux"]);
+        assert!(result.is_err());
     }
 }

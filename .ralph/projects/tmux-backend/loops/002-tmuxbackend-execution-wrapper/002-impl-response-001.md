@@ -1,0 +1,18 @@
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. **Isolated session names for parallel-safe unit tests** — The four unit tests in `src/backend/tmux_backend.rs` that shared the session name `"test-session"` now each use a unique name, preventing file-watcher cross-talk under parallel `cargo test` execution:
+   - `execute_success_returns_output`: `"test-session"` → `"test-success"` (watcher prefix: `ralph-test-success-`)
+   - `execute_nonzero_exit_returns_error`: `"test-session"` → `"test-nonzero"` (watcher prefix: `ralph-test-nonzero-`)
+   - `execute_timeout_returns_backend_timeout`: `"test-session"` → `"test-timeout"` (no watcher, but unique temp-file prefix)
+   - `kill_window_called_on_nonzero_exit`: `"test-session"` → `"test-killwin"` (watcher prefix: `ralph-test-killwin-`, assertion updated to `test-killwin:5`)
+
+   The remaining tests (`temp_files_cleaned_up_on_success`, `temp_files_cleaned_up_on_failure`) already used unique session names (`clean-session`, `fail-clean-session`) and required no changes.
+
+   The temp-file prefix format is `ralph-{session_name}-{pid}-{counter}`, so unique session names guarantee non-overlapping file patterns even when tests run concurrently. Combined with the atomic counter and PID, there is no possibility of cross-test interference.
+
+## Could Not Address
+None
+
+## Pending Changes (Pre-Commit)
+- `src/backend/tmux_backend.rs` — four session name renames + one assertion update in unit tests (lines 376, 392, 439, 448, 493, 677, 685, 707)

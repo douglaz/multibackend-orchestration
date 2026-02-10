@@ -115,6 +115,10 @@ struct TailEventOutput<'a> {
 }
 
 pub async fn execute(args: TailArgs) -> Result<()> {
+    if args.tmux {
+        return execute_tmux_attach().await;
+    }
+
     let workspace = Workspace::discover()?;
     let project_id = if let Some(project) = args.project {
         project
@@ -167,6 +171,59 @@ pub async fn execute(args: TailArgs) -> Result<()> {
             print_events(&project_id, &new_events, None, args.json)?;
         }
     }
+}
+
+async fn execute_tmux_attach() -> Result<()> {
+    let workspace = Workspace::discover()?;
+    let session_name = &workspace.config.workspace.tmux_session;
+    tmux_attach(session_name).await
+}
+
+/// Attach to a tmux session by name. Validates that tmux is available and
+/// the session exists before attempting to attach.
+pub async fn tmux_attach(session_name: &str) -> Result<()> {
+    // Check if tmux is available
+    crate::backend::tmux::check_tmux_available().map_err(|_| {
+        RalphError::Validation(
+            "tmux is not installed or not on PATH; cannot attach to tmux session".to_owned(),
+        )
+    })?;
+
+    // Check if the session exists
+    let session_exists = {
+        let output = tokio::process::Command::new("tmux")
+            .args(["has-session", "-t", session_name])
+            .output()
+            .await
+            .map_err(|err| RalphError::Validation(format!("failed to run tmux: {err}")))?;
+        output.status.success()
+    };
+
+    if !session_exists {
+        return Err(RalphError::Validation(format!(
+            "tmux session '{session_name}' does not exist. \
+             Start a run with `ralph run --tmux` to create it."
+        )));
+    }
+
+    // Run tmux attach as a child process (exec would be ideal but isn't
+    // portable / testable; a blocking child process serves the same purpose).
+    let status = std::process::Command::new("tmux")
+        .args(["attach", "-t", session_name])
+        .status()
+        .map_err(|err| {
+            RalphError::Validation(format!(
+                "failed to attach to tmux session '{session_name}': {err}"
+            ))
+        })?;
+
+    if !status.success() {
+        return Err(RalphError::Validation(format!(
+            "tmux attach to session '{session_name}' exited with non-zero status"
+        )));
+    }
+
+    Ok(())
 }
 
 fn collect_all_events(project_dir: &Path, project_id: &str) -> Result<Vec<TailEvent>> {

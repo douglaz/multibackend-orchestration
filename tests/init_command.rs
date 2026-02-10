@@ -45,6 +45,8 @@ fn test_init_generates_valid_config() {
     // Verify required config sections exist with expected defaults
     assert_eq!(workspace.config.workspace.version, "1.0");
     assert_eq!(workspace.config.workspace.default_backend, "claude");
+    assert!(!workspace.config.workspace.tmux);
+    assert_eq!(workspace.config.workspace.tmux_session, "ralph");
 
     // Verify backends section
     assert_eq!(workspace.config.backends.claude.command, "claude");

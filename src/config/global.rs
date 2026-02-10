@@ -20,6 +20,12 @@ pub struct GlobalConfig {
 pub struct WorkspaceConfig {
     pub version: String,
     pub default_backend: String,
+    #[serde(default)]
+    pub tmux: bool,
+    #[serde(default = "default_tmux_session")]
+    pub tmux_session: String,
+    #[serde(default = "default_tmux_window_keep_seconds")]
+    pub tmux_window_keep_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +92,9 @@ impl Default for GlobalConfig {
             workspace: WorkspaceConfig {
                 version: "1.0".to_owned(),
                 default_backend: "claude".to_owned(),
+                tmux: false,
+                tmux_session: "ralph".to_owned(),
+                tmux_window_keep_seconds: 5,
             },
             backends: BackendConfigs {
                 claude: BackendConfig {
@@ -128,6 +137,14 @@ impl Default for GlobalConfig {
     }
 }
 
+fn default_tmux_session() -> String {
+    "ralph".to_owned()
+}
+
+fn default_tmux_window_keep_seconds() -> u64 {
+    5
+}
+
 impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
@@ -147,5 +164,103 @@ impl GlobalConfig {
             "codex" => Some(&self.backends.codex),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlobalConfig;
+
+    #[test]
+    fn default_workspace_tmux_settings_match_expected_values() {
+        let config = GlobalConfig::default();
+        assert!(!config.workspace.tmux);
+        assert_eq!(config.workspace.tmux_session, "ralph");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
+    }
+
+    #[test]
+    fn deserializes_workspace_tmux_defaults_when_fields_are_missing() {
+        let raw = r#"
+[workspace]
+version = "1.0"
+default_backend = "claude"
+
+[backends.claude]
+command = "claude"
+timeout_seconds = 600
+
+[backends.codex]
+command = "codex"
+timeout_seconds = 600
+
+[workflow]
+max_review_iterations = 5
+auto_commit = true
+commit_message_style = "conventional"
+commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
+prompt_change_action = "abort"
+
+[templates]
+planner = "templates/planner.md"
+implementer = "templates/implementer.md"
+reviewer = "templates/reviewer.md"
+completer = "templates/completer.md"
+
+[git]
+auto_branch = true
+branch_format = "ralph/{project_id}"
+sign_commits = false
+base_branch = "master"
+"#;
+
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert!(!config.workspace.tmux);
+        assert_eq!(config.workspace.tmux_session, "ralph");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
+    }
+
+    #[test]
+    fn deserializes_workspace_tmux_fields_when_present() {
+        let raw = r#"
+[workspace]
+version = "1.0"
+default_backend = "claude"
+tmux = true
+tmux_session = "demo"
+tmux_window_keep_seconds = 10
+
+[backends.claude]
+command = "claude"
+timeout_seconds = 600
+
+[backends.codex]
+command = "codex"
+timeout_seconds = 600
+
+[workflow]
+max_review_iterations = 5
+auto_commit = true
+commit_message_style = "conventional"
+commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
+prompt_change_action = "abort"
+
+[templates]
+planner = "templates/planner.md"
+implementer = "templates/implementer.md"
+reviewer = "templates/reviewer.md"
+completer = "templates/completer.md"
+
+[git]
+auto_branch = true
+branch_format = "ralph/{project_id}"
+sign_commits = false
+base_branch = "master"
+"#;
+
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert!(config.workspace.tmux);
+        assert_eq!(config.workspace.tmux_session, "demo");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 10);
     }
 }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
+use ralph::error::RalphError;
 use ralph::project::lifecycle::{
     create_project, load_project_state, CreateProjectOptions, PromptSource,
 };
@@ -244,6 +244,7 @@ fn run_options(project_id: &str) -> RunOptions {
         until_complete: false,
         dry_run: false,
         backend: None,
+        tmux: None,
         on_prompt_change: None,
         skip_commit: false,
     }
@@ -396,6 +397,56 @@ async fn dry_run_does_not_checkout_project_branch() {
         .expect("load project state");
     assert_eq!(state.current_loop, 0);
     assert_eq!(state.status, ProjectStatus::Pending);
+}
+
+#[tokio::test]
+async fn tmux_mode_fails_early_when_tmux_is_unavailable() {
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.workspace.tmux = true;
+    workspace.config.workspace.tmux_session = "ralph-test".to_owned();
+
+    fn tmux_unavailable() -> ralph::Result<()> {
+        Err(RalphError::TmuxUnavailable)
+    }
+
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator.set_tmux_preflight_checker(tmux_unavailable);
+    let result = orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect_err("run should fail without tmux");
+    assert!(
+        matches!(result, RalphError::TmuxUnavailable),
+        "expected tmux unavailable error, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tmux_mode_dry_run_skips_tmux_availability_check() {
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.workspace.tmux = true;
+    workspace.config.workspace.tmux_session = "ralph-test".to_owned();
+
+    fn tmux_unavailable() -> ralph::Result<()> {
+        Err(RalphError::TmuxUnavailable)
+    }
+
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator.set_tmux_preflight_checker(tmux_unavailable);
+    let mut options = run_options(&project_id);
+    options.dry_run = true;
+
+    let result = orchestrator.run(options).await;
+    assert!(
+        result.is_ok(),
+        "dry-run should skip tmux preflight: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -667,7 +718,10 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
     write_codex_script(&codex_script);
 
     git_ok(repo_root, &["add", "mock_claude.sh", "mock_codex.sh"]);
-    git_ok(repo_root, &["commit", "-m", "test: add split backend mocks"]);
+    git_ok(
+        repo_root,
+        &["commit", "-m", "test: add split backend mocks"],
+    );
 
     // Initialise workspace
     let workspace_root = repo_root.join(".ralph");

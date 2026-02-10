@@ -8,7 +8,8 @@ use chrono::Utc;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, BackendRegistry};
+use crate::backend::tmux_backend::TmuxExecutionContext;
+use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{
     resolve_effective_config, CommitMessageStyle, EffectiveConfig, PromptChangeAction,
 };
@@ -65,6 +66,7 @@ pub struct RunOptions {
     pub until_complete: bool,
     pub dry_run: bool,
     pub backend: Option<String>,
+    pub tmux: Option<bool>,
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
 }
@@ -77,11 +79,22 @@ pub struct OrchestrationResult {
 
 pub struct Orchestrator {
     workspace: Workspace,
+    tmux_preflight_checker: Option<fn() -> Result<()>>,
 }
 
 impl Orchestrator {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            tmux_preflight_checker: None,
+        }
+    }
+
+    /// Override the tmux availability checker used during preflight.
+    /// When set, this function is called instead of `tmux::check_tmux_available`.
+    /// Intended for testing — production callers should use `Orchestrator::new`.
+    pub fn set_tmux_preflight_checker(&mut self, checker: fn() -> Result<()>) {
+        self.tmux_preflight_checker = Some(checker);
     }
 
     pub async fn run(&mut self, options: RunOptions) -> Result<OrchestrationResult> {
@@ -113,7 +126,24 @@ impl Orchestrator {
             options.backend.as_deref(),
         )?;
 
-        let registry = BackendRegistry::new(&effective.global);
+        let tmux_settings = resolve_tmux_settings(
+            options.tmux,
+            effective.global.workspace.tmux,
+            effective.global.workspace.tmux_session.clone(),
+        );
+        let checker = self
+            .tmux_preflight_checker
+            .unwrap_or(tmux::check_tmux_available);
+        validate_tmux_preflight(tmux_settings.enabled, options.dry_run, checker)?;
+
+        let registry = BackendRegistry::new(
+            &effective.global,
+            BackendRegistryTmuxConfig {
+                enabled: tmux_settings.enabled,
+                session_name: tmux_settings.session_name,
+                window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
+            },
+        );
         if !options.dry_run {
             info!("checking backend availability...");
             registry.health_check_all().await?;
@@ -191,6 +221,13 @@ impl Orchestrator {
                         &feature_backends.implementer,
                         &project_dir,
                     )?;
+
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("planner".to_owned()),
+                        })
+                        .await;
 
                     info!(
                         loop = loop_number,
@@ -328,6 +365,13 @@ impl Orchestrator {
                             &project_dir,
                         )?;
 
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("impl".to_owned()),
+                            })
+                            .await;
+
                         info!(
                             loop = loop_number,
                             backend = implementer_backend.name(),
@@ -403,6 +447,13 @@ impl Orchestrator {
                             Some(&feedback_content),
                             &project_dir,
                         )?;
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("impl".to_owned()),
+                            })
+                            .await;
 
                         info!(
                             loop = loop_number,
@@ -554,6 +605,13 @@ impl Orchestrator {
                         &git_diff,
                         &project_dir,
                     )?;
+
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("reviewer".to_owned()),
+                        })
+                        .await;
 
                     info!(
                         loop = loop_number,
@@ -792,6 +850,13 @@ impl Orchestrator {
                         &previous_specs,
                     )?;
 
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("completer".to_owned()),
+                        })
+                        .await;
+
                     info!(
                         loop = loop_number,
                         backend = completer_backend.name(),
@@ -890,6 +955,33 @@ impl Orchestrator {
             "run exceeded maximum phase transitions ({MAX_PHASE_STEPS_PER_RUN}); aborting"
         )))
     }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTmuxSettings {
+    enabled: bool,
+    session_name: String,
+}
+
+fn resolve_tmux_settings(
+    cli_override: Option<bool>,
+    config_enabled: bool,
+    session_name: String,
+) -> ResolvedTmuxSettings {
+    ResolvedTmuxSettings {
+        enabled: cli_override.unwrap_or(config_enabled),
+        session_name,
+    }
+}
+
+fn validate_tmux_preflight<F>(tmux_enabled: bool, dry_run: bool, check_tmux: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if tmux_enabled && !dry_run {
+        check_tmux()?;
+    }
+    Ok(())
 }
 
 fn validate_termination_controls(options: &RunOptions) -> Result<()> {
@@ -1524,4 +1616,47 @@ async fn execute_with_timeout_retries(
     Err(RalphError::Orchestration(
         "unexpected timeout retry control-flow error".to_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::{resolve_tmux_settings, validate_tmux_preflight};
+    use crate::error::RalphError;
+
+    #[test]
+    fn resolve_tmux_settings_prefers_cli_override() {
+        let resolved = resolve_tmux_settings(Some(false), true, "ralph".to_owned());
+        assert!(!resolved.enabled);
+        assert_eq!(resolved.session_name, "ralph");
+    }
+
+    #[test]
+    fn resolve_tmux_settings_falls_back_to_config() {
+        let resolved = resolve_tmux_settings(None, true, "session-a".to_owned());
+        assert!(resolved.enabled);
+        assert_eq!(resolved.session_name, "session-a");
+    }
+
+    #[test]
+    fn validate_tmux_preflight_checks_when_enabled_and_not_dry_run() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_ref = Arc::clone(&called);
+
+        let result = validate_tmux_preflight(true, false, move || {
+            called_ref.store(true, Ordering::Relaxed);
+            Err(RalphError::TmuxUnavailable)
+        });
+
+        assert!(called.load(Ordering::Relaxed));
+        assert!(matches!(result, Err(RalphError::TmuxUnavailable)));
+    }
+
+    #[test]
+    fn validate_tmux_preflight_skips_check_for_dry_run() {
+        let result = validate_tmux_preflight(true, true, || Err(RalphError::TmuxUnavailable));
+        assert!(result.is_ok());
+    }
 }
