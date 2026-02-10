@@ -1,7 +1,7 @@
 //! Unit tests for backend registry and alternation logic.
 
 use std::fs;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ralph::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use ralph::config::global::GlobalConfig;
@@ -39,12 +39,26 @@ fn test_backend_registry_default() {
 }
 
 #[test]
+fn test_backend_registry_default_preserves_model_spec() {
+    let mut config = test_config();
+    config.workspace.default_backend = "claude(opus)".to_owned();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(registry.default_backend(), "claude(opus)");
+}
+
+#[test]
 fn test_backend_opposite() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     assert_eq!(registry.opposite("claude").unwrap(), "codex");
     assert_eq!(registry.opposite("codex").unwrap(), "claude");
+    assert_eq!(registry.opposite("claude(opus)").unwrap(), "codex");
+    assert_eq!(
+        registry.opposite("codex(gpt-5.3-codex-xhigh)").unwrap(),
+        "claude"
+    );
 }
 
 #[test]
@@ -88,6 +102,25 @@ fn test_planner_for_loop_with_codex_start() {
 }
 
 #[test]
+fn test_planner_for_loop_with_model_spec_start() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.planner_for_loop(1, "claude(opus)").unwrap(),
+        "claude(opus)"
+    );
+    assert_eq!(
+        registry.planner_for_loop(2, "claude(opus)").unwrap(),
+        "codex"
+    );
+    assert_eq!(
+        registry.planner_for_loop(3, "claude(opus)").unwrap(),
+        "claude(opus)"
+    );
+}
+
+#[test]
 fn test_assign_feature_backends() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
@@ -104,6 +137,26 @@ fn test_assign_feature_backends() {
 }
 
 #[test]
+fn test_assign_feature_backends_with_model_spec_start() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    let backends = registry
+        .assign_feature_backends(1, "claude(opus)")
+        .expect("loop 1 should resolve");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.implementer, "codex");
+    assert_eq!(backends.reviewer, "claude(opus)");
+
+    let backends = registry
+        .assign_feature_backends(2, "claude(opus)")
+        .expect("loop 2 should resolve");
+    assert_eq!(backends.planner, "codex");
+    assert_eq!(backends.implementer, "claude");
+    assert_eq!(backends.reviewer, "codex");
+}
+
+#[test]
 fn test_assign_completion_backends() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
@@ -113,6 +166,24 @@ fn test_assign_completion_backends() {
     assert_eq!(backends.completer, "codex");
 
     let backends = registry.assign_completion_backends(2, "claude").unwrap();
+    assert_eq!(backends.planner, "codex");
+    assert_eq!(backends.completer, "claude");
+}
+
+#[test]
+fn test_assign_completion_backends_with_model_spec_start() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    let backends = registry
+        .assign_completion_backends(1, "claude(opus)")
+        .expect("loop 1 should resolve");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.completer, "codex");
+
+    let backends = registry
+        .assign_completion_backends(2, "claude(opus)")
+        .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex");
     assert_eq!(backends.completer, "claude");
 }
@@ -319,4 +390,43 @@ cat
         .await
         .expect("direct cli backend should execute");
     assert_eq!(output, "hello without tmux");
+}
+
+#[tokio::test]
+async fn get_or_create_for_spec_injects_model_args_and_reuses_cached_backend() {
+    let _lock = lock_path();
+    let temp = TempDir::new().expect("temp dir");
+    let bin_dir = temp.path();
+    let backend_script = bin_dir.join("mock-backend");
+
+    write_executable(
+        &backend_script,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '%s\n' "$*"
+"#,
+    );
+
+    let mut config = test_config();
+    config.backends.claude.command = backend_script.to_string_lossy().to_string();
+    config.backends.claude.args = vec!["--base-flag".to_owned(), "value".to_owned()];
+
+    let mut registry = BackendRegistry::new(&config, tmux_disabled());
+    let backend_a = registry
+        .get_or_create_for_spec("claude(opus)")
+        .expect("model backend should be created");
+    let backend_b = registry
+        .get_or_create_for_spec("claude(opus)")
+        .expect("model backend should be cached");
+
+    assert!(Arc::ptr_eq(&backend_a, &backend_b));
+    assert_eq!(backend_a.name(), "claude(opus)");
+    assert!(registry.get("claude(opus)").is_some());
+
+    let output = backend_a
+        .execute("hello")
+        .await
+        .expect("model backend should execute");
+    assert_eq!(output.trim(), "--model opus --base-flag value");
 }

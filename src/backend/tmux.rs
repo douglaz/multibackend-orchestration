@@ -212,13 +212,7 @@ pub async fn set_remain_on_exit<R: TmuxCommandRunner + ?Sized>(
 ) -> Result<()> {
     let target = format!("{session_name}:{window_id}");
     runner
-        .run(&[
-            "set-option",
-            "-t",
-            &target,
-            "remain-on-exit",
-            "on",
-        ])
+        .run(&["set-option", "-t", &target, "remain-on-exit", "on"])
         .await?;
     Ok(())
 }
@@ -230,7 +224,10 @@ pub async fn has_window<R: TmuxCommandRunner + ?Sized>(
     window_id: &str,
 ) -> Result<bool> {
     let target = format!("{session_name}:{window_id}");
-    match runner.run(&["list-windows", "-t", &target, "-F", "#{window_index}"]).await {
+    match runner
+        .run(&["list-windows", "-t", &target, "-F", "#{window_index}"])
+        .await
+    {
         Ok(_) => Ok(true),
         Err(RalphError::BackendCommandFailed { details, .. })
             if looks_like_missing_session(&details) || looks_like_missing_window(&details) =>
@@ -321,9 +318,9 @@ mod tests {
     use tokio::time::sleep;
 
     use super::{
-        create_window, create_window_with_retry, ensure_session, format_window_label,
-        has_session, has_window, kill_window, kill_window_best_effort, sanitize_tmux_label,
-        set_remain_on_exit, wait_for_exit, TmuxCommandRunner,
+        create_window, create_window_with_retry, ensure_session, format_window_label, has_session,
+        has_window, kill_window, kill_window_best_effort, sanitize_tmux_label, set_remain_on_exit,
+        wait_for_exit, TmuxCommandRunner,
     };
     use crate::error::RalphError;
     use crate::Result;
@@ -593,12 +590,18 @@ mod tests {
 
     #[test]
     fn format_window_label_planner_role() {
-        assert_eq!(format_window_label(1, "planner", "claude"), "L1-planner-claude");
+        assert_eq!(
+            format_window_label(1, "planner", "claude"),
+            "L1-planner-claude"
+        );
     }
 
     #[test]
     fn format_window_label_reviewer_role() {
-        assert_eq!(format_window_label(2, "reviewer", "codex"), "L2-reviewer-codex");
+        assert_eq!(
+            format_window_label(2, "reviewer", "codex"),
+            "L2-reviewer-codex"
+        );
     }
 
     // --- set_remain_on_exit tests ---

@@ -3,6 +3,7 @@ pub mod project;
 
 use std::path::{Path, PathBuf};
 
+use crate::backend::parse_backend_spec;
 use crate::error::RalphError;
 use crate::Result;
 
@@ -52,7 +53,11 @@ pub fn resolve_effective_config(
         global.workspace.default_backend.clone()
     };
 
-    if global.backend_config(&starting_backend).is_none() {
+    let parsed_starting_backend = parse_backend_spec(&starting_backend)?;
+    if global
+        .backend_config(&parsed_starting_backend.name)
+        .is_none()
+    {
         return Err(RalphError::Validation(format!(
             "unknown backend configured as starting backend: {starting_backend}"
         )));
@@ -121,4 +126,47 @@ fn resolve_template_path(
     }
 
     workspace_root.join(global_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::config::{resolve_effective_config, GlobalConfig};
+
+    #[test]
+    fn resolve_effective_config_accepts_starting_backend_with_model_spec() {
+        let mut global = GlobalConfig::default();
+        global.workspace.default_backend = "claude(opus)".to_owned();
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            None,
+        )
+        .expect("model backend spec should resolve");
+
+        assert_eq!(effective.workflow.starting_backend, "claude(opus)");
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_unknown_base_backend_in_spec() {
+        let mut global = GlobalConfig::default();
+        global.workspace.default_backend = "unknown(opus)".to_owned();
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            None,
+        )
+        .expect_err("unknown backend should fail validation");
+
+        assert!(error
+            .to_string()
+            .contains("unknown backend configured as starting backend: unknown(opus)"));
+    }
 }

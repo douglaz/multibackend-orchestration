@@ -136,7 +136,7 @@ impl Orchestrator {
             .unwrap_or(tmux::check_tmux_available);
         validate_tmux_preflight(tmux_settings.enabled, options.dry_run, checker)?;
 
-        let registry = BackendRegistry::new(
+        let mut registry = BackendRegistry::new(
             &effective.global,
             BackendRegistryTmuxConfig {
                 enabled: tmux_settings.enabled,
@@ -209,11 +209,7 @@ impl Orchestrator {
                     )?;
 
                     let planner_backend =
-                        registry.get(&feature_backends.planner).ok_or_else(|| {
-                            RalphError::BackendUnavailable {
-                                backend: feature_backends.planner.clone(),
-                            }
-                        })?;
+                        registry.get_or_create_for_spec(&feature_backends.planner)?;
 
                     let planner_prompt = build_planner_prompt(
                         &effective,
@@ -343,11 +339,7 @@ impl Orchestrator {
                     };
 
                     let implementer_backend =
-                        registry.get(&implementer_backend_name).ok_or_else(|| {
-                            RalphError::BackendUnavailable {
-                                backend: implementer_backend_name.clone(),
-                            }
-                        })?;
+                        registry.get_or_create_for_spec(&implementer_backend_name)?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
                     let git_diff = current_git_diff(&self.workspace.root)?;
@@ -561,155 +553,151 @@ impl Orchestrator {
                     };
 
                     if state.phase_iteration > effective.workflow.max_review_iterations {
-                        review_limit_hit = Some((loop_number, effective.workflow.max_review_iterations));
+                        review_limit_hit =
+                            Some((loop_number, effective.workflow.max_review_iterations));
                     } else {
+                        let reviewer_backend =
+                            registry.get_or_create_for_spec(&reviewer_backend_name)?;
 
-                    let reviewer_backend =
-                        registry.get(&reviewer_backend_name).ok_or_else(|| {
-                            RalphError::BackendUnavailable {
-                                backend: reviewer_backend_name.clone(),
-                            }
+                        let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
+                        let impl_notes_rel = impl_notes_rel.ok_or_else(|| {
+                            RalphError::Orchestration(
+                                "cannot review before impl-notes artifact exists".to_owned(),
+                            )
                         })?;
+                        let impl_notes_content =
+                            read_project_relative_file(&project_dir, &impl_notes_rel)?;
+                        let git_diff = current_git_diff(&self.workspace.root)?;
 
-                    let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
-                    let impl_notes_rel = impl_notes_rel.ok_or_else(|| {
-                        RalphError::Orchestration(
-                            "cannot review before impl-notes artifact exists".to_owned(),
-                        )
-                    })?;
-                    let impl_notes_content =
-                        read_project_relative_file(&project_dir, &impl_notes_rel)?;
-                    let git_diff = current_git_diff(&self.workspace.root)?;
-
-                    let previous_iteration = state.phase_iteration.saturating_sub(1);
-                    let impl_response_content = if previous_iteration > 0 {
-                        let response_rel = response_rel_path(
-                            &project_dir,
-                            loop_number,
-                            &loop_slug,
-                            previous_iteration,
-                        )?;
-                        read_project_relative_file(&project_dir, &response_rel).ok()
-                    } else {
-                        None
-                    };
-
-                    let reviewer_prompt = build_reviewer_prompt(
-                        &effective,
-                        &state,
-                        &prompt_content,
-                        &feature_name,
-                        &loop_slug,
-                        reviewer_backend.name(),
-                        &planner_backend_name,
-                        &spec_content,
-                        &impl_notes_content,
-                        impl_response_content.as_deref(),
-                        &git_diff,
-                        &project_dir,
-                    )?;
-
-                    registry
-                        .set_tmux_context(TmuxExecutionContext {
-                            loop_number: Some(loop_number),
-                            role: Some("reviewer".to_owned()),
-                        })
-                        .await;
-
-                    info!(
-                        loop = loop_number,
-                        backend = reviewer_backend.name(),
-                        "invoking reviewer..."
-                    );
-                    let reviewer_decision = execute_with_parse_retries(
-                        reviewer_backend,
-                        &registry,
-                        "reviewer",
-                        "reviewing",
-                        &reviewer_prompt,
-                        parse_reviewer_output,
-                        expected_format_template("reviewer"),
-                    )
-                    .await?;
-                    debug!(loop = loop_number, "reviewer responded");
-
-                    match reviewer_decision {
-                        ReviewerDecision::Suggestions { body } => {
-                            info!(
-                                loop = loop_number,
-                                iteration = state.phase_iteration,
-                                "reviewer provided suggestions"
-                            );
-                            let iteration = state.phase_iteration;
-                            let feedback_path = write_artifact(
+                        let previous_iteration = state.phase_iteration.saturating_sub(1);
+                        let impl_response_content = if previous_iteration > 0 {
+                            let response_rel = response_rel_path(
                                 &project_dir,
-                                ArtifactWriteInput {
-                                    project_id: &state.project_id,
-                                    loop_number,
-                                    loop_slug: &loop_slug,
-                                    backend: &reviewer_backend_name,
-                                    role: "reviewer",
-                                    kind: ArtifactKind::ReviewFeedback { iteration },
-                                    body: &body,
-                                },
+                                loop_number,
+                                &loop_slug,
+                                previous_iteration,
                             )?;
+                            read_project_relative_file(&project_dir, &response_rel).ok()
+                        } else {
+                            None
+                        };
 
-                            let _feedback_rel =
-                                artifact_relative_path(&project_dir, &feedback_path);
-                            state.current_phase = Phase::Implementing;
-                            state.phase_iteration = iteration;
-                            logs.push(format!(
+                        let reviewer_prompt = build_reviewer_prompt(
+                            &effective,
+                            &state,
+                            &prompt_content,
+                            &feature_name,
+                            &loop_slug,
+                            reviewer_backend.name(),
+                            &planner_backend_name,
+                            &spec_content,
+                            &impl_notes_content,
+                            impl_response_content.as_deref(),
+                            &git_diff,
+                            &project_dir,
+                        )?;
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("reviewer".to_owned()),
+                            })
+                            .await;
+
+                        info!(
+                            loop = loop_number,
+                            backend = reviewer_backend.name(),
+                            "invoking reviewer..."
+                        );
+                        let reviewer_decision = execute_with_parse_retries(
+                            reviewer_backend,
+                            &registry,
+                            "reviewer",
+                            "reviewing",
+                            &reviewer_prompt,
+                            parse_reviewer_output,
+                            expected_format_template("reviewer"),
+                        )
+                        .await?;
+                        debug!(loop = loop_number, "reviewer responded");
+
+                        match reviewer_decision {
+                            ReviewerDecision::Suggestions { body } => {
+                                info!(
+                                    loop = loop_number,
+                                    iteration = state.phase_iteration,
+                                    "reviewer provided suggestions"
+                                );
+                                let iteration = state.phase_iteration;
+                                let feedback_path = write_artifact(
+                                    &project_dir,
+                                    ArtifactWriteInput {
+                                        project_id: &state.project_id,
+                                        loop_number,
+                                        loop_slug: &loop_slug,
+                                        backend: &reviewer_backend_name,
+                                        role: "reviewer",
+                                        kind: ArtifactKind::ReviewFeedback { iteration },
+                                        body: &body,
+                                    },
+                                )?;
+
+                                let _feedback_rel =
+                                    artifact_relative_path(&project_dir, &feedback_path);
+                                state.current_phase = Phase::Implementing;
+                                state.phase_iteration = iteration;
+                                logs.push(format!(
                                 "loop {loop_number}: reviewer provided suggestions for iteration {iteration}"
                             ));
-                        }
-                        ReviewerDecision::Approved {
-                            body,
-                            commit_message,
-                        } => {
-                            info!(loop = loop_number, "reviewer approved changes");
-                            let iterations = review_count;
-                            let approval_path = write_artifact(
-                                &project_dir,
-                                ArtifactWriteInput {
-                                    project_id: &state.project_id,
-                                    loop_number,
-                                    loop_slug: &loop_slug,
-                                    backend: &reviewer_backend_name,
-                                    role: "reviewer",
-                                    kind: ArtifactKind::ReviewApproved { iterations },
-                                    body: &body,
-                                },
-                            )?;
-                            let approval_rel = artifact_relative_path(&project_dir, &approval_path);
+                            }
+                            ReviewerDecision::Approved {
+                                body,
+                                commit_message,
+                            } => {
+                                info!(loop = loop_number, "reviewer approved changes");
+                                let iterations = review_count;
+                                let approval_path = write_artifact(
+                                    &project_dir,
+                                    ArtifactWriteInput {
+                                        project_id: &state.project_id,
+                                        loop_number,
+                                        loop_slug: &loop_slug,
+                                        backend: &reviewer_backend_name,
+                                        role: "reviewer",
+                                        kind: ArtifactKind::ReviewApproved { iterations },
+                                        body: &body,
+                                    },
+                                )?;
+                                let approval_rel =
+                                    artifact_relative_path(&project_dir, &approval_path);
 
-                            {
-                                let loop_state =
-                                    state.current_feature_loop_mut().ok_or_else(|| {
-                                        RalphError::Orchestration(
+                                {
+                                    let loop_state =
+                                        state.current_feature_loop_mut().ok_or_else(|| {
+                                            RalphError::Orchestration(
                                             "failed to reload current loop after reviewer approval"
                                                 .to_owned(),
                                         )
-                                    })?;
-                                loop_state.artifacts.approval = Some(approval_rel);
-                            }
+                                        })?;
+                                    loop_state.artifacts.approval = Some(approval_rel);
+                                }
 
-                            state.current_phase = Phase::Committing;
-                            state.phase_iteration = 1;
-                            logs.push(format!("loop {loop_number}: reviewer approved changes"));
+                                state.current_phase = Phase::Committing;
+                                state.phase_iteration = 1;
+                                logs.push(format!("loop {loop_number}: reviewer approved changes"));
 
-                            if options.until_review {
-                                until_review_stop =
-                                    Some(loop_number);
-                            }
+                                if options.until_review {
+                                    until_review_stop = Some(loop_number);
+                                }
 
-                            if let Some(message) = commit_message {
-                                logs.push(format!(
+                                if let Some(message) = commit_message {
+                                    logs.push(format!(
                                     "loop {loop_number}: reviewer suggested commit message '{}'",
                                     message
                                 ));
+                                }
                             }
                         }
-                    }
                     } // else (review limit not hit)
                 }
                 Phase::Committing => {
@@ -825,11 +813,7 @@ impl Orchestrator {
                     };
 
                     let completer_backend =
-                        registry.get(&completer_backend_name).ok_or_else(|| {
-                            RalphError::BackendUnavailable {
-                                backend: completer_backend_name.clone(),
-                            }
-                        })?;
+                        registry.get_or_create_for_spec(&completer_backend_name)?;
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
@@ -926,12 +910,7 @@ impl Orchestrator {
                     "review iteration limit exceeded, rolling back loop"
                 );
                 rollback_current_loop(&mut state, &project_dir)?;
-                persist_state_and_index(
-                    &mut self.workspace,
-                    &project_id,
-                    &project_dir,
-                    &state,
-                )?;
+                persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
                         "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1561,7 +1540,8 @@ fn extract_reviewer_commit_message(body: &str) -> Option<String> {
 
 fn expected_format_template(role: &str) -> &'static str {
     match role {
-        "planner" => "\
+        "planner" => {
+            "\
 # Feature: <name>\n\
 ## Description\n\
 ## Acceptance Criteria\n\
@@ -1573,17 +1553,23 @@ OR\n\
 # Project Completion Request\n\
 ## Rationale\n\
 ## Summary of Work\n\
-## Remaining Items",
-        "implementer-notes" => "\
+## Remaining Items"
+        }
+        "implementer-notes" => {
+            "\
 # Implementation Notes\n\
 ## Decisions Made\n\
 ## Spec Deviations\n\
-## Testing",
-        "implementer-response" => "\
+## Testing"
+        }
+        "implementer-response" => {
+            "\
 # Implementation Response (Iteration <N>)\n\
 ## Changes Made\n\
-## Could Not Address",
-        "reviewer" => "\
+## Could Not Address"
+        }
+        "reviewer" => {
+            "\
 # Review: APPROVED\n\
 ## Acceptance Criteria Checklist\n\
 ## Notes\n\
@@ -1593,8 +1579,10 @@ OR\n\
 \n\
 # Review: SUGGESTIONS\n\
 ## Required Changes\n\
-## Recommended Improvements",
-        "completer" => "\
+## Recommended Improvements"
+        }
+        "completer" => {
+            "\
 # Verdict: COMPLETE\n\
 (list of requirements and how they are satisfied)\n\
 \n\
@@ -1602,7 +1590,8 @@ OR\n\
 \n\
 # Verdict: CONTINUE\n\
 ## Missing Requirements\n\
-## Recommended Next Features",
+## Recommended Next Features"
+        }
         _ => "valid markdown with required H1",
     }
 }
@@ -1647,9 +1636,7 @@ where
                 3. No YAML frontmatter (no lines starting with ---)\n\
                 4. Include ALL required H2 sections\n\n\
                 Required structure:\n{}\n",
-                parse_error_1,
-                first_output,
-                expected_format_template,
+                parse_error_1, first_output, expected_format_template,
             );
 
             let second_output =

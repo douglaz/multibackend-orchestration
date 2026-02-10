@@ -245,7 +245,7 @@ async fn tmux_backend_timeout_with_missing_session_returns_actionable_error() {
             backend: "tmux".to_owned(),
             details: "can't find session: timeout-session".to_owned(),
         }),
-        Ok(String::new()),    // kill_window (best-effort, after classification)
+        Ok(String::new()), // kill_window (best-effort, after classification)
     ]);
 
     let cli = CliBackend::new(
@@ -560,7 +560,10 @@ async fn tmux_backend_does_not_fail_on_window_cleanup_error() {
     watcher.await.unwrap();
 
     // Should succeed even though cleanup failed
-    assert!(result.is_ok(), "should succeed despite cleanup error: {result:?}");
+    assert!(
+        result.is_ok(),
+        "should succeed despite cleanup error: {result:?}"
+    );
     assert_eq!(result.unwrap(), "done");
 }
 
@@ -582,7 +585,13 @@ async fn tmux_backend_keep_seconds_zero_cleans_up_immediately() {
         BTreeMap::new(),
     );
     // window_keep_seconds = 0 means immediate cleanup
-    let backend = TmuxBackend::new(cli, "keep0-session".to_owned(), runner.clone(), 0, SharedTmuxContext::default());
+    let backend = TmuxBackend::new(
+        cli,
+        "keep0-session".to_owned(),
+        runner.clone(),
+        0,
+        SharedTmuxContext::default(),
+    );
 
     let start = std::time::Instant::now();
     let watcher = spawn_file_watcher("keep0-session", "ok", 0);
@@ -620,7 +629,13 @@ async fn tmux_backend_keep_seconds_nonzero_delays_cleanup() {
         BTreeMap::new(),
     );
     // window_keep_seconds = 1 means 1-second retention
-    let backend = TmuxBackend::new(cli, "keep2-session".to_owned(), runner.clone(), 1, SharedTmuxContext::default());
+    let backend = TmuxBackend::new(
+        cli,
+        "keep2-session".to_owned(),
+        runner.clone(),
+        1,
+        SharedTmuxContext::default(),
+    );
 
     let start = std::time::Instant::now();
     let watcher = spawn_file_watcher("keep2-session", "ok", 0);
@@ -658,7 +673,13 @@ async fn tmux_backend_keep_seconds_skipped_on_failure() {
         BTreeMap::new(),
     );
     // window_keep_seconds = 5 but should NOT wait on failure
-    let backend = TmuxBackend::new(cli, "keepfail-session".to_owned(), runner.clone(), 5, SharedTmuxContext::default());
+    let backend = TmuxBackend::new(
+        cli,
+        "keepfail-session".to_owned(),
+        runner.clone(),
+        5,
+        SharedTmuxContext::default(),
+    );
 
     let start = std::time::Instant::now();
     // Don't write exit file — will timeout
@@ -702,7 +723,13 @@ async fn tmux_backend_context_preserved_across_multiple_executions() {
         Duration::from_secs(5),
         BTreeMap::new(),
     );
-    let backend1 = TmuxBackend::new(cli1, "retry-ctx-session".to_owned(), runner1.clone(), 0, shared_ctx.clone());
+    let backend1 = TmuxBackend::new(
+        cli1,
+        "retry-ctx-session".to_owned(),
+        runner1.clone(),
+        0,
+        shared_ctx.clone(),
+    );
 
     let watcher1 = spawn_file_watcher("retry-ctx-session", "ok1", 0);
     let _ = backend1.execute("prompt1").await.unwrap();
@@ -728,7 +755,13 @@ async fn tmux_backend_context_preserved_across_multiple_executions() {
         Duration::from_secs(5),
         BTreeMap::new(),
     );
-    let backend2 = TmuxBackend::new(cli2, "retry-ctx2-session".to_owned(), runner2.clone(), 0, shared_ctx.clone());
+    let backend2 = TmuxBackend::new(
+        cli2,
+        "retry-ctx2-session".to_owned(),
+        runner2.clone(),
+        0,
+        shared_ctx.clone(),
+    );
 
     let watcher2 = spawn_file_watcher("retry-ctx2-session", "ok2", 0);
     let _ = backend2.execute("prompt2").await.unwrap();
@@ -757,7 +790,7 @@ async fn tmux_backend_session_alive_but_window_gone_returns_command_failed() {
             backend: "tmux".to_owned(),
             details: "no such window: 7".to_owned(),
         }),
-        Ok(String::new()),    // kill_window (best-effort, after classification)
+        Ok(String::new()), // kill_window (best-effort, after classification)
     ]);
 
     let cli = CliBackend::new(
@@ -783,10 +816,7 @@ async fn tmux_backend_session_alive_but_window_gone_returns_command_failed() {
                 details.contains("alive-session"),
                 "should mention session: {details}"
             );
-            assert!(
-                details.contains("7"),
-                "should mention window id: {details}"
-            );
+            assert!(details.contains("7"), "should mention window id: {details}");
         }
         other => panic!("expected BackendCommandFailed, got: {other:?}"),
     }
@@ -802,7 +832,7 @@ async fn tmux_backend_returns_actionable_error_on_window_disappearance() {
             backend: "tmux".to_owned(),
             details: "can't find window: 1".to_owned(),
         }),
-        Ok(String::new()),    // kill_window (best-effort, after classification)
+        Ok(String::new()), // kill_window (best-effort, after classification)
     ]);
 
     let cli = CliBackend::new(

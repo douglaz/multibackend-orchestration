@@ -5,8 +5,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use clap::Parser;
 
-use ralph::cli::{Cli, Commands};
 use ralph::cli::tail::tmux_attach;
+use ralph::cli::{Cli, Commands};
 use ralph::error::RalphError;
 
 // --- CLI parsing tests ---

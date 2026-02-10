@@ -218,13 +218,9 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
                 // Check the specific window, not just the session. A disappeared
                 // window in a still-alive session should be reported as a command
                 // failure with actionable diagnostics, not as a timeout.
-                let window_alive = tmux::has_window(
-                    &self.runner,
-                    &self.session_name,
-                    &window_id,
-                )
-                .await
-                .unwrap_or(false);
+                let window_alive = tmux::has_window(&self.runner, &self.session_name, &window_id)
+                    .await
+                    .unwrap_or(false);
 
                 // Best-effort cleanup after classification
                 tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
@@ -349,7 +345,11 @@ mod tests {
         SharedTmuxContext::default()
     }
 
-    fn make_backend(cli: CliBackend, session: &str, runner: MockTmuxRunner) -> TmuxBackend<MockTmuxRunner> {
+    fn make_backend(
+        cli: CliBackend,
+        session: &str,
+        runner: MockTmuxRunner,
+    ) -> TmuxBackend<MockTmuxRunner> {
         TmuxBackend::new(cli, session.to_owned(), runner, 0, test_shared_ctx())
     }
 
@@ -489,7 +489,13 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-success".to_owned(), runner.clone(), 0, test_shared_ctx());
+        let backend = TmuxBackend::new(
+            cli,
+            "test-success".to_owned(),
+            runner.clone(),
+            0,
+            test_shared_ctx(),
+        );
 
         // We need to intercept the execute flow. Since execute writes prompt then calls
         // create_window, and then wait_for_exit polls for the exit file, we need to
@@ -551,7 +557,8 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-nonzero".to_owned(), runner, 0, test_shared_ctx());
+        let backend =
+            TmuxBackend::new(cli, "test-nonzero".to_owned(), runner, 0, test_shared_ctx());
 
         // Watcher that writes non-zero exit
         let watcher = tokio::spawn(async move {
@@ -605,7 +612,8 @@ mod tests {
             Duration::from_millis(100), // Very short timeout
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
+        let backend =
+            TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
 
         // Don't write any exit file — genuine timeout with session still alive.
         let result = backend.execute("test prompt").await;
@@ -628,7 +636,7 @@ mod tests {
                 backend: "tmux".to_owned(),
                 details: "can't find window: 3".to_owned(),
             }),
-            Ok(String::new()),    // kill_window (best-effort, after classification)
+            Ok(String::new()), // kill_window (best-effort, after classification)
         ]);
 
         let cli = CliBackend::new(
@@ -638,7 +646,8 @@ mod tests {
             Duration::from_millis(100), // Very short timeout
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
+        let backend =
+            TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
 
         // Don't write any exit file — timeout + session disappeared externally.
         let result = backend.execute("test prompt").await;
@@ -672,7 +681,13 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "clean-session".to_owned(), runner, 0, test_shared_ctx());
+        let backend = TmuxBackend::new(
+            cli,
+            "clean-session".to_owned(),
+            runner,
+            0,
+            test_shared_ctx(),
+        );
 
         let created_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let created_files_clone = created_files.clone();
@@ -734,7 +749,13 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "fail-clean-session".to_owned(), runner, 0, test_shared_ctx());
+        let backend = TmuxBackend::new(
+            cli,
+            "fail-clean-session".to_owned(),
+            runner,
+            0,
+            test_shared_ctx(),
+        );
 
         let created_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let created_files_clone = created_files.clone();
@@ -825,7 +846,13 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-killwin".to_owned(), runner.clone(), 0, test_shared_ctx());
+        let backend = TmuxBackend::new(
+            cli,
+            "test-killwin".to_owned(),
+            runner.clone(),
+            0,
+            test_shared_ctx(),
+        );
 
         let watcher = tokio::spawn(async move {
             let tmp_dir = std::env::temp_dir();

@@ -30,6 +30,59 @@ pub trait Backend: Send + Sync {
     async fn health_check(&self) -> Result<()>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendSpec {
+    pub name: String,
+    pub model: Option<String>,
+}
+
+pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(RalphError::Validation(
+            "backend spec must not be empty".to_owned(),
+        ));
+    }
+
+    let open_count = spec.matches('(').count();
+    let close_count = spec.matches(')').count();
+
+    if open_count == 0 && close_count == 0 {
+        return Ok(BackendSpec {
+            name: spec.to_owned(),
+            model: None,
+        });
+    }
+
+    if open_count != 1 || close_count != 1 || !spec.ends_with(')') {
+        return Err(RalphError::Validation(format!(
+            "invalid backend spec format: {spec}"
+        )));
+    }
+
+    let open_idx = spec
+        .find('(')
+        .ok_or_else(|| RalphError::Validation(format!("invalid backend spec format: {spec}")))?;
+    let name = &spec[..open_idx];
+    let model = &spec[open_idx + 1..spec.len() - 1];
+
+    if name.is_empty() {
+        return Err(RalphError::Validation(format!(
+            "backend name must not be empty in spec: {spec}"
+        )));
+    }
+    if model.is_empty() {
+        return Err(RalphError::Validation(format!(
+            "backend model must not be empty in spec: {spec}"
+        )));
+    }
+
+    Ok(BackendSpec {
+        name: name.to_owned(),
+        model: Some(model.to_owned()),
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct CliBackend {
     name: String,
@@ -160,6 +213,8 @@ pub struct BackendRegistry {
     backends: HashMap<String, Arc<dyn Backend>>,
     default_backend: String,
     tmux_context: SharedTmuxContext,
+    config: GlobalConfig,
+    tmux: BackendRegistryTmuxConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -174,12 +229,12 @@ impl BackendRegistry {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
         let shared_ctx = SharedTmuxContext::default();
 
-        let claude_backend = claude::backend_from_config(config);
+        let claude_backend = claude::backend_from_config(config, None);
         backends.insert(
             "claude".to_owned(),
             backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
-        let codex_backend = codex::backend_from_config(config);
+        let codex_backend = codex::backend_from_config(config, None);
         backends.insert(
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
@@ -189,6 +244,8 @@ impl BackendRegistry {
             backends,
             default_backend: config.workspace.default_backend.clone(),
             tmux_context: shared_ctx,
+            config: config.clone(),
+            tmux,
         }
     }
 
@@ -202,12 +259,30 @@ impl BackendRegistry {
         self.backends.get(name).cloned()
     }
 
+    pub fn get_or_create_for_spec(&mut self, spec: &str) -> Result<Arc<dyn Backend>> {
+        let parsed = parse_backend_spec(spec)?;
+        let cache_key = backend_spec_key(&parsed);
+
+        if let Some(backend) = self.backends.get(&cache_key) {
+            return Ok(backend.clone());
+        }
+
+        let backend = backend_with_optional_tmux(
+            self.create_cli_backend_for_spec(&parsed)?,
+            &self.tmux,
+            self.tmux_context.clone(),
+        );
+        self.backends.insert(cache_key, backend.clone());
+        Ok(backend)
+    }
+
     pub fn default_backend(&self) -> &str {
         &self.default_backend
     }
 
     pub fn opposite(&self, backend: &str) -> Result<&str> {
-        match backend {
+        let parsed = parse_backend_spec(backend)?;
+        match parsed.name.as_str() {
             "claude" => Ok("codex"),
             "codex" => Ok("claude"),
             _ => Err(RalphError::Validation(format!(
@@ -253,6 +328,25 @@ impl BackendRegistry {
         }
         Ok(())
     }
+
+    fn create_cli_backend_for_spec(&self, spec: &BackendSpec) -> Result<CliBackend> {
+        let model = spec.model.as_deref();
+        match spec.name.as_str() {
+            "claude" => Ok(claude::backend_from_config(&self.config, model)),
+            "codex" => Ok(codex::backend_from_config(&self.config, model)),
+            _ => Err(RalphError::Validation(format!(
+                "unknown backend for spec lookup: {}",
+                backend_spec_key(spec)
+            ))),
+        }
+    }
+}
+
+fn backend_spec_key(spec: &BackendSpec) -> String {
+    match spec.model.as_deref() {
+        Some(model) => format!("{}({model})", spec.name),
+        None => spec.name.clone(),
+    }
 }
 
 fn backend_with_optional_tmux(
@@ -270,5 +364,54 @@ fn backend_with_optional_tmux(
         ))
     } else {
         Arc::new(backend)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_backend_spec, BackendSpec};
+
+    #[test]
+    fn parse_backend_spec_accepts_bare_name() {
+        let parsed = parse_backend_spec("claude").expect("bare backend should parse");
+        assert_eq!(
+            parsed,
+            BackendSpec {
+                name: "claude".to_owned(),
+                model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_spec_accepts_name_with_model() {
+        let parsed = parse_backend_spec("claude(opus)").expect("model backend should parse");
+        assert_eq!(
+            parsed,
+            BackendSpec {
+                name: "claude".to_owned(),
+                model: Some("opus".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_spec_rejects_empty_name() {
+        assert!(parse_backend_spec("(opus)").is_err());
+    }
+
+    #[test]
+    fn parse_backend_spec_rejects_empty_model() {
+        assert!(parse_backend_spec("claude()").is_err());
+    }
+
+    #[test]
+    fn parse_backend_spec_rejects_missing_closing_paren() {
+        assert!(parse_backend_spec("claude(opus").is_err());
+    }
+
+    #[test]
+    fn parse_backend_spec_rejects_missing_opening_paren() {
+        assert!(parse_backend_spec("claudeopus)").is_err());
     }
 }
