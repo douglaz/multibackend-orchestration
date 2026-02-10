@@ -162,6 +162,7 @@ impl Orchestrator {
             },
         );
         preload_override_backends(&mut registry, &role_overrides)?;
+        preload_role_model_backends(&mut registry)?;
         if !options.dry_run {
             info!("checking backend availability...");
             registry.health_check_all().await?;
@@ -1094,6 +1095,13 @@ fn preload_override_backends(
     Ok(())
 }
 
+fn preload_role_model_backends(registry: &mut BackendRegistry) -> Result<()> {
+    for backend_spec in registry.backend_role_model_specs() {
+        registry.get_or_create_for_spec(&backend_spec)?;
+    }
+    Ok(())
+}
+
 fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState) -> Result<()> {
     if let Some(index_entry) = workspace.index.get_project(&state.project_id) {
         if index_entry.parent_project != state.parent_project {
@@ -1655,10 +1663,14 @@ where
     match parse_fn(&first_output) {
         Ok(parsed) => Ok(parsed),
         Err(parse_error_1) => {
-            let reformatter_backend = registry
+            let reformatter_spec = registry
                 .opposite(backend.name())
-                .ok()
-                .and_then(|opposite_name| registry.get(opposite_name))
+                .map(|opposite_name| {
+                    registry.resolve_backend_for_role(opposite_name, "reformatter")
+                })
+                .unwrap_or_else(|_| backend.name().to_owned());
+            let reformatter_backend = registry
+                .get(&reformatter_spec)
                 .unwrap_or_else(|| backend.clone());
             let reformatter_name = reformatter_backend.name().to_owned();
 
@@ -1760,8 +1772,86 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use super::{resolve_tmux_settings, validate_tmux_preflight};
+    use super::{preload_role_model_backends, resolve_tmux_settings, validate_tmux_preflight};
+    use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
+    use crate::config::global::BackendRoleModels;
+    use crate::config::GlobalConfig;
     use crate::error::RalphError;
+
+    fn tmux_disabled() -> BackendRegistryTmuxConfig {
+        BackendRegistryTmuxConfig {
+            enabled: false,
+            session_name: "ralph".to_owned(),
+            window_keep_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn preload_role_model_backends_creates_expected_entries_for_default_config() {
+        let config = GlobalConfig::default();
+        let mut registry = BackendRegistry::new(&config, tmux_disabled());
+
+        preload_role_model_backends(&mut registry)
+            .expect("preloading default role-model backends should succeed");
+
+        assert!(registry.get("claude(claude-sonnet-4-5-20250929)").is_some());
+        assert!(registry.get("codex(o3)").is_some());
+    }
+
+    #[test]
+    fn preload_role_model_backends_is_noop_when_models_are_unset() {
+        let mut config = GlobalConfig::default();
+        config.backends.claude.models = BackendRoleModels::default();
+        config.backends.codex.models = BackendRoleModels::default();
+        let mut registry = BackendRegistry::new(&config, tmux_disabled());
+
+        preload_role_model_backends(&mut registry)
+            .expect("preloading without role-models should succeed");
+
+        assert!(registry.get("claude(claude-sonnet-4-5-20250929)").is_none());
+        assert!(registry.get("codex(o3)").is_none());
+    }
+
+    #[test]
+    fn preload_role_model_backends_covers_all_roles_for_all_backends() {
+        let mut config = GlobalConfig::default();
+        config.backends.claude.models = BackendRoleModels {
+            planner: Some("claude-planner".to_owned()),
+            implementer: Some("claude-implementer".to_owned()),
+            reviewer: Some("claude-reviewer".to_owned()),
+            completer: Some("claude-completer".to_owned()),
+            reformatter: Some("claude-reformatter".to_owned()),
+        };
+        config.backends.codex.models = BackendRoleModels {
+            planner: Some("codex-planner".to_owned()),
+            implementer: Some("codex-implementer".to_owned()),
+            reviewer: Some("codex-reviewer".to_owned()),
+            completer: Some("codex-completer".to_owned()),
+            reformatter: Some("codex-reformatter".to_owned()),
+        };
+        let mut registry = BackendRegistry::new(&config, tmux_disabled());
+
+        preload_role_model_backends(&mut registry)
+            .expect("preloading distinct role-model specs should succeed");
+
+        for expected_spec in [
+            "claude(claude-planner)",
+            "claude(claude-implementer)",
+            "claude(claude-reviewer)",
+            "claude(claude-completer)",
+            "claude(claude-reformatter)",
+            "codex(codex-planner)",
+            "codex(codex-implementer)",
+            "codex(codex-reviewer)",
+            "codex(codex-completer)",
+            "codex(codex-reformatter)",
+        ] {
+            assert!(
+                registry.get(expected_spec).is_some(),
+                "expected preloaded backend spec {expected_spec}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_tmux_settings_prefers_cli_override() {

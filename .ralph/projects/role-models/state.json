@@ -5,7 +5,7 @@
   "prompt_hash": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
   "prompt_hash_at_loop_start": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -36,7 +36,7 @@
       "slug": "backendregistry-role-model-resolution",
       "feature_name": "BackendRegistry Role-Model Resolution",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex",
         "implementer": "claude",
@@ -48,8 +48,29 @@
         "reviews": [],
         "approval": "loops/002-backendregistry-role-model-resolution/20260210184738-review-approved.md"
       },
-      "commit": null,
+      "commit": "89c70d0af8199ff46dfebfab3658590c04c3a9e9",
       "started_at": "2026-02-10T18:40:59.819835104Z",
+      "completed_at": "2026-02-10T18:47:38.090929064Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "reformatter-role-model-resolution-and-role-model",
+      "feature_name": "Reformatter Role-Model Resolution and Role-Model Health Checks",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/003-reformatter-role-model-resolution-and-role-model/20260210184907-spec.md",
+        "impl_notes": "loops/003-reformatter-role-model-resolution-and-role-model/20260210185402-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-reformatter-role-model-resolution-and-role-model/20260210185448-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T18:49:07.571051131Z",
       "completed_at": null
     }
   ],

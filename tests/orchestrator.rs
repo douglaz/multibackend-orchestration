@@ -1230,6 +1230,15 @@ if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]];
   fi
   count=$((count + 1))
   echo "$count" > "$counter_file"
+  if [[ " $* " == *" --model o3 "* ]]; then
+    model_counter_file="${COUNTER_DIR}/codex_reformat_model_count"
+    model_count=0
+    if [ -f "$model_counter_file" ]; then
+      model_count=$(cat "$model_counter_file")
+    fi
+    model_count=$((model_count + 1))
+    echo "$model_count" > "$model_counter_file"
+  fi
   cat <<'EOF'
 # Feature: Reformat Rescue Feature
 
@@ -1421,10 +1430,47 @@ async fn parse_retry_reformat_uses_opposite_backend() {
         "1",
         "opposite backend should be used exactly once for planner reformat"
     );
+    let codex_model_count = fs::read_to_string(counter_dir.join("codex_reformat_model_count"))
+        .expect("codex reformat should use the configured reformatter model");
+    assert_eq!(
+        codex_model_count.trim(),
+        "1",
+        "reformat retry should target codex(o3), not bare codex"
+    );
 
     let claude_reformat_counter = counter_dir.join("claude_reformat_count");
     assert!(
         !claude_reformat_counter.exists(),
         "original backend should not receive planner reformat attempt"
+    );
+}
+
+#[tokio::test]
+async fn parse_retry_reformat_without_role_model_uses_bare_opposite_backend() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_reformat_backend_test();
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.backends.claude.models.reformatter = None;
+    workspace.config.backends.codex.models.reformatter = None;
+
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("orchestration should succeed with bare opposite-backend reformat");
+
+    let codex_count = fs::read_to_string(counter_dir.join("codex_reformat_count"))
+        .expect("codex should receive the reformat attempt");
+    assert_eq!(
+        codex_count.trim(),
+        "1",
+        "opposite backend should still be used when reformatter models are unset"
+    );
+
+    let codex_model_counter = counter_dir.join("codex_reformat_model_count");
+    assert!(
+        !codex_model_counter.exists(),
+        "bare opposite backend should be used when no reformatter role model is configured"
     );
 }

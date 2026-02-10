@@ -4,7 +4,7 @@ pub mod mock;
 pub mod tmux;
 pub mod tmux_backend;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -388,6 +388,32 @@ impl BackendRegistry {
             planner: self.resolve_backend_for_role(&planner, "planner"),
             completer: self.resolve_backend_for_role(&completer, "completer"),
         })
+    }
+
+    /// Collect model-injected backend specs configured for all roles across
+    /// all known backends.
+    pub fn backend_role_model_specs(&self) -> Vec<String> {
+        let mut specs = BTreeSet::new();
+        let roles = [
+            "planner",
+            "implementer",
+            "reviewer",
+            "completer",
+            "reformatter",
+        ];
+
+        for (backend_name, models) in [
+            ("claude", &self.config.backends.claude.models),
+            ("codex", &self.config.backends.codex.models),
+        ] {
+            for role in roles {
+                if let Some(model) = models.for_role(role) {
+                    specs.insert(format!("{backend_name}({model})"));
+                }
+            }
+        }
+
+        specs.into_iter().collect()
     }
 
     pub async fn health_check_all(&self) -> Result<()> {
