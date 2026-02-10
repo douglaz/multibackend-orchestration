@@ -6,7 +6,7 @@
   "prompt_hash_at_loop_start": "d7cad311f633f6e72bcdc11808ce072b11cc6e6b28bc787304f4f54a937534a4",
   "parent_project": null,
   "current_loop": 1,
-  "current_phase": "committing",
+  "current_phase": "planning",
   "phase_iteration": 1,
   "status": "in_progress",
   "loops": [
@@ -15,7 +15,7 @@
       "slug": "per-role-backendmodel-overrides",
       "feature_name": "Per-Role Backend/Model Overrides",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude",
         "implementer": "codex",
@@ -27,9 +27,9 @@
         "reviews": [],
         "approval": "loops/001-per-role-backendmodel-overrides/20260210180403-review-approved.md"
       },
-      "commit": null,
+      "commit": "4b859fa6f9ccbda75947c187de85c8485506e65b",
       "started_at": "2026-02-10T17:56:26.519883531Z",
-      "completed_at": null
+      "completed_at": "2026-02-10T18:04:03.485810820Z"
     }
   ],
   "completion_attempts": []
