@@ -429,3 +429,449 @@ async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
     assert_eq!(state.current_loop, 0);
     assert_eq!(state.status, ProjectStatus::Pending);
 }
+
+// ---------------------------------------------------------------------------
+// Two-loop happy-path test with separate Claude / Codex mock scripts
+// ---------------------------------------------------------------------------
+
+/// Write `mock_claude.sh`.
+///
+/// Planner behaviour (tracked via `$COUNTER_DIR/claude_planner_count`):
+///   - 1st call → `# Feature: Auth Module`
+///   - 2nd call → `# Project Completion Request`
+///
+/// Implementer / reviewer / completer behave identically to the shared mock.
+fn write_claude_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  counter_file="${COUNTER_DIR}/claude_planner_count"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$counter_file"
+
+  if [ "$count" -ge 2 ]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All project requirements have been satisfied.
+
+## Summary of Work
+- Built Auth Module and API Layer.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Auth Module
+
+## Description
+Implement authentication module.
+
+## Acceptance Criteria
+- [ ] Auth behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the auth module
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Feature behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: auth module
+EOF
+
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Auth Module: satisfied
+- API Layer: satisfied
+EOF
+
+else
+  echo "claude: unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write claude script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+/// Write `mock_codex.sh`.
+///
+/// Planner behaviour (tracked via `$COUNTER_DIR/codex_planner_count`):
+///   - 1st call → `# Feature: API Layer`
+///   - 2nd call → `# Project Completion Request`
+///
+/// Implementer / reviewer / completer behave identically to the shared mock.
+fn write_codex_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  counter_file="${COUNTER_DIR}/codex_planner_count"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$counter_file"
+
+  if [ "$count" -ge 2 ]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All project requirements have been satisfied.
+
+## Summary of Work
+- Built Auth Module and API Layer.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: API Layer
+
+## Description
+Implement the API layer.
+
+## Acceptance Criteria
+- [ ] API behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the API layer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Feature behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: api layer
+EOF
+
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Auth Module: satisfied
+- API Layer: satisfied
+EOF
+
+else
+  echo "codex: unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write codex script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+/// Set up a workspace where `claude` and `codex` backends point at **separate**
+/// mock scripts so that backend alternation is exercised with distinct outputs.
+fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    // Initialise git repo
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+
+    fs::write(repo_root.join("README.md"), "# demo\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+
+    // Write separate mock scripts
+    let claude_script = repo_root.join("mock_claude.sh");
+    write_claude_script(&claude_script);
+
+    let codex_script = repo_root.join("mock_codex.sh");
+    write_codex_script(&codex_script);
+
+    git_ok(repo_root, &["add", "mock_claude.sh", "mock_codex.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add split backend mocks"]);
+
+    // Initialise workspace
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+    fs::write(
+        workspace_root.join("templates/planner.md"),
+        default_planner_template(),
+    )
+    .expect("write planner template");
+    fs::write(
+        workspace_root.join("templates/implementer.md"),
+        default_implementer_template(),
+    )
+    .expect("write implementer template");
+    fs::write(
+        workspace_root.join("templates/reviewer.md"),
+        default_reviewer_template(),
+    )
+    .expect("write reviewer template");
+    fs::write(
+        workspace_root.join("templates/completer.md"),
+        default_completer_template(),
+    )
+    .expect("write completer template");
+
+    // Counter directory – lives inside the temp dir so scripts can track calls
+    let counter_dir = repo_root.join("counters");
+    fs::create_dir_all(&counter_dir).expect("create counter dir");
+
+    // Configure claude backend → mock_claude.sh
+    let mut claude_env = BTreeMap::new();
+    claude_env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir.to_string_lossy().to_string(),
+    );
+    workspace.config.backends.claude.command = claude_script.to_string_lossy().to_string();
+    workspace.config.backends.claude.args = Vec::new();
+    workspace.config.backends.claude.timeout_seconds = 30;
+    workspace.config.backends.claude.env = claude_env;
+
+    // Configure codex backend → mock_codex.sh
+    let mut codex_env = BTreeMap::new();
+    codex_env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir.to_string_lossy().to_string(),
+    );
+    workspace.config.backends.codex.command = codex_script.to_string_lossy().to_string();
+    workspace.config.backends.codex.args = Vec::new();
+    workspace.config.backends.codex.timeout_seconds = 30;
+    workspace.config.backends.codex.env = codex_env;
+
+    workspace.config.git.base_branch =
+        git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save config");
+
+    // Create project
+    let prompt_path = repo_root.join("PROMPT.md");
+    fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
+
+    let project_id = "01-poc".to_owned();
+    create_project(
+        &mut workspace,
+        CreateProjectOptions {
+            id: project_id.clone(),
+            name: "Proof of Concept".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: Some("claude".to_owned()),
+        },
+    )
+    .expect("create project");
+
+    (temp, workspace_root, project_id)
+}
+
+#[tokio::test]
+async fn two_loop_happy_path_with_separate_backends() {
+    let (_temp, workspace_root, project_id) = setup_workspace_with_split_backends();
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let mut options = run_options(&project_id);
+    options.loops = None;
+    options.until_complete = true;
+
+    orchestrator
+        .run(options)
+        .await
+        .expect("two-loop orchestration should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+
+    // --- 1. Loop count ---
+    assert_eq!(
+        state.loops.len(),
+        2,
+        "expected exactly 2 feature loops, got {}",
+        state.loops.len()
+    );
+
+    // --- 2. Backend alternation ---
+    // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
+    assert_eq!(state.loops[0].backends.planner, "claude");
+    assert_eq!(state.loops[0].backends.implementer, "codex");
+    assert_eq!(state.loops[0].backends.reviewer, "claude");
+    // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
+    assert_eq!(state.loops[1].backends.planner, "codex");
+    assert_eq!(state.loops[1].backends.implementer, "claude");
+    assert_eq!(state.loops[1].backends.reviewer, "codex");
+
+    // --- 3. Feature names ---
+    assert_eq!(state.loops[0].feature_name, "Auth Module");
+    assert!(
+        state.loops[0].slug.contains("auth-module"),
+        "loop 1 slug should contain 'auth-module', got '{}'",
+        state.loops[0].slug
+    );
+    assert_eq!(state.loops[1].feature_name, "API Layer");
+    assert!(
+        state.loops[1].slug.contains("api-layer"),
+        "loop 2 slug should contain 'api-layer', got '{}'",
+        state.loops[1].slug
+    );
+
+    // --- 4. All loops completed with commit hashes ---
+    assert_eq!(state.loops[0].status, LoopStatus::Completed);
+    assert!(
+        state.loops[0].commit.is_some(),
+        "loop 1 should have a commit hash"
+    );
+    assert_eq!(state.loops[1].status, LoopStatus::Completed);
+    assert!(
+        state.loops[1].commit.is_some(),
+        "loop 2 should have a commit hash"
+    );
+
+    // --- 5. Git tags ---
+    let repo_root = workspace_root.parent().expect("repo root");
+    let tag1 = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-1"]);
+    assert_eq!(tag1.trim(), "ralph/01-poc/loop-1");
+    let tag2 = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-2"]);
+    assert_eq!(tag2.trim(), "ralph/01-poc/loop-2");
+
+    // --- 6. Artifacts ---
+    // Loop 1: spec, impl-notes, approval
+    assert_timestamped_artifact(&state.loops[0].artifacts.spec, "spec.md");
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .impl_notes
+            .as_deref()
+            .expect("loop 1 should have impl-notes"),
+        "impl-notes.md",
+    );
+    assert_timestamped_artifact(
+        state.loops[0]
+            .artifacts
+            .approval
+            .as_deref()
+            .expect("loop 1 should have approval"),
+        "review-approved.md",
+    );
+    // Loop 2: spec, impl-notes, approval
+    assert_timestamped_artifact(&state.loops[1].artifacts.spec, "spec.md");
+    assert_timestamped_artifact(
+        state.loops[1]
+            .artifacts
+            .impl_notes
+            .as_deref()
+            .expect("loop 2 should have impl-notes"),
+        "impl-notes.md",
+    );
+    assert_timestamped_artifact(
+        state.loops[1]
+            .artifacts
+            .approval
+            .as_deref()
+            .expect("loop 2 should have approval"),
+        "review-approved.md",
+    );
+
+    // --- 7. Completion ---
+    assert_eq!(state.status, ProjectStatus::Completed);
+    assert_eq!(
+        state.completion_attempts.len(),
+        1,
+        "expected exactly 1 completion attempt"
+    );
+    assert_eq!(
+        state.completion_attempts[0].verdict,
+        Some(CompletionVerdict::Complete)
+    );
+    assert_timestamped_artifact(
+        &state.completion_attempts[0].artifacts.termination_request,
+        "termination-request.md",
+    );
+    assert_timestamped_artifact(
+        state.completion_attempts[0]
+            .artifacts
+            .verdict
+            .as_deref()
+            .expect("completion verdict artifact should exist"),
+        "completer-verdict.md",
+    );
+}

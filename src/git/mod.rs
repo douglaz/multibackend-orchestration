@@ -84,7 +84,7 @@ pub fn conflicting_files(workdir: &Path) -> Result<Vec<String>> {
     Ok(conflicts)
 }
 
-fn read_porcelain_status(workdir: &Path) -> Result<String> {
+pub(crate) fn read_porcelain_status(workdir: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(workdir)

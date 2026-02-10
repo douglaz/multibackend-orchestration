@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use crate::error::RalphError;
-use crate::git::{conflicting_files, ensure_git_repo, has_conflicts, run_git, run_git_status};
+use crate::git::{
+    conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
+    run_git_status,
+};
 use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
@@ -72,7 +75,7 @@ pub fn unstaged_diff(workdir: &Path) -> Result<String> {
 /// Returns changed file paths from `git status --porcelain` (including untracked files).
 pub fn changed_paths(workdir: &Path) -> Result<Vec<String>> {
     ensure_git_repo(workdir)?;
-    let status = run_git(workdir, &["status", "--porcelain"])?;
+    let status = read_porcelain_status(workdir)?;
     Ok(status
         .lines()
         .filter_map(parse_porcelain_status_path)
