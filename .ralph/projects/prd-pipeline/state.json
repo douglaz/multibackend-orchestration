@@ -5,7 +5,7 @@
   "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "scaffolding-cli-wiring",
       "feature_name": "Scaffolding + CLI Wiring",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex)",
@@ -27,8 +27,40 @@
         "reviews": [],
         "approval": "loops/001-scaffolding-cli-wiring/20260210200304-review-approved.md"
       },
-      "commit": null,
+      "commit": "b668b28a8579016b91c09c2696581f7b4b2e7e45",
       "started_at": "2026-02-10T19:52:08.501551597Z",
+      "completed_at": "2026-02-10T20:03:04.537862829Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "core-types-unit-tests",
+      "feature_name": "Core Types + Unit Tests",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/002-core-types-unit-tests/20260210200415-spec.md",
+        "impl_notes": "loops/002-core-types-unit-tests/20260210200428-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-core-types-unit-tests/20260210200632-review-001-feedback.md",
+            "response": "loops/002-core-types-unit-tests/20260210200650-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-core-types-unit-tests/20260210200743-review-002-feedback.md",
+            "response": "loops/002-core-types-unit-tests/20260210200857-impl-response-002.md"
+          }
+        ],
+        "approval": "loops/002-core-types-unit-tests/20260210201010-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T20:04:15.098062707Z",
       "completed_at": null
     }
   ],
