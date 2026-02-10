@@ -9,9 +9,10 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::backend::tmux_backend::TmuxExecutionContext;
-use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig};
+use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
     resolve_effective_config, CommitMessageStyle, EffectiveConfig, PromptChangeAction,
+    RunWorkflowOverrides,
 };
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
@@ -66,6 +67,10 @@ pub struct RunOptions {
     pub until_complete: bool,
     pub dry_run: bool,
     pub backend: Option<String>,
+    pub planner_backend: Option<String>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub completer_backend: Option<String>,
     pub tmux: Option<bool>,
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
@@ -123,8 +128,20 @@ impl Orchestrator {
             &project_dir,
             self.workspace.config.clone(),
             project_config,
-            options.backend.as_deref(),
+            RunWorkflowOverrides {
+                starting_backend: options.backend.as_deref(),
+                planner_backend: options.planner_backend.as_deref(),
+                implementer_backend: options.implementer_backend.as_deref(),
+                reviewer_backend: options.reviewer_backend.as_deref(),
+                completer_backend: options.completer_backend.as_deref(),
+            },
         )?;
+        let role_overrides = RoleOverrides {
+            planner: effective.workflow.planner_backend.clone(),
+            implementer: effective.workflow.implementer_backend.clone(),
+            reviewer: effective.workflow.reviewer_backend.clone(),
+            completer: effective.workflow.completer_backend.clone(),
+        };
 
         let tmux_settings = resolve_tmux_settings(
             options.tmux,
@@ -144,6 +161,7 @@ impl Orchestrator {
                 window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
             },
         );
+        preload_override_backends(&mut registry, &role_overrides)?;
         if !options.dry_run {
             info!("checking backend availability...");
             registry.health_check_all().await?;
@@ -166,7 +184,7 @@ impl Orchestrator {
         }
 
         if options.dry_run {
-            return dry_run_summary(&state, &effective, &registry);
+            return dry_run_summary(&state, &effective, &registry, &role_overrides);
         }
 
         let feature_target = options.loops.unwrap_or(1);
@@ -206,6 +224,7 @@ impl Orchestrator {
                     let feature_backends = registry.assign_feature_backends(
                         loop_number,
                         &effective.workflow.starting_backend,
+                        &role_overrides,
                     )?;
 
                     let planner_backend =
@@ -280,6 +299,7 @@ impl Orchestrator {
                             let completion_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
+                                &role_overrides,
                             )?;
                             let termination_path = write_artifact(
                                 &project_dir,
@@ -1026,6 +1046,7 @@ fn dry_run_summary(
     state: &ProjectState,
     effective: &EffectiveConfig,
     registry: &BackendRegistry,
+    role_overrides: &RoleOverrides,
 ) -> Result<OrchestrationResult> {
     if state.has_in_progress_loop() {
         let summary = format!(
@@ -1041,8 +1062,11 @@ fn dry_run_summary(
     }
 
     let next_loop = state.next_loop_number();
-    let backends =
-        registry.assign_feature_backends(next_loop, &effective.workflow.starting_backend)?;
+    let backends = registry.assign_feature_backends(
+        next_loop,
+        &effective.workflow.starting_backend,
+        role_overrides,
+    )?;
     Ok(OrchestrationResult {
         summary: format!(
             "dry-run: would start loop {next_loop} with planner={}, implementer={}, reviewer={}",
@@ -1050,6 +1074,24 @@ fn dry_run_summary(
         ),
         loop_number: Some(next_loop),
     })
+}
+
+fn preload_override_backends(
+    registry: &mut BackendRegistry,
+    role_overrides: &RoleOverrides,
+) -> Result<()> {
+    for backend_spec in [
+        role_overrides.planner.as_deref(),
+        role_overrides.implementer.as_deref(),
+        role_overrides.reviewer.as_deref(),
+        role_overrides.completer.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        registry.get_or_create_for_spec(backend_spec)?;
+    }
+    Ok(())
 }
 
 fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState) -> Result<()> {

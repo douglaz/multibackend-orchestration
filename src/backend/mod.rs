@@ -36,6 +36,14 @@ pub struct BackendSpec {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoleOverrides {
+    pub planner: Option<String>,
+    pub implementer: Option<String>,
+    pub reviewer: Option<String>,
+    pub completer: Option<String>,
+}
+
 pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -302,13 +310,29 @@ impl BackendRegistry {
         &self,
         loop_number: u32,
         starting_backend: &str,
+        role_overrides: &RoleOverrides,
     ) -> Result<FeatureLoopBackends> {
-        let planner = self.planner_for_loop(loop_number, starting_backend)?;
-        let implementer = self.opposite(&planner)?.to_owned();
+        let alternating_planner = self.planner_for_loop(loop_number, starting_backend)?;
+        let alternating_implementer = self.opposite(&alternating_planner)?.to_owned();
+        let alternating_reviewer = alternating_planner.clone();
+
+        let planner = role_overrides
+            .planner
+            .clone()
+            .unwrap_or(alternating_planner);
+        let implementer = role_overrides
+            .implementer
+            .clone()
+            .unwrap_or(alternating_implementer);
+        let reviewer = role_overrides
+            .reviewer
+            .clone()
+            .unwrap_or(alternating_reviewer);
+
         Ok(FeatureLoopBackends {
-            planner: planner.clone(),
+            planner,
             implementer,
-            reviewer: planner,
+            reviewer,
         })
     }
 
@@ -316,9 +340,20 @@ impl BackendRegistry {
         &self,
         loop_number: u32,
         starting_backend: &str,
+        role_overrides: &RoleOverrides,
     ) -> Result<CompletionLoopBackends> {
-        let planner = self.planner_for_loop(loop_number, starting_backend)?;
-        let completer = self.opposite(&planner)?.to_owned();
+        let alternating_planner = self.planner_for_loop(loop_number, starting_backend)?;
+        let alternating_completer = self.opposite(&alternating_planner)?.to_owned();
+
+        let planner = role_overrides
+            .planner
+            .clone()
+            .unwrap_or(alternating_planner);
+        let completer = role_overrides
+            .completer
+            .clone()
+            .unwrap_or(alternating_completer);
+
         Ok(CompletionLoopBackends { planner, completer })
     }
 

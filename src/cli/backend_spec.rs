@@ -52,8 +52,7 @@ mod tests {
     #[test]
     fn validate_claude_with_model() {
         let config = GlobalConfig::default();
-        validate_backend_spec("claude(opus)", &config)
-            .expect("claude(opus) should be valid");
+        validate_backend_spec("claude(opus)", &config).expect("claude(opus) should be valid");
     }
 
     #[test]
@@ -74,16 +73,15 @@ mod tests {
     #[test]
     fn reject_unknown_bare_backend() {
         let config = GlobalConfig::default();
-        let err = validate_backend_spec("foobar", &config)
-            .expect_err("unknown bare backend should fail");
+        let err =
+            validate_backend_spec("foobar", &config).expect_err("unknown bare backend should fail");
         assert!(err.to_string().contains("unknown backend: foobar"));
     }
 
     #[test]
     fn reject_empty_model_in_parens() {
         let config = GlobalConfig::default();
-        let err = validate_backend_spec("claude()", &config)
-            .expect_err("empty model should fail");
+        let err = validate_backend_spec("claude()", &config).expect_err("empty model should fail");
         assert!(err.to_string().contains("invalid") || err.to_string().contains("empty"));
     }
 
@@ -98,16 +96,14 @@ mod tests {
     #[test]
     fn reject_empty_name_with_model() {
         let config = GlobalConfig::default();
-        let err = validate_backend_spec("(opus)", &config)
-            .expect_err("empty name should fail");
+        let err = validate_backend_spec("(opus)", &config).expect_err("empty name should fail");
         assert!(err.to_string().contains("empty"));
     }
 
     #[test]
     fn reject_empty_spec() {
         let config = GlobalConfig::default();
-        let err = validate_backend_spec("", &config)
-            .expect_err("empty spec should fail");
+        let err = validate_backend_spec("", &config).expect_err("empty spec should fail");
         assert!(err.to_string().contains("empty"));
     }
 
@@ -123,8 +119,8 @@ mod tests {
 
     #[test]
     fn validate_name_only_rejects_unknown() {
-        let err = validate_backend_spec_name("unknown(opus)")
-            .expect_err("unknown backend should fail");
+        let err =
+            validate_backend_spec_name("unknown(opus)").expect_err("unknown backend should fail");
         assert!(err.to_string().contains("unknown backend: unknown"));
     }
 }

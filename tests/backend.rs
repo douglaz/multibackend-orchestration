@@ -3,7 +3,7 @@
 use std::fs;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ralph::backend::{BackendRegistry, BackendRegistryTmuxConfig};
+use ralph::backend::{BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use ralph::config::global::GlobalConfig;
 use ralph::error::RalphError;
 use tempfile::TempDir;
@@ -18,6 +18,10 @@ fn tmux_disabled() -> BackendRegistryTmuxConfig {
         session_name: "ralph".to_owned(),
         window_keep_seconds: 0,
     }
+}
+
+fn no_role_overrides() -> RoleOverrides {
+    RoleOverrides::default()
 }
 
 #[test]
@@ -125,12 +129,16 @@ fn test_assign_feature_backends() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    let backends = registry.assign_feature_backends(1, "claude").unwrap();
+    let backends = registry
+        .assign_feature_backends(1, "claude", &no_role_overrides())
+        .unwrap();
     assert_eq!(backends.planner, "claude");
     assert_eq!(backends.implementer, "codex");
     assert_eq!(backends.reviewer, "claude");
 
-    let backends = registry.assign_feature_backends(2, "claude").unwrap();
+    let backends = registry
+        .assign_feature_backends(2, "claude", &no_role_overrides())
+        .unwrap();
     assert_eq!(backends.planner, "codex");
     assert_eq!(backends.implementer, "claude");
     assert_eq!(backends.reviewer, "codex");
@@ -142,16 +150,54 @@ fn test_assign_feature_backends_with_model_spec_start() {
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let backends = registry
-        .assign_feature_backends(1, "claude(opus)")
+        .assign_feature_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "codex");
     assert_eq!(backends.reviewer, "claude(opus)");
 
     let backends = registry
-        .assign_feature_backends(2, "claude(opus)")
+        .assign_feature_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex");
+    assert_eq!(backends.implementer, "claude");
+    assert_eq!(backends.reviewer, "codex");
+}
+
+#[test]
+fn test_assign_feature_backends_with_all_role_overrides() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: Some("claude(opus)".to_owned()),
+        implementer: Some("codex(gpt-5)".to_owned()),
+        reviewer: Some("claude(sonnet)".to_owned()),
+        completer: None,
+    };
+
+    let backends = registry
+        .assign_feature_backends(2, "claude", &role_overrides)
+        .expect("overridden feature backends should resolve");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.implementer, "codex(gpt-5)");
+    assert_eq!(backends.reviewer, "claude(sonnet)");
+}
+
+#[test]
+fn test_assign_feature_backends_with_partial_role_overrides() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: Some("claude(opus)".to_owned()),
+        implementer: None,
+        reviewer: None,
+        completer: None,
+    };
+
+    let backends = registry
+        .assign_feature_backends(2, "claude", &role_overrides)
+        .expect("mixed feature backends should resolve");
+    assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "claude");
     assert_eq!(backends.reviewer, "codex");
 }
@@ -161,11 +207,15 @@ fn test_assign_completion_backends() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    let backends = registry.assign_completion_backends(1, "claude").unwrap();
+    let backends = registry
+        .assign_completion_backends(1, "claude", &no_role_overrides())
+        .unwrap();
     assert_eq!(backends.planner, "claude");
     assert_eq!(backends.completer, "codex");
 
-    let backends = registry.assign_completion_backends(2, "claude").unwrap();
+    let backends = registry
+        .assign_completion_backends(2, "claude", &no_role_overrides())
+        .unwrap();
     assert_eq!(backends.planner, "codex");
     assert_eq!(backends.completer, "claude");
 }
@@ -176,15 +226,51 @@ fn test_assign_completion_backends_with_model_spec_start() {
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let backends = registry
-        .assign_completion_backends(1, "claude(opus)")
+        .assign_completion_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.completer, "codex");
 
     let backends = registry
-        .assign_completion_backends(2, "claude(opus)")
+        .assign_completion_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex");
+    assert_eq!(backends.completer, "claude");
+}
+
+#[test]
+fn test_assign_completion_backends_with_all_role_overrides() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: Some("codex(gpt-5.3-codex)".to_owned()),
+        implementer: None,
+        reviewer: None,
+        completer: Some("claude(opus)".to_owned()),
+    };
+
+    let backends = registry
+        .assign_completion_backends(1, "claude", &role_overrides)
+        .expect("overridden completion backends should resolve");
+    assert_eq!(backends.planner, "codex(gpt-5.3-codex)");
+    assert_eq!(backends.completer, "claude(opus)");
+}
+
+#[test]
+fn test_assign_completion_backends_with_partial_role_overrides() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: Some("claude(sonnet)".to_owned()),
+        implementer: None,
+        reviewer: None,
+        completer: None,
+    };
+
+    let backends = registry
+        .assign_completion_backends(2, "claude", &role_overrides)
+        .expect("mixed completion backends should resolve");
+    assert_eq!(backends.planner, "claude(sonnet)");
     assert_eq!(backends.completer, "claude");
 }
 
@@ -209,7 +295,7 @@ fn test_backend_alternation_sequence() {
 
     for (loop_num, exp_planner, exp_impl, exp_reviewer) in expected {
         let backends = registry
-            .assign_feature_backends(loop_num, "claude")
+            .assign_feature_backends(loop_num, "claude", &no_role_overrides())
             .unwrap();
         assert_eq!(
             backends.planner, exp_planner,
@@ -241,7 +327,7 @@ fn test_completion_alternation_sequence() {
 
     for (loop_num, exp_planner, exp_completer) in expected {
         let backends = registry
-            .assign_completion_backends(loop_num, "claude")
+            .assign_completion_backends(loop_num, "claude", &no_role_overrides())
             .unwrap();
         assert_eq!(
             backends.planner, exp_planner,

@@ -24,6 +24,10 @@ pub struct ProjectWorkflowOverrides {
     pub auto_commit: Option<bool>,
     pub commit_message_style: Option<CommitMessageStyle>,
     pub prompt_change_action: Option<PromptChangeAction>,
+    pub planner_backend: Option<String>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub completer_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

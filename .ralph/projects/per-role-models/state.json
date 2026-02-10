@@ -5,10 +5,32 @@
   "prompt_hash": "d7cad311f633f6e72bcdc11808ce072b11cc6e6b28bc787304f4f54a937534a4",
   "prompt_hash_at_loop_start": "d7cad311f633f6e72bcdc11808ce072b11cc6e6b28bc787304f4f54a937534a4",
   "parent_project": null,
-  "current_loop": 0,
-  "current_phase": "planning",
+  "current_loop": 1,
+  "current_phase": "committing",
   "phase_iteration": 1,
-  "status": "pending",
-  "loops": [],
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "per-role-backendmodel-overrides",
+      "feature_name": "Per-Role Backend/Model Overrides",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/001-per-role-backendmodel-overrides/20260210175626-spec.md",
+        "impl_notes": "loops/001-per-role-backendmodel-overrides/20260210180307-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-per-role-backendmodel-overrides/20260210180403-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T17:56:26.519883531Z",
+      "completed_at": null
+    }
+  ],
   "completion_attempts": []
 }

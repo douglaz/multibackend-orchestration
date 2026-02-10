@@ -199,26 +199,23 @@ mod tests {
 
     #[test]
     fn project_backend_rejects_unknown_base() {
-        let err = validate_backend_spec_name("unknown(opus)")
-            .expect_err("unknown backend should fail");
+        let err =
+            validate_backend_spec_name("unknown(opus)").expect_err("unknown backend should fail");
         assert!(err.to_string().contains("unknown backend"));
     }
 
     #[test]
     fn project_backend_rejects_malformed_empty_model() {
-        validate_backend_spec_name("claude()")
-            .expect_err("empty model should fail");
+        validate_backend_spec_name("claude()").expect_err("empty model should fail");
     }
 
     #[test]
     fn project_backend_rejects_malformed_missing_close_paren() {
-        validate_backend_spec_name("claude(opus")
-            .expect_err("missing close paren should fail");
+        validate_backend_spec_name("claude(opus").expect_err("missing close paren should fail");
     }
 
     #[test]
     fn project_backend_rejects_malformed_empty_name() {
-        validate_backend_spec_name("(opus)")
-            .expect_err("empty name should fail");
+        validate_backend_spec_name("(opus)").expect_err("empty name should fail");
     }
 }

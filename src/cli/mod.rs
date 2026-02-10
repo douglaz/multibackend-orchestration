@@ -95,6 +95,14 @@ pub struct RunArgs {
     pub dry_run: bool,
     #[arg(long)]
     pub backend: Option<String>,
+    #[arg(long = "planner-backend")]
+    pub planner_backend: Option<String>,
+    #[arg(long = "implementer-backend")]
+    pub implementer_backend: Option<String>,
+    #[arg(long = "reviewer-backend")]
+    pub reviewer_backend: Option<String>,
+    #[arg(long = "completer-backend")]
+    pub completer_backend: Option<String>,
     #[arg(long)]
     pub on_prompt_change: Option<PromptChangeAction>,
     #[arg(long)]
@@ -286,5 +294,29 @@ mod tests {
     fn rejects_run_with_conflicting_tmux_flags() {
         let result = Cli::try_parse_from(["ralph", "run", "--tmux", "--no-tmux"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_run_with_role_backend_overrides() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "run",
+            "--planner-backend",
+            "claude(opus)",
+            "--implementer-backend",
+            "codex(gpt-5)",
+            "--reviewer-backend",
+            "claude",
+            "--completer-backend",
+            "codex",
+        ]);
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(args.planner_backend.as_deref(), Some("claude(opus)"));
+        assert_eq!(args.implementer_backend.as_deref(), Some("codex(gpt-5)"));
+        assert_eq!(args.reviewer_backend.as_deref(), Some("claude"));
+        assert_eq!(args.completer_backend.as_deref(), Some("codex"));
     }
 }

@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::config::{
     resolve_effective_config, CommitMessageStyle, ProjectConfig, PromptChangeAction,
+    RunWorkflowOverrides,
 };
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::ProjectLock;
@@ -105,7 +106,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 &project_dir,
                 workspace.config.clone(),
                 project_config.clone(),
-                None,
+                RunWorkflowOverrides::default(),
             )?;
 
             let value = serde_json::json!({
@@ -117,6 +118,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 "backends": effective.global.backends,
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
+                    "planner_backend": effective.workflow.planner_backend,
+                    "implementer_backend": effective.workflow.implementer_backend,
+                    "reviewer_backend": effective.workflow.reviewer_backend,
+                    "completer_backend": effective.workflow.completer_backend,
                     "max_review_iterations": effective.workflow.max_review_iterations,
                     "auto_commit": effective.workflow.auto_commit,
                     "commit_message_style": effective.workflow.commit_message_style,
@@ -149,7 +154,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 &project_dir,
                 workspace.config.clone(),
                 project_config,
-                None,
+                RunWorkflowOverrides::default(),
             )?;
 
             serde_json::json!({
@@ -157,6 +162,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 "backends": effective.global.backends,
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
+                    "planner_backend": effective.workflow.planner_backend,
+                    "implementer_backend": effective.workflow.implementer_backend,
+                    "reviewer_backend": effective.workflow.reviewer_backend,
+                    "completer_backend": effective.workflow.completer_backend,
                     "max_review_iterations": effective.workflow.max_review_iterations,
                     "auto_commit": effective.workflow.auto_commit,
                     "commit_message_style": effective.workflow.commit_message_style,
@@ -290,6 +299,18 @@ fn set_global_value(
         "workflow.prompt_change_action" => {
             config.workflow.prompt_change_action = parse_prompt_change_action(raw_value)?;
         }
+        "workflow.planner_backend" => {
+            config.workflow.planner_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.implementer_backend" => {
+            config.workflow.implementer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.reviewer_backend" => {
+            config.workflow.reviewer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.completer_backend" => {
+            config.workflow.completer_backend = parse_optional_backend(raw_value)?;
+        }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
@@ -350,6 +371,18 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.prompt_change_action" => {
             config.workflow.prompt_change_action = parse_optional_prompt_change_action(raw_value)?;
+        }
+        "workflow.planner_backend" => {
+            config.workflow.planner_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.implementer_backend" => {
+            config.workflow.implementer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.reviewer_backend" => {
+            config.workflow.reviewer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.completer_backend" => {
+            config.workflow.completer_backend = parse_optional_backend(raw_value)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
@@ -512,72 +545,61 @@ mod tests {
 
     #[test]
     fn ensure_backend_accepts_codex_with_model() {
-        ensure_backend("codex(gpt-5.3-codex-xhigh)")
-            .expect("codex with model should pass");
+        ensure_backend("codex(gpt-5.3-codex-xhigh)").expect("codex with model should pass");
     }
 
     #[test]
     fn ensure_backend_rejects_unknown_base() {
-        let err = ensure_backend("unknown(opus)")
-            .expect_err("unknown backend should fail");
+        let err = ensure_backend("unknown(opus)").expect_err("unknown backend should fail");
         assert!(err.to_string().contains("unknown backend"));
     }
 
     #[test]
     fn ensure_backend_rejects_unknown_bare() {
-        let err = ensure_backend("foobar")
-            .expect_err("unknown bare backend should fail");
+        let err = ensure_backend("foobar").expect_err("unknown bare backend should fail");
         assert!(err.to_string().contains("unknown backend"));
     }
 
     #[test]
     fn ensure_backend_rejects_empty_model() {
-        ensure_backend("claude()")
-            .expect_err("empty model should fail");
+        ensure_backend("claude()").expect_err("empty model should fail");
     }
 
     #[test]
     fn ensure_backend_rejects_missing_close_paren() {
-        ensure_backend("claude(opus")
-            .expect_err("missing close paren should fail");
+        ensure_backend("claude(opus").expect_err("missing close paren should fail");
     }
 
     #[test]
     fn ensure_backend_rejects_empty_name_with_model() {
-        ensure_backend("(opus)")
-            .expect_err("empty name should fail");
+        ensure_backend("(opus)").expect_err("empty name should fail");
     }
 
     #[test]
     fn parse_optional_backend_accepts_claude_with_model() {
-        let result = parse_optional_backend("claude(opus)")
-            .expect("should parse successfully");
+        let result = parse_optional_backend("claude(opus)").expect("should parse successfully");
         assert_eq!(result, Some("claude(opus)".to_owned()));
     }
 
     #[test]
     fn parse_optional_backend_accepts_bare_name() {
-        let result = parse_optional_backend("codex")
-            .expect("should parse successfully");
+        let result = parse_optional_backend("codex").expect("should parse successfully");
         assert_eq!(result, Some("codex".to_owned()));
     }
 
     #[test]
     fn parse_optional_backend_accepts_null() {
-        let result = parse_optional_backend("null")
-            .expect("should parse successfully");
+        let result = parse_optional_backend("null").expect("should parse successfully");
         assert_eq!(result, None);
     }
 
     #[test]
     fn parse_optional_backend_rejects_unknown() {
-        parse_optional_backend("unknown(opus)")
-            .expect_err("unknown backend should fail");
+        parse_optional_backend("unknown(opus)").expect_err("unknown backend should fail");
     }
 
     #[test]
     fn parse_optional_backend_rejects_malformed() {
-        parse_optional_backend("claude()")
-            .expect_err("malformed spec should fail");
+        parse_optional_backend("claude()").expect_err("malformed spec should fail");
     }
 }

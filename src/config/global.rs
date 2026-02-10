@@ -51,6 +51,14 @@ pub struct WorkflowConfig {
     pub commit_message_style: CommitMessageStyle,
     pub commit_tag_format: String,
     pub prompt_change_action: PromptChangeAction,
+    #[serde(default)]
+    pub planner_backend: Option<String>,
+    #[serde(default)]
+    pub implementer_backend: Option<String>,
+    #[serde(default)]
+    pub reviewer_backend: Option<String>,
+    #[serde(default)]
+    pub completer_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +128,10 @@ impl Default for GlobalConfig {
                 commit_message_style: CommitMessageStyle::Conventional,
                 commit_tag_format: "ralph/{project_id}/loop-{loop_number}".to_owned(),
                 prompt_change_action: PromptChangeAction::Abort,
+                planner_backend: None,
+                implementer_backend: None,
+                reviewer_backend: None,
+                completer_backend: None,
             },
             templates: TemplateConfig {
                 planner: "templates/planner.md".to_owned(),
