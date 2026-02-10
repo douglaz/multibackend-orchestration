@@ -1,0 +1,14 @@
+{
+  "project_id": "codex-reasoning-effort",
+  "project_name": "Codex Reasoning Effort",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "9ec1c59cf534fe52b1660d8d0cd772b3946b1e4e0d05387a1bcdd976f1d0bcbb",
+  "prompt_hash_at_loop_start": "9ec1c59cf534fe52b1660d8d0cd772b3946b1e4e0d05387a1bcdd976f1d0bcbb",
+  "parent_project": null,
+  "current_loop": 0,
+  "current_phase": "planning",
+  "phase_iteration": 1,
+  "status": "pending",
+  "loops": [],
+  "completion_attempts": []
+}
