@@ -5,7 +5,7 @@ default_backend = "claude"
 [backends.claude]
 command = "claude"
 args = ["-p", "--permission-mode", "acceptEdits"]
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.claude.env]
 
@@ -16,7 +16,7 @@ args = [
     "--dangerously-bypass-approvals-and-sandbox",
     "-",
 ]
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex.env]
 

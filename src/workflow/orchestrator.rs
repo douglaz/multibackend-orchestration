@@ -8,6 +8,7 @@ use chrono::Utc;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{
     resolve_effective_config, CommitMessageStyle, EffectiveConfig, PromptChangeAction,
@@ -130,6 +131,7 @@ impl Orchestrator {
             BackendRegistryTmuxConfig {
                 enabled: tmux_settings.enabled,
                 session_name: tmux_settings.session_name,
+                window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
             },
         );
         if !options.dry_run {
@@ -209,6 +211,13 @@ impl Orchestrator {
                         &feature_backends.implementer,
                         &project_dir,
                     )?;
+
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("planner".to_owned()),
+                        })
+                        .await;
 
                     info!(
                         loop = loop_number,
@@ -346,6 +355,13 @@ impl Orchestrator {
                             &project_dir,
                         )?;
 
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("impl".to_owned()),
+                            })
+                            .await;
+
                         info!(
                             loop = loop_number,
                             backend = implementer_backend.name(),
@@ -421,6 +437,13 @@ impl Orchestrator {
                             Some(&feedback_content),
                             &project_dir,
                         )?;
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("impl".to_owned()),
+                            })
+                            .await;
 
                         info!(
                             loop = loop_number,
@@ -572,6 +595,13 @@ impl Orchestrator {
                         &git_diff,
                         &project_dir,
                     )?;
+
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("reviewer".to_owned()),
+                        })
+                        .await;
 
                     info!(
                         loop = loop_number,
@@ -809,6 +839,13 @@ impl Orchestrator {
                         &termination_content,
                         &previous_specs,
                     )?;
+
+                    registry
+                        .set_tmux_context(TmuxExecutionContext {
+                            loop_number: Some(loop_number),
+                            role: Some("completer".to_owned()),
+                        })
+                        .await;
 
                     info!(
                         loop = loop_number,

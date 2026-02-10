@@ -16,6 +16,7 @@ fn tmux_disabled() -> BackendRegistryTmuxConfig {
     BackendRegistryTmuxConfig {
         enabled: false,
         session_name: "ralph".to_owned(),
+        window_keep_seconds: 0,
     }
 }
 
@@ -225,6 +226,7 @@ fn tmux_enabled(session_name: &str) -> BackendRegistryTmuxConfig {
     BackendRegistryTmuxConfig {
         enabled: true,
         session_name: session_name.to_owned(),
+        window_keep_seconds: 0,
     }
 }
 

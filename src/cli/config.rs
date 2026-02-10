@@ -272,6 +272,9 @@ fn set_global_value(
         "workspace.tmux_session" => {
             config.workspace.tmux_session = raw_value.to_owned();
         }
+        "workspace.tmux_window_keep_seconds" => {
+            config.workspace.tmux_window_keep_seconds = parse_u64(raw_value, key)?;
+        }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
         }

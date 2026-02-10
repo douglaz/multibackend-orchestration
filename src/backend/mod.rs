@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::config::GlobalConfig;
@@ -20,7 +21,7 @@ use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
 use crate::Result;
 
 use self::tmux::RealTmuxRunner;
-use self::tmux_backend::TmuxBackend;
+use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -139,36 +140,62 @@ impl Backend for CliBackend {
     }
 }
 
+/// Shared execution context that the orchestrator updates before each backend
+/// invocation, allowing TmuxBackend instances to read loop/role info without
+/// a change to the Backend trait.
+#[derive(Clone, Default)]
+pub struct SharedTmuxContext(Arc<Mutex<TmuxExecutionContext>>);
+
+impl SharedTmuxContext {
+    pub async fn set(&self, ctx: TmuxExecutionContext) {
+        *self.0.lock().await = ctx;
+    }
+
+    pub async fn get(&self) -> TmuxExecutionContext {
+        self.0.lock().await.clone()
+    }
+}
+
 pub struct BackendRegistry {
     backends: HashMap<String, Arc<dyn Backend>>,
     default_backend: String,
+    tmux_context: SharedTmuxContext,
 }
 
 #[derive(Debug, Clone)]
 pub struct BackendRegistryTmuxConfig {
     pub enabled: bool,
     pub session_name: String,
+    pub window_keep_seconds: u64,
 }
 
 impl BackendRegistry {
     pub fn new(config: &GlobalConfig, tmux: BackendRegistryTmuxConfig) -> Self {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
+        let shared_ctx = SharedTmuxContext::default();
 
         let claude_backend = claude::backend_from_config(config);
         backends.insert(
             "claude".to_owned(),
-            backend_with_optional_tmux(claude_backend, &tmux),
+            backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
         let codex_backend = codex::backend_from_config(config);
         backends.insert(
             "codex".to_owned(),
-            backend_with_optional_tmux(codex_backend, &tmux),
+            backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
         );
 
         Self {
             backends,
             default_backend: config.workspace.default_backend.clone(),
+            tmux_context: shared_ctx,
         }
+    }
+
+    /// Set the tmux execution context (loop number, role) for the next backend
+    /// invocation. This is a no-op when tmux mode is disabled.
+    pub async fn set_tmux_context(&self, ctx: TmuxExecutionContext) {
+        self.tmux_context.set(ctx).await;
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
@@ -231,12 +258,15 @@ impl BackendRegistry {
 fn backend_with_optional_tmux(
     backend: CliBackend,
     tmux: &BackendRegistryTmuxConfig,
+    shared_ctx: SharedTmuxContext,
 ) -> Arc<dyn Backend> {
     if tmux.enabled {
         Arc::new(TmuxBackend::new(
             backend,
             tmux.session_name.clone(),
             RealTmuxRunner,
+            tmux.window_keep_seconds,
+            shared_ctx,
         ))
     } else {
         Arc::new(backend)

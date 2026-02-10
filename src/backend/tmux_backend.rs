@@ -7,7 +7,7 @@ use tokio::fs;
 use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
-use super::{Backend, CliBackend};
+use super::{Backend, CliBackend, SharedTmuxContext};
 use crate::error::RalphError;
 use crate::Result;
 
@@ -15,20 +15,49 @@ static INVOCATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Per-invocation context that the orchestrator sets before calling `execute()`.
+/// This allows the orchestrator to pass loop/role information without changing
+/// the `Backend` trait signature.
+#[derive(Debug, Clone, Default)]
+pub struct TmuxExecutionContext {
+    pub loop_number: Option<u32>,
+    pub role: Option<String>,
+}
+
 /// A `Backend` implementation that runs commands inside tmux windows
 /// while still capturing stdout for orchestration parsing.
 pub struct TmuxBackend<R: TmuxCommandRunner = tmux::RealTmuxRunner> {
     inner: CliBackend,
     session_name: String,
     runner: R,
+    window_keep_seconds: u64,
+    shared_context: SharedTmuxContext,
 }
 
 impl<R: TmuxCommandRunner> TmuxBackend<R> {
-    pub fn new(inner: CliBackend, session_name: String, runner: R) -> Self {
+    pub fn new(
+        inner: CliBackend,
+        session_name: String,
+        runner: R,
+        window_keep_seconds: u64,
+        shared_context: SharedTmuxContext,
+    ) -> Self {
         Self {
             inner,
             session_name,
             runner,
+            window_keep_seconds,
+            shared_context,
+        }
+    }
+
+    /// Build a contextual window label from the current execution context.
+    fn build_label(&self, ctx: &TmuxExecutionContext) -> String {
+        match (&ctx.loop_number, &ctx.role) {
+            (Some(loop_num), Some(role)) => {
+                tmux::format_window_label(*loop_num, role, self.inner.name())
+            }
+            _ => format!("ralph-{}", self.inner.name()),
         }
     }
 
@@ -128,6 +157,11 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             exit_file.clone(),
         ]);
 
+        // Snapshot the execution context for this invocation. We use get()
+        // (not take()) so that the context remains available for retry
+        // invocations triggered by parse/timeout retries in the orchestrator.
+        let ctx = self.shared_context.get().await;
+
         // 1. Write prompt to temp file
         fs::write(&prompt_file, prompt)
             .await
@@ -139,9 +173,9 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // 2. Ensure tmux session exists
         tmux::ensure_session(&self.runner, &self.session_name).await?;
 
-        // 3. Create tmux window with the shell command
+        // 3. Create tmux window with the shell command (with retry on session loss)
         let shell_cmd = self.build_shell_command(&prompt_file, &output_file, &exit_file);
-        let label = format!("ralph-{}", self.inner.name());
+        let label = self.build_label(&ctx);
 
         debug!(
             backend = self.inner.name(),
@@ -151,22 +185,87 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         );
 
         let window_id =
-            tmux::create_window(&self.runner, &self.session_name, &label, &shell_cmd).await?;
+            tmux::create_window_with_retry(&self.runner, &self.session_name, &label, &shell_cmd)
+                .await?;
+
+        // 3b. Enable remain-on-exit so the window stays visible after the command
+        // process exits. Without this, the window closes immediately on exit and
+        // users cannot inspect it during the retention period.
+        if self.window_keep_seconds > 0 {
+            if let Err(err) =
+                tmux::set_remain_on_exit(&self.runner, &self.session_name, &window_id).await
+            {
+                debug!(
+                    error = %err,
+                    "failed to set remain-on-exit (non-fatal, window may close on completion)"
+                );
+            }
+        }
 
         // 4. Wait for exit file (respecting backend timeout)
         let wait_result =
             tmux::wait_for_exit(&exit_file, self.inner.timeout(), POLL_INTERVAL).await;
 
-        // 5. Best-effort window cleanup regardless of outcome
-        let _ = tmux::kill_window(&self.runner, &self.session_name, &window_id).await;
+        // 5. Classify timeout cause BEFORE cleanup.
+        //
+        // We must check whether the window/session still exists before
+        // kill_window_best_effort, because a successful kill-window would
+        // make has_window report false, misclassifying genuine timeouts as
+        // external disappearance.
+        let exit_code = match wait_result {
+            Ok(code) => code,
+            Err(RalphError::BackendTimeout { .. }) => {
+                // Check the specific window, not just the session. A disappeared
+                // window in a still-alive session should be reported as a command
+                // failure with actionable diagnostics, not as a timeout.
+                let window_alive = tmux::has_window(
+                    &self.runner,
+                    &self.session_name,
+                    &window_id,
+                )
+                .await
+                .unwrap_or(false);
 
-        // 6. Process the result
-        let exit_code = wait_result.map_err(|err| match err {
-            RalphError::BackendTimeout { .. } => RalphError::BackendTimeout {
-                backend: self.inner.name().to_owned(),
-            },
-            other => other,
-        })?;
+                // Best-effort cleanup after classification
+                tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+
+                if window_alive {
+                    // Window still alive — this is a genuine timeout.
+                    // Propagate as BackendTimeout so orchestrator can retry.
+                    return Err(RalphError::BackendTimeout {
+                        backend: self.inner.name().to_owned(),
+                    });
+                }
+                // Window (or session) is gone — external interruption.
+                return Err(RalphError::BackendCommandFailed {
+                    backend: self.inner.name().to_owned(),
+                    details: format!(
+                        "tmux window '{}' (id={}) for backend '{}' disappeared or timed out \
+                         before the exit file was written. The tmux window may have been \
+                         closed externally. Re-run the command or check your tmux session '{}'.",
+                        label,
+                        window_id,
+                        self.inner.command(),
+                        self.session_name
+                    ),
+                });
+            }
+            Err(other) => return Err(other),
+        };
+
+        // 6. Retention delay before cleanup (only on success)
+        let keep_seconds = self.window_keep_seconds;
+        if keep_seconds > 0 {
+            debug!(
+                keep_seconds = keep_seconds,
+                window = %window_id,
+                "keeping completed tmux window for inspection"
+            );
+            tokio::time::sleep(Duration::from_secs(keep_seconds)).await;
+        }
+
+        // 7. Best-effort window cleanup
+        tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
 
         if exit_code != 0 {
             return Err(RalphError::BackendCommandFailed {
@@ -178,7 +277,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             });
         }
 
-        // 7. Read the captured stdout
+        // 8. Read the captured stdout
         let output = fs::read_to_string(&output_file).await.map_err(|err| {
             RalphError::BackendCommandFailed {
                 backend: self.inner.name().to_owned(),
@@ -246,6 +345,14 @@ mod tests {
         }
     }
 
+    fn test_shared_ctx() -> SharedTmuxContext {
+        SharedTmuxContext::default()
+    }
+
+    fn make_backend(cli: CliBackend, session: &str, runner: MockTmuxRunner) -> TmuxBackend<MockTmuxRunner> {
+        TmuxBackend::new(cli, session.to_owned(), runner, 0, test_shared_ctx())
+    }
+
     fn test_cli_backend() -> CliBackend {
         CliBackend::new(
             "test-backend",
@@ -273,7 +380,7 @@ mod tests {
     #[test]
     fn build_shell_command_basic() {
         let runner = MockTmuxRunner::default();
-        let backend = TmuxBackend::new(test_cli_backend(), "ralph".to_owned(), runner);
+        let backend = make_backend(test_cli_backend(), "ralph", runner);
 
         let cmd = backend.build_shell_command(
             Path::new("/tmp/prompt.txt"),
@@ -304,7 +411,7 @@ mod tests {
     #[test]
     fn build_shell_command_preserves_args() {
         let runner = MockTmuxRunner::default();
-        let backend = TmuxBackend::new(test_cli_backend(), "ralph".to_owned(), runner);
+        let backend = make_backend(test_cli_backend(), "ralph", runner);
 
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
@@ -318,7 +425,7 @@ mod tests {
     #[test]
     fn build_shell_command_includes_env() {
         let runner = MockTmuxRunner::default();
-        let backend = TmuxBackend::new(test_cli_backend_with_env(), "ralph".to_owned(), runner);
+        let backend = make_backend(test_cli_backend_with_env(), "ralph", runner);
 
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
@@ -344,7 +451,7 @@ mod tests {
             env,
         );
         let runner = MockTmuxRunner::default();
-        let backend = TmuxBackend::new(cli, "ralph".to_owned(), runner);
+        let backend = make_backend(cli, "ralph", runner);
 
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
@@ -382,7 +489,7 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-success".to_owned(), runner.clone());
+        let backend = TmuxBackend::new(cli, "test-success".to_owned(), runner.clone(), 0, test_shared_ctx());
 
         // We need to intercept the execute flow. Since execute writes prompt then calls
         // create_window, and then wait_for_exit polls for the exit file, we need to
@@ -444,7 +551,7 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-nonzero".to_owned(), runner);
+        let backend = TmuxBackend::new(cli, "test-nonzero".to_owned(), runner, 0, test_shared_ctx());
 
         // Watcher that writes non-zero exit
         let watcher = tokio::spawn(async move {
@@ -480,14 +587,15 @@ mod tests {
         }
     }
 
-    // --- Timeout test ---
+    // --- Timeout tests ---
 
     #[tokio::test]
-    async fn execute_timeout_returns_backend_timeout() {
+    async fn execute_genuine_timeout_returns_backend_timeout() {
         let runner = MockTmuxRunner::with_responses(vec![
-            Ok(String::new()),    // has-session
+            Ok(String::new()),    // has-session (ensure_session)
             Ok("3\n".to_owned()), // create_window
-            Ok(String::new()),    // kill_window
+            Ok("3\n".to_owned()), // has_window (list-windows) — window still exists (classified BEFORE cleanup)
+            Ok(String::new()),    // kill_window (best-effort, after classification)
         ]);
 
         let cli = CliBackend::new(
@@ -497,9 +605,9 @@ mod tests {
             Duration::from_millis(100), // Very short timeout
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-timeout".to_owned(), runner);
+        let backend = TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
 
-        // Don't write any exit file — should timeout
+        // Don't write any exit file — genuine timeout with session still alive.
         let result = backend.execute("test prompt").await;
 
         match result {
@@ -507,6 +615,43 @@ mod tests {
                 assert_eq!(backend, "slow-backend");
             }
             other => panic!("expected BackendTimeout, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_window_disappeared_returns_actionable_error() {
+        let runner = MockTmuxRunner::with_responses(vec![
+            Ok(String::new()),    // has-session (ensure_session)
+            Ok("3\n".to_owned()), // create_window
+            // has_window (list-windows) check BEFORE cleanup — window gone
+            Err(RalphError::BackendCommandFailed {
+                backend: "tmux".to_owned(),
+                details: "can't find window: 3".to_owned(),
+            }),
+            Ok(String::new()),    // kill_window (best-effort, after classification)
+        ]);
+
+        let cli = CliBackend::new(
+            "slow-backend",
+            "sleep".to_owned(),
+            vec![],
+            Duration::from_millis(100), // Very short timeout
+            BTreeMap::new(),
+        );
+        let backend = TmuxBackend::new(cli, "test-timeout".to_owned(), runner, 0, test_shared_ctx());
+
+        // Don't write any exit file — timeout + session disappeared externally.
+        let result = backend.execute("test prompt").await;
+
+        match result {
+            Err(RalphError::BackendCommandFailed { backend, details }) => {
+                assert_eq!(backend, "slow-backend");
+                assert!(
+                    details.contains("disappeared or timed out"),
+                    "expected actionable diagnostics: {details}"
+                );
+            }
+            other => panic!("expected BackendCommandFailed with diagnostics, got: {other:?}"),
         }
     }
 
@@ -527,7 +672,7 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "clean-session".to_owned(), runner);
+        let backend = TmuxBackend::new(cli, "clean-session".to_owned(), runner, 0, test_shared_ctx());
 
         let created_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let created_files_clone = created_files.clone();
@@ -589,7 +734,7 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "fail-clean-session".to_owned(), runner);
+        let backend = TmuxBackend::new(cli, "fail-clean-session".to_owned(), runner, 0, test_shared_ctx());
 
         let created_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let created_files_clone = created_files.clone();
@@ -659,7 +804,7 @@ mod tests {
     fn name_delegates_to_inner() {
         let runner = MockTmuxRunner::default();
         let cli = test_cli_backend();
-        let backend = TmuxBackend::new(cli, "ralph".to_owned(), runner);
+        let backend = make_backend(cli, "ralph", runner);
         assert_eq!(backend.name(), "test-backend");
     }
 
@@ -680,7 +825,7 @@ mod tests {
             Duration::from_secs(5),
             BTreeMap::new(),
         );
-        let backend = TmuxBackend::new(cli, "test-killwin".to_owned(), runner.clone());
+        let backend = TmuxBackend::new(cli, "test-killwin".to_owned(), runner.clone(), 0, test_shared_ctx());
 
         let watcher = tokio::spawn(async move {
             let tmp_dir = std::env::temp_dir();

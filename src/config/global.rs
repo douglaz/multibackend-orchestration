@@ -24,6 +24,8 @@ pub struct WorkspaceConfig {
     pub tmux: bool,
     #[serde(default = "default_tmux_session")]
     pub tmux_session: String,
+    #[serde(default = "default_tmux_window_keep_seconds")]
+    pub tmux_window_keep_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,7 @@ impl Default for GlobalConfig {
                 default_backend: "claude".to_owned(),
                 tmux: false,
                 tmux_session: "ralph".to_owned(),
+                tmux_window_keep_seconds: 5,
             },
             backends: BackendConfigs {
                 claude: BackendConfig {
@@ -138,6 +141,10 @@ fn default_tmux_session() -> String {
     "ralph".to_owned()
 }
 
+fn default_tmux_window_keep_seconds() -> u64 {
+    5
+}
+
 impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
@@ -169,6 +176,7 @@ mod tests {
         let config = GlobalConfig::default();
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
     }
 
     #[test]
@@ -209,6 +217,7 @@ base_branch = "master"
         let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
     }
 
     #[test]
@@ -219,6 +228,7 @@ version = "1.0"
 default_backend = "claude"
 tmux = true
 tmux_session = "demo"
+tmux_window_keep_seconds = 10
 
 [backends.claude]
 command = "claude"
@@ -251,5 +261,6 @@ base_branch = "master"
         let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
         assert!(config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "demo");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 10);
     }
 }

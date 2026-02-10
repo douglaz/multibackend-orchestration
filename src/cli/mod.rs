@@ -5,7 +5,7 @@ mod project;
 mod rollback;
 mod run;
 mod status;
-mod tail;
+pub mod tail;
 
 use std::path::PathBuf;
 
@@ -144,6 +144,9 @@ pub struct TailArgs {
     pub poll_interval_ms: u64,
     #[arg(long)]
     pub json: bool,
+    /// Attach to the ralph tmux session instead of showing artifact events
+    #[arg(long)]
+    pub tmux: bool,
 }
 
 #[derive(Debug, Args)]

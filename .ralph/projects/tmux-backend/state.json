@@ -5,7 +5,7 @@
   "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "parent_project": null,
-  "current_loop": 3,
+  "current_loop": 4,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -63,7 +63,7 @@
       "slug": "configuration-and-cli-wiring",
       "feature_name": "Configuration and CLI wiring",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude",
         "implementer": "codex",
@@ -75,8 +75,45 @@
         "reviews": [],
         "approval": "loops/003-configuration-and-cli-wiring/20260210050402-review-approved.md"
       },
-      "commit": null,
+      "commit": "b5c532e98e086f3c068f6e90454124a88b66df91",
       "started_at": "2026-02-10T04:55:17.666696405Z",
+      "completed_at": "2026-02-10T05:04:02Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "window-labeling-and-tmux-ux-polish",
+      "feature_name": "Window labeling and tmux UX polish",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex",
+        "implementer": "claude",
+        "reviewer": "codex"
+      },
+      "artifacts": {
+        "spec": "loops/004-window-labeling-and-tmux-ux-polish/20260210065331-spec.md",
+        "impl_notes": "loops/004-window-labeling-and-tmux-ux-polish/20260210114107-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/004-window-labeling-and-tmux-ux-polish/20260210114556-review-001-feedback.md",
+            "response": "loops/004-window-labeling-and-tmux-ux-polish/20260210115345-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/004-window-labeling-and-tmux-ux-polish/20260210115923-review-002-feedback.md",
+            "response": "loops/004-window-labeling-and-tmux-ux-polish/20260210120448-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/004-window-labeling-and-tmux-ux-polish/20260210120714-review-003-feedback.md",
+            "response": "loops/004-window-labeling-and-tmux-ux-polish/20260210121023-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/004-window-labeling-and-tmux-ux-polish/20260210121326-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T06:53:31.396358755Z",
       "completed_at": null
     }
   ],
