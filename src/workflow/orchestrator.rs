@@ -239,6 +239,7 @@ impl Orchestrator {
                     );
                     let planner_decision = execute_with_parse_retries(
                         planner_backend,
+                        &registry,
                         "planner",
                         "planning",
                         &planner_prompt,
@@ -382,6 +383,7 @@ impl Orchestrator {
                         );
                         let decision = execute_with_parse_retries(
                             implementer_backend,
+                            &registry,
                             "implementer",
                             "implementing",
                             &impl_prompt,
@@ -466,6 +468,7 @@ impl Orchestrator {
                         );
                         let decision = execute_with_parse_retries(
                             implementer_backend,
+                            &registry,
                             "implementer",
                             "implementing",
                             &impl_prompt,
@@ -620,6 +623,7 @@ impl Orchestrator {
                     );
                     let reviewer_decision = execute_with_parse_retries(
                         reviewer_backend,
+                        &registry,
                         "reviewer",
                         "reviewing",
                         &reviewer_prompt,
@@ -855,6 +859,7 @@ impl Orchestrator {
                     );
                     let completer_decision: CompleterDecision = execute_with_parse_retries(
                         completer_backend,
+                        &registry,
                         "completer",
                         "completing",
                         &completer_prompt,
@@ -1604,6 +1609,7 @@ OR\n\
 
 async fn execute_with_parse_retries<T, F>(
     backend: Arc<dyn Backend>,
+    registry: &BackendRegistry,
     role: &str,
     phase: &str,
     original_prompt: &str,
@@ -1618,10 +1624,18 @@ where
     match parse_fn(&first_output) {
         Ok(parsed) => Ok(parsed),
         Err(parse_error_1) => {
+            let reformatter_backend = registry
+                .opposite(backend.name())
+                .ok()
+                .and_then(|opposite_name| registry.get(opposite_name))
+                .unwrap_or_else(|| backend.clone());
+            let reformatter_name = reformatter_backend.name().to_owned();
+
             warn!(
                 role = role,
+                backend = %reformatter_name,
                 error = %parse_error_1,
-                "parse failed, requesting reformat (attempt 1/3)"
+                "parse failed, requesting reformat via {reformatter_name} (attempt 2/3)"
             );
             let reformat_prompt = format!(
                 "CRITICAL: Your previous response could not be parsed.\n\n\
@@ -1639,7 +1653,7 @@ where
             );
 
             let second_output =
-                execute_with_timeout_retries(backend.clone(), role, phase, &reformat_prompt)
+                execute_with_timeout_retries(reformatter_backend, role, phase, &reformat_prompt)
                     .await?;
             if let Ok(parsed) = parse_fn(&second_output) {
                 return Ok(parsed);

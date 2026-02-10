@@ -1134,3 +1134,284 @@ async fn review_iteration_limit_rollback() {
         "current_loop should be 0 after rollback"
     );
 }
+
+fn write_parse_retry_claude_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]]; then
+  counter_file="${COUNTER_DIR}/claude_reformat_count"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$counter_file"
+  cat <<'EOF'
+this response is still not parseable
+EOF
+elif [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+planner response without required markdown structure
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Demo behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: parse retry test
+EOF
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Demo requirement satisfied
+EOF
+else
+  echo "claude: unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write parse-retry claude script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn write_parse_retry_codex_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]]; then
+  counter_file="${COUNTER_DIR}/codex_reformat_count"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$counter_file"
+  cat <<'EOF'
+# Feature: Reformat Rescue Feature
+
+## Description
+Produce parseable planner output during reformat retry.
+
+## Acceptance Criteria
+- [ ] Output is parseable
+
+## Files to Modify/Create
+- `README.md` - Document parse retry behavior
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Feature: Fallback Feature
+
+## Description
+Fallback planner output.
+
+## Acceptance Criteria
+- [ ] Output is parseable
+
+## Files to Modify/Create
+- `README.md` - Document fallback behavior
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Demo behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: parse retry test
+EOF
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Demo requirement satisfied
+EOF
+else
+  echo "codex: unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write parse-retry codex script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, PathBuf) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+
+    fs::write(repo_root.join("README.md"), "# demo\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+
+    let claude_script = repo_root.join("mock_claude.sh");
+    write_parse_retry_claude_script(&claude_script);
+    let codex_script = repo_root.join("mock_codex.sh");
+    write_parse_retry_codex_script(&codex_script);
+    git_ok(repo_root, &["add", "mock_claude.sh", "mock_codex.sh"]);
+    git_ok(
+        repo_root,
+        &["commit", "-m", "test: add parse retry backend mocks"],
+    );
+
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+    fs::write(
+        workspace_root.join("templates/planner.md"),
+        default_planner_template(),
+    )
+    .expect("write planner template");
+    fs::write(
+        workspace_root.join("templates/implementer.md"),
+        default_implementer_template(),
+    )
+    .expect("write implementer template");
+    fs::write(
+        workspace_root.join("templates/reviewer.md"),
+        default_reviewer_template(),
+    )
+    .expect("write reviewer template");
+    fs::write(
+        workspace_root.join("templates/completer.md"),
+        default_completer_template(),
+    )
+    .expect("write completer template");
+
+    let counter_dir = repo_root.join("counters");
+    fs::create_dir_all(&counter_dir).expect("create counter dir");
+
+    let mut claude_env = BTreeMap::new();
+    claude_env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir.to_string_lossy().to_string(),
+    );
+    workspace.config.backends.claude.command = claude_script.to_string_lossy().to_string();
+    workspace.config.backends.claude.args = Vec::new();
+    workspace.config.backends.claude.timeout_seconds = 30;
+    workspace.config.backends.claude.env = claude_env;
+
+    let mut codex_env = BTreeMap::new();
+    codex_env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir.to_string_lossy().to_string(),
+    );
+    workspace.config.backends.codex.command = codex_script.to_string_lossy().to_string();
+    workspace.config.backends.codex.args = Vec::new();
+    workspace.config.backends.codex.timeout_seconds = 30;
+    workspace.config.backends.codex.env = codex_env;
+
+    workspace.config.git.base_branch =
+        git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save config");
+
+    let prompt_path = repo_root.join("PROMPT.md");
+    fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
+
+    let project_id = "01-poc".to_owned();
+    create_project(
+        &mut workspace,
+        CreateProjectOptions {
+            id: project_id.clone(),
+            name: "Proof of Concept".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: Some("claude".to_owned()),
+        },
+    )
+    .expect("create project");
+
+    (temp, workspace_root, project_id, counter_dir)
+}
+
+#[tokio::test]
+async fn parse_retry_reformat_uses_opposite_backend() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_reformat_backend_test();
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("orchestration should succeed with opposite-backend reformat");
+
+    let codex_count = fs::read_to_string(counter_dir.join("codex_reformat_count"))
+        .expect("codex should receive the reformat attempt");
+    assert_eq!(
+        codex_count.trim(),
+        "1",
+        "opposite backend should be used exactly once for planner reformat"
+    );
+
+    let claude_reformat_counter = counter_dir.join("claude_reformat_count");
+    assert!(
+        !claude_reformat_counter.exists(),
+        "original backend should not receive planner reformat attempt"
+    );
+}

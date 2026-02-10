@@ -1,0 +1,36 @@
+{
+  "project_id": "reformatter-agent",
+  "project_name": "Reformatter Agent",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "81dad0ceae26a5773827cf5904fff2c2c81ed4361edfba2fd992712008a535fc",
+  "prompt_hash_at_loop_start": "81dad0ceae26a5773827cf5904fff2c2c81ed4361edfba2fd992712008a535fc",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "reformatter-agent-for-parse-retries",
+      "feature_name": "Reformatter Agent for Parse Retries",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/001-reformatter-agent-for-parse-retries/20260210160705-spec.md",
+        "impl_notes": "loops/001-reformatter-agent-for-parse-retries/20260210161121-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-reformatter-agent-for-parse-retries/20260210161201-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T16:07:05.420510294Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
