@@ -40,6 +40,9 @@ pub enum RalphError {
     #[error("backend unavailable: {backend}")]
     BackendUnavailable { backend: String },
 
+    #[error("tmux is not installed or not on PATH; install tmux to use tmux mode")]
+    TmuxUnavailable,
+
     #[error("backend timeout: {backend}")]
     BackendTimeout { backend: String },
 

@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod mock;
+pub mod tmux;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
