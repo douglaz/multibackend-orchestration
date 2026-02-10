@@ -79,11 +79,22 @@ pub struct OrchestrationResult {
 
 pub struct Orchestrator {
     workspace: Workspace,
+    tmux_preflight_checker: Option<fn() -> Result<()>>,
 }
 
 impl Orchestrator {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            tmux_preflight_checker: None,
+        }
+    }
+
+    /// Override the tmux availability checker used during preflight.
+    /// When set, this function is called instead of `tmux::check_tmux_available`.
+    /// Intended for testing — production callers should use `Orchestrator::new`.
+    pub fn set_tmux_preflight_checker(&mut self, checker: fn() -> Result<()>) {
+        self.tmux_preflight_checker = Some(checker);
     }
 
     pub async fn run(&mut self, options: RunOptions) -> Result<OrchestrationResult> {
@@ -120,11 +131,10 @@ impl Orchestrator {
             effective.global.workspace.tmux,
             effective.global.workspace.tmux_session.clone(),
         );
-        validate_tmux_preflight(
-            tmux_settings.enabled,
-            options.dry_run,
-            tmux::check_tmux_available,
-        )?;
+        let checker = self
+            .tmux_preflight_checker
+            .unwrap_or(tmux::check_tmux_available);
+        validate_tmux_preflight(tmux_settings.enabled, options.dry_run, checker)?;
 
         let registry = BackendRegistry::new(
             &effective.global,

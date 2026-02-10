@@ -5,8 +5,8 @@
   "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "parent_project": null,
-  "current_loop": 5,
-  "current_phase": "planning",
+  "current_loop": 6,
+  "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
   "loops": [
@@ -115,7 +115,46 @@
       "commit": "69bd652967c6b9679eb3c2930508a59d80e10062",
       "started_at": "2026-02-10T06:53:31.396358755Z",
       "completed_at": "2026-02-10T12:13:26.408670513Z"
+    },
+    {
+      "loop_number": 6,
+      "slug": "deterministic-tmux-preflight-test-isolation",
+      "feature_name": "Deterministic tmux preflight test isolation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex",
+        "implementer": "claude",
+        "reviewer": "codex"
+      },
+      "artifacts": {
+        "spec": "loops/006-deterministic-tmux-preflight-test-isolation/20260210134254-spec.md",
+        "impl_notes": "loops/006-deterministic-tmux-preflight-test-isolation/20260210134632-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/006-deterministic-tmux-preflight-test-isolation/20260210134818-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T13:42:54.664767805Z",
+      "completed_at": null
     }
   ],
-  "completion_attempts": []
+  "completion_attempts": [
+    {
+      "loop_number": 5,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/005-completion/20260210133233-termination-request.md",
+        "verdict": "loops/005-completion/20260210133902-completer-verdict.md"
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-10T13:32:33.828737232Z",
+      "completed_at": "2026-02-10T13:39:02.615412053Z"
+    }
+  ]
 }

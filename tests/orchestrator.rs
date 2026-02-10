@@ -4,8 +4,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
-
 use ralph::error::RalphError;
 use ralph::project::lifecycle::{
     create_project, load_project_state, CreateProjectOptions, PromptSource,
@@ -19,8 +17,6 @@ use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
 use regex::Regex;
 use tempfile::TempDir;
-
-static PATH_LOCK: Mutex<()> = Mutex::new(());
 
 fn git_ok(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -264,32 +260,6 @@ fn assert_timestamped_artifact(rel_path: &str, suffix: &str) {
     );
 }
 
-struct PathGuard {
-    original: Option<String>,
-}
-
-impl PathGuard {
-    fn set(path: &str) -> Self {
-        let original = std::env::var("PATH").ok();
-        std::env::set_var("PATH", path);
-        Self { original }
-    }
-}
-
-impl Drop for PathGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.as_ref() {
-            std::env::set_var("PATH", value);
-        } else {
-            std::env::remove_var("PATH");
-        }
-    }
-}
-
-fn lock_path() -> MutexGuard<'static, ()> {
-    PATH_LOCK.lock().expect("path lock poisoned")
-}
-
 #[tokio::test]
 async fn runs_full_feature_loop_and_commits() {
     let (_temp, workspace_root, project_id, _script) =
@@ -431,7 +401,6 @@ async fn dry_run_does_not_checkout_project_branch() {
 
 #[tokio::test]
 async fn tmux_mode_fails_early_when_tmux_is_unavailable() {
-    let _lock = lock_path();
     let (_temp, workspace_root, project_id, _script) =
         setup_workspace_with_project("feature", "complete");
 
@@ -439,10 +408,12 @@ async fn tmux_mode_fails_early_when_tmux_is_unavailable() {
     workspace.config.workspace.tmux = true;
     workspace.config.workspace.tmux_session = "ralph-test".to_owned();
 
-    // Empty PATH ensures tmux cannot be discovered.
-    let _path_guard = PathGuard::set("");
+    fn tmux_unavailable() -> ralph::Result<()> {
+        Err(RalphError::TmuxUnavailable)
+    }
 
     let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator.set_tmux_preflight_checker(tmux_unavailable);
     let result = orchestrator
         .run(run_options(&project_id))
         .await
@@ -455,7 +426,6 @@ async fn tmux_mode_fails_early_when_tmux_is_unavailable() {
 
 #[tokio::test]
 async fn tmux_mode_dry_run_skips_tmux_availability_check() {
-    let _lock = lock_path();
     let (_temp, workspace_root, project_id, _script) =
         setup_workspace_with_project("feature", "complete");
 
@@ -463,10 +433,12 @@ async fn tmux_mode_dry_run_skips_tmux_availability_check() {
     workspace.config.workspace.tmux = true;
     workspace.config.workspace.tmux_session = "ralph-test".to_owned();
 
-    // Even without PATH, dry-run should not fail on tmux preflight.
-    let _path_guard = PathGuard::set("");
+    fn tmux_unavailable() -> ralph::Result<()> {
+        Err(RalphError::TmuxUnavailable)
+    }
 
     let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator.set_tmux_preflight_checker(tmux_unavailable);
     let mut options = run_options(&project_id);
     options.dry_run = true;
 
@@ -828,7 +800,6 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
 
 #[tokio::test]
 async fn two_loop_happy_path_with_separate_backends() {
-    let _lock = lock_path();
     let (_temp, workspace_root, project_id) = setup_workspace_with_split_backends();
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
