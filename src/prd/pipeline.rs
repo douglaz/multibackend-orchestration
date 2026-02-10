@@ -1,4 +1,4 @@
-//! PRD pipeline driver with non-interactive happy path.
+//! PRD pipeline driver.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,10 +11,13 @@ use crate::util::time::now_iso8601;
 use crate::Result;
 
 use super::answers::AnswerStore;
-use super::cache::{CacheManager, PrdLock};
-use super::interaction::UserInteraction;
+use super::cache::CacheManager;
+use super::gaps::{
+    gap_report_has_questions, run_llm_gap_analysis, GapReport, Question, QuestionKind,
+};
+use super::interaction::{InteractionContext, UserInteraction};
 use super::stages::{check_stage_output, StagePromptBuilder};
-use super::state::{PipelineContext, PrdMeta, Stage};
+use super::state::{PipelineContext, PrdMeta, PrdPhase, Stage};
 
 /// Options for PRD pipeline execution.
 #[derive(Debug, Clone)]
@@ -23,7 +26,7 @@ pub struct PrdOptions {
     pub idea: String,
     /// The backend specification (e.g., "codex(gpt-5.3-codex)").
     pub backend_spec: String,
-    /// Maximum number of question rounds (deferred to loop 7).
+    /// Maximum number of question rounds.
     pub ask_max: u32,
     /// Whether to resume from cached outputs.
     pub resume: bool,
@@ -53,17 +56,13 @@ pub struct PrdPipeline {
     context: PipelineContext,
     meta: PrdMeta,
     options: PrdOptions,
+    pending_questions: Vec<Question>,
+    pending_answers: Option<BTreeMap<String, String>>,
+    pending_gap_stage: Option<Stage>,
 }
 
 impl PrdPipeline {
     /// Creates a new PRD pipeline.
-    ///
-    /// # Arguments
-    /// - `backend`: The backend to use for LLM calls.
-    /// - `interaction`: The interaction layer for user communication.
-    /// - `cache`: The cache manager for reading/writing artifacts.
-    /// - `answer_store`: The answer store for loading/saving user answers.
-    /// - `options`: Pipeline options.
     pub fn new(
         backend: Arc<dyn Backend>,
         interaction: Box<dyn UserInteraction>,
@@ -71,7 +70,6 @@ impl PrdPipeline {
         answer_store: AnswerStore,
         options: PrdOptions,
     ) -> Result<Self> {
-        // Initialize context with the idea and empty state.
         let context = PipelineContext {
             idea: options.idea.clone(),
             answers: BTreeMap::new(),
@@ -81,7 +79,6 @@ impl PrdPipeline {
             question_rounds: 0,
         };
 
-        // Initialize metadata.
         let meta = PrdMeta {
             idea: options.idea.clone(),
             idea_hash: cache.idea_hash().to_string(),
@@ -101,358 +98,307 @@ impl PrdPipeline {
             context,
             meta,
             options,
+            pending_questions: Vec::new(),
+            pending_answers: None,
+            pending_gap_stage: None,
         })
     }
 
-    /// Runs the PRD pipeline, executing stages sequentially and handling gaps deterministically.
-    ///
-    /// This is the loop 6 implementation: sequential stage execution with deterministic gap checks.
-    /// LLM gap analysis, interactive reruns, and validation are deferred to loops 7-8.
+    /// Runs the PRD pipeline as a state machine.
     pub async fn run(mut self) -> Result<PrdResult> {
-        // Acquire lock for the duration of the run.
         let _lock = self.cache.acquire_lock()?;
 
-        // Validate resume (if enabled) to ensure cache matches idea.
         if self.options.resume {
             self.cache.validate_resume_idea()?;
         }
 
-        // Load pre-existing answers from answer store.
         self.answer_store.load()?;
         self.context.answers = self.answer_store.answers().clone();
         self.context.answers_hash = self.answer_store.hash()?;
 
-        // Execute stages in order: Ideation -> Research -> Synthesis -> Prd.
-        for &stage in Stage::all() {
-            self.run_stage(stage).await?;
-            self.check_stage_gaps(stage)?;
+        let mut phase = PrdPhase::RunStage(Stage::Ideation);
+        loop {
+            phase = match phase {
+                PrdPhase::RunStage(stage) => {
+                    self.run_stage(stage).await?;
+                    PrdPhase::CheckGaps(stage)
+                }
+                PrdPhase::CheckGaps(stage) => self.check_gaps_phase(stage).await?,
+                PrdPhase::AskUser(questions) => self.ask_user_phase(questions).await?,
+                PrdPhase::ApplyAnswers => self.apply_answers_phase()?,
+                PrdPhase::MaybeRerun(stage) => self.maybe_rerun_phase(stage),
+                PrdPhase::ValidatePrd => PrdPhase::Done,
+                PrdPhase::Done => break,
+            };
         }
 
-        // Write final metadata and output PRD.md to current working directory.
-        self.meta.completed_at = Some(now_iso8601());
-        self.cache.write_meta(&self.meta)?;
-
-        let final_prd = self
-            .context
-            .stage_outputs
-            .get(&Stage::Prd)
-            .ok_or_else(|| RalphError::PrdPipelineFailed("PRD stage output missing".to_string()))?;
-
-        let prd_path = PathBuf::from("PRD.md");
-        std::fs::write(&prd_path, final_prd)?;
-
-        let summary = format!(
-            "PRD generated successfully in {} question rounds",
-            self.meta.question_rounds
-        );
-
-        Ok(PrdResult {
-            prd_path,
-            cache_dir: self.cache.cache_dir().to_path_buf(),
-            meta: self.meta,
-            summary,
-        })
+        self.finalize_result()
     }
 
-    /// Runs a single stage: builds prompt, calls backend, persists output.
     async fn run_stage(&mut self, stage: Stage) -> Result<()> {
         let start = Instant::now();
-
         self.interaction
             .status(&format!("Running {:?} stage...", stage));
 
-        // Build the stage prompt with current context.
-        let builder =
-            StagePromptBuilder::new(self.context.idea.clone(), self.context.answers.clone(), self.context.stage_outputs.clone());
+        let builder = StagePromptBuilder::new(
+            self.context.idea.clone(),
+            self.context.answers.clone(),
+            self.context.stage_outputs.clone(),
+        );
         let prompt = builder.build_stage_prompt(stage);
-
-        // Call the backend exactly once.
         let raw_output = self.backend.execute(&prompt).await?;
 
-        // Parse and clean the output immediately after backend execution.
         let check = check_stage_output(stage, &raw_output);
-
-        // Persist the cleaned output to cache (frontmatter stripped).
-        self.cache.write_stage_output(stage, &check.cleaned_output)?;
-
-        // Update context with cleaned output (used for downstream stages).
+        self.cache
+            .write_stage_output(stage, &check.cleaned_output)?;
         self.context
             .stage_outputs
             .insert(stage, check.cleaned_output.clone());
 
-        // Compute and store input hash for this stage.
         let input_hash = self.cache.compute_stage_input_hash(stage, &self.context);
         self.context.stage_input_hashes.insert(stage, input_hash);
 
-        // Record timing.
         let elapsed = start.elapsed().as_secs_f64();
         self.meta.stage_timings.insert(stage, elapsed);
-
         self.interaction
             .stage_complete(&stage, &format!("completed in {:.1}s", elapsed));
 
         Ok(())
     }
 
-    /// Checks stage output for deterministic missing sections.
-    /// On missing sections, writes missing_info_report.md and returns PrdMissingInfo error.
-    fn check_stage_gaps(&mut self, stage: Stage) -> Result<()> {
-        let cleaned_output = self
+    async fn check_gaps_phase(&mut self, stage: Stage) -> Result<PrdPhase> {
+        let stage_output = self
             .context
             .stage_outputs
             .get(&stage)
+            .cloned()
             .ok_or_else(|| {
                 RalphError::PrdPipelineFailed(format!("{:?} stage output missing", stage))
             })?;
 
-        let check = check_stage_output(stage, cleaned_output);
-
+        let check = check_stage_output(stage, &stage_output);
         if !check.missing_sections.is_empty() {
-            // Deterministic missing sections detected.
-            let report = format_missing_info_report(stage, &check.missing_sections);
+            let report = format_deterministic_missing_info_report(stage, &check.missing_sections);
             self.cache.write_missing_info_report(&report)?;
-
-            self.interaction
-                .status(&format!("Missing sections in {:?} stage output", stage));
-
             return Err(RalphError::PrdMissingInfo);
         }
 
-        Ok(())
+        let gap_report =
+            run_llm_gap_analysis(self.backend.clone(), stage, &stage_output, &self.context).await?;
+        if gap_report_has_questions(&gap_report) {
+            let max_rounds_reached = self.context.question_rounds >= self.options.ask_max;
+            if !self.interaction.is_interactive() || max_rounds_reached {
+                let reason = if !self.interaction.is_interactive() {
+                    "Pipeline is running in non-interactive mode.".to_owned()
+                } else {
+                    format!(
+                        "Maximum question rounds reached ({}/{}).",
+                        self.context.question_rounds, self.options.ask_max
+                    )
+                };
+                let report = format_gap_missing_info_report(stage, &gap_report, &reason);
+                self.cache.write_missing_info_report(&report)?;
+                return Err(RalphError::PrdMissingInfo);
+            }
+
+            self.pending_gap_stage = Some(stage);
+            self.pending_questions = gap_report.questions.clone();
+            return Ok(PrdPhase::AskUser(gap_report.questions));
+        }
+
+        Ok(match next_stage(stage) {
+            Some(next) => PrdPhase::RunStage(next),
+            None => PrdPhase::ValidatePrd,
+        })
+    }
+
+    async fn ask_user_phase(&mut self, questions: Vec<Question>) -> Result<PrdPhase> {
+        self.context.question_rounds += 1;
+        self.meta.question_rounds = self.context.question_rounds;
+
+        self.pending_questions = questions.clone();
+        let fallback_stage = min_question_impact_stage(&questions).unwrap_or(Stage::Ideation);
+        let stage = self.pending_gap_stage.unwrap_or(fallback_stage);
+        let interaction_ctx = InteractionContext {
+            stage,
+            question_round: self.context.question_rounds,
+            max_rounds: self.options.ask_max,
+        };
+
+        let maybe_answers = self
+            .interaction
+            .ask_questions(&questions, &interaction_ctx)
+            .await?;
+
+        match maybe_answers {
+            None => Err(RalphError::PrdPipelineFailed(
+                "user exited during question flow".to_owned(),
+            )),
+            Some(answers) => {
+                self.pending_answers = Some(answers);
+                Ok(PrdPhase::ApplyAnswers)
+            }
+        }
+    }
+
+    fn apply_answers_phase(&mut self) -> Result<PrdPhase> {
+        let answers = self.pending_answers.take().ok_or_else(|| {
+            RalphError::PrdPipelineFailed("no answers available to apply".to_owned())
+        })?;
+
+        let fallback_stage = self
+            .pending_gap_stage
+            .take()
+            .or_else(|| min_question_impact_stage(&self.pending_questions))
+            .unwrap_or(Stage::Ideation);
+
+        let rerun_stage = self
+            .pending_questions
+            .iter()
+            .filter(|question| answers.contains_key(&question.key))
+            .map(|question| question.impact_stage)
+            .min()
+            .or_else(|| min_question_impact_stage(&self.pending_questions))
+            .unwrap_or(fallback_stage);
+
+        self.answer_store.merge(answers);
+        self.answer_store.save()?;
+        self.context.answers = self.answer_store.answers().clone();
+        self.context.answers_hash = self.answer_store.hash()?;
+
+        self.pending_questions.clear();
+
+        Ok(PrdPhase::MaybeRerun(rerun_stage))
+    }
+
+    fn maybe_rerun_phase(&mut self, rerun_stage: Stage) -> PrdPhase {
+        for stage in Stage::all() {
+            if *stage >= rerun_stage {
+                self.context.stage_outputs.remove(stage);
+                self.context.stage_input_hashes.remove(stage);
+            }
+        }
+
+        self.meta.rerun_stages.push(rerun_stage);
+        PrdPhase::RunStage(rerun_stage)
+    }
+
+    fn finalize_result(mut self) -> Result<PrdResult> {
+        self.meta.completed_at = Some(now_iso8601());
+        self.cache.write_meta(&self.meta)?;
+
+        let final_prd =
+            self.context.stage_outputs.get(&Stage::Prd).ok_or_else(|| {
+                RalphError::PrdPipelineFailed("PRD stage output missing".to_owned())
+            })?;
+
+        let prd_path = PathBuf::from("PRD.md");
+        std::fs::write(&prd_path, final_prd)?;
+
+        Ok(PrdResult {
+            prd_path,
+            cache_dir: self.cache.cache_dir().to_path_buf(),
+            meta: self.meta,
+            summary: format!(
+                "PRD generated successfully in {} question rounds",
+                self.context.question_rounds
+            ),
+        })
     }
 }
 
-/// Formats a missing info report for deterministic missing sections.
-fn format_missing_info_report(stage: Stage, missing_sections: &[String]) -> String {
-    let mut report = format!("# Missing Information Report\n\n");
-    report.push_str(&format!("Stage: {:?}\n\n", stage));
-    report.push_str("Missing Required Sections:\n\n");
-    for section in missing_sections {
-        report.push_str(&format!("- {}\n", section));
+fn next_stage(stage: Stage) -> Option<Stage> {
+    match stage {
+        Stage::Ideation => Some(Stage::Research),
+        Stage::Research => Some(Stage::Synthesis),
+        Stage::Synthesis => Some(Stage::Prd),
+        Stage::Prd => None,
     }
-    report.push_str("\n");
-    report.push_str("The LLM output for this stage is missing required sections.\n");
-    report.push_str("Please ensure the backend is correctly configured and retry.\n");
+}
+
+fn min_question_impact_stage(questions: &[Question]) -> Option<Stage> {
+    questions.iter().map(|question| question.impact_stage).min()
+}
+
+fn format_deterministic_missing_info_report(stage: Stage, missing_sections: &[String]) -> String {
+    let mut report = String::from("# Missing Information Report\n\n");
+    report.push_str(&format!("## Stage\n`{stage:?}`\n\n"));
+    report.push_str("## Missing Required Sections\n");
+    for section in missing_sections {
+        report.push_str(&format!("- {section}\n"));
+    }
+    report.push_str("\n## Next Step\n");
+    report.push_str("Regenerate the stage output with all required headings.\n");
     report
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backend::MockBackend;
-    use crate::prd::interaction::MockInteraction;
-    use tempfile::TempDir;
+fn format_gap_missing_info_report(stage: Stage, report: &GapReport, reason: &str) -> String {
+    let mut markdown = String::from("# Missing Information Report\n\n");
+    markdown.push_str(&format!("## Stage\n`{stage:?}`\n\n"));
+    markdown.push_str(&format!("## Pipeline Stopped\n{reason}\n\n"));
 
-    fn make_ideation_output() -> String {
-        r#"
-## Core Concept
-A smart onboarding system.
+    markdown.push_str("## Questions\n");
+    if report.questions.is_empty() {
+        markdown.push_str("- None\n");
+    } else {
+        for question in &report.questions {
+            markdown.push_str(&format!(
+                "- **{}** (`{:?}`): {}\n",
+                question.key, question.impact_stage, question.prompt
+            ));
+            markdown.push_str(&format!(
+                "  Type: {}\n",
+                format_question_kind(&question.kind)
+            ));
+            if let Some(default) = &question.suggested_default {
+                markdown.push_str(&format!("  Suggested default: {default}\n"));
+            }
+        }
+    }
+    markdown.push('\n');
 
-## Target Users
-New hires in tech companies.
+    markdown.push_str("## Missing Fields\n");
+    if report.missing_fields.is_empty() {
+        markdown.push_str("- None\n");
+    } else {
+        for field in &report.missing_fields {
+            markdown.push_str(&format!("- **{}**: {}\n", field.field, field.description));
+        }
+    }
+    markdown.push('\n');
 
-## Key Problems Solved
-Manual onboarding is slow and error-prone.
+    markdown.push_str("## Ambiguities\n");
+    if report.ambiguities.is_empty() {
+        markdown.push_str("- None\n");
+    } else {
+        for ambiguity in &report.ambiguities {
+            markdown.push_str(&format!(
+                "- **{}**: {}\n",
+                ambiguity.area, ambiguity.description
+            ));
+        }
+    }
+    markdown.push('\n');
 
-## Proposed Features
-- Automated task assignment
-- Progress tracking
-
-## Success Metrics
-- Time to productivity
-- User satisfaction
-
-## Constraints & Assumptions
-- Must integrate with existing HR systems.
-"#
-        .to_string()
+    markdown.push_str("## Suggested Defaults\n");
+    if report.suggested_defaults.is_empty() {
+        markdown.push_str("- None\n");
+    } else {
+        for default in &report.suggested_defaults {
+            markdown.push_str(&format!(
+                "- **{}** = `{}` ({})\n",
+                default.key, default.value, default.rationale
+            ));
+        }
     }
 
-    fn make_research_output() -> String {
-        r#"
-## Market Context
-Competitive market with several players.
+    markdown
+}
 
-## Technical Landscape
-Cloud-based SaaS is standard.
-
-## Comparable Solutions
-BambooHR, Workday.
-
-## Technical Feasibility
-Highly feasible with modern tech stack.
-
-## Risk Assessment
-Low technical risk, moderate market risk.
-"#
-        .to_string()
-    }
-
-    fn make_synthesis_output() -> String {
-        r#"
-## Product Vision
-Streamline employee onboarding.
-
-## User Stories
-- As an HR manager, I want to automate task assignment.
-
-## Feature Prioritization
-1. Core onboarding workflow
-2. Integrations
-
-## Architecture Overview
-Microservices on AWS.
-
-## MVP Scope
-Basic task assignment and tracking.
-
-## Open Questions
-- Which HR systems to prioritize?
-"#
-        .to_string()
-    }
-
-    fn make_prd_output() -> String {
-        r#"
-## Executive Summary
-A system to automate employee onboarding.
-
-## Goals & Non-Goals
-Goals: automate onboarding. Non-goals: payroll.
-
-## User Stories
-- As an HR manager, I want to assign tasks.
-
-## Functional Requirements
-- Task creation and assignment.
-
-## Non-Functional Requirements
-- 99.9% uptime.
-
-## Technical Architecture
-Microservices with API gateway.
-
-## Data Model
-User, Task, Assignment entities.
-
-## API Design
-RESTful API with JSON payloads.
-
-## Security Considerations
-OAuth 2.0 for authentication.
-
-## Testing Strategy
-Unit, integration, and E2E tests.
-
-## Rollout Plan
-Phased rollout starting with pilot team.
-
-## Success Metrics
-- Reduced onboarding time by 50%.
-
-## Open Questions
-- Timeline for pilot?
-"#
-        .to_string()
-    }
-
-    #[tokio::test]
-    async fn happy_path_non_interactive_all_stages_succeed() {
-        let temp = TempDir::new().expect("temp dir");
-        let idea = "smart onboarding system";
-
-        let cache = CacheManager::new(temp.path(), idea).expect("cache manager");
-        let answers_path = cache.cache_dir().join("answers.yaml");
-        let answer_store = AnswerStore::new(&answers_path);
-
-        let backend = Arc::new(MockBackend::new(
-            "mock",
-            vec![
-                make_ideation_output(),
-                make_research_output(),
-                make_synthesis_output(),
-                make_prd_output(),
-            ],
-        ));
-
-        let interaction = Box::new(MockInteraction::new(vec![]));
-
-        let options = PrdOptions {
-            idea: idea.to_string(),
-            backend_spec: "codex(gpt-5.3-codex)".to_string(),
-            ask_max: 3,
-            resume: false,
-            dry_run: false,
-        };
-
-        let pipeline = PrdPipeline::new(backend.clone(), interaction, cache, answer_store, options)
-            .expect("pipeline creation");
-
-        let result = pipeline.run().await.expect("pipeline run");
-
-        // Verify PRD.md was written to current directory.
-        assert_eq!(result.prd_path, PathBuf::from("PRD.md"));
-        assert!(std::fs::metadata("PRD.md").is_ok());
-
-        // Verify metadata was recorded.
-        assert_eq!(result.meta.question_rounds, 0);
-        assert_eq!(result.meta.stage_timings.len(), 4);
-        assert!(result.meta.completed_at.is_some());
-
-        // Verify backend was called exactly 4 times.
-        assert_eq!(backend.call_count().await, 4);
-
-        // Cleanup.
-        let _ = std::fs::remove_file("PRD.md");
-    }
-
-    #[tokio::test]
-    async fn missing_section_triggers_prd_missing_info() {
-        let temp = TempDir::new().expect("temp dir");
-        let idea = "incomplete ideation test";
-
-        let cache = CacheManager::new(temp.path(), idea).expect("cache manager");
-        let answers_path = cache.cache_dir().join("answers.yaml");
-        let answer_store = AnswerStore::new(&answers_path);
-
-        // Ideation output missing "## Success Metrics" and "## Constraints & Assumptions".
-        let incomplete_ideation = r#"
-## Core Concept
-A thing.
-
-## Target Users
-Some users.
-
-## Key Problems Solved
-Some problems.
-
-## Proposed Features
-Some features.
-"#
-        .to_string();
-
-        let backend = Arc::new(MockBackend::new("mock", vec![incomplete_ideation]));
-        let interaction = Box::new(MockInteraction::new(vec![]));
-
-        let options = PrdOptions {
-            idea: idea.to_string(),
-            backend_spec: "codex(gpt-5.3-codex)".to_string(),
-            ask_max: 3,
-            resume: false,
-            dry_run: false,
-        };
-
-        let pipeline = PrdPipeline::new(backend, interaction, cache.clone(), answer_store, options)
-            .expect("pipeline creation");
-
-        let err = pipeline.run().await.expect_err("should fail");
-        assert!(matches!(err, RalphError::PrdMissingInfo));
-
-        // Verify missing_info_report.md was written.
-        let report_path = cache.cache_dir().join("missing_info_report.md");
-        let report = std::fs::read_to_string(report_path).expect("read report");
-        assert!(report.contains("Missing Required Sections"));
-        assert!(report.contains("## Success Metrics"));
-        assert!(report.contains("## Constraints & Assumptions"));
+fn format_question_kind(kind: &QuestionKind) -> String {
+    match kind {
+        QuestionKind::FreeText => "FreeText".to_owned(),
+        QuestionKind::Choice(options) => format!("Choice [{}]", options.join(", ")),
+        QuestionKind::YesNo => "YesNo".to_owned(),
     }
 }

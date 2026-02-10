@@ -23,6 +23,8 @@ pub trait UserInteraction: Send + Sync {
     fn status(&self, message: &str);
 
     fn stage_complete(&self, stage: &Stage, summary: &str);
+
+    fn is_interactive(&self) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +162,10 @@ impl UserInteraction for PlainInteraction {
     fn stage_complete(&self, stage: &Stage, summary: &str) {
         println!("Completed {:?}: {}", stage, summary);
     }
+
+    fn is_interactive(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -184,6 +190,10 @@ impl UserInteraction for NonInteractiveInteraction {
     fn status(&self, _message: &str) {}
 
     fn stage_complete(&self, _stage: &Stage, _summary: &str) {}
+
+    fn is_interactive(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,6 +253,10 @@ impl UserInteraction for MockInteraction {
             .lock()
             .expect("mock stage completion lock poisoned")
             .push((*stage, summary.to_owned()));
+    }
+
+    fn is_interactive(&self) -> bool {
+        true
     }
 }
 

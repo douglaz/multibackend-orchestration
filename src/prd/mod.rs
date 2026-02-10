@@ -8,6 +8,10 @@ pub mod state;
 
 pub use answers::AnswerStore;
 pub use cache::{CacheManager, PrdLock};
+pub use gaps::{
+    gap_report_has_questions, parse_gap_report, run_llm_gap_analysis, Ambiguity, GapReport,
+    MissingField, Question, QuestionKind, SuggestedDefault,
+};
 pub use interaction::{
     InteractionContext, MockInteraction, NonInteractiveInteraction, PlainInteraction,
     UserInteraction,

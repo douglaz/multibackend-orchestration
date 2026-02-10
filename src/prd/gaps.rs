@@ -1,11 +1,17 @@
 //! PRD gap analysis types and logic.
 
+use std::sync::Arc;
+
+use crate::backend::Backend;
+use crate::error::RalphError;
+use crate::Result;
 use serde::{Deserialize, Serialize};
 
-use super::state::Stage;
+use super::stages::StagePromptBuilder;
+use super::state::{PipelineContext, Stage};
 
 /// Gap analysis report from a stage output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapReport {
     /// Fields that are required but missing from the output.
     pub missing_fields: Vec<MissingField>,
@@ -70,6 +76,72 @@ pub enum QuestionKind {
     Choice(Vec<String>),
     /// Yes/No question.
     YesNo,
+}
+
+/// Parses a gap analysis response from an LLM, extracting the fenced JSON block.
+pub fn parse_gap_report(raw: &str) -> Result<GapReport> {
+    let fenced_json = extract_fenced_json(raw)?;
+    let report = serde_json::from_str::<GapReport>(fenced_json)?;
+    Ok(report)
+}
+
+/// Returns true when a gap report has at least one follow-up question.
+pub fn gap_report_has_questions(report: &GapReport) -> bool {
+    !report.questions.is_empty()
+}
+
+/// Runs LLM-based gap analysis with up to 3 parse attempts and parse-fallback behavior.
+pub async fn run_llm_gap_analysis(
+    backend: Arc<dyn Backend>,
+    stage: Stage,
+    stage_output: &str,
+    context: &PipelineContext,
+) -> Result<GapReport> {
+    let prompt_builder = StagePromptBuilder::new(
+        context.idea.clone(),
+        context.answers.clone(),
+        context.stage_outputs.clone(),
+    );
+
+    let mut prompt = prompt_builder.build_gap_analysis_prompt(stage, stage_output);
+
+    for attempt in 1..=3_u8 {
+        let raw = backend.execute(&prompt).await?;
+        match parse_gap_report(&raw) {
+            Ok(report) => return Ok(report),
+            Err(parse_error) => {
+                if attempt == 3 {
+                    return Ok(GapReport::default());
+                }
+                prompt = build_reformat_prompt(stage, &parse_error, &raw);
+            }
+        }
+    }
+
+    Ok(GapReport::default())
+}
+
+fn extract_fenced_json(raw: &str) -> Result<&str> {
+    let fence_start = raw
+        .find("```json")
+        .ok_or_else(|| RalphError::ParseError("missing opening ```json fence".to_owned()))?;
+    let json_start = fence_start + "```json".len();
+    let tail = &raw[json_start..];
+    let fence_end = tail
+        .find("```")
+        .ok_or_else(|| RalphError::ParseError("missing closing ``` fence".to_owned()))?;
+    Ok(tail[..fence_end].trim())
+}
+
+fn build_reformat_prompt(stage: Stage, parse_error: &RalphError, previous_output: &str) -> String {
+    format!(
+        "CRITICAL: Your previous gap analysis for stage {stage:?} could not be parsed.\n\n\
+Error: {parse_error}\n\n\
+Return ONLY a single fenced JSON block with schema:\n\
+`missing_fields`, `ambiguities`, `questions`, `suggested_defaults`.\n\
+Use valid JSON, no prose before or after the fenced block.\n\n\
+Previous response:\n---\n{previous_output}\n---\n"
+    )
 }
 
 #[cfg(test)]
@@ -145,5 +217,69 @@ mod tests {
         let json = serde_json::to_string(&question).unwrap();
         let deserialized: Question = serde_json::from_str(&json).unwrap();
         assert_eq!(question.impact_stage, deserialized.impact_stage);
+    }
+
+    #[test]
+    fn parse_gap_report_valid_fenced_json() {
+        let raw = r#"
+Some analysis text.
+
+```json
+{
+  "missing_fields": [],
+  "ambiguities": [],
+  "questions": [
+    {
+      "key": "target_user",
+      "prompt": "Who is the target user?",
+      "kind": "FreeText",
+      "suggested_default": null,
+      "impact_stage": "Ideation"
+    }
+  ],
+  "suggested_defaults": []
+}
+```
+"#;
+
+        let report = parse_gap_report(raw).expect("should parse");
+        assert_eq!(report.questions.len(), 1);
+        assert!(gap_report_has_questions(&report));
+    }
+
+    #[test]
+    fn parse_gap_report_malformed_json_returns_error() {
+        let raw = r#"
+```json
+{ "missing_fields": [ }
+```
+"#;
+
+        assert!(parse_gap_report(raw).is_err());
+    }
+
+    #[test]
+    fn parse_gap_report_missing_fence_markers_returns_error() {
+        let raw =
+            r#"{"missing_fields":[],"ambiguities":[],"questions":[],"suggested_defaults":[]}"#;
+        assert!(parse_gap_report(raw).is_err());
+    }
+
+    #[test]
+    fn parse_gap_report_empty_questions_list() {
+        let raw = r#"
+```json
+{
+  "missing_fields": [],
+  "ambiguities": [],
+  "questions": [],
+  "suggested_defaults": []
+}
+```
+"#;
+
+        let report = parse_gap_report(raw).expect("should parse");
+        assert!(report.questions.is_empty());
+        assert!(!gap_report_has_questions(&report));
     }
 }

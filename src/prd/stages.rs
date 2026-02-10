@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::workflow::parser::{first_h1_line, strip_frontmatter};
+use crate::workflow::parser::strip_frontmatter;
 
 use super::state::Stage;
 
@@ -291,7 +291,10 @@ impl StagePromptBuilder {
         // Inject prior stage outputs based on stage dependency rules
         let ideation = self.stage_outputs.get(&Stage::Ideation).map(|s| s.as_str());
         let research = self.stage_outputs.get(&Stage::Research).map(|s| s.as_str());
-        let synthesis = self.stage_outputs.get(&Stage::Synthesis).map(|s| s.as_str());
+        let synthesis = self
+            .stage_outputs
+            .get(&Stage::Synthesis)
+            .map(|s| s.as_str());
 
         match stage {
             Stage::Ideation => {
@@ -310,8 +313,7 @@ impl StagePromptBuilder {
                 // PRD gets all three
                 replacements.push(("{{ideation}}", ideation.unwrap_or("(not yet available)")));
                 replacements.push(("{{research}}", research.unwrap_or("(not yet available)")));
-                replacements
-                    .push(("{{synthesis}}", synthesis.unwrap_or("(not yet available)")));
+                replacements.push(("{{synthesis}}", synthesis.unwrap_or("(not yet available)")));
             }
         }
 
@@ -541,8 +543,11 @@ mod tests {
 
     #[test]
     fn test_gap_analysis_prompt() {
-        let builder =
-            StagePromptBuilder::new("Build a todo app".to_string(), BTreeMap::new(), BTreeMap::new());
+        let builder = StagePromptBuilder::new(
+            "Build a todo app".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
 
         let prompt = builder.build_gap_analysis_prompt(Stage::Ideation, "Some ideation output");
 
@@ -563,8 +568,11 @@ mod tests {
 
     #[test]
     fn test_validation_prompt() {
-        let builder =
-            StagePromptBuilder::new("Build a todo app".to_string(), BTreeMap::new(), BTreeMap::new());
+        let builder = StagePromptBuilder::new(
+            "Build a todo app".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
 
         let prompt = builder.build_validation_prompt("Final PRD content");
 
@@ -616,9 +624,15 @@ Some content
 
         let check = check_stage_output(Stage::Ideation, output);
         assert_eq!(check.missing_sections.len(), 4);
-        assert!(check.missing_sections.contains(&"## Key Problems Solved".to_string()));
-        assert!(check.missing_sections.contains(&"## Proposed Features".to_string()));
-        assert!(check.missing_sections.contains(&"## Success Metrics".to_string()));
+        assert!(check
+            .missing_sections
+            .contains(&"## Key Problems Solved".to_string()));
+        assert!(check
+            .missing_sections
+            .contains(&"## Proposed Features".to_string()));
+        assert!(check
+            .missing_sections
+            .contains(&"## Success Metrics".to_string()));
         assert!(check
             .missing_sections
             .contains(&"## Constraints & Assumptions".to_string()));
@@ -667,8 +681,7 @@ Some content
 
     #[test]
     fn test_format_answers_empty() {
-        let builder =
-            StagePromptBuilder::new("idea".to_string(), BTreeMap::new(), BTreeMap::new());
+        let builder = StagePromptBuilder::new("idea".to_string(), BTreeMap::new(), BTreeMap::new());
         assert_eq!(builder.format_answers(), "(none provided)");
     }
 
