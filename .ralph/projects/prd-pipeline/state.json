@@ -5,10 +5,10 @@
   "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "parent_project": null,
-  "current_loop": 8,
-  "current_phase": "committing",
+  "current_loop": 9,
+  "current_phase": "completing",
   "phase_iteration": 1,
-  "status": "in_progress",
+  "status": "completed",
   "loops": [
     {
       "loop_number": 1,
@@ -200,7 +200,7 @@
       "slug": "validation-resume-completion",
       "feature_name": "Validation + Resume Completion",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex)",
         "implementer": "claude(sonnet)",
@@ -228,10 +228,28 @@
         ],
         "approval": "loops/008-validation-resume-completion/20260210213102-review-approved.md"
       },
-      "commit": null,
+      "commit": "c287d1b4e45c29ee79a1e5efccb288bf7e121f68",
       "started_at": "2026-02-10T21:08:32.853364488Z",
-      "completed_at": null
+      "completed_at": "2026-02-10T21:31:02.897149004Z"
     }
   ],
-  "completion_attempts": []
+  "completion_attempts": [
+    {
+      "loop_number": 9,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "termination_request": "loops/009-completion/20260210213126-termination-request.md",
+        "verdict": "loops/009-completion/20260210213552-completer-verdict.md"
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-10T21:31:26.474866395Z",
+      "completed_at": "2026-02-10T21:35:52.738241355Z"
+    }
+  ]
 }
