@@ -39,8 +39,10 @@
           # /usr/bin/env, so patch the shebang string in the test source
           # to use the Nix store bash path directly.
           postPatch = ''
-            substituteInPlace tests/orchestrator.rs \
-              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+            for f in tests/orchestrator.rs tests/backend.rs tests/tail_tmux.rs; do
+              substituteInPlace "$f" \
+                --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+            done
           '';
 
         };

@@ -828,6 +828,7 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
 
 #[tokio::test]
 async fn two_loop_happy_path_with_separate_backends() {
+    let _lock = lock_path();
     let (_temp, workspace_root, project_id) = setup_workspace_with_split_backends();
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
