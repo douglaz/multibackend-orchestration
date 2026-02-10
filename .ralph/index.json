@@ -64,9 +64,9 @@
       "status": "in_progress",
       "created_at": "2026-02-10T19:48:14.577731302Z",
       "completed_at": null,
-      "total_feature_loops": 1,
+      "total_feature_loops": 2,
       "total_completion_attempts": 0,
-      "last_loop_number": 2,
+      "last_loop_number": 3,
       "parent_project": null
     }
   ]

@@ -5,3 +5,6 @@ pub mod interaction;
 pub mod pipeline;
 pub mod stages;
 pub mod state;
+
+pub use answers::AnswerStore;
+pub use cache::{CacheManager, PrdLock};

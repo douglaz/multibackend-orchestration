@@ -5,7 +5,7 @@
   "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -36,7 +36,7 @@
       "slug": "core-types-unit-tests",
       "feature_name": "Core Types + Unit Tests",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex)",
         "implementer": "claude(sonnet)",
@@ -59,8 +59,29 @@
         ],
         "approval": "loops/002-core-types-unit-tests/20260210201010-review-approved.md"
       },
-      "commit": null,
+      "commit": "7191a1f0f93466c30d144d0aa18bff8a593b7184",
       "started_at": "2026-02-10T20:04:15.098062707Z",
+      "completed_at": "2026-02-10T20:10:10.186701226Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "cache-lock-answers",
+      "feature_name": "Cache + Lock + Answers",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/003-cache-lock-answers/20260210201058-spec.md",
+        "impl_notes": "loops/003-cache-lock-answers/20260210201531-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-cache-lock-answers/20260210201634-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T20:10:58.291585359Z",
       "completed_at": null
     }
   ],
