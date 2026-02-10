@@ -72,7 +72,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
     ///
     /// The command:
     ///   1. Pipes the prompt file into the backend command via stdin
-    ///   2. Redirects only stdout to the output file (stderr stays on the terminal)
+    ///   2. Pipes stdout through `tee` so it's visible in the tmux pane AND captured to the output file
     ///   3. Writes the exit code to the exit file
     fn build_shell_command(
         &self,
@@ -93,9 +93,9 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             ));
         }
 
-        // cat prompt | command args > output; echo $? > exit
+        // cat prompt | command args | tee output; echo ${PIPESTATUS[1]} > exit
         parts.push(format!(
-            "cat {} | {} {} > {}; echo $? > {}",
+            "cat {} | {} {} | tee {}; echo ${{PIPESTATUS[1]}} > {}",
             shell_escape(&prompt_file.display().to_string()),
             shell_escape(&resolved),
             self.inner
@@ -394,11 +394,11 @@ mod tests {
             "missing cat prompt: {cmd}"
         );
         assert!(
-            cmd.contains("> '/tmp/output.txt'"),
-            "missing stdout redirect: {cmd}"
+            cmd.contains("| tee '/tmp/output.txt'"),
+            "missing tee stdout: {cmd}"
         );
         assert!(
-            cmd.contains("echo $? > '/tmp/exit.txt'"),
+            cmd.contains("echo ${PIPESTATUS[1]} > '/tmp/exit.txt'"),
             "missing exit capture: {cmd}"
         );
         // Should NOT contain 2>&1

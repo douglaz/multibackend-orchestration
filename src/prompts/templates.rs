@@ -86,6 +86,7 @@ Given a feature spec, implement it by:
 1. Creating/modifying the specified files
 2. Following project conventions
 3. Writing clean, tested code
+4. VERIFYING your changes compile — after making all changes, run the project's build/check command (e.g. `cargo check`, `nix build`, `npm test`, etc.) and fix any compilation errors before submitting your response
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)

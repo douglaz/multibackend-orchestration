@@ -11,7 +11,7 @@ use tokio::time::{sleep, Duration};
 use crate::cli::TailArgs;
 use crate::project::artifacts::parse_artifact_filename_timestamp;
 use crate::project::lifecycle::load_project_state;
-use crate::project::state::{CompletionVerdict, LoopStatus, Phase};
+use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -133,6 +133,16 @@ pub async fn execute(args: TailArgs) -> Result<()> {
     let project_dir = workspace.project_dir(&project_id);
     if !project_dir.exists() {
         return Err(RalphError::ProjectNotFound(project_id));
+    }
+
+    // Warn if showing a completed project (may be stale)
+    if let Ok(state) = load_project_state(&project_dir) {
+        if state.status == ProjectStatus::Completed {
+            eprintln!(
+                "warning: project '{}' is completed. Output may be stale.",
+                project_id
+            );
+        }
     }
 
     let mut events = collect_all_events(&project_dir, &project_id)?;

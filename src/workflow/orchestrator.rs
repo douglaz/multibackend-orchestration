@@ -105,6 +105,7 @@ impl Orchestrator {
     pub async fn run(&mut self, options: RunOptions) -> Result<OrchestrationResult> {
         validate_termination_controls(&options)?;
 
+        let explicit_project = options.project.is_some();
         let project_id = if let Some(id) = options.project.as_ref() {
             id.clone()
         } else {
@@ -118,6 +119,14 @@ impl Orchestrator {
         let project_dir = self.workspace.project_dir(&project_id);
         if !project_dir.exists() {
             return Err(RalphError::ProjectNotFound(project_id));
+        }
+
+        // When --project is explicitly specified, update the active project
+        if explicit_project {
+            self.workspace
+                .index
+                .set_active_project(&project_id)?;
+            self.workspace.save_index()?;
         }
 
         let _lock = ProjectLock::acquire(&project_dir, &project_id)?;
