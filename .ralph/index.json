@@ -39,12 +39,12 @@
     {
       "id": "per-role-models",
       "name": "Per-Role Backend/Model Overrides",
-      "status": "in_progress",
+      "status": "completed",
       "created_at": "2026-02-10T17:54:35.001030940Z",
-      "completed_at": null,
-      "total_feature_loops": 0,
-      "total_completion_attempts": 0,
-      "last_loop_number": 1,
+      "completed_at": "2026-02-10T18:12:37.427866925Z",
+      "total_feature_loops": 1,
+      "total_completion_attempts": 1,
+      "last_loop_number": 2,
       "parent_project": null
     }
   ]
