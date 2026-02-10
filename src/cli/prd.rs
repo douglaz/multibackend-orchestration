@@ -7,8 +7,7 @@ use clap::Args;
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
 use crate::prd::{
-    AnswerStore, CacheManager, NonInteractiveInteraction, PlainInteraction, PrdOptions,
-    PrdPipeline,
+    AnswerStore, CacheManager, NonInteractiveInteraction, PlainInteraction, PrdOptions, PrdPipeline,
 };
 use crate::workspace::Workspace;
 use crate::Result;

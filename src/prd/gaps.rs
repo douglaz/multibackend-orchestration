@@ -393,12 +393,10 @@ Some analysis text.
     fn validation_result_serde_roundtrip() {
         let result = ValidationResult {
             valid: false,
-            issues: vec![
-                ValidationIssue {
-                    field: "security".to_string(),
-                    description: "Authentication strategy unclear".to_string(),
-                },
-            ],
+            issues: vec![ValidationIssue {
+                field: "security".to_string(),
+                description: "Authentication strategy unclear".to_string(),
+            }],
         };
 
         let json = serde_json::to_string(&result).unwrap();

@@ -776,3 +776,48 @@ printf '%s\n' "$*"
         .expect("model backend should execute");
     assert_eq!(output.trim(), "--model opus --base-flag value");
 }
+
+#[tokio::test]
+async fn get_or_create_for_spec_codex_suffix_injects_reasoning_effort_args() {
+    let _lock = lock_path();
+    let temp = TempDir::new().expect("temp dir");
+    let bin_dir = temp.path();
+    let backend_script = bin_dir.join("mock-backend");
+
+    write_executable(
+        &backend_script,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '%s\n' "$*"
+"#,
+    );
+
+    let mut config = test_config();
+    config.backends.codex.command = backend_script.to_string_lossy().to_string();
+
+    let mut registry = BackendRegistry::new(&config, tmux_disabled());
+    let backend = registry
+        .get_or_create_for_spec("codex(gpt-5.3-codex-xhigh)")
+        .expect("codex model backend should be created");
+    assert_eq!(backend.name(), "codex(gpt-5.3-codex-xhigh)");
+
+    let output = backend
+        .execute("hello")
+        .await
+        .expect("codex model backend should execute");
+    let args = output.trim();
+
+    assert!(
+        args.contains("-c model_reasoning_effort=\"xhigh\""),
+        "expected reasoning effort arg, got: {args}"
+    );
+    assert!(
+        args.contains("--model gpt-5.3-codex"),
+        "expected base model arg, got: {args}"
+    );
+    assert!(
+        !args.contains("--model gpt-5.3-codex-xhigh"),
+        "unexpected suffixed model arg: {args}"
+    );
+}
