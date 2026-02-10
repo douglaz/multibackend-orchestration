@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
+use ralph::error::RalphError;
 use ralph::project::lifecycle::{
     create_project, load_project_state, CreateProjectOptions, PromptSource,
 };
@@ -17,6 +19,8 @@ use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
 use regex::Regex;
 use tempfile::TempDir;
+
+static PATH_LOCK: Mutex<()> = Mutex::new(());
 
 fn git_ok(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -244,6 +248,7 @@ fn run_options(project_id: &str) -> RunOptions {
         until_complete: false,
         dry_run: false,
         backend: None,
+        tmux: None,
         on_prompt_change: None,
         skip_commit: false,
     }
@@ -257,6 +262,32 @@ fn assert_timestamped_artifact(rel_path: &str, suffix: &str) {
         re.is_match(rel_path),
         "artifact path should be timestamp-prefixed: {rel_path}"
     );
+}
+
+struct PathGuard {
+    original: Option<String>,
+}
+
+impl PathGuard {
+    fn set(path: &str) -> Self {
+        let original = std::env::var("PATH").ok();
+        std::env::set_var("PATH", path);
+        Self { original }
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.as_ref() {
+            std::env::set_var("PATH", value);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+}
+
+fn lock_path() -> MutexGuard<'static, ()> {
+    PATH_LOCK.lock().expect("path lock poisoned")
 }
 
 #[tokio::test]
@@ -396,6 +427,54 @@ async fn dry_run_does_not_checkout_project_branch() {
         .expect("load project state");
     assert_eq!(state.current_loop, 0);
     assert_eq!(state.status, ProjectStatus::Pending);
+}
+
+#[tokio::test]
+async fn tmux_mode_fails_early_when_tmux_is_unavailable() {
+    let _lock = lock_path();
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.workspace.tmux = true;
+    workspace.config.workspace.tmux_session = "ralph-test".to_owned();
+
+    // Empty PATH ensures tmux cannot be discovered.
+    let _path_guard = PathGuard::set("");
+
+    let mut orchestrator = Orchestrator::new(workspace);
+    let result = orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect_err("run should fail without tmux");
+    assert!(
+        matches!(result, RalphError::TmuxUnavailable),
+        "expected tmux unavailable error, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tmux_mode_dry_run_skips_tmux_availability_check() {
+    let _lock = lock_path();
+    let (_temp, workspace_root, project_id, _script) =
+        setup_workspace_with_project("feature", "complete");
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.workspace.tmux = true;
+    workspace.config.workspace.tmux_session = "ralph-test".to_owned();
+
+    // Even without PATH, dry-run should not fail on tmux preflight.
+    let _path_guard = PathGuard::set("");
+
+    let mut orchestrator = Orchestrator::new(workspace);
+    let mut options = run_options(&project_id);
+    options.dry_run = true;
+
+    let result = orchestrator.run(options).await;
+    assert!(
+        result.is_ok(),
+        "dry-run should skip tmux preflight: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -667,7 +746,10 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
     write_codex_script(&codex_script);
 
     git_ok(repo_root, &["add", "mock_claude.sh", "mock_codex.sh"]);
-    git_ok(repo_root, &["commit", "-m", "test: add split backend mocks"]);
+    git_ok(
+        repo_root,
+        &["commit", "-m", "test: add split backend mocks"],
+    );
 
     // Initialise workspace
     let workspace_root = repo_root.join(".ralph");

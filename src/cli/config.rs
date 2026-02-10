@@ -266,6 +266,12 @@ fn set_global_value(
             ensure_backend(raw_value)?;
             config.workspace.default_backend = raw_value.to_owned();
         }
+        "workspace.tmux" => {
+            config.workspace.tmux = parse_bool(raw_value, key)?;
+        }
+        "workspace.tmux_session" => {
+            config.workspace.tmux_session = raw_value.to_owned();
+        }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
         }

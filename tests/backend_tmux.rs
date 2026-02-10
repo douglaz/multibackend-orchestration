@@ -73,7 +73,9 @@ fn spawn_file_watcher(
                         let exit_path = tmp_dir.join(format!("{file_prefix}-exit.txt"));
 
                         fs::write(&output_path, &output).await.unwrap();
-                        fs::write(&exit_path, format!("{exit_code}\n")).await.unwrap();
+                        fs::write(&exit_path, format!("{exit_code}\n"))
+                            .await
+                            .unwrap();
 
                         return vec![prompt_path, output_path, exit_path];
                     }
@@ -87,9 +89,9 @@ fn spawn_file_watcher(
 #[tokio::test]
 async fn tmux_backend_calls_sequence_ensure_create_wait_kill() {
     let runner = MockTmuxRunner::with_responses(vec![
-        Ok(String::new()),       // has-session
-        Ok("4\n".to_owned()),    // create_window
-        Ok(String::new()),       // kill_window
+        Ok(String::new()),    // has-session
+        Ok("4\n".to_owned()), // create_window
+        Ok(String::new()),    // kill_window
     ]);
 
     let cli = CliBackend::new(
@@ -177,8 +179,14 @@ async fn tmux_backend_nonzero_exit_returns_backend_command_failed() {
     match result {
         Err(RalphError::BackendCommandFailed { backend, details }) => {
             assert_eq!(backend, "fail-backend");
-            assert!(details.contains("42"), "should include exit code: {details}");
-            assert!(details.contains("mycommand"), "should include command: {details}");
+            assert!(
+                details.contains("42"),
+                "should include exit code: {details}"
+            );
+            assert!(
+                details.contains("mycommand"),
+                "should include command: {details}"
+            );
         }
         other => panic!("expected BackendCommandFailed, got: {other:?}"),
     }
@@ -314,10 +322,22 @@ async fn tmux_backend_command_preserves_env_and_args() {
     let create_call = &calls[1]; // new-window call
     let shell_cmd = create_call.last().unwrap();
 
-    assert!(shell_cmd.contains("API_KEY"), "should contain env var: {shell_cmd}");
-    assert!(shell_cmd.contains("secret123"), "should contain env value: {shell_cmd}");
-    assert!(shell_cmd.contains("--verbose"), "should contain --verbose arg: {shell_cmd}");
-    assert!(shell_cmd.contains("--mode=fast"), "should contain --mode=fast arg: {shell_cmd}");
+    assert!(
+        shell_cmd.contains("API_KEY"),
+        "should contain env var: {shell_cmd}"
+    );
+    assert!(
+        shell_cmd.contains("secret123"),
+        "should contain env value: {shell_cmd}"
+    );
+    assert!(
+        shell_cmd.contains("--verbose"),
+        "should contain --verbose arg: {shell_cmd}"
+    );
+    assert!(
+        shell_cmd.contains("--mode=fast"),
+        "should contain --mode=fast arg: {shell_cmd}"
+    );
 }
 
 #[tokio::test]
@@ -343,5 +363,8 @@ async fn tmux_backend_no_stderr_redirect() {
 
     let calls = runner.calls().await;
     let shell_cmd = calls[1].last().unwrap();
-    assert!(!shell_cmd.contains("2>&1"), "stderr must not be redirected: {shell_cmd}");
+    assert!(
+        !shell_cmd.contains("2>&1"),
+        "stderr must not be redirected: {shell_cmd}"
+    );
 }

@@ -5,7 +5,7 @@
   "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -36,7 +36,7 @@
       "slug": "tmuxbackend-execution-wrapper",
       "feature_name": "TmuxBackend execution wrapper",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex",
         "implementer": "claude",
@@ -54,8 +54,29 @@
         ],
         "approval": "loops/002-tmuxbackend-execution-wrapper/20260210045244-review-approved.md"
       },
-      "commit": null,
+      "commit": "3362f9036f86dff299afd9cfa2ec1476351b92e0",
       "started_at": "2026-02-10T04:38:38.272116545Z",
+      "completed_at": "2026-02-10T04:52:44.710923635Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "configuration-and-cli-wiring",
+      "feature_name": "Configuration and CLI wiring",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/003-configuration-and-cli-wiring/20260210045517-spec.md",
+        "impl_notes": "loops/003-configuration-and-cli-wiring/20260210050331-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-configuration-and-cli-wiring/20260210050402-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T04:55:17.666696405Z",
       "completed_at": null
     }
   ],

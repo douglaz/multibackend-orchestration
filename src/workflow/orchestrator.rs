@@ -8,7 +8,7 @@ use chrono::Utc;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, BackendRegistry};
+use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{
     resolve_effective_config, CommitMessageStyle, EffectiveConfig, PromptChangeAction,
 };
@@ -65,6 +65,7 @@ pub struct RunOptions {
     pub until_complete: bool,
     pub dry_run: bool,
     pub backend: Option<String>,
+    pub tmux: Option<bool>,
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
 }
@@ -113,7 +114,24 @@ impl Orchestrator {
             options.backend.as_deref(),
         )?;
 
-        let registry = BackendRegistry::new(&effective.global);
+        let tmux_settings = resolve_tmux_settings(
+            options.tmux,
+            effective.global.workspace.tmux,
+            effective.global.workspace.tmux_session.clone(),
+        );
+        validate_tmux_preflight(
+            tmux_settings.enabled,
+            options.dry_run,
+            tmux::check_tmux_available,
+        )?;
+
+        let registry = BackendRegistry::new(
+            &effective.global,
+            BackendRegistryTmuxConfig {
+                enabled: tmux_settings.enabled,
+                session_name: tmux_settings.session_name,
+            },
+        );
         if !options.dry_run {
             info!("checking backend availability...");
             registry.health_check_all().await?;
@@ -892,6 +910,33 @@ impl Orchestrator {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedTmuxSettings {
+    enabled: bool,
+    session_name: String,
+}
+
+fn resolve_tmux_settings(
+    cli_override: Option<bool>,
+    config_enabled: bool,
+    session_name: String,
+) -> ResolvedTmuxSettings {
+    ResolvedTmuxSettings {
+        enabled: cli_override.unwrap_or(config_enabled),
+        session_name,
+    }
+}
+
+fn validate_tmux_preflight<F>(tmux_enabled: bool, dry_run: bool, check_tmux: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if tmux_enabled && !dry_run {
+        check_tmux()?;
+    }
+    Ok(())
+}
+
 fn validate_termination_controls(options: &RunOptions) -> Result<()> {
     if options.loops == Some(0) {
         return Err(RalphError::Validation(
@@ -1524,4 +1569,47 @@ async fn execute_with_timeout_retries(
     Err(RalphError::Orchestration(
         "unexpected timeout retry control-flow error".to_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::{resolve_tmux_settings, validate_tmux_preflight};
+    use crate::error::RalphError;
+
+    #[test]
+    fn resolve_tmux_settings_prefers_cli_override() {
+        let resolved = resolve_tmux_settings(Some(false), true, "ralph".to_owned());
+        assert!(!resolved.enabled);
+        assert_eq!(resolved.session_name, "ralph");
+    }
+
+    #[test]
+    fn resolve_tmux_settings_falls_back_to_config() {
+        let resolved = resolve_tmux_settings(None, true, "session-a".to_owned());
+        assert!(resolved.enabled);
+        assert_eq!(resolved.session_name, "session-a");
+    }
+
+    #[test]
+    fn validate_tmux_preflight_checks_when_enabled_and_not_dry_run() {
+        let called = Arc::new(AtomicBool::new(false));
+        let called_ref = Arc::clone(&called);
+
+        let result = validate_tmux_preflight(true, false, move || {
+            called_ref.store(true, Ordering::Relaxed);
+            Err(RalphError::TmuxUnavailable)
+        });
+
+        assert!(called.load(Ordering::Relaxed));
+        assert!(matches!(result, Err(RalphError::TmuxUnavailable)));
+    }
+
+    #[test]
+    fn validate_tmux_preflight_skips_check_for_dry_run() {
+        let result = validate_tmux_preflight(true, true, || Err(RalphError::TmuxUnavailable));
+        assert!(result.is_ok());
+    }
 }

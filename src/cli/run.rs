@@ -17,6 +17,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             backend: args.backend,
             on_prompt_change: args.on_prompt_change,
             skip_commit: args.skip_commit,
+            tmux: args.tmux.or(args.no_tmux),
         })
         .await?;
 

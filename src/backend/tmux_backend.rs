@@ -51,17 +51,17 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
         output_file: &Path,
         exit_file: &Path,
     ) -> String {
-        let resolved = self
-            .inner
-            .resolved_command_path()
-            .display()
-            .to_string();
+        let resolved = self.inner.resolved_command_path().display().to_string();
 
         let mut parts: Vec<String> = Vec::new();
 
         // Prepend env var exports
         for (key, val) in self.inner.env() {
-            parts.push(format!("export {}={};", shell_escape(key), shell_escape(val)));
+            parts.push(format!(
+                "export {}={};",
+                shell_escape(key),
+                shell_escape(val)
+            ));
         }
 
         // cat prompt | command args > output; echo $? > exit
@@ -129,12 +129,12 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         ]);
 
         // 1. Write prompt to temp file
-        fs::write(&prompt_file, prompt).await.map_err(|err| {
-            RalphError::BackendCommandFailed {
+        fs::write(&prompt_file, prompt)
+            .await
+            .map_err(|err| RalphError::BackendCommandFailed {
                 backend: self.inner.name().to_owned(),
                 details: format!("failed to write prompt temp file: {err}"),
-            }
-        })?;
+            })?;
 
         // 2. Ensure tmux session exists
         tmux::ensure_session(&self.runner, &self.session_name).await?;
@@ -150,21 +150,12 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             "creating tmux window for backend execution"
         );
 
-        let window_id = tmux::create_window(
-            &self.runner,
-            &self.session_name,
-            &label,
-            &shell_cmd,
-        )
-        .await?;
+        let window_id =
+            tmux::create_window(&self.runner, &self.session_name, &label, &shell_cmd).await?;
 
         // 4. Wait for exit file (respecting backend timeout)
-        let wait_result = tmux::wait_for_exit(
-            &exit_file,
-            self.inner.timeout(),
-            POLL_INTERVAL,
-        )
-        .await;
+        let wait_result =
+            tmux::wait_for_exit(&exit_file, self.inner.timeout(), POLL_INTERVAL).await;
 
         // 5. Best-effort window cleanup regardless of outcome
         let _ = tmux::kill_window(&self.runner, &self.session_name, &window_id).await;
@@ -291,11 +282,23 @@ mod tests {
         );
 
         // Should pipe prompt -> command -> output, and capture exit code
-        assert!(cmd.contains("cat '/tmp/prompt.txt'"), "missing cat prompt: {cmd}");
-        assert!(cmd.contains("> '/tmp/output.txt'"), "missing stdout redirect: {cmd}");
-        assert!(cmd.contains("echo $? > '/tmp/exit.txt'"), "missing exit capture: {cmd}");
+        assert!(
+            cmd.contains("cat '/tmp/prompt.txt'"),
+            "missing cat prompt: {cmd}"
+        );
+        assert!(
+            cmd.contains("> '/tmp/output.txt'"),
+            "missing stdout redirect: {cmd}"
+        );
+        assert!(
+            cmd.contains("echo $? > '/tmp/exit.txt'"),
+            "missing exit capture: {cmd}"
+        );
         // Should NOT contain 2>&1
-        assert!(!cmd.contains("2>&1"), "stderr must not be redirected: {cmd}");
+        assert!(
+            !cmd.contains("2>&1"),
+            "stderr must not be redirected: {cmd}"
+        );
     }
 
     #[test]
@@ -323,7 +326,10 @@ mod tests {
             Path::new("/tmp/e.txt"),
         );
 
-        assert!(cmd.contains("export 'MY_VAR'='hello world'"), "missing env export: {cmd}");
+        assert!(
+            cmd.contains("export 'MY_VAR'='hello world'"),
+            "missing env export: {cmd}"
+        );
     }
 
     #[test]
@@ -347,7 +353,10 @@ mod tests {
         );
 
         // Single quotes inside should be escaped as '\''
-        assert!(cmd.contains("'it'\\''s here'"), "env value not escaped: {cmd}");
+        assert!(
+            cmd.contains("'it'\\''s here'"),
+            "env value not escaped: {cmd}"
+        );
         assert!(cmd.contains("'--msg=it'\\''s'"), "arg not escaped: {cmd}");
     }
 
@@ -389,8 +398,7 @@ mod tests {
                 if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with("ralph-test-success-")
-                            && name.ends_with("-prompt.txt")
+                        if name.starts_with("ralph-test-success-") && name.ends_with("-prompt.txt")
                         {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let output_path = tmp_dir.join(format!("{prefix}-output.txt"));
@@ -424,9 +432,9 @@ mod tests {
     #[tokio::test]
     async fn execute_nonzero_exit_returns_error() {
         let runner = MockTmuxRunner::with_responses(vec![
-            Ok(String::new()),        // has-session
-            Ok("2\n".to_owned()),     // create_window
-            Ok(String::new()),        // kill_window
+            Ok(String::new()),    // has-session
+            Ok("2\n".to_owned()), // create_window
+            Ok(String::new()),    // kill_window
         ]);
 
         let cli = CliBackend::new(
@@ -445,8 +453,7 @@ mod tests {
                 if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with("ralph-test-nonzero-")
-                            && name.ends_with("-prompt.txt")
+                        if name.starts_with("ralph-test-nonzero-") && name.ends_with("-prompt.txt")
                         {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let output_path = tmp_dir.join(format!("{prefix}-output.txt"));
@@ -478,9 +485,9 @@ mod tests {
     #[tokio::test]
     async fn execute_timeout_returns_backend_timeout() {
         let runner = MockTmuxRunner::with_responses(vec![
-            Ok(String::new()),        // has-session
-            Ok("3\n".to_owned()),     // create_window
-            Ok(String::new()),        // kill_window
+            Ok(String::new()),    // has-session
+            Ok("3\n".to_owned()), // create_window
+            Ok(String::new()),    // kill_window
         ]);
 
         let cli = CliBackend::new(
@@ -531,8 +538,7 @@ mod tests {
                 if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with("ralph-clean-session-")
-                            && name.ends_with("-prompt.txt")
+                        if name.starts_with("ralph-clean-session-") && name.ends_with("-prompt.txt")
                         {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let prompt_path = tmp_dir.join(&name);
@@ -662,9 +668,9 @@ mod tests {
     #[tokio::test]
     async fn kill_window_called_on_nonzero_exit() {
         let runner = MockTmuxRunner::with_responses(vec![
-            Ok(String::new()),        // has-session
-            Ok("5\n".to_owned()),     // create_window
-            Ok(String::new()),        // kill_window
+            Ok(String::new()),    // has-session
+            Ok("5\n".to_owned()), // create_window
+            Ok(String::new()),    // kill_window
         ]);
 
         let cli = CliBackend::new(
@@ -682,8 +688,7 @@ mod tests {
                 if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with("ralph-test-killwin-")
-                            && name.ends_with("-prompt.txt")
+                        if name.starts_with("ralph-test-killwin-") && name.ends_with("-prompt.txt")
                         {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let output_path = tmp_dir.join(format!("{prefix}-output.txt"));

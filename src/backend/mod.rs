@@ -19,6 +19,9 @@ use crate::error::RalphError;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
 use crate::Result;
 
+use self::tmux::RealTmuxRunner;
+use self::tmux_backend::TmuxBackend;
+
 #[async_trait]
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
@@ -141,17 +144,25 @@ pub struct BackendRegistry {
     default_backend: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct BackendRegistryTmuxConfig {
+    pub enabled: bool,
+    pub session_name: String,
+}
+
 impl BackendRegistry {
-    pub fn new(config: &GlobalConfig) -> Self {
+    pub fn new(config: &GlobalConfig, tmux: BackendRegistryTmuxConfig) -> Self {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
 
+        let claude_backend = claude::backend_from_config(config);
         backends.insert(
             "claude".to_owned(),
-            Arc::new(claude::backend_from_config(config)),
+            backend_with_optional_tmux(claude_backend, &tmux),
         );
+        let codex_backend = codex::backend_from_config(config);
         backends.insert(
             "codex".to_owned(),
-            Arc::new(codex::backend_from_config(config)),
+            backend_with_optional_tmux(codex_backend, &tmux),
         );
 
         Self {
@@ -214,5 +225,20 @@ impl BackendRegistry {
             backend.health_check().await?;
         }
         Ok(())
+    }
+}
+
+fn backend_with_optional_tmux(
+    backend: CliBackend,
+    tmux: &BackendRegistryTmuxConfig,
+) -> Arc<dyn Backend> {
+    if tmux.enabled {
+        Arc::new(TmuxBackend::new(
+            backend,
+            tmux.session_name.clone(),
+            RealTmuxRunner,
+        ))
+    } else {
+        Arc::new(backend)
     }
 }
