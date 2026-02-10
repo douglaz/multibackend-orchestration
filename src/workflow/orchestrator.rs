@@ -1794,8 +1794,11 @@ mod tests {
         preload_role_model_backends(&mut registry)
             .expect("preloading default role-model backends should succeed");
 
-        assert!(registry.get("claude(claude-sonnet-4-5-20250929)").is_some());
-        assert!(registry.get("codex(o3)").is_some());
+        assert!(registry.get("claude(opus)").is_some());
+        assert!(registry.get("claude(sonnet)").is_some());
+        assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
+        assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
+        assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
     }
 
     #[test]
@@ -1808,8 +1811,8 @@ mod tests {
         preload_role_model_backends(&mut registry)
             .expect("preloading without role-models should succeed");
 
-        assert!(registry.get("claude(claude-sonnet-4-5-20250929)").is_none());
-        assert!(registry.get("codex(o3)").is_none());
+        assert!(registry.get("claude(opus)").is_none());
+        assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
     }
 
     #[test]

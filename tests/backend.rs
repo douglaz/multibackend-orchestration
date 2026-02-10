@@ -143,27 +143,27 @@ fn resolve_backend_for_role_injects_model_when_configured() {
 
     assert_eq!(
         registry.resolve_backend_for_role("claude", "planner"),
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(opus)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "planner"),
-        "codex(o3)"
+        "codex(gpt-5.3-codex-xhigh)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "implementer"),
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(sonnet)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reviewer"),
-        "codex(o3)"
+        "codex(gpt-5.3-codex-xhigh)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "completer"),
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(opus)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reformatter"),
-        "codex(o3)"
+        "codex(gpt-5.3-codex-medium)"
     );
 }
 
@@ -245,17 +245,17 @@ fn test_assign_feature_backends() {
     let backends = registry
         .assign_feature_backends(1, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
-    assert_eq!(backends.implementer, "codex(o3)");
-    assert_eq!(backends.reviewer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
+    assert_eq!(backends.reviewer, "claude(opus)");
 
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
     let backends = registry
         .assign_feature_backends(2, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "codex(o3)");
-    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
-    assert_eq!(backends.reviewer, "codex(o3)");
+    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
 #[test]
@@ -288,15 +288,15 @@ fn test_assign_feature_backends_with_model_spec_start() {
         .assign_feature_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "codex(o3)");
+    assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
     assert_eq!(backends.reviewer, "claude(opus)");
 
     let backends = registry
         .assign_feature_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex(o3)");
-    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
-    assert_eq!(backends.reviewer, "codex(o3)");
+    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
 #[test]
@@ -336,8 +336,8 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         .assign_feature_backends(2, "claude", &role_overrides)
         .expect("mixed feature backends should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
-    assert_eq!(backends.reviewer, "codex(o3)");
+    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
 #[test]
@@ -355,7 +355,7 @@ fn test_assign_feature_backends_bare_role_override_gets_model_injection() {
     let backends = registry
         .assign_feature_backends(2, "claude", &role_overrides)
         .expect("bare override should resolve");
-    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.planner, "claude(opus)");
 }
 
 // ---------------------------------------------------------------------------
@@ -370,14 +370,14 @@ fn test_assign_completion_backends() {
     let backends = registry
         .assign_completion_backends(1, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
-    assert_eq!(backends.completer, "codex(o3)");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.completer, "codex(gpt-5.3-codex-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude", &no_role_overrides())
         .unwrap();
-    assert_eq!(backends.planner, "codex(o3)");
-    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completer, "claude(opus)");
 }
 
 #[test]
@@ -407,13 +407,13 @@ fn test_assign_completion_backends_with_model_spec_start() {
         .assign_completion_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completer, "codex(o3)");
+    assert_eq!(backends.completer, "codex(gpt-5.3-codex-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex(o3)");
-    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completer, "claude(opus)");
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn test_assign_completion_backends_with_partial_role_overrides() {
         .assign_completion_backends(2, "claude", &role_overrides)
         .expect("mixed completion backends should resolve");
     assert_eq!(backends.planner, "claude(sonnet)");
-    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.completer, "claude(opus)");
 }
 
 // ---------------------------------------------------------------------------
@@ -468,33 +468,33 @@ fn test_backend_alternation_sequence() {
     let expected = vec![
         (
             1,
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
+            "claude(opus)",
+            "codex(gpt-5.3-codex-high)",
+            "claude(opus)",
         ),
         (
             2,
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
+            "codex(gpt-5.3-codex-xhigh)",
+            "claude(sonnet)",
+            "codex(gpt-5.3-codex-xhigh)",
         ),
         (
             3,
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
+            "claude(opus)",
+            "codex(gpt-5.3-codex-high)",
+            "claude(opus)",
         ),
         (
             4,
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
+            "codex(gpt-5.3-codex-xhigh)",
+            "claude(sonnet)",
+            "codex(gpt-5.3-codex-xhigh)",
         ),
         (
             5,
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
+            "claude(opus)",
+            "codex(gpt-5.3-codex-high)",
+            "claude(opus)",
         ),
     ];
 
@@ -557,23 +557,23 @@ fn test_completion_alternation_sequence() {
     let expected = vec![
         (
             1,
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
+            "claude(opus)",
+            "codex(gpt-5.3-codex-xhigh)",
         ),
         (
             2,
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
+            "codex(gpt-5.3-codex-xhigh)",
+            "claude(opus)",
         ),
         (
             3,
-            "claude(claude-sonnet-4-5-20250929)",
-            "codex(o3)",
+            "claude(opus)",
+            "codex(gpt-5.3-codex-xhigh)",
         ),
         (
             4,
-            "codex(o3)",
-            "claude(claude-sonnet-4-5-20250929)",
+            "codex(gpt-5.3-codex-xhigh)",
+            "claude(opus)",
         ),
     ];
 

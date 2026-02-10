@@ -832,20 +832,20 @@ async fn two_loop_happy_path_with_separate_backends() {
     // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
     assert_eq!(
         state.loops[0].backends.planner,
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(opus)"
     );
-    assert_eq!(state.loops[0].backends.implementer, "codex(o3)");
+    assert_eq!(state.loops[0].backends.implementer, "codex(gpt-5.3-codex-high)");
     assert_eq!(
         state.loops[0].backends.reviewer,
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(opus)"
     );
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
-    assert_eq!(state.loops[1].backends.planner, "codex(o3)");
+    assert_eq!(state.loops[1].backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(
         state.loops[1].backends.implementer,
-        "claude(claude-sonnet-4-5-20250929)"
+        "claude(sonnet)"
     );
-    assert_eq!(state.loops[1].backends.reviewer, "codex(o3)");
+    assert_eq!(state.loops[1].backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 
     // --- 3. Feature names ---
     assert_eq!(state.loops[0].feature_name, "Auth Module");
@@ -1230,7 +1230,7 @@ if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]];
   fi
   count=$((count + 1))
   echo "$count" > "$counter_file"
-  if [[ " $* " == *" --model o3 "* ]]; then
+  if [[ " $* " == *" --model gpt-5.3-codex-medium "* ]]; then
     model_counter_file="${COUNTER_DIR}/codex_reformat_model_count"
     model_count=0
     if [ -f "$model_counter_file" ]; then
@@ -1435,7 +1435,7 @@ async fn parse_retry_reformat_uses_opposite_backend() {
     assert_eq!(
         codex_model_count.trim(),
         "1",
-        "reformat retry should target codex(o3), not bare codex"
+        "reformat retry should target codex(gpt-5.3-codex-medium), not bare codex"
     );
 
     let claude_reformat_counter = counter_dir.join("claude_reformat_count");

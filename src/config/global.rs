@@ -135,11 +135,11 @@ impl Default for GlobalConfig {
                     timeout_seconds: 600,
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
-                        planner: Some("claude-sonnet-4-5-20250929".to_owned()),
-                        implementer: Some("claude-sonnet-4-5-20250929".to_owned()),
-                        reviewer: Some("claude-sonnet-4-5-20250929".to_owned()),
-                        completer: Some("claude-sonnet-4-5-20250929".to_owned()),
-                        reformatter: Some("claude-sonnet-4-5-20250929".to_owned()),
+                        planner: Some("opus".to_owned()),
+                        implementer: Some("sonnet".to_owned()),
+                        reviewer: Some("opus".to_owned()),
+                        completer: Some("opus".to_owned()),
+                        reformatter: Some("sonnet".to_owned()),
                     },
                 },
                 codex: BackendConfig {
@@ -152,11 +152,11 @@ impl Default for GlobalConfig {
                     timeout_seconds: 600,
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
-                        planner: Some("o3".to_owned()),
-                        implementer: Some("o3".to_owned()),
-                        reviewer: Some("o3".to_owned()),
-                        completer: Some("o3".to_owned()),
-                        reformatter: Some("o3".to_owned()),
+                        planner: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        implementer: Some("gpt-5.3-codex-high".to_owned()),
+                        reviewer: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        completer: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        reformatter: Some("gpt-5.3-codex-medium".to_owned()),
                     },
                 },
             },
@@ -346,22 +346,22 @@ command = "claude"
 timeout_seconds = 600
 
 [backends.claude.models]
-planner = "claude-sonnet-4-5-20250929"
-implementer = "claude-sonnet-4-5-20250929"
-reviewer = "claude-sonnet-4-5-20250929"
-completer = "claude-sonnet-4-5-20250929"
-reformatter = "claude-sonnet-4-5-20250929"
+planner = "opus"
+implementer = "sonnet"
+reviewer = "opus"
+completer = "opus"
+reformatter = "sonnet"
 
 [backends.codex]
 command = "codex"
 timeout_seconds = 600
 
 [backends.codex.models]
-planner = "o3"
-implementer = "o3"
-reviewer = "o3"
-completer = "o3"
-reformatter = "o3"
+planner = "gpt-5.3-codex-xhigh"
+implementer = "gpt-5.3-codex-high"
+reviewer = "gpt-5.3-codex-xhigh"
+completer = "gpt-5.3-codex-xhigh"
+reformatter = "gpt-5.3-codex-medium"
 
 [workflow]
 max_review_iterations = 5
@@ -386,37 +386,37 @@ base_branch = "master"
         let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
         assert_eq!(
             config.backends.claude.models.planner.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("opus")
         );
         assert_eq!(
             config.backends.claude.models.implementer.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
         assert_eq!(
             config.backends.claude.models.reviewer.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("opus")
         );
         assert_eq!(
             config.backends.claude.models.completer.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("opus")
         );
         assert_eq!(
             config.backends.claude.models.reformatter.as_deref(),
-            Some("claude-sonnet-4-5-20250929")
+            Some("sonnet")
         );
-        assert_eq!(config.backends.codex.models.planner.as_deref(), Some("o3"));
+        assert_eq!(config.backends.codex.models.planner.as_deref(), Some("gpt-5.3-codex-xhigh"));
         assert_eq!(
             config.backends.codex.models.implementer.as_deref(),
-            Some("o3")
+            Some("gpt-5.3-codex-high")
         );
-        assert_eq!(config.backends.codex.models.reviewer.as_deref(), Some("o3"));
+        assert_eq!(config.backends.codex.models.reviewer.as_deref(), Some("gpt-5.3-codex-xhigh"));
         assert_eq!(
             config.backends.codex.models.completer.as_deref(),
-            Some("o3")
+            Some("gpt-5.3-codex-xhigh")
         );
         assert_eq!(
             config.backends.codex.models.reformatter.as_deref(),
-            Some("o3")
+            Some("gpt-5.3-codex-medium")
         );
     }
 

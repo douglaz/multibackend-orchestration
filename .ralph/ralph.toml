@@ -10,11 +10,11 @@ timeout_seconds = 7200
 [backends.claude.env]
 
 [backends.claude.models]
-planner = "claude-sonnet-4-5-20250929"
-implementer = "claude-sonnet-4-5-20250929"
-reviewer = "claude-sonnet-4-5-20250929"
-completer = "claude-sonnet-4-5-20250929"
-reformatter = "claude-sonnet-4-5-20250929"
+planner = "opus"
+implementer = "sonnet"
+reviewer = "opus"
+completer = "opus"
+reformatter = "sonnet"
 
 [backends.codex]
 command = "/root/.npm-global/bin/codex"
@@ -28,11 +28,11 @@ timeout_seconds = 7200
 [backends.codex.env]
 
 [backends.codex.models]
-planner = "o3"
-implementer = "o3"
-reviewer = "o3"
-completer = "o3"
-reformatter = "o3"
+planner = "gpt-5.3-codex-xhigh"
+implementer = "gpt-5.3-codex-high"
+reviewer = "gpt-5.3-codex-xhigh"
+completer = "gpt-5.3-codex-xhigh"
+reformatter = "gpt-5.3-codex-medium"
 
 [workflow]
 max_review_iterations = 30
