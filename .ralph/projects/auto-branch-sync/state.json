@@ -1,0 +1,14 @@
+{
+  "project_id": "auto-branch-sync",
+  "project_name": "Auto-Branch Sync",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "04c530f3a3453d36f13a8b0f123f894dab7a188df79ace1503b87fb097cb7882",
+  "prompt_hash_at_loop_start": "04c530f3a3453d36f13a8b0f123f894dab7a188df79ace1503b87fb097cb7882",
+  "parent_project": null,
+  "current_loop": 0,
+  "current_phase": "planning",
+  "phase_iteration": 1,
+  "status": "pending",
+  "loops": [],
+  "completion_attempts": []
+}
