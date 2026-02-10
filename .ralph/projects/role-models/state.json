@@ -1,0 +1,14 @@
+{
+  "project_id": "role-models",
+  "project_name": "Per-Backend Role-Specific Model Defaults",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
+  "prompt_hash_at_loop_start": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
+  "parent_project": null,
+  "current_loop": 0,
+  "current_phase": "planning",
+  "phase_iteration": 1,
+  "status": "pending",
+  "loops": [],
+  "completion_attempts": []
+}
