@@ -5,10 +5,10 @@
   "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "parent_project": null,
-  "current_loop": 6,
-  "current_phase": "committing",
+  "current_loop": 7,
+  "current_phase": "completing",
   "phase_iteration": 1,
-  "status": "in_progress",
+  "status": "completed",
   "loops": [
     {
       "loop_number": 1,
@@ -121,7 +121,7 @@
       "slug": "deterministic-tmux-preflight-test-isolation",
       "feature_name": "Deterministic tmux preflight test isolation",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex",
         "implementer": "claude",
@@ -133,9 +133,9 @@
         "reviews": [],
         "approval": "loops/006-deterministic-tmux-preflight-test-isolation/20260210134818-review-approved.md"
       },
-      "commit": null,
+      "commit": "a51e5b50cb5cd86a3032b89a13bd257e3a6ef225",
       "started_at": "2026-02-10T13:42:54.664767805Z",
-      "completed_at": null
+      "completed_at": "2026-02-10T13:48:18.389723750Z"
     }
   ],
   "completion_attempts": [
@@ -155,6 +155,23 @@
       "verdict": "continue",
       "started_at": "2026-02-10T13:32:33.828737232Z",
       "completed_at": "2026-02-10T13:39:02.615412053Z"
+    },
+    {
+      "loop_number": 7,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/007-completion/20260210135102-termination-request.md",
+        "verdict": "loops/007-completion/20260210135457-completer-verdict.md"
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-10T13:51:02.239515287Z",
+      "completed_at": "2026-02-10T13:54:57.228172984Z"
     }
   ]
 }
