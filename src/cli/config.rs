@@ -439,12 +439,7 @@ fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
 }
 
 fn ensure_backend(raw: &str) -> Result<()> {
-    match raw {
-        "claude" | "codex" => Ok(()),
-        _ => Err(RalphError::Validation(
-            "backend must be one of: claude, codex".to_owned(),
-        )),
-    }
+    crate::cli::backend_spec::validate_backend_spec_name(raw)
 }
 
 fn parse_optional_string(raw: &str) -> Option<String> {
@@ -493,5 +488,96 @@ fn config_path_for_scope(workspace: &Workspace, scope: &ConfigScope) -> PathBuf 
     match scope {
         ConfigScope::Global => workspace.root.join("ralph.toml"),
         ConfigScope::Project(project_id) => workspace.project_dir(project_id).join("config.toml"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_backend_accepts_bare_claude() {
+        ensure_backend("claude").expect("bare claude should pass");
+    }
+
+    #[test]
+    fn ensure_backend_accepts_bare_codex() {
+        ensure_backend("codex").expect("bare codex should pass");
+    }
+
+    #[test]
+    fn ensure_backend_accepts_claude_with_model() {
+        ensure_backend("claude(opus)").expect("claude(opus) should pass");
+    }
+
+    #[test]
+    fn ensure_backend_accepts_codex_with_model() {
+        ensure_backend("codex(gpt-5.3-codex-xhigh)")
+            .expect("codex with model should pass");
+    }
+
+    #[test]
+    fn ensure_backend_rejects_unknown_base() {
+        let err = ensure_backend("unknown(opus)")
+            .expect_err("unknown backend should fail");
+        assert!(err.to_string().contains("unknown backend"));
+    }
+
+    #[test]
+    fn ensure_backend_rejects_unknown_bare() {
+        let err = ensure_backend("foobar")
+            .expect_err("unknown bare backend should fail");
+        assert!(err.to_string().contains("unknown backend"));
+    }
+
+    #[test]
+    fn ensure_backend_rejects_empty_model() {
+        ensure_backend("claude()")
+            .expect_err("empty model should fail");
+    }
+
+    #[test]
+    fn ensure_backend_rejects_missing_close_paren() {
+        ensure_backend("claude(opus")
+            .expect_err("missing close paren should fail");
+    }
+
+    #[test]
+    fn ensure_backend_rejects_empty_name_with_model() {
+        ensure_backend("(opus)")
+            .expect_err("empty name should fail");
+    }
+
+    #[test]
+    fn parse_optional_backend_accepts_claude_with_model() {
+        let result = parse_optional_backend("claude(opus)")
+            .expect("should parse successfully");
+        assert_eq!(result, Some("claude(opus)".to_owned()));
+    }
+
+    #[test]
+    fn parse_optional_backend_accepts_bare_name() {
+        let result = parse_optional_backend("codex")
+            .expect("should parse successfully");
+        assert_eq!(result, Some("codex".to_owned()));
+    }
+
+    #[test]
+    fn parse_optional_backend_accepts_null() {
+        let result = parse_optional_backend("null")
+            .expect("should parse successfully");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_optional_backend_rejects_unknown() {
+        parse_optional_backend("unknown(opus)")
+            .expect_err("unknown backend should fail");
+    }
+
+    #[test]
+    fn parse_optional_backend_rejects_malformed() {
+        parse_optional_backend("claude()")
+            .expect_err("malformed spec should fail");
     }
 }

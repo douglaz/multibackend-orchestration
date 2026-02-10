@@ -5,7 +5,7 @@
   "prompt_hash": "cbf12c4c8a9ae4070feb071a094b943f1d8e52144f5c51010753afa1507c6477",
   "prompt_hash_at_loop_start": "cbf12c4c8a9ae4070feb071a094b943f1d8e52144f5c51010753afa1507c6477",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "backend-spec-parsing-model-injection-and-registry",
       "feature_name": "Backend Spec Parsing, Model Injection, and Registry Support",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude",
         "implementer": "codex",
@@ -27,8 +27,29 @@
         "reviews": [],
         "approval": "loops/001-backend-spec-parsing-model-injection-and-registry/20260210173402-review-approved.md"
       },
-      "commit": null,
+      "commit": "17df6bc83b76d1f757f9e41612e5c50dcab1ca33",
       "started_at": "2026-02-10T17:25:42.359737422Z",
+      "completed_at": "2026-02-10T17:34:02.806715854Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "cli-backend-spec-acceptance-for-projectconfig",
+      "feature_name": "CLI Backend Spec Acceptance for Project/Config Commands",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex",
+        "implementer": "claude",
+        "reviewer": "codex"
+      },
+      "artifacts": {
+        "spec": "loops/002-cli-backend-spec-acceptance-for-projectconfig/20260210173717-spec.md",
+        "impl_notes": "loops/002-cli-backend-spec-acceptance-for-projectconfig/20260210174036-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-cli-backend-spec-acceptance-for-projectconfig/20260210174233-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T17:37:17.879746457Z",
       "completed_at": null
     }
   ],

@@ -1,3 +1,4 @@
+use crate::cli::backend_spec::validate_backend_spec_name;
 use crate::cli::{ProjectArgs, ProjectCommand};
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::is_git_repo;
@@ -23,11 +24,7 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             };
 
             if let Some(backend) = new_args.backend.as_deref() {
-                if backend != "claude" && backend != "codex" {
-                    return Err(RalphError::Validation(
-                        "--backend must be one of: claude, codex".to_owned(),
-                    ));
-                }
+                validate_backend_spec_name(backend)?;
             }
 
             create_project(
@@ -172,5 +169,56 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cli::backend_spec::validate_backend_spec_name;
+
+    #[test]
+    fn project_backend_accepts_bare_claude() {
+        validate_backend_spec_name("claude").expect("bare claude should pass");
+    }
+
+    #[test]
+    fn project_backend_accepts_bare_codex() {
+        validate_backend_spec_name("codex").expect("bare codex should pass");
+    }
+
+    #[test]
+    fn project_backend_accepts_claude_with_model() {
+        validate_backend_spec_name("claude(opus)").expect("claude(opus) should pass");
+    }
+
+    #[test]
+    fn project_backend_accepts_codex_with_model() {
+        validate_backend_spec_name("codex(gpt-5.3-codex-xhigh)")
+            .expect("codex with model should pass");
+    }
+
+    #[test]
+    fn project_backend_rejects_unknown_base() {
+        let err = validate_backend_spec_name("unknown(opus)")
+            .expect_err("unknown backend should fail");
+        assert!(err.to_string().contains("unknown backend"));
+    }
+
+    #[test]
+    fn project_backend_rejects_malformed_empty_model() {
+        validate_backend_spec_name("claude()")
+            .expect_err("empty model should fail");
+    }
+
+    #[test]
+    fn project_backend_rejects_malformed_missing_close_paren() {
+        validate_backend_spec_name("claude(opus")
+            .expect_err("missing close paren should fail");
+    }
+
+    #[test]
+    fn project_backend_rejects_malformed_empty_name() {
+        validate_backend_spec_name("(opus)")
+            .expect_err("empty name should fail");
     }
 }
