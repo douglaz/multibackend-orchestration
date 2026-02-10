@@ -7,7 +7,12 @@ The Planner has suggested the project is complete. Your job is to:
 
 You MUST use a DIFFERENT perspective than the Planner.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Output:
 
 # Verdict: COMPLETE

@@ -115,7 +115,7 @@ impl Default for GlobalConfig {
                 },
             },
             workflow: WorkflowConfig {
-                max_review_iterations: 5,
+                max_review_iterations: 30,
                 auto_commit: true,
                 commit_message_style: CommitMessageStyle::Conventional,
                 commit_tag_format: "ralph/{project_id}/loop-{loop_number}".to_owned(),

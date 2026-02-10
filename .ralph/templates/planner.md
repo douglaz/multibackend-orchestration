@@ -8,7 +8,12 @@ Given `prompt.md` and `state.json`, you must:
 
 If all requirements are already satisfied, output `# Project Completion Request` instead of planning another feature.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Your output MUST be in this format:
 
 # Feature: <name>

@@ -55,7 +55,7 @@ fn test_init_generates_valid_config() {
     assert_eq!(workspace.config.backends.codex.timeout_seconds, 600);
 
     // Verify workflow section
-    assert_eq!(workspace.config.workflow.max_review_iterations, 5);
+    assert_eq!(workspace.config.workflow.max_review_iterations, 30);
     assert!(workspace.config.workflow.auto_commit);
 
     // Verify templates section

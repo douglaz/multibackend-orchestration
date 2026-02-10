@@ -21,7 +21,7 @@ timeout_seconds = 7200
 [backends.codex.env]
 
 [workflow]
-max_review_iterations = 5
+max_review_iterations = 30
 auto_commit = true
 commit_message_style = "conventional"
 commit_tag_format = "ralph/{project_id}/loop-{loop_number}"

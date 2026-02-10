@@ -929,3 +929,208 @@ async fn two_loop_happy_path_with_separate_backends() {
         "completer-verdict.md",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review iteration limit rollback test
+// ---------------------------------------------------------------------------
+
+fn write_suggestions_backend_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Implement a minimal demo feature.
+
+## Acceptance Criteria
+- [ ] Demo behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the demo feature
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  if [[ "$prompt" == *"Review Feedback (if responding to review)"* && "$prompt" == *"Required Changes"* ]]; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+  fi
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: SUGGESTIONS
+
+## Required Changes
+1. **Demo check**: tighten behavior
+   - Current: loose
+   - Expected: strict
+   - Reference: spec
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write suggestions backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+
+    fs::write(repo_root.join("README.md"), "# demo\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+
+    let script_path = repo_root.join("mock_backend.sh");
+    write_suggestions_backend_script(&script_path);
+    git_ok(repo_root, &["add", "mock_backend.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
+
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+    fs::write(
+        workspace_root.join("templates/planner.md"),
+        default_planner_template(),
+    )
+    .expect("write planner template");
+    fs::write(
+        workspace_root.join("templates/implementer.md"),
+        default_implementer_template(),
+    )
+    .expect("write implementer template");
+    fs::write(
+        workspace_root.join("templates/reviewer.md"),
+        default_reviewer_template(),
+    )
+    .expect("write reviewer template");
+    fs::write(
+        workspace_root.join("templates/completer.md"),
+        default_completer_template(),
+    )
+    .expect("write completer template");
+
+    let mut env = BTreeMap::new();
+    env.insert("PLANNER_MODE".to_owned(), "feature".to_owned());
+    env.insert("REVIEW_MODE".to_owned(), "suggestions".to_owned());
+    env.insert("COMPLETER_MODE".to_owned(), "complete".to_owned());
+
+    workspace.config.backends.claude.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.claude.args = Vec::new();
+    workspace.config.backends.claude.timeout_seconds = 30;
+    workspace.config.backends.claude.env = env.clone();
+
+    workspace.config.backends.codex.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.codex.args = Vec::new();
+    workspace.config.backends.codex.timeout_seconds = 30;
+    workspace.config.backends.codex.env = env;
+
+    workspace.config.workflow.max_review_iterations = 1;
+
+    workspace.config.git.base_branch =
+        git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save config");
+
+    let prompt_path = repo_root.join("PROMPT.md");
+    fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
+
+    let project_id = "01-poc".to_owned();
+    create_project(
+        &mut workspace,
+        CreateProjectOptions {
+            id: project_id.clone(),
+            name: "Proof of Concept".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: Some("claude".to_owned()),
+        },
+    )
+    .expect("create project");
+
+    (temp, workspace_root, project_id)
+}
+
+#[tokio::test]
+async fn review_iteration_limit_rollback() {
+    let (_temp, workspace_root, project_id) = setup_workspace_with_always_suggestions();
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let options = run_options(&project_id);
+
+    let result = orchestrator.run(options).await;
+    assert!(
+        result.is_err(),
+        "run should fail with ReviewIterationLimitExceeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RalphError::ReviewIterationLimitExceeded {
+                loop_number: 1,
+                max_iterations: 1,
+            }
+        ),
+        "expected ReviewIterationLimitExceeded, got {err:?}"
+    );
+
+    // Verify state was rolled back cleanly
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after rollback, got {} loop(s)",
+        state.loops.len()
+    );
+    assert_eq!(
+        state.current_phase,
+        Phase::Planning,
+        "phase should be reset to Planning"
+    );
+    assert_eq!(
+        state.phase_iteration, 1,
+        "phase_iteration should be reset to 1"
+    );
+    assert_eq!(
+        state.current_loop, 0,
+        "current_loop should be 0 after rollback"
+    );
+}

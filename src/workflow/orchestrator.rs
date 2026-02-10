@@ -193,6 +193,9 @@ impl Orchestrator {
                 state.phase_iteration = 1;
             }
 
+            let mut until_review_stop: Option<u32> = None;
+            let mut review_limit_hit: Option<(u32, u32)> = None;
+
             match state.current_phase {
                 Phase::Planning => {
                     if !state.has_in_progress_loop() {
@@ -555,11 +558,8 @@ impl Orchestrator {
                     };
 
                     if state.phase_iteration > effective.workflow.max_review_iterations {
-                        return Err(RalphError::ReviewIterationLimitExceeded {
-                            loop_number,
-                            max_iterations: effective.workflow.max_review_iterations,
-                        });
-                    }
+                        review_limit_hit = Some((loop_number, effective.workflow.max_review_iterations));
+                    } else {
 
                     let reviewer_backend =
                         registry.get(&reviewer_backend_name).ok_or_else(|| {
@@ -694,18 +694,8 @@ impl Orchestrator {
                             logs.push(format!("loop {loop_number}: reviewer approved changes"));
 
                             if options.until_review {
-                                persist_state_and_index(
-                                    &mut self.workspace,
-                                    &project_id,
-                                    &project_dir,
-                                    &state,
-                                )?;
-                                return Ok(OrchestrationResult {
-                                    summary: format!(
-                                        "stopped after review approval for loop {loop_number}; commit not executed"
-                                    ),
-                                    loop_number: Some(loop_number),
-                                });
+                                until_review_stop =
+                                    Some(loop_number);
                             }
 
                             if let Some(message) = commit_message {
@@ -716,6 +706,7 @@ impl Orchestrator {
                             }
                         }
                     }
+                    } // else (review limit not hit)
                 }
                 Phase::Committing => {
                     info!(loop = state.current_loop, "starting commit phase");
@@ -922,7 +913,43 @@ impl Orchestrator {
                 }
             }
 
+            // Handle ReviewIterationLimitExceeded: rollback the current loop
+            if let Some((ln, max_iter)) = review_limit_hit {
+                warn!(
+                    loop_number = ln,
+                    max_iterations = max_iter,
+                    "review iteration limit exceeded, rolling back loop"
+                );
+                rollback_current_loop(&mut state, &project_dir)?;
+                persist_state_and_index(
+                    &mut self.workspace,
+                    &project_id,
+                    &project_dir,
+                    &state,
+                )?;
+                if options.until_complete {
+                    logs.push(format!(
+                        "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
+                    ));
+                    continue;
+                }
+                return Err(RalphError::ReviewIterationLimitExceeded {
+                    loop_number: ln,
+                    max_iterations: max_iter,
+                });
+            }
+
             persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+
+            // Handle --until-review stop
+            if let Some(ln) = until_review_stop {
+                return Ok(OrchestrationResult {
+                    summary: format!(
+                        "stopped after review approval for loop {ln}; commit not executed"
+                    ),
+                    loop_number: Some(ln),
+                });
+            }
 
             if state.status == ProjectStatus::Completed {
                 return Ok(OrchestrationResult {
@@ -1053,6 +1080,51 @@ fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState)
     Ok(())
 }
 
+fn rollback_current_loop(state: &mut ProjectState, project_dir: &Path) -> Result<()> {
+    if !state.has_in_progress_loop() {
+        return Ok(());
+    }
+
+    let loop_number = state.current_loop;
+    let loop_slug = state
+        .current_feature_loop()
+        .map(|l| l.slug.clone())
+        .or_else(|| state.current_completion_attempt().map(|l| l.slug.clone()))
+        .ok_or_else(|| {
+            RalphError::Orchestration(
+                "rollback requested but current loop could not be found".to_owned(),
+            )
+        })?;
+
+    let loop_dir = project_dir
+        .join("loops")
+        .join(format!("{loop_number:03}-{loop_slug}"));
+    if loop_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(&loop_dir) {
+            warn!(
+                loop_number = loop_number,
+                path = %loop_dir.display(),
+                error = %e,
+                "failed to remove artifact directory during rollback"
+            );
+        }
+    }
+
+    state.remove_loop(loop_number);
+    state.current_loop = state.last_loop_number();
+    state.current_phase = Phase::Planning;
+    state.phase_iteration = 1;
+    if state.status != ProjectStatus::Completed {
+        state.status = if state.loops.is_empty() && state.completion_attempts.is_empty() {
+            ProjectStatus::Pending
+        } else {
+            ProjectStatus::InProgress
+        };
+    }
+
+    Ok(())
+}
+
 fn handle_prompt_change(
     state: &mut ProjectState,
     project_dir: &Path,
@@ -1078,34 +1150,7 @@ fn handle_prompt_change(
             state.current_loop
         ))),
         PromptChangeAction::RestartLoop => {
-            let loop_number = state.current_loop;
-            let loop_slug = state
-                .current_feature_loop()
-                .map(|l| l.slug.clone())
-                .or_else(|| state.current_completion_attempt().map(|l| l.slug.clone()))
-                .ok_or_else(|| {
-                    RalphError::Orchestration(
-                        "prompt change restart requested but current loop could not be found"
-                            .to_owned(),
-                    )
-                })?;
-
-            let loop_dir = project_dir
-                .join("loops")
-                .join(format!("{loop_number:03}-{loop_slug}"));
-            if loop_dir.exists() {
-                fs::remove_dir_all(loop_dir)?;
-            }
-
-            state.remove_loop(loop_number);
-            state.current_loop = state.last_loop_number();
-            state.current_phase = Phase::Planning;
-            state.phase_iteration = 1;
-            state.status = if state.loops.is_empty() && state.completion_attempts.is_empty() {
-                ProjectStatus::Pending
-            } else {
-                ProjectStatus::InProgress
-            };
+            rollback_current_loop(state, project_dir)?;
             state.prompt_hash = new_prompt_hash.to_owned();
             state.prompt_hash_at_loop_start = new_prompt_hash.to_owned();
             Ok(())
@@ -1511,11 +1556,48 @@ fn extract_reviewer_commit_message(body: &str) -> Option<String> {
 
 fn expected_format_template(role: &str) -> &'static str {
     match role {
-        "planner" => "# Feature: <name> OR # Project Completion Request",
-        "implementer-notes" => "# Implementation Notes",
-        "implementer-response" => "# Implementation Response (Iteration <N>)",
-        "reviewer" => "# Review: APPROVED OR # Review: SUGGESTIONS",
-        "completer" => "# Verdict: COMPLETE OR # Verdict: CONTINUE",
+        "planner" => "\
+# Feature: <name>\n\
+## Description\n\
+## Acceptance Criteria\n\
+## Files to Modify/Create\n\
+## Dependencies\n\
+\n\
+OR\n\
+\n\
+# Project Completion Request\n\
+## Rationale\n\
+## Summary of Work\n\
+## Remaining Items",
+        "implementer-notes" => "\
+# Implementation Notes\n\
+## Decisions Made\n\
+## Spec Deviations\n\
+## Testing",
+        "implementer-response" => "\
+# Implementation Response (Iteration <N>)\n\
+## Changes Made\n\
+## Could Not Address",
+        "reviewer" => "\
+# Review: APPROVED\n\
+## Acceptance Criteria Checklist\n\
+## Notes\n\
+## Commit Message\n\
+\n\
+OR\n\
+\n\
+# Review: SUGGESTIONS\n\
+## Required Changes\n\
+## Recommended Improvements",
+        "completer" => "\
+# Verdict: COMPLETE\n\
+(list of requirements and how they are satisfied)\n\
+\n\
+OR\n\
+\n\
+# Verdict: CONTINUE\n\
+## Missing Requirements\n\
+## Recommended Next Features",
         _ => "valid markdown with required H1",
     }
 }
@@ -1542,7 +1624,15 @@ where
                 "parse failed, requesting reformat (attempt 1/3)"
             );
             let reformat_prompt = format!(
-                "Your previous response could not be parsed. The error was:\n{}\n\nYour original response was:\n---\n{}\n---\n\nPlease reformat your response following the required structure exactly:\n{}\n",
+                "CRITICAL: Your previous response could not be parsed.\n\n\
+                Error: {}\n\n\
+                Your original response was:\n---\n{}\n---\n\n\
+                Requirements:\n\
+                1. Your response MUST begin with the correct H1 heading as the VERY FIRST LINE\n\
+                2. No preamble, commentary, or explanation before the H1\n\
+                3. No YAML frontmatter (no lines starting with ---)\n\
+                4. Include ALL required H2 sections\n\n\
+                Required structure:\n{}\n",
                 parse_error_1,
                 first_output,
                 expected_format_template,
@@ -1557,10 +1647,14 @@ where
 
             warn!(
                 role = role,
-                "reformat failed, retrying original prompt (attempt 2/3)"
+                "reformat failed, retrying with format reminder (attempt 2/3)"
+            );
+            let reminded_prompt = format!(
+                "IMPORTANT: Format your response as parseable markdown. Start with the correct H1 heading immediately (no preamble). Include all required H2 sections. No YAML frontmatter.\n\n{}",
+                original_prompt
             );
             let third_output =
-                execute_with_timeout_retries(backend, role, phase, original_prompt).await?;
+                execute_with_timeout_retries(backend, role, phase, &reminded_prompt).await?;
             if let Ok(parsed) = parse_fn(&third_output) {
                 return Ok(parsed);
             }

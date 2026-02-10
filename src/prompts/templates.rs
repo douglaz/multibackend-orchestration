@@ -24,7 +24,12 @@ Given `prompt.md` and `state.json`, you must:
 
 If all requirements are already satisfied, output `# Project Completion Request` instead of planning another feature.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Your output MUST be in this format:
 
 # Feature: <name>
@@ -82,7 +87,11 @@ Given a feature spec, implement it by:
 2. Following project conventions
 3. Writing clean, tested code
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
 
 If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
@@ -146,7 +155,12 @@ Review for:
 If acceptance criteria are already satisfied and no additional code change is required,
 return `# Review: APPROVED` with evidence instead of requesting re-implementation.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Your output MUST be:
 
 # Review: APPROVED
@@ -213,7 +227,12 @@ The Planner has suggested the project is complete. Your job is to:
 
 You MUST use a DIFFERENT perspective than the Planner.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Output:
 
 # Verdict: COMPLETE

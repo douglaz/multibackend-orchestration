@@ -5,7 +5,11 @@ Given a feature spec, implement it by:
 2. Following project conventions
 3. Writing clean, tested code
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
 
 If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 

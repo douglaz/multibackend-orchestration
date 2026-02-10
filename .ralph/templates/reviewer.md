@@ -15,7 +15,12 @@ Review for:
 If acceptance criteria are already satisfied and no additional code change is required,
 return `# Review: APPROVED` with evidence instead of requesting re-implementation.
 
-Return markdown body only (no YAML frontmatter).
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
 Your output MUST be:
 
 # Review: APPROVED
