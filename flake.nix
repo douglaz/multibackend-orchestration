@@ -23,11 +23,26 @@
 
           nativeBuildInputs = [
             pkgs.pkg-config
+            pkgs.git
+          ];
+
+          nativeCheckInputs = [
+            pkgs.bash
           ];
 
           buildInputs = [
             pkgs.openssl
           ];
+
+          # Tests generate mock backend scripts at runtime with
+          # #!/usr/bin/env bash shebangs. The sandbox doesn't provide
+          # /usr/bin/env, so patch the shebang string in the test source
+          # to use the Nix store bash path directly.
+          postPatch = ''
+            substituteInPlace tests/orchestrator.rs \
+              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+          '';
+
         };
 
         apps.default = flake-utils.lib.mkApp {
