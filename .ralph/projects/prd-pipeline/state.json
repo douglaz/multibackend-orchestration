@@ -5,7 +5,7 @@
   "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
   "parent_project": null,
-  "current_loop": 4,
+  "current_loop": 5,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -89,7 +89,7 @@
       "slug": "stages-deterministic-parsers",
       "feature_name": "Stages + Deterministic Parsers",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex)",
         "implementer": "claude(sonnet)",
@@ -112,8 +112,29 @@
         ],
         "approval": "loops/004-stages-deterministic-parsers/20260210202546-review-approved.md"
       },
-      "commit": null,
+      "commit": "7444093ed316db74fbb8625291a5e599bbea06c0",
       "started_at": "2026-02-10T20:17:34.304625133Z",
+      "completed_at": "2026-02-10T20:25:46.061883673Z"
+    },
+    {
+      "loop_number": 5,
+      "slug": "interaction-layer",
+      "feature_name": "Interaction Layer",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/005-interaction-layer/20260210202623-spec.md",
+        "impl_notes": "loops/005-interaction-layer/20260210203119-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/005-interaction-layer/20260210203203-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T20:26:23.170800546Z",
       "completed_at": null
     }
   ],

@@ -8,4 +8,8 @@ pub mod state;
 
 pub use answers::AnswerStore;
 pub use cache::{CacheManager, PrdLock};
+pub use interaction::{
+    InteractionContext, MockInteraction, NonInteractiveInteraction, PlainInteraction,
+    UserInteraction,
+};
 pub use stages::{check_stage_output, StageOutputCheck, StagePromptBuilder};
