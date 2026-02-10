@@ -1,6 +1,6 @@
 //! PRD pipeline driver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +13,8 @@ use crate::Result;
 use super::answers::AnswerStore;
 use super::cache::CacheManager;
 use super::gaps::{
-    gap_report_has_questions, run_llm_gap_analysis, GapReport, Question, QuestionKind,
+    gap_report_has_questions, run_llm_gap_analysis, run_llm_validation, GapReport, Question,
+    QuestionKind, ValidationIssue,
 };
 use super::interaction::{InteractionContext, UserInteraction};
 use super::stages::{check_stage_output, StagePromptBuilder};
@@ -59,6 +60,7 @@ pub struct PrdPipeline {
     pending_questions: Vec<Question>,
     pending_answers: Option<BTreeMap<String, String>>,
     pending_gap_stage: Option<Stage>,
+    skipped_stages: std::collections::BTreeSet<Stage>,
 }
 
 impl PrdPipeline {
@@ -101,6 +103,7 @@ impl PrdPipeline {
             pending_questions: Vec::new(),
             pending_answers: None,
             pending_gap_stage: None,
+            skipped_stages: BTreeSet::new(),
         })
     }
 
@@ -110,6 +113,7 @@ impl PrdPipeline {
 
         if self.options.resume {
             self.cache.validate_resume_idea()?;
+            self.hydrate_from_cache()?;
         }
 
         self.answer_store.load()?;
@@ -121,13 +125,18 @@ impl PrdPipeline {
             phase = match phase {
                 PrdPhase::RunStage(stage) => {
                     self.run_stage(stage).await?;
-                    PrdPhase::CheckGaps(stage)
+                    // If stage was skipped, bypass gap analysis and advance directly
+                    if self.skipped_stages.contains(&stage) {
+                        self.advance_to_next_stage(stage)
+                    } else {
+                        PrdPhase::CheckGaps(stage)
+                    }
                 }
                 PrdPhase::CheckGaps(stage) => self.check_gaps_phase(stage).await?,
                 PrdPhase::AskUser(questions) => self.ask_user_phase(questions).await?,
                 PrdPhase::ApplyAnswers => self.apply_answers_phase()?,
                 PrdPhase::MaybeRerun(stage) => self.maybe_rerun_phase(stage),
-                PrdPhase::ValidatePrd => PrdPhase::Done,
+                PrdPhase::ValidatePrd => self.validate_prd_phase().await?,
                 PrdPhase::Done => break,
             };
         }
@@ -135,8 +144,41 @@ impl PrdPipeline {
         self.finalize_result()
     }
 
+    fn hydrate_from_cache(&mut self) -> Result<()> {
+        // Load persisted stage outputs
+        for stage in Stage::all() {
+            if let Some(output) = self.cache.read_stage_output(*stage)? {
+                self.context.stage_outputs.insert(*stage, output);
+            }
+        }
+
+        // Load persisted stage input hashes
+        if let Some(hashes) = self.cache.read_stage_hashes()? {
+            self.context.stage_input_hashes = hashes;
+        }
+
+        Ok(())
+    }
+
     async fn run_stage(&mut self, stage: Stage) -> Result<()> {
         let start = Instant::now();
+
+        // Resume-aware skip logic: check if cached output exists and hash matches
+        let input_hash = self.cache.compute_stage_input_hash(stage, &self.context);
+        if self.options.resume && self.cache.should_skip_stage(stage, &self.context) {
+            if let Some(cached_output) = self.cache.read_stage_output(stage)? {
+                self.interaction.status(&format!(
+                    "Skipping {:?} stage (using cached output)...",
+                    stage
+                ));
+                self.context.stage_outputs.insert(stage, cached_output);
+                self.context.stage_input_hashes.insert(stage, input_hash);
+                self.skipped_stages.insert(stage);
+                // Don't update stage_timings or call stage_complete for skipped stages
+                return Ok(());
+            }
+        }
+
         self.interaction
             .status(&format!("Running {:?} stage...", stage));
 
@@ -155,8 +197,8 @@ impl PrdPipeline {
             .stage_outputs
             .insert(stage, check.cleaned_output.clone());
 
-        let input_hash = self.cache.compute_stage_input_hash(stage, &self.context);
         self.context.stage_input_hashes.insert(stage, input_hash);
+        self.cache.write_stage_hashes(&self.context.stage_input_hashes)?;
 
         let elapsed = start.elapsed().as_secs_f64();
         self.meta.stage_timings.insert(stage, elapsed);
@@ -164,6 +206,15 @@ impl PrdPipeline {
             .stage_complete(&stage, &format!("completed in {:.1}s", elapsed));
 
         Ok(())
+    }
+
+    fn advance_to_next_stage(&self, current_stage: Stage) -> PrdPhase {
+        match current_stage {
+            Stage::Ideation => PrdPhase::RunStage(Stage::Research),
+            Stage::Research => PrdPhase::RunStage(Stage::Synthesis),
+            Stage::Synthesis => PrdPhase::RunStage(Stage::Prd),
+            Stage::Prd => PrdPhase::ValidatePrd,
+        }
     }
 
     async fn check_gaps_phase(&mut self, stage: Stage) -> Result<PrdPhase> {
@@ -276,11 +327,38 @@ impl PrdPipeline {
             if *stage >= rerun_stage {
                 self.context.stage_outputs.remove(stage);
                 self.context.stage_input_hashes.remove(stage);
+                self.skipped_stages.remove(stage);
             }
         }
 
         self.meta.rerun_stages.push(rerun_stage);
         PrdPhase::RunStage(rerun_stage)
+    }
+
+    async fn validate_prd_phase(&mut self) -> Result<PrdPhase> {
+        self.interaction.status("Validating PRD...");
+
+        let prd_output = self
+            .context
+            .stage_outputs
+            .get(&Stage::Prd)
+            .cloned()
+            .ok_or_else(|| RalphError::PrdPipelineFailed("PRD stage output missing".to_owned()))?;
+
+        let validation_result = run_llm_validation(self.backend.clone(), &prd_output, &self.context).await?;
+
+        if validation_result.valid {
+            self.interaction
+                .status("PRD validation passed. Finalizing...");
+            Ok(PrdPhase::Done)
+        } else {
+            let report = format_validation_failure_report(&validation_result.issues);
+            self.cache.write_validation_report(&report)?;
+            Err(RalphError::PrdValidationFailed(format!(
+                "PRD validation failed with {} issue(s). See validation_report.md for details.",
+                validation_result.issues.len()
+            )))
+        }
     }
 
     fn finalize_result(mut self) -> Result<PrdResult> {
@@ -401,4 +479,31 @@ fn format_question_kind(kind: &QuestionKind) -> String {
         QuestionKind::Choice(options) => format!("Choice [{}]", options.join(", ")),
         QuestionKind::YesNo => "YesNo".to_owned(),
     }
+}
+
+fn format_validation_failure_report(issues: &[ValidationIssue]) -> String {
+    let mut report = String::from("# PRD Validation Failed\n\n");
+    report.push_str("The final PRD has critical issues that must be resolved before implementation.\n\n");
+    report.push_str("## Issues Found\n\n");
+
+    if issues.is_empty() {
+        report.push_str("- None (this should not happen)\n");
+    } else {
+        for (idx, issue) in issues.iter().enumerate() {
+            report.push_str(&format!(
+                "{}. **{}**: {}\n",
+                idx + 1,
+                issue.field,
+                issue.description
+            ));
+        }
+    }
+
+    report.push_str("\n## Next Steps\n\n");
+    report.push_str("In v1 of the PRD pipeline, automatic repair is not implemented. ");
+    report.push_str("Please review the issues above and provide additional context by:\n\n");
+    report.push_str("1. Adding answers to the answers.yaml file in the cache directory\n");
+    report.push_str("2. Re-running the pipeline with `--resume` to regenerate affected stages\n");
+
+    report
 }

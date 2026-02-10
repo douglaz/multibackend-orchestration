@@ -143,6 +143,33 @@ fn empty_gap_report() -> String {
     .to_string()
 }
 
+fn validation_pass() -> String {
+    r#"
+```json
+{
+  "valid": true,
+  "issues": []
+}
+```
+"#
+    .to_string()
+}
+
+fn validation_fail(field: &str, description: &str) -> String {
+    format!(
+        r#"
+```json
+{{
+  "valid": false,
+  "issues": [
+    {{"field": "{field}", "description": "{description}"}}
+  ]
+}}
+```
+"#
+    )
+}
+
 fn gap_report_with_question(key: &str, prompt: &str, impact_stage: Stage) -> String {
     format!(
         r#"
@@ -183,6 +210,13 @@ fn base_options(idea: &str, ask_max: u32) -> PrdOptions {
 fn cwd_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn acquire_cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+    match cwd_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 struct CwdGuard {
@@ -230,6 +264,7 @@ async fn llm_gap_detected_questions_answered_reruns_from_correct_stage_then_succ
             empty_gap_report(),
             make_prd_output("rerun"),
             empty_gap_report(),
+            validation_pass(),
         ],
     ));
 
@@ -246,11 +281,11 @@ async fn llm_gap_detected_questions_answered_reruns_from_correct_stage_then_succ
     )
     .expect("pipeline creation");
 
-    let _cwd_guard = cwd_lock().lock().expect("cwd lock");
+    let _cwd_guard = acquire_cwd_lock();
     let _cwd = CwdGuard::enter(workspace_root);
     let result = pipeline.run().await.expect("pipeline run");
 
-    assert_eq!(backend.call_count().await, 10);
+    assert_eq!(backend.call_count().await, 11);
     assert_eq!(result.meta.question_rounds, 1);
     assert_eq!(result.meta.rerun_stages, vec![Stage::Research]);
 
@@ -424,6 +459,7 @@ async fn gap_analysis_json_parse_failure_retried_three_times_then_falls_back() {
             empty_gap_report(),
             make_prd_output("initial"),
             empty_gap_report(),
+            validation_pass(),
         ],
     ));
 
@@ -438,12 +474,387 @@ async fn gap_analysis_json_parse_failure_retried_three_times_then_falls_back() {
     )
     .expect("pipeline creation");
 
-    let _cwd_guard = cwd_lock().lock().expect("cwd lock");
+    let _cwd_guard = acquire_cwd_lock();
     let _cwd = CwdGuard::enter(workspace_root);
     let result = pipeline.run().await.expect("pipeline run");
 
     assert_eq!(result.meta.question_rounds, 0);
-    assert_eq!(backend.call_count().await, 10);
+    assert_eq!(backend.call_count().await, 11);
     assert!(workspace_root.join("PRD.md").exists());
     assert!(!cache.cache_dir().join("missing_info_report.md").exists());
+}
+
+#[tokio::test]
+async fn validation_pass_writes_final_prd() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "validation pass test";
+
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("v1"),
+            empty_gap_report(),
+            make_research_output("v1"),
+            empty_gap_report(),
+            make_synthesis_output("v1"),
+            empty_gap_report(),
+            make_prd_output("v1"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 9);
+    assert_eq!(result.meta.question_rounds, 0);
+    assert!(workspace_root.join("PRD.md").exists());
+
+    let prd_content = std::fs::read_to_string(workspace_root.join("PRD.md")).expect("read PRD");
+    assert!(prd_content.contains("v1 PRD summary"));
+}
+
+#[tokio::test]
+async fn validation_fail_returns_exit_11_with_report() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "validation fail test";
+
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("v1"),
+            empty_gap_report(),
+            make_research_output("v1"),
+            empty_gap_report(),
+            make_synthesis_output("v1"),
+            empty_gap_report(),
+            make_prd_output("v1"),
+            empty_gap_report(),
+            validation_fail("api_design", "API endpoints not fully specified"),
+        ],
+    ));
+
+    let interaction = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let err = pipeline.run().await.expect_err("should fail");
+
+    assert!(matches!(err, RalphError::PrdValidationFailed(_)));
+    assert_eq!(err.exit_code(), 11);
+    assert_eq!(backend.call_count().await, 9);
+
+    let report_path = cache.cache_dir().join("validation_report.md");
+    assert!(report_path.exists());
+    let report = std::fs::read_to_string(report_path).expect("read validation report");
+    assert!(report.contains("PRD Validation Failed"));
+    assert!(report.contains("api_design"));
+    assert!(report.contains("API endpoints not fully specified"));
+
+    assert!(!workspace_root.join("PRD.md").exists());
+}
+
+#[tokio::test]
+async fn resume_skips_cached_stages_with_matching_hashes() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "resume skip test";
+
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    // First run: complete pipeline
+    let backend_first = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("first"),
+            empty_gap_report(),
+            make_research_output("first"),
+            empty_gap_report(),
+            make_synthesis_output("first"),
+            empty_gap_report(),
+            make_prd_output("first"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction_first = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline_first = PrdPipeline::new(
+        backend_first.clone(),
+        interaction_first,
+        cache.clone(),
+        answer_store.clone(),
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    pipeline_first.run().await.expect("first run");
+    assert_eq!(backend_first.call_count().await, 9);
+
+    // Second run: resume with no changes (all stages should skip)
+    let backend_second = Arc::new(MockBackend::new("mock", vec![validation_pass()]));
+
+    let interaction_second = Box::new(MockInteraction::new(vec![]));
+
+    let mut options_second = base_options(idea, 3);
+    options_second.resume = true;
+
+    let pipeline_second = PrdPipeline::new(
+        backend_second.clone(),
+        interaction_second,
+        cache.clone(),
+        answer_store,
+        options_second,
+    )
+    .expect("pipeline creation");
+
+    pipeline_second.run().await.expect("second run");
+
+    // All 4 stages should be skipped, only validation runs
+    assert_eq!(backend_second.call_count().await, 1);
+}
+
+#[tokio::test]
+async fn resume_invalidates_stages_when_answers_change() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "resume invalidation test";
+
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let mut answer_store = AnswerStore::new(&answers_path);
+
+    // First run: complete pipeline
+    let backend_first = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("first"),
+            empty_gap_report(),
+            make_research_output("first"),
+            empty_gap_report(),
+            make_synthesis_output("first"),
+            empty_gap_report(),
+            make_prd_output("first"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction_first = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline_first = PrdPipeline::new(
+        backend_first.clone(),
+        interaction_first,
+        cache.clone(),
+        answer_store.clone(),
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    pipeline_first.run().await.expect("first run");
+    assert_eq!(backend_first.call_count().await, 9);
+
+    // Modify answers file
+    let mut new_answers = std::collections::BTreeMap::new();
+    new_answers.insert("platform".to_string(), "mobile".to_string());
+    answer_store.merge(new_answers);
+    answer_store.save().expect("save modified answers");
+
+    // Second run: resume with changed answers (stages should regenerate)
+    let backend_second = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("second"),
+            empty_gap_report(),
+            make_research_output("second"),
+            empty_gap_report(),
+            make_synthesis_output("second"),
+            empty_gap_report(),
+            make_prd_output("second"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction_second = Box::new(MockInteraction::new(vec![]));
+
+    let mut options_second = base_options(idea, 3);
+    options_second.resume = true;
+
+    let pipeline_second = PrdPipeline::new(
+        backend_second.clone(),
+        interaction_second,
+        cache.clone(),
+        AnswerStore::new(&answers_path),
+        options_second,
+    )
+    .expect("pipeline creation");
+
+    pipeline_second.run().await.expect("second run");
+
+    // All stages should rerun due to changed answers affecting input hashes
+    assert_eq!(backend_second.call_count().await, 9);
+}
+
+#[tokio::test]
+async fn resume_idea_mismatch_returns_cache_mismatch_error() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea_first = "first idea";
+
+    let cache_first = CacheManager::new(workspace_root, idea_first).expect("cache manager");
+    let answers_path_first = cache_first.cache_dir().join("answers.yaml");
+    let answer_store_first = AnswerStore::new(&answers_path_first);
+
+    // First run with idea_first
+    let backend_first = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("first"),
+            empty_gap_report(),
+            make_research_output("first"),
+            empty_gap_report(),
+            make_synthesis_output("first"),
+            empty_gap_report(),
+            make_prd_output("first"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction_first = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline_first = PrdPipeline::new(
+        backend_first.clone(),
+        interaction_first,
+        cache_first.clone(),
+        answer_store_first,
+        base_options(idea_first, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    pipeline_first.run().await.expect("first run");
+
+    // Second run with different idea (same cache hash would be unlikely, but we'll use same cache)
+    let idea_second = "different idea";
+    let cache_second = CacheManager::new(workspace_root, idea_second).expect("cache manager");
+
+    // Manually copy meta.json from first run to simulate collision
+    std::fs::copy(
+        cache_first.cache_dir().join("meta.json"),
+        cache_second.cache_dir().join("meta.json"),
+    )
+    .expect("copy meta");
+
+    let answers_path_second = cache_second.cache_dir().join("answers.yaml");
+    let answer_store_second = AnswerStore::new(&answers_path_second);
+
+    let backend_second = Arc::new(MockBackend::new("mock", vec![]));
+    let interaction_second = Box::new(MockInteraction::new(vec![]));
+
+    let mut options_second = base_options(idea_second, 3);
+    options_second.resume = true;
+
+    let pipeline_second = PrdPipeline::new(
+        backend_second,
+        interaction_second,
+        cache_second,
+        answer_store_second,
+        options_second,
+    )
+    .expect("pipeline creation");
+
+    let err = pipeline_second.run().await.expect_err("should fail");
+    assert!(matches!(err, RalphError::PrdCacheMismatch(_)));
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[tokio::test]
+async fn validation_parse_retry_exhaustion_fails_closed() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "validation parse retry test";
+
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    // All stages succeed, but validation JSON is malformed for 3 attempts
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("v1"),
+            empty_gap_report(),
+            make_research_output("v1"),
+            empty_gap_report(),
+            make_synthesis_output("v1"),
+            empty_gap_report(),
+            make_prd_output("v1"),
+            empty_gap_report(),
+            "Invalid JSON response 1".to_string(),
+            "Invalid JSON response 2".to_string(),
+            "Invalid JSON response 3".to_string(),
+        ],
+    ));
+
+    let interaction = Box::new(MockInteraction::new(vec![]));
+
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let err = pipeline.run().await.expect_err("should fail");
+
+    assert!(matches!(err, RalphError::PrdValidationFailed(_)));
+    assert_eq!(err.exit_code(), 11);
+    assert_eq!(backend.call_count().await, 11);
+    assert!(!workspace_root.join("PRD.md").exists());
 }

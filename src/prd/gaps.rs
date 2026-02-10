@@ -90,6 +90,24 @@ pub fn gap_report_has_questions(report: &GapReport) -> bool {
     !report.questions.is_empty()
 }
 
+/// A validation issue found in the final PRD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationIssue {
+    /// Field name that has an issue.
+    pub field: String,
+    /// Description of what is missing or unclear.
+    pub description: String,
+}
+
+/// Result of PRD validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationResult {
+    /// Whether the PRD is valid and ready for implementation.
+    pub valid: bool,
+    /// List of issues found (empty if valid is true).
+    pub issues: Vec<ValidationIssue>,
+}
+
 /// Runs LLM-based gap analysis with up to 3 parse attempts and parse-fallback behavior.
 pub async fn run_llm_gap_analysis(
     backend: Arc<dyn Backend>,
@@ -121,6 +139,46 @@ pub async fn run_llm_gap_analysis(
     Ok(GapReport::default())
 }
 
+/// Parses a validation response from an LLM, extracting the fenced JSON block.
+pub fn parse_validation_result(raw: &str) -> Result<ValidationResult> {
+    let fenced_json = extract_fenced_json(raw)?;
+    let result = serde_json::from_str::<ValidationResult>(fenced_json)?;
+    Ok(result)
+}
+
+/// Runs LLM-based PRD validation with up to 3 parse attempts and parse-fallback behavior.
+pub async fn run_llm_validation(
+    backend: Arc<dyn Backend>,
+    prd: &str,
+    context: &PipelineContext,
+) -> Result<ValidationResult> {
+    let prompt_builder = StagePromptBuilder::new(
+        context.idea.clone(),
+        context.answers.clone(),
+        context.stage_outputs.clone(),
+    );
+
+    let mut prompt = prompt_builder.build_validation_prompt(prd);
+
+    for attempt in 1..=3_u8 {
+        let raw = backend.execute(&prompt).await?;
+        match parse_validation_result(&raw) {
+            Ok(result) => return Ok(result),
+            Err(parse_error) => {
+                if attempt == 3 {
+                    return Err(RalphError::PrdValidationFailed(format!(
+                        "Failed to parse validation result after 3 attempts. Last error: {}",
+                        parse_error
+                    )));
+                }
+                prompt = build_validation_reformat_prompt(&parse_error, &raw);
+            }
+        }
+    }
+
+    unreachable!("loop should return or error before reaching this point")
+}
+
 fn extract_fenced_json(raw: &str) -> Result<&str> {
     let fence_start = raw
         .find("```json")
@@ -139,6 +197,17 @@ fn build_reformat_prompt(stage: Stage, parse_error: &RalphError, previous_output
 Error: {parse_error}\n\n\
 Return ONLY a single fenced JSON block with schema:\n\
 `missing_fields`, `ambiguities`, `questions`, `suggested_defaults`.\n\
+Use valid JSON, no prose before or after the fenced block.\n\n\
+Previous response:\n---\n{previous_output}\n---\n"
+    )
+}
+
+fn build_validation_reformat_prompt(parse_error: &RalphError, previous_output: &str) -> String {
+    format!(
+        "CRITICAL: Your previous validation response could not be parsed.\n\n\
+Error: {parse_error}\n\n\
+Return ONLY a single fenced JSON block with schema:\n\
+{{\"valid\": bool, \"issues\": [{{\"field\": string, \"description\": string}}]}}\n\
 Use valid JSON, no prose before or after the fenced block.\n\n\
 Previous response:\n---\n{previous_output}\n---\n"
     )
@@ -281,5 +350,59 @@ Some analysis text.
         let report = parse_gap_report(raw).expect("should parse");
         assert!(report.questions.is_empty());
         assert!(!gap_report_has_questions(&report));
+    }
+
+    #[test]
+    fn parse_validation_result_valid() {
+        let raw = r#"
+```json
+{
+  "valid": true,
+  "issues": []
+}
+```
+"#;
+
+        let result = parse_validation_result(raw).expect("should parse");
+        assert!(result.valid);
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn parse_validation_result_invalid_with_issues() {
+        let raw = r#"
+```json
+{
+  "valid": false,
+  "issues": [
+    {"field": "api_design", "description": "API endpoints not specified"},
+    {"field": "data_model", "description": "Schema details missing"}
+  ]
+}
+```
+"#;
+
+        let result = parse_validation_result(raw).expect("should parse");
+        assert!(!result.valid);
+        assert_eq!(result.issues.len(), 2);
+        assert_eq!(result.issues[0].field, "api_design");
+        assert_eq!(result.issues[1].field, "data_model");
+    }
+
+    #[test]
+    fn validation_result_serde_roundtrip() {
+        let result = ValidationResult {
+            valid: false,
+            issues: vec![
+                ValidationIssue {
+                    field: "security".to_string(),
+                    description: "Authentication strategy unclear".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: ValidationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, deserialized);
     }
 }

@@ -1,5 +1,6 @@
 //! PRD cache management.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ use crate::Result;
 const LOCK_FILENAME: &str = ".lock";
 const META_FILENAME: &str = "meta.json";
 const MISSING_INFO_REPORT_FILENAME: &str = "missing_info_report.md";
+const VALIDATION_REPORT_FILENAME: &str = "validation_report.md";
+const STAGE_HASHES_FILENAME: &str = "stage_hashes.json";
 
 #[derive(Debug, Clone)]
 pub struct CacheManager {
@@ -94,6 +97,28 @@ impl CacheManager {
 
     pub fn write_missing_info_report(&self, report: &str) -> Result<()> {
         fs::write(self.cache_dir.join(MISSING_INFO_REPORT_FILENAME), report)?;
+        Ok(())
+    }
+
+    pub fn write_validation_report(&self, report: &str) -> Result<()> {
+        fs::write(self.cache_dir.join(VALIDATION_REPORT_FILENAME), report)?;
+        Ok(())
+    }
+
+    pub fn read_stage_hashes(&self) -> Result<Option<BTreeMap<Stage, String>>> {
+        let hashes_path = self.cache_dir.join(STAGE_HASHES_FILENAME);
+        let Some(raw) = read_optional_string(&hashes_path)? else {
+            return Ok(None);
+        };
+
+        let hashes = serde_json::from_str::<BTreeMap<Stage, String>>(&raw)?;
+        Ok(Some(hashes))
+    }
+
+    pub fn write_stage_hashes(&self, hashes: &BTreeMap<Stage, String>) -> Result<()> {
+        let path = self.cache_dir.join(STAGE_HASHES_FILENAME);
+        let content = serde_json::to_string_pretty(hashes)?;
+        fs::write(path, format!("{content}\n"))?;
         Ok(())
     }
 
