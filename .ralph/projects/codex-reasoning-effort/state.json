@@ -5,17 +5,17 @@
   "prompt_hash": "9ec1c59cf534fe52b1660d8d0cd772b3946b1e4e0d05387a1bcdd976f1d0bcbb",
   "prompt_hash_at_loop_start": "9ec1c59cf534fe52b1660d8d0cd772b3946b1e4e0d05387a1bcdd976f1d0bcbb",
   "parent_project": null,
-  "current_loop": 1,
-  "current_phase": "committing",
+  "current_loop": 2,
+  "current_phase": "completing",
   "phase_iteration": 1,
-  "status": "in_progress",
+  "status": "completed",
   "loops": [
     {
       "loop_number": 1,
       "slug": "codex-reasoning-effort-suffix-decomposition",
       "feature_name": "Codex Reasoning Effort Suffix Decomposition",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex)",
@@ -27,10 +27,28 @@
         "reviews": [],
         "approval": "loops/001-codex-reasoning-effort-suffix-decomposition/20260210230933-review-approved.md"
       },
-      "commit": null,
+      "commit": "6a1b01982df1cfc59d7474cd6bafff2a36909c01",
       "started_at": "2026-02-10T23:05:19.822010426Z",
-      "completed_at": null
+      "completed_at": "2026-02-10T23:09:33.491979125Z"
     }
   ],
-  "completion_attempts": []
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260210231009-termination-request.md",
+        "verdict": "loops/002-completion/20260210231106-completer-verdict.md"
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-10T23:10:09.522997625Z",
+      "completed_at": "2026-02-10T23:11:06.328646868Z"
+    }
+  ]
 }
