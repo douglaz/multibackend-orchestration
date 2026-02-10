@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod mock;
 pub mod tmux;
+pub mod tmux_backend;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -51,8 +52,24 @@ impl CliBackend {
         }
     }
 
-    fn resolved_command_path(&self) -> PathBuf {
+    pub fn resolved_command_path(&self) -> PathBuf {
         which::which(&self.command).unwrap_or_else(|_| PathBuf::from(&self.command))
+    }
+
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 

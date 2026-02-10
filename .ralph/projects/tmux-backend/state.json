@@ -5,7 +5,7 @@
   "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "tmux-session-and-window-management",
       "feature_name": "tmux session and window management",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude",
         "implementer": "codex",
@@ -27,8 +27,35 @@
         "reviews": [],
         "approval": "loops/001-tmux-session-and-window-management/20260210043628-review-approved.md"
       },
-      "commit": null,
+      "commit": "41bdacdf3a3831c921f72872900b9175c746a797",
       "started_at": "2026-02-10T04:31:35.884676940Z",
+      "completed_at": "2026-02-10T04:36:28.188839792Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "tmuxbackend-execution-wrapper",
+      "feature_name": "TmuxBackend execution wrapper",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex",
+        "implementer": "claude",
+        "reviewer": "codex"
+      },
+      "artifacts": {
+        "spec": "loops/002-tmuxbackend-execution-wrapper/20260210043838-spec.md",
+        "impl_notes": "loops/002-tmuxbackend-execution-wrapper/20260210044539-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-tmuxbackend-execution-wrapper/20260210044813-review-001-feedback.md",
+            "response": "loops/002-tmuxbackend-execution-wrapper/20260210045054-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-tmuxbackend-execution-wrapper/20260210045244-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T04:38:38.272116545Z",
       "completed_at": null
     }
   ],
