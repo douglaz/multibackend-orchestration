@@ -10,6 +10,9 @@ pub enum RalphError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("yaml error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+
     #[error("toml decode error: {0}")]
     TomlDecode(#[from] toml::de::Error),
 
@@ -80,6 +83,18 @@ pub enum RalphError {
     #[error("orchestration error: {0}")]
     Orchestration(String),
 
+    #[error("PRD pipeline failed: {0}")]
+    PrdPipelineFailed(String),
+
+    #[error("PRD validation failed: {0}")]
+    PrdValidationFailed(String),
+
+    #[error("PRD missing information -- see missing_info_report.md")]
+    PrdMissingInfo,
+
+    #[error("PRD cache mismatch: {0}")]
+    PrdCacheMismatch(String),
+
     #[error("unsupported operation: {0}")]
     Unsupported(String),
 }
@@ -90,8 +105,12 @@ impl RalphError {
             Self::Validation(_)
             | Self::WorkspaceNotFound
             | Self::ProjectNotFound(_)
-            | Self::ActiveProjectNotSet => 2,
+            | Self::ActiveProjectNotSet
+            | Self::PrdCacheMismatch(_) => 2,
             Self::StateLocked { .. } => 3,
+            Self::PrdPipelineFailed(_) => 10,
+            Self::PrdValidationFailed(_) => 11,
+            Self::PrdMissingInfo => 12,
             _ => 1,
         }
     }

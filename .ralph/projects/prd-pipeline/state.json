@@ -1,0 +1,36 @@
+{
+  "project_id": "prd-pipeline",
+  "project_name": "PRD Pipeline",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
+  "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "scaffolding-cli-wiring",
+      "feature_name": "Scaffolding + CLI Wiring",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/001-scaffolding-cli-wiring/20260210195208-spec.md",
+        "impl_notes": "loops/001-scaffolding-cli-wiring/20260210200225-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-scaffolding-cli-wiring/20260210200304-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T19:52:08.501551597Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

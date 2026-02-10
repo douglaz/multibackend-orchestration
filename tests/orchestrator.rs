@@ -830,22 +830,22 @@ async fn two_loop_happy_path_with_separate_backends() {
 
     // --- 2. Backend alternation (with role-model injection from defaults) ---
     // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
+    assert_eq!(state.loops[0].backends.planner, "claude(opus)");
     assert_eq!(
-        state.loops[0].backends.planner,
-        "claude(opus)"
+        state.loops[0].backends.implementer,
+        "codex(gpt-5.3-codex-high)"
     );
-    assert_eq!(state.loops[0].backends.implementer, "codex(gpt-5.3-codex-high)");
-    assert_eq!(
-        state.loops[0].backends.reviewer,
-        "claude(opus)"
-    );
+    assert_eq!(state.loops[0].backends.reviewer, "claude(opus)");
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
-    assert_eq!(state.loops[1].backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(
-        state.loops[1].backends.implementer,
-        "claude(sonnet)"
+        state.loops[1].backends.planner,
+        "codex(gpt-5.3-codex-xhigh)"
     );
-    assert_eq!(state.loops[1].backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(state.loops[1].backends.implementer, "claude(sonnet)");
+    assert_eq!(
+        state.loops[1].backends.reviewer,
+        "codex(gpt-5.3-codex-xhigh)"
+    );
 
     // --- 3. Feature names ---
     assert_eq!(state.loops[0].feature_name, "Auth Module");

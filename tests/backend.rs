@@ -225,10 +225,7 @@ fn resolve_backend_for_role_returns_unchanged_on_parse_failure() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    assert_eq!(
-        registry.resolve_backend_for_role("", "planner"),
-        ""
-    );
+    assert_eq!(registry.resolve_backend_for_role("", "planner"), "");
 }
 
 // ---------------------------------------------------------------------------
@@ -555,26 +552,10 @@ fn test_completion_alternation_sequence() {
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let expected = vec![
-        (
-            1,
-            "claude(opus)",
-            "codex(gpt-5.3-codex-xhigh)",
-        ),
-        (
-            2,
-            "codex(gpt-5.3-codex-xhigh)",
-            "claude(opus)",
-        ),
-        (
-            3,
-            "claude(opus)",
-            "codex(gpt-5.3-codex-xhigh)",
-        ),
-        (
-            4,
-            "codex(gpt-5.3-codex-xhigh)",
-            "claude(opus)",
-        ),
+        (1, "claude(opus)", "codex(gpt-5.3-codex-xhigh)"),
+        (2, "codex(gpt-5.3-codex-xhigh)", "claude(opus)"),
+        (3, "claude(opus)", "codex(gpt-5.3-codex-xhigh)"),
+        (4, "codex(gpt-5.3-codex-xhigh)", "claude(opus)"),
     ];
 
     for (loop_num, exp_planner, exp_completer) in expected {

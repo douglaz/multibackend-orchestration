@@ -404,12 +404,18 @@ base_branch = "master"
             config.backends.claude.models.reformatter.as_deref(),
             Some("sonnet")
         );
-        assert_eq!(config.backends.codex.models.planner.as_deref(), Some("gpt-5.3-codex-xhigh"));
+        assert_eq!(
+            config.backends.codex.models.planner.as_deref(),
+            Some("gpt-5.3-codex-xhigh")
+        );
         assert_eq!(
             config.backends.codex.models.implementer.as_deref(),
             Some("gpt-5.3-codex-high")
         );
-        assert_eq!(config.backends.codex.models.reviewer.as_deref(), Some("gpt-5.3-codex-xhigh"));
+        assert_eq!(
+            config.backends.codex.models.reviewer.as_deref(),
+            Some("gpt-5.3-codex-xhigh")
+        );
         assert_eq!(
             config.backends.codex.models.completer.as_deref(),
             Some("gpt-5.3-codex-xhigh")
