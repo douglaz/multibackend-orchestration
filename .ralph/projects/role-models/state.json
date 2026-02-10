@@ -5,7 +5,7 @@
   "prompt_hash": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
   "prompt_hash_at_loop_start": "431d5b34729b99d9fb4389b1f8f678e7f8f5e0e8cceba5ebed8b3441c7ff39cb",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "backendrolemodels-config-layer",
       "feature_name": "BackendRoleModels Config Layer",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude",
         "implementer": "codex",
@@ -27,8 +27,29 @@
         "reviews": [],
         "approval": "loops/001-backendrolemodels-config-layer/20260210183829-review-approved.md"
       },
-      "commit": null,
+      "commit": "f9a8c6ea61907f5564ea70d0675ad99453bf318c",
       "started_at": "2026-02-10T18:35:35.638067368Z",
+      "completed_at": "2026-02-10T18:38:29.782724484Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "backendregistry-role-model-resolution",
+      "feature_name": "BackendRegistry Role-Model Resolution",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex",
+        "implementer": "claude",
+        "reviewer": "codex"
+      },
+      "artifacts": {
+        "spec": "loops/002-backendregistry-role-model-resolution/20260210184059-spec.md",
+        "impl_notes": "loops/002-backendregistry-role-model-resolution/20260210184601-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-backendregistry-role-model-resolution/20260210184738-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-10T18:40:59.819835104Z",
       "completed_at": null
     }
   ],

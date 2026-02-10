@@ -306,6 +306,36 @@ impl BackendRegistry {
         Ok(self.opposite(starting_backend)?.to_owned())
     }
 
+    /// Resolve the backend spec for a given role by injecting the configured
+    /// role-specific model when the base spec is bare (no explicit model).
+    ///
+    /// Returns `base_backend` unchanged when:
+    /// - it already includes an explicit model (e.g. `claude(opus)`)
+    /// - the backend name is unknown
+    /// - no role model is configured for the given role
+    /// - spec parsing fails
+    pub fn resolve_backend_for_role(&self, base_backend: &str, role: &str) -> String {
+        let parsed = match parse_backend_spec(base_backend) {
+            Ok(p) => p,
+            Err(_) => return base_backend.to_owned(),
+        };
+
+        // Already has an explicit model — don't override
+        if parsed.model.is_some() {
+            return base_backend.to_owned();
+        }
+
+        let model = self
+            .config
+            .backend_config(&parsed.name)
+            .and_then(|bc| bc.models.for_role(role));
+
+        match model {
+            Some(m) => format!("{}({m})", parsed.name),
+            None => base_backend.to_owned(),
+        }
+    }
+
     pub fn assign_feature_backends(
         &self,
         loop_number: u32,
@@ -330,9 +360,9 @@ impl BackendRegistry {
             .unwrap_or(alternating_reviewer);
 
         Ok(FeatureLoopBackends {
-            planner,
-            implementer,
-            reviewer,
+            planner: self.resolve_backend_for_role(&planner, "planner"),
+            implementer: self.resolve_backend_for_role(&implementer, "implementer"),
+            reviewer: self.resolve_backend_for_role(&reviewer, "reviewer"),
         })
     }
 
@@ -354,7 +384,10 @@ impl BackendRegistry {
             .clone()
             .unwrap_or(alternating_completer);
 
-        Ok(CompletionLoopBackends { planner, completer })
+        Ok(CompletionLoopBackends {
+            planner: self.resolve_backend_for_role(&planner, "planner"),
+            completer: self.resolve_backend_for_role(&completer, "completer"),
+        })
     }
 
     pub async fn health_check_all(&self) -> Result<()> {

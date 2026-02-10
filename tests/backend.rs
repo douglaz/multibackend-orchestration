@@ -4,12 +4,20 @@ use std::fs;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ralph::backend::{BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
-use ralph::config::global::GlobalConfig;
+use ralph::config::global::{BackendRoleModels, GlobalConfig};
 use ralph::error::RalphError;
 use tempfile::TempDir;
 
 fn test_config() -> GlobalConfig {
     GlobalConfig::default()
+}
+
+/// Config with no role models configured — preserves bare backend names.
+fn test_config_no_models() -> GlobalConfig {
+    let mut config = GlobalConfig::default();
+    config.backends.claude.models = BackendRoleModels::default();
+    config.backends.codex.models = BackendRoleModels::default();
+    config
 }
 
 fn tmux_disabled() -> BackendRegistryTmuxConfig {
@@ -124,9 +132,135 @@ fn test_planner_for_loop_with_model_spec_start() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// resolve_backend_for_role tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_backend_for_role_injects_model_when_configured() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "planner"),
+        "claude(claude-sonnet-4-5-20250929)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "planner"),
+        "codex(o3)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "implementer"),
+        "claude(claude-sonnet-4-5-20250929)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "reviewer"),
+        "codex(o3)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "completer"),
+        "claude(claude-sonnet-4-5-20250929)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "reformatter"),
+        "codex(o3)"
+    );
+}
+
+#[test]
+fn resolve_backend_for_role_returns_bare_when_no_model_configured() {
+    let config = test_config_no_models();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "planner"),
+        "claude"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "implementer"),
+        "codex"
+    );
+}
+
+#[test]
+fn resolve_backend_for_role_preserves_explicit_model() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    // Already has an explicit model — should NOT be overridden
+    assert_eq!(
+        registry.resolve_backend_for_role("claude(opus)", "planner"),
+        "claude(opus)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex(gpt-5)", "implementer"),
+        "codex(gpt-5)"
+    );
+}
+
+#[test]
+fn resolve_backend_for_role_returns_unchanged_for_unknown_role() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "unknown-role"),
+        "claude"
+    );
+}
+
+#[test]
+fn resolve_backend_for_role_returns_unchanged_for_unknown_backend() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.resolve_backend_for_role("unknown", "planner"),
+        "unknown"
+    );
+}
+
+#[test]
+fn resolve_backend_for_role_returns_unchanged_on_parse_failure() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    assert_eq!(
+        registry.resolve_backend_for_role("", "planner"),
+        ""
+    );
+}
+
+// ---------------------------------------------------------------------------
+// assign_feature_backends with default config (model injection)
+// ---------------------------------------------------------------------------
+
 #[test]
 fn test_assign_feature_backends() {
     let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
+    // With default role models, these become model-injected specs
+    let backends = registry
+        .assign_feature_backends(1, "claude", &no_role_overrides())
+        .unwrap();
+    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.implementer, "codex(o3)");
+    assert_eq!(backends.reviewer, "claude(claude-sonnet-4-5-20250929)");
+
+    // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
+    let backends = registry
+        .assign_feature_backends(2, "claude", &no_role_overrides())
+        .unwrap();
+    assert_eq!(backends.planner, "codex(o3)");
+    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.reviewer, "codex(o3)");
+}
+
+#[test]
+fn test_assign_feature_backends_no_models() {
+    let config = test_config_no_models();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let backends = registry
@@ -149,19 +283,20 @@ fn test_assign_feature_backends_with_model_spec_start() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
+    // Starting with explicit model spec — explicit models pass through unchanged
     let backends = registry
         .assign_feature_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "codex");
+    assert_eq!(backends.implementer, "codex(o3)");
     assert_eq!(backends.reviewer, "claude(opus)");
 
     let backends = registry
         .assign_feature_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex");
-    assert_eq!(backends.implementer, "claude");
-    assert_eq!(backends.reviewer, "codex");
+    assert_eq!(backends.planner, "codex(o3)");
+    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.reviewer, "codex(o3)");
 }
 
 #[test]
@@ -175,6 +310,7 @@ fn test_assign_feature_backends_with_all_role_overrides() {
         completer: None,
     };
 
+    // All overrides have explicit models — they pass through unchanged
     let backends = registry
         .assign_feature_backends(2, "claude", &role_overrides)
         .expect("overridden feature backends should resolve");
@@ -194,17 +330,59 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         completer: None,
     };
 
+    // Loop 2: alternation gives codex as planner, but override pins claude(opus)
+    // implementer alternates to claude (model injected), reviewer alternates to codex (model injected)
     let backends = registry
         .assign_feature_backends(2, "claude", &role_overrides)
         .expect("mixed feature backends should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "claude");
-    assert_eq!(backends.reviewer, "codex");
+    assert_eq!(backends.implementer, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.reviewer, "codex(o3)");
 }
+
+#[test]
+fn test_assign_feature_backends_bare_role_override_gets_model_injection() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: Some("claude".to_owned()),
+        implementer: None,
+        reviewer: None,
+        completer: None,
+    };
+
+    // Bare per-role override should still receive role-model injection
+    let backends = registry
+        .assign_feature_backends(2, "claude", &role_overrides)
+        .expect("bare override should resolve");
+    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
+}
+
+// ---------------------------------------------------------------------------
+// assign_completion_backends with default config (model injection)
+// ---------------------------------------------------------------------------
 
 #[test]
 fn test_assign_completion_backends() {
     let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
+    let backends = registry
+        .assign_completion_backends(1, "claude", &no_role_overrides())
+        .unwrap();
+    assert_eq!(backends.planner, "claude(claude-sonnet-4-5-20250929)");
+    assert_eq!(backends.completer, "codex(o3)");
+
+    let backends = registry
+        .assign_completion_backends(2, "claude", &no_role_overrides())
+        .unwrap();
+    assert_eq!(backends.planner, "codex(o3)");
+    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
+}
+
+#[test]
+fn test_assign_completion_backends_no_models() {
+    let config = test_config_no_models();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let backends = registry
@@ -229,13 +407,13 @@ fn test_assign_completion_backends_with_model_spec_start() {
         .assign_completion_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completer, "codex");
+    assert_eq!(backends.completer, "codex(o3)");
 
     let backends = registry
         .assign_completion_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
-    assert_eq!(backends.planner, "codex");
-    assert_eq!(backends.completer, "claude");
+    assert_eq!(backends.planner, "codex(o3)");
+    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
 }
 
 #[test]
@@ -271,19 +449,78 @@ fn test_assign_completion_backends_with_partial_role_overrides() {
         .assign_completion_backends(2, "claude", &role_overrides)
         .expect("mixed completion backends should resolve");
     assert_eq!(backends.planner, "claude(sonnet)");
-    assert_eq!(backends.completer, "claude");
+    assert_eq!(backends.completer, "claude(claude-sonnet-4-5-20250929)");
 }
+
+// ---------------------------------------------------------------------------
+// Alternation sequence tests with default role models
+// ---------------------------------------------------------------------------
 
 #[test]
 fn test_backend_alternation_sequence() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    // Verify the documented alternation pattern
+    // Verify the documented alternation pattern with role-model injection
     // Loop 1: Claude planner, Codex implementer, Claude reviewer
     // Loop 2: Codex planner, Claude implementer, Codex reviewer
-    // Loop 3: Claude planner, Codex implementer, Claude reviewer
     // etc.
+    let expected = vec![
+        (
+            1,
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+        ),
+        (
+            2,
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+        ),
+        (
+            3,
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+        ),
+        (
+            4,
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+        ),
+        (
+            5,
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+        ),
+    ];
+
+    for (loop_num, exp_planner, exp_impl, exp_reviewer) in expected {
+        let backends = registry
+            .assign_feature_backends(loop_num, "claude", &no_role_overrides())
+            .unwrap();
+        assert_eq!(
+            backends.planner, exp_planner,
+            "Loop {loop_num} planner mismatch"
+        );
+        assert_eq!(
+            backends.implementer, exp_impl,
+            "Loop {loop_num} implementer mismatch"
+        );
+        assert_eq!(
+            backends.reviewer, exp_reviewer,
+            "Loop {loop_num} reviewer mismatch"
+        );
+    }
+}
+
+#[test]
+fn test_backend_alternation_sequence_no_models() {
+    let config = test_config_no_models();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
 
     let expected = vec![
         (1, "claude", "codex", "claude"),
@@ -317,7 +554,49 @@ fn test_completion_alternation_sequence() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    // Completer must always be opposite of Planner
+    let expected = vec![
+        (
+            1,
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+        ),
+        (
+            2,
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+        ),
+        (
+            3,
+            "claude(claude-sonnet-4-5-20250929)",
+            "codex(o3)",
+        ),
+        (
+            4,
+            "codex(o3)",
+            "claude(claude-sonnet-4-5-20250929)",
+        ),
+    ];
+
+    for (loop_num, exp_planner, exp_completer) in expected {
+        let backends = registry
+            .assign_completion_backends(loop_num, "claude", &no_role_overrides())
+            .unwrap();
+        assert_eq!(
+            backends.planner, exp_planner,
+            "Loop {loop_num} planner mismatch"
+        );
+        assert_eq!(
+            backends.completer, exp_completer,
+            "Loop {loop_num} completer mismatch"
+        );
+    }
+}
+
+#[test]
+fn test_completion_alternation_sequence_no_models() {
+    let config = test_config_no_models();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+
     let expected = vec![
         (1, "claude", "codex"),
         (2, "codex", "claude"),
