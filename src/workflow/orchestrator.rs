@@ -15,7 +15,7 @@ use crate::config::{
     RunWorkflowOverrides,
 };
 use crate::error::RalphError;
-use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
+use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_feature_loop,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
@@ -186,6 +186,7 @@ impl Orchestrator {
                         resolve_branch_name(&self.workspace.config.git.branch_format, &project_id);
                     if branch_exists(repo_root, &branch)? {
                         checkout_branch(repo_root, &branch)?;
+                        merge_base_branch(repo_root, &self.workspace.config.git.base_branch)?;
                     }
                 }
             }

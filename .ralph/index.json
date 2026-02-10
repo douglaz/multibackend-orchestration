@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "codex-reasoning-effort",
+  "active_project": "auto-branch-sync",
   "projects": [
     {
       "id": "tmux-backend",
@@ -83,12 +83,12 @@
     {
       "id": "auto-branch-sync",
       "name": "Auto-Branch Sync",
-      "status": "pending",
+      "status": "in_progress",
       "created_at": "2026-02-10T23:19:01.912445341Z",
       "completed_at": null,
       "total_feature_loops": 0,
       "total_completion_attempts": 0,
-      "last_loop_number": 0,
+      "last_loop_number": 1,
       "parent_project": null
     }
   ]
