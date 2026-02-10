@@ -1230,7 +1230,8 @@ if [[ "$prompt" == *"CRITICAL: Your previous response could not be parsed."* ]];
   fi
   count=$((count + 1))
   echo "$count" > "$counter_file"
-  if [[ " $* " == *" --model gpt-5.3-codex-medium "* ]]; then
+  args=" $* "
+  if [[ "$args" == *' -c model_reasoning_effort="medium" '* && "$args" == *" --model gpt-5.3-codex "* ]]; then
     model_counter_file="${COUNTER_DIR}/codex_reformat_model_count"
     model_count=0
     if [ -f "$model_counter_file" ]; then

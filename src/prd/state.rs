@@ -17,7 +17,12 @@ pub enum Stage {
 impl Stage {
     /// Returns all stages in canonical order.
     pub fn all() -> &'static [Stage] {
-        &[Stage::Ideation, Stage::Research, Stage::Synthesis, Stage::Prd]
+        &[
+            Stage::Ideation,
+            Stage::Research,
+            Stage::Synthesis,
+            Stage::Prd,
+        ]
     }
 
     /// Returns the zero-based index of this stage in the canonical order.

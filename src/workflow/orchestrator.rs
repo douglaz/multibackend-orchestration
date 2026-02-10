@@ -123,9 +123,7 @@ impl Orchestrator {
 
         // When --project is explicitly specified, update the active project
         if explicit_project {
-            self.workspace
-                .index
-                .set_active_project(&project_id)?;
+            self.workspace.index.set_active_project(&project_id)?;
             self.workspace.save_index()?;
         }
 

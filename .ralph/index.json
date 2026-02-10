@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "prd-pipeline",
+  "active_project": "codex-reasoning-effort",
   "projects": [
     {
       "id": "tmux-backend",
@@ -67,6 +67,17 @@
       "total_feature_loops": 8,
       "total_completion_attempts": 1,
       "last_loop_number": 9,
+      "parent_project": null
+    },
+    {
+      "id": "codex-reasoning-effort",
+      "name": "Codex Reasoning Effort",
+      "status": "completed",
+      "created_at": "2026-02-10T23:04:46.805034225Z",
+      "completed_at": "2026-02-10T23:11:06.328719804Z",
+      "total_feature_loops": 1,
+      "total_completion_attempts": 1,
+      "last_loop_number": 2,
       "parent_project": null
     }
   ]

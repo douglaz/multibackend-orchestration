@@ -198,7 +198,8 @@ impl PrdPipeline {
             .insert(stage, check.cleaned_output.clone());
 
         self.context.stage_input_hashes.insert(stage, input_hash);
-        self.cache.write_stage_hashes(&self.context.stage_input_hashes)?;
+        self.cache
+            .write_stage_hashes(&self.context.stage_input_hashes)?;
 
         let elapsed = start.elapsed().as_secs_f64();
         self.meta.stage_timings.insert(stage, elapsed);
@@ -345,7 +346,8 @@ impl PrdPipeline {
             .cloned()
             .ok_or_else(|| RalphError::PrdPipelineFailed("PRD stage output missing".to_owned()))?;
 
-        let validation_result = run_llm_validation(self.backend.clone(), &prd_output, &self.context).await?;
+        let validation_result =
+            run_llm_validation(self.backend.clone(), &prd_output, &self.context).await?;
 
         if validation_result.valid {
             self.interaction
@@ -483,7 +485,9 @@ fn format_question_kind(kind: &QuestionKind) -> String {
 
 fn format_validation_failure_report(issues: &[ValidationIssue]) -> String {
     let mut report = String::from("# PRD Validation Failed\n\n");
-    report.push_str("The final PRD has critical issues that must be resolved before implementation.\n\n");
+    report.push_str(
+        "The final PRD has critical issues that must be resolved before implementation.\n\n",
+    );
     report.push_str("## Issues Found\n\n");
 
     if issues.is_empty() {
