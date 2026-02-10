@@ -7,7 +7,7 @@
   "parent_project": null,
   "current_loop": 5,
   "current_phase": "planning",
-  "phase_iteration": 0,
+  "phase_iteration": 1,
   "status": "in_progress",
   "loops": [
     {
@@ -117,23 +117,5 @@
       "completed_at": "2026-02-10T12:13:26.408670513Z"
     }
   ],
-  "completion_attempts": [
-    {
-      "loop_number": 5,
-      "slug": "completion",
-      "loop_type": "completion",
-      "status": "completed",
-      "backends": {
-        "planner": "claude",
-        "completer": "codex"
-      },
-      "artifacts": {
-        "termination_request": "loops/005-completion/20260210121343-termination-request.md",
-        "verdict": "loops/005-completion/20260210121725-completer-verdict.md"
-      },
-      "verdict": "continue",
-      "started_at": "2026-02-10T12:13:43.600418015Z",
-      "completed_at": "2026-02-10T12:17:25.121723141Z"
-    }
-  ]
+  "completion_attempts": []
 }
