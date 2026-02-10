@@ -841,7 +841,7 @@ async fn two_loop_happy_path_with_separate_backends() {
         state.loops[1].backends.planner,
         "codex(gpt-5.3-codex-xhigh)"
     );
-    assert_eq!(state.loops[1].backends.implementer, "claude(sonnet)");
+    assert_eq!(state.loops[1].backends.implementer, "claude(opus)");
     assert_eq!(
         state.loops[1].backends.reviewer,
         "codex(gpt-5.3-codex-xhigh)"

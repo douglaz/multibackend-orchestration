@@ -151,7 +151,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "implementer"),
-        "claude(sonnet)"
+        "claude(opus)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reviewer"),
@@ -251,7 +251,7 @@ fn test_assign_feature_backends() {
         .assign_feature_backends(2, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
-    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.implementer, "claude(opus)");
     assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
@@ -292,7 +292,7 @@ fn test_assign_feature_backends_with_model_spec_start() {
         .assign_feature_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
-    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.implementer, "claude(opus)");
     assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
@@ -333,7 +333,7 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         .assign_feature_backends(2, "claude", &role_overrides)
         .expect("mixed feature backends should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.implementer, "claude(sonnet)");
+    assert_eq!(backends.implementer, "claude(opus)");
     assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
 }
 
@@ -472,7 +472,7 @@ fn test_backend_alternation_sequence() {
         (
             2,
             "codex(gpt-5.3-codex-xhigh)",
-            "claude(sonnet)",
+            "claude(opus)",
             "codex(gpt-5.3-codex-xhigh)",
         ),
         (
@@ -484,7 +484,7 @@ fn test_backend_alternation_sequence() {
         (
             4,
             "codex(gpt-5.3-codex-xhigh)",
-            "claude(sonnet)",
+            "claude(opus)",
             "codex(gpt-5.3-codex-xhigh)",
         ),
         (

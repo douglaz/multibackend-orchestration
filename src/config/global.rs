@@ -136,7 +136,7 @@ impl Default for GlobalConfig {
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
                         planner: Some("opus".to_owned()),
-                        implementer: Some("sonnet".to_owned()),
+                        implementer: Some("opus".to_owned()),
                         reviewer: Some("opus".to_owned()),
                         completer: Some("opus".to_owned()),
                         reformatter: Some("sonnet".to_owned()),
@@ -347,7 +347,7 @@ timeout_seconds = 600
 
 [backends.claude.models]
 planner = "opus"
-implementer = "sonnet"
+implementer = "opus"
 reviewer = "opus"
 completer = "opus"
 reformatter = "sonnet"
@@ -390,7 +390,7 @@ base_branch = "master"
         );
         assert_eq!(
             config.backends.claude.models.implementer.as_deref(),
-            Some("sonnet")
+            Some("opus")
         );
         assert_eq!(
             config.backends.claude.models.reviewer.as_deref(),

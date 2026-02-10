@@ -11,7 +11,7 @@ timeout_seconds = 7200
 
 [backends.claude.models]
 planner = "opus"
-implementer = "sonnet"
+implementer = "opus"
 reviewer = "opus"
 completer = "opus"
 reformatter = "sonnet"
