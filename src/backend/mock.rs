@@ -10,6 +10,7 @@ use crate::Result;
 pub struct MockBackend {
     pub name: String,
     pub responses: Arc<Mutex<Vec<String>>>,
+    pub call_count: Arc<Mutex<usize>>,
 }
 
 impl MockBackend {
@@ -17,7 +18,12 @@ impl MockBackend {
         Self {
             name: name.to_owned(),
             responses: Arc::new(Mutex::new(responses)),
+            call_count: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub async fn call_count(&self) -> usize {
+        *self.call_count.lock().await
     }
 }
 
@@ -28,6 +34,10 @@ impl Backend for MockBackend {
     }
 
     async fn execute(&self, _prompt: &str) -> Result<String> {
+        let mut count = self.call_count.lock().await;
+        *count += 1;
+        drop(count);
+
         let mut guard = self.responses.lock().await;
         if guard.is_empty() {
             return Ok(String::new());

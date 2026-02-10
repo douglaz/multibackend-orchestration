@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod git;
+pub mod prd;
 pub mod project;
 pub mod prompts;
 pub mod util;

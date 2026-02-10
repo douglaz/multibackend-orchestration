@@ -2,6 +2,7 @@ pub(crate) mod backend_spec;
 mod config;
 mod history;
 pub mod init;
+mod prd;
 mod project;
 mod rollback;
 mod run;
@@ -28,6 +29,7 @@ pub enum Commands {
     Init(InitArgs),
     Project(ProjectArgs),
     Run(RunArgs),
+    Prd(prd::PrdArgs),
     Status(StatusArgs),
     History(HistoryArgs),
     Tail(TailArgs),
@@ -243,6 +245,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Init(args) => init::execute(args),
         Commands::Project(args) => project::execute(args),
         Commands::Run(args) => run::execute(args).await,
+        Commands::Prd(args) => prd::execute(args).await,
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
         Commands::Tail(args) => tail::execute(args).await,
@@ -318,5 +321,52 @@ mod tests {
         assert_eq!(args.implementer_backend.as_deref(), Some("codex(gpt-5)"));
         assert_eq!(args.reviewer_backend.as_deref(), Some("claude"));
         assert_eq!(args.completer_backend.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn parses_prd_command_with_expected_arguments() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "prd",
+            "--idea",
+            "smart onboarding",
+            "--non-interactive",
+            "--ask-max",
+            "5",
+            "--answers",
+            "answers.yaml",
+            "--resume",
+            "--dry-run",
+            "--backend",
+            "claude(opus)",
+        ]);
+        let Commands::Prd(args) = cli.command else {
+            panic!("expected prd command");
+        };
+
+        assert_eq!(args.idea, "smart onboarding");
+        assert!(args.non_interactive);
+        assert!(!args.interactive);
+        assert_eq!(args.ask_max, 5);
+        assert_eq!(
+            args.answers.as_deref(),
+            Some(std::path::Path::new("answers.yaml"))
+        );
+        assert!(args.resume);
+        assert!(args.dry_run);
+        assert_eq!(args.backend.as_deref(), Some("claude(opus)"));
+    }
+
+    #[test]
+    fn rejects_prd_with_conflicting_interactive_flags() {
+        let result = Cli::try_parse_from([
+            "ralph",
+            "prd",
+            "--idea",
+            "smart onboarding",
+            "--interactive",
+            "--non-interactive",
+        ]);
+        assert!(result.is_err());
     }
 }

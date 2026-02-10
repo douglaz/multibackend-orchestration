@@ -1,0 +1,255 @@
+{
+  "project_id": "prd-pipeline",
+  "project_name": "PRD Pipeline",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
+  "prompt_hash_at_loop_start": "4d6c41d713b7d3f812e1edde21c40f48994fb22c3b1132d7609a2690503734fd",
+  "parent_project": null,
+  "current_loop": 9,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "scaffolding-cli-wiring",
+      "feature_name": "Scaffolding + CLI Wiring",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/001-scaffolding-cli-wiring/20260210195208-spec.md",
+        "impl_notes": "loops/001-scaffolding-cli-wiring/20260210200225-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-scaffolding-cli-wiring/20260210200304-review-approved.md"
+      },
+      "commit": "b668b28a8579016b91c09c2696581f7b4b2e7e45",
+      "started_at": "2026-02-10T19:52:08.501551597Z",
+      "completed_at": "2026-02-10T20:03:04.537862829Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "core-types-unit-tests",
+      "feature_name": "Core Types + Unit Tests",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/002-core-types-unit-tests/20260210200415-spec.md",
+        "impl_notes": "loops/002-core-types-unit-tests/20260210200428-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-core-types-unit-tests/20260210200632-review-001-feedback.md",
+            "response": "loops/002-core-types-unit-tests/20260210200650-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-core-types-unit-tests/20260210200743-review-002-feedback.md",
+            "response": "loops/002-core-types-unit-tests/20260210200857-impl-response-002.md"
+          }
+        ],
+        "approval": "loops/002-core-types-unit-tests/20260210201010-review-approved.md"
+      },
+      "commit": "7191a1f0f93466c30d144d0aa18bff8a593b7184",
+      "started_at": "2026-02-10T20:04:15.098062707Z",
+      "completed_at": "2026-02-10T20:10:10.186701226Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "cache-lock-answers",
+      "feature_name": "Cache + Lock + Answers",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/003-cache-lock-answers/20260210201058-spec.md",
+        "impl_notes": "loops/003-cache-lock-answers/20260210201531-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-cache-lock-answers/20260210201634-review-approved.md"
+      },
+      "commit": "4bce53f58b24ba0a7c6f94329931460629d16d9a",
+      "started_at": "2026-02-10T20:10:58.291585359Z",
+      "completed_at": "2026-02-10T20:16:34.504371717Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "stages-deterministic-parsers",
+      "feature_name": "Stages + Deterministic Parsers",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/004-stages-deterministic-parsers/20260210201734-spec.md",
+        "impl_notes": "loops/004-stages-deterministic-parsers/20260210201753-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/004-stages-deterministic-parsers/20260210201954-review-001-feedback.md",
+            "response": "loops/004-stages-deterministic-parsers/20260210202009-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/004-stages-deterministic-parsers/20260210202206-review-002-feedback.md",
+            "response": "loops/004-stages-deterministic-parsers/20260210202427-impl-response-002.md"
+          }
+        ],
+        "approval": "loops/004-stages-deterministic-parsers/20260210202546-review-approved.md"
+      },
+      "commit": "7444093ed316db74fbb8625291a5e599bbea06c0",
+      "started_at": "2026-02-10T20:17:34.304625133Z",
+      "completed_at": "2026-02-10T20:25:46.061883673Z"
+    },
+    {
+      "loop_number": 5,
+      "slug": "interaction-layer",
+      "feature_name": "Interaction Layer",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/005-interaction-layer/20260210202623-spec.md",
+        "impl_notes": "loops/005-interaction-layer/20260210203119-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/005-interaction-layer/20260210203203-review-approved.md"
+      },
+      "commit": "2e5e6207d6067c76077afb5ca79129444f9cdbda",
+      "started_at": "2026-02-10T20:26:23.170800546Z",
+      "completed_at": "2026-02-10T20:32:03.120020742Z"
+    },
+    {
+      "loop_number": 6,
+      "slug": "pipeline-non-interactive-happy-path",
+      "feature_name": "Pipeline + Non-Interactive Happy Path",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/006-pipeline-non-interactive-happy-path/20260210203430-spec.md",
+        "impl_notes": "loops/006-pipeline-non-interactive-happy-path/20260210203900-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204156-review-001-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204215-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204440-review-002-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204457-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/006-pipeline-non-interactive-happy-path/20260210204719-review-003-feedback.md",
+            "response": "loops/006-pipeline-non-interactive-happy-path/20260210204831-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/006-pipeline-non-interactive-happy-path/20260210205155-review-approved.md"
+      },
+      "commit": "fc591395e2451db9e67a17011d8c3739cc0b97d3",
+      "started_at": "2026-02-10T20:34:30.544122818Z",
+      "completed_at": "2026-02-10T20:51:55.491056140Z"
+    },
+    {
+      "loop_number": 7,
+      "slug": "gap-analysis-interactive-flow",
+      "feature_name": "Gap Analysis + Interactive Flow",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/007-gap-analysis-interactive-flow/20260210205358-spec.md",
+        "impl_notes": "loops/007-gap-analysis-interactive-flow/20260210210335-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/007-gap-analysis-interactive-flow/20260210210602-review-approved.md"
+      },
+      "commit": "485209278076f0890a27139f8ee3d1de9fdab071",
+      "started_at": "2026-02-10T20:53:58.525729794Z",
+      "completed_at": "2026-02-10T21:06:02.265049532Z"
+    },
+    {
+      "loop_number": 8,
+      "slug": "validation-resume-completion",
+      "feature_name": "Validation + Resume Completion",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex)",
+        "implementer": "claude(sonnet)",
+        "reviewer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "spec": "loops/008-validation-resume-completion/20260210210832-spec.md",
+        "impl_notes": "loops/008-validation-resume-completion/20260210211311-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/008-validation-resume-completion/20260210211751-review-001-feedback.md",
+            "response": "loops/008-validation-resume-completion/20260210211826-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/008-validation-resume-completion/20260210212107-review-002-feedback.md",
+            "response": "loops/008-validation-resume-completion/20260210212119-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/008-validation-resume-completion/20260210212320-review-003-feedback.md",
+            "response": "loops/008-validation-resume-completion/20260210212744-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/008-validation-resume-completion/20260210213102-review-approved.md"
+      },
+      "commit": "c287d1b4e45c29ee79a1e5efccb288bf7e121f68",
+      "started_at": "2026-02-10T21:08:32.853364488Z",
+      "completed_at": "2026-02-10T21:31:02.897149004Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 9,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex)"
+      },
+      "artifacts": {
+        "termination_request": "loops/009-completion/20260210213126-termination-request.md",
+        "verdict": "loops/009-completion/20260210213552-completer-verdict.md"
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-10T21:31:26.474866395Z",
+      "completed_at": "2026-02-10T21:35:52.738241355Z"
+    }
+  ]
+}

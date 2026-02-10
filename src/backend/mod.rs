@@ -4,6 +4,8 @@ pub mod mock;
 pub mod tmux;
 pub mod tmux_backend;
 
+pub use mock::MockBackend;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
