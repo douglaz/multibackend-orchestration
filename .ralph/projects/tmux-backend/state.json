@@ -1,0 +1,14 @@
+{
+  "project_id": "tmux-backend",
+  "project_name": "tmux Backend Execution",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
+  "prompt_hash_at_loop_start": "4fcb28ea0cd39fc58fba9dd1ebadd65bbaf2d826a7ad43727c5cf073f33991ec",
+  "parent_project": null,
+  "current_loop": 0,
+  "current_phase": "planning",
+  "phase_iteration": 1,
+  "status": "pending",
+  "loops": [],
+  "completion_attempts": []
+}
