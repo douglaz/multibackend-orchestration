@@ -210,6 +210,8 @@ fn git_tag_format(h: &RalphHarness) -> TestResult {
 
 fn two_loops_alternation(h: &RalphHarness) -> TestResult {
     run_case(|| {
+        use crate::validate::assertions::normalize_backend;
+
         let project_id = "run-alternation";
         h.init_workspace().expect("init failed");
 
@@ -248,16 +250,26 @@ fn two_loops_alternation(h: &RalphHarness) -> TestResult {
         );
 
         let loop1_frontmatter = parse_yaml_frontmatter(&loop1_spec);
-        let loop1_backend = loop1_frontmatter["backend"]
+        let loop1_backend_raw = loop1_frontmatter["backend"]
             .as_str()
             .expect("loop 1 spec frontmatter backend should be a string");
         let loop2_frontmatter = parse_yaml_frontmatter(&loop2_spec);
-        let loop2_backend = loop2_frontmatter["backend"]
+        let loop2_backend_raw = loop2_frontmatter["backend"]
             .as_str()
             .expect("loop 2 spec frontmatter backend should be a string");
-        assert_ne!(
-            loop1_backend, loop2_backend,
-            "planner backend should alternate between loops"
+
+        // Normalize backend strings (strip model suffixes like "claude(sonnet-4)" → "claude")
+        let loop1_backend = normalize_backend(loop1_backend_raw);
+        let loop2_backend = normalize_backend(loop2_backend_raw);
+
+        // Per spec contract: loop 1 planner=claude, loop 2 planner=codex
+        assert_eq!(
+            loop1_backend, "claude",
+            "expected loop 1 planner backend to be 'claude', got '{loop1_backend}' (raw: '{loop1_backend_raw}')"
+        );
+        assert_eq!(
+            loop2_backend, "codex",
+            "expected loop 2 planner backend to be 'codex', got '{loop2_backend}' (raw: '{loop2_backend_raw}')"
         );
     })
 }

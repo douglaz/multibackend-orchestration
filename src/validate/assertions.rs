@@ -269,3 +269,33 @@ pub fn git_tag_commit(repo_root: &Path, tag: &str) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
+
+/// Assert that the given JSON value is a top-level array, returning a reference
+/// to the array. Panics with a descriptive message if the value is not an array.
+pub fn assert_json_array(value: &Value) -> &Vec<Value> {
+    value.as_array().unwrap_or_else(|| {
+        panic!(
+            "expected top-level JSON array, got {}",
+            match value {
+                Value::Object(_) => "object",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_) => "bool",
+                Value::Null => "null",
+                Value::Array(_) => unreachable!(),
+            }
+        )
+    })
+}
+
+/// Normalize a backend string by stripping model suffixes.
+/// For example: `"claude(sonnet-4)"` → `"claude"`, `"codex(gpt-5.3-codex)"` → `"codex"`.
+/// If the string has no parenthesized suffix, it is returned as-is (lowercased).
+pub fn normalize_backend(backend: &str) -> String {
+    let s = backend.trim();
+    if let Some(idx) = s.find('(') {
+        s[..idx].trim().to_lowercase()
+    } else {
+        s.to_lowercase()
+    }
+}

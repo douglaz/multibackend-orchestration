@@ -55,10 +55,10 @@ fn creates_template_files(h: &RalphHarness) -> TestResult {
 
         let templates = h.repo_root.join(".ralph").join("templates");
         for name in &[
-            "planner.md",
-            "implementer.md",
-            "reviewer.md",
-            "completer.md",
+            "spec.md",
+            "implementation.md",
+            "review.md",
+            "completion.md",
         ] {
             assert_file_not_empty(&templates.join(name));
         }
@@ -103,22 +103,22 @@ fn default_config(h: &RalphHarness) -> TestResult {
         assert_toml_field(
             &config,
             "templates.planner",
-            &TomlValue::String("templates/planner.md".to_owned()),
+            &TomlValue::String("templates/spec.md".to_owned()),
         );
         assert_toml_field(
             &config,
             "templates.implementer",
-            &TomlValue::String("templates/implementer.md".to_owned()),
+            &TomlValue::String("templates/implementation.md".to_owned()),
         );
         assert_toml_field(
             &config,
             "templates.reviewer",
-            &TomlValue::String("templates/reviewer.md".to_owned()),
+            &TomlValue::String("templates/review.md".to_owned()),
         );
         assert_toml_field(
             &config,
             "templates.completer",
-            &TomlValue::String("templates/completer.md".to_owned()),
+            &TomlValue::String("templates/completion.md".to_owned()),
         );
     })) {
         Ok(()) => TestResult::Pass,

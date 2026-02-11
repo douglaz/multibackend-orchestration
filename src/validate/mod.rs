@@ -31,8 +31,35 @@ pub struct ValidateArgs {
 }
 
 pub fn execute(args: ValidateArgs) -> Result<()> {
+    // Resolve --bin to an absolute path so relative paths work regardless of
+    // per-test harness cwd changes.
+    let ralph_bin = std::fs::canonicalize(&args.bin).map_err(|e| {
+        RalphError::Validation(format!(
+            "--bin path '{}' does not exist or is not accessible: {e}",
+            args.bin.display()
+        ))
+    })?;
+
+    // Verify the resolved path is executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&ralph_bin).map_err(|e| {
+            RalphError::Validation(format!(
+                "--bin path '{}' cannot be stat'd: {e}",
+                ralph_bin.display()
+            ))
+        })?;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(RalphError::Validation(format!(
+                "--bin path '{}' is not executable",
+                ralph_bin.display()
+            )));
+        }
+    }
+
     let tests = register_tests();
-    let runner = TestRunner::new(tests, args.bin, args.filter, args.verbose);
+    let runner = TestRunner::new(tests, ralph_bin, args.filter, args.verbose);
     let success = runner.run(args.list)?;
 
     if success {

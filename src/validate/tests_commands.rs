@@ -129,6 +129,8 @@ fn history_shows_loops(h: &RalphHarness) -> TestResult {
 
 fn history_json(h: &RalphHarness) -> TestResult {
     run_case(|| {
+        use crate::validate::assertions::assert_json_array;
+
         let project_id = "history-json";
         setup_with_standard_mock(h, project_id);
 
@@ -143,16 +145,11 @@ fn history_json(h: &RalphHarness) -> TestResult {
         let parsed: serde_json::Value =
             serde_json::from_str(&stdout).expect("history --json output should be valid JSON");
 
-        // Should contain loop history data
-        let loops = parsed
-            .get("loops")
-            .expect("JSON should contain 'loops' field");
-        let loops_arr = loops
-            .as_array()
-            .expect("'loops' should be an array");
+        // Per spec contract: output must be a top-level JSON array (not an object wrapper)
+        let arr = assert_json_array(&parsed);
         assert!(
-            !loops_arr.is_empty(),
-            "expected at least one loop entry in history JSON"
+            !arr.is_empty(),
+            "expected at least one loop entry in history JSON array"
         );
     })
 }
@@ -314,16 +311,16 @@ fn config_get(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
-        // Read a known default config value
+        // Per spec contract: key is `planner_backend` (not `workflow.planner_backend`)
         let stdout = h
-            .ralph_ok(["config", "get", "workflow.planner_backend"])
+            .ralph_ok(["config", "get", "planner_backend"])
             .expect("ralph config get should succeed");
 
         // Should return a non-empty value
         let value = stdout.trim();
         assert!(
             !value.is_empty(),
-            "expected config get to return a non-empty value"
+            "expected config get planner_backend to return a non-empty value"
         );
     })
 }
@@ -332,19 +329,19 @@ fn config_set(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
-        // Set a config value
-        h.ralph_ok(["config", "set", "workflow.planner_backend", "codex"])
+        // Per spec contract: key is `planner_backend` (not `workflow.planner_backend`)
+        h.ralph_ok(["config", "set", "planner_backend", "codex"])
             .expect("ralph config set should succeed");
 
-        // Read it back and verify
+        // Read-after-write: verify the value persisted
         let stdout = h
-            .ralph_ok(["config", "get", "workflow.planner_backend"])
+            .ralph_ok(["config", "get", "planner_backend"])
             .expect("ralph config get should succeed");
 
         let value = stdout.trim();
         assert!(
             value.contains("codex"),
-            "expected config get to return 'codex' after set, got: '{value}'"
+            "expected config get planner_backend to return 'codex' after set, got: '{value}'"
         );
     })
 }
