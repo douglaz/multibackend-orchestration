@@ -66,6 +66,25 @@ impl BackendRoleModels {
             _ => None,
         }
     }
+
+    /// Fill any `None` fields from `defaults`.
+    pub fn fill_from(&mut self, defaults: &BackendRoleModels) {
+        if self.planner.is_none() {
+            self.planner.clone_from(&defaults.planner);
+        }
+        if self.implementer.is_none() {
+            self.implementer.clone_from(&defaults.implementer);
+        }
+        if self.reviewer.is_none() {
+            self.reviewer.clone_from(&defaults.reviewer);
+        }
+        if self.completer.is_none() {
+            self.completer.clone_from(&defaults.completer);
+        }
+        if self.reformatter.is_none() {
+            self.reformatter.clone_from(&defaults.reformatter);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,7 +217,10 @@ fn default_tmux_window_keep_seconds() -> u64 {
 impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&raw)?;
+        let mut config: Self = toml::from_str(&raw)?;
+        let defaults = Self::default();
+        config.backends.claude.models.fill_from(&defaults.backends.claude.models);
+        config.backends.codex.models.fill_from(&defaults.backends.codex.models);
         Ok(config)
     }
 
@@ -442,5 +464,90 @@ base_branch = "master"
         assert_eq!(models.for_role("completer"), Some("completer-model"));
         assert_eq!(models.for_role("reformatter"), Some("reformatter-model"));
         assert_eq!(models.for_role("unknown-role"), None);
+    }
+
+    #[test]
+    fn fill_from_fills_none_fields_from_defaults() {
+        let mut models = BackendRoleModels {
+            planner: Some("custom-planner".to_owned()),
+            implementer: None,
+            reviewer: None,
+            completer: Some("custom-completer".to_owned()),
+            reformatter: None,
+        };
+        let defaults = BackendRoleModels {
+            planner: Some("default-planner".to_owned()),
+            implementer: Some("default-implementer".to_owned()),
+            reviewer: Some("default-reviewer".to_owned()),
+            completer: Some("default-completer".to_owned()),
+            reformatter: Some("default-reformatter".to_owned()),
+        };
+        models.fill_from(&defaults);
+        assert_eq!(models.planner.as_deref(), Some("custom-planner"));
+        assert_eq!(models.implementer.as_deref(), Some("default-implementer"));
+        assert_eq!(models.reviewer.as_deref(), Some("default-reviewer"));
+        assert_eq!(models.completer.as_deref(), Some("custom-completer"));
+        assert_eq!(models.reformatter.as_deref(), Some("default-reformatter"));
+    }
+
+    #[test]
+    fn load_fills_missing_models_from_code_defaults() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("ralph.toml");
+        let raw = r#"
+[workspace]
+version = "1.0"
+default_backend = "claude"
+
+[backends.claude]
+command = "claude"
+timeout_seconds = 600
+
+[backends.codex]
+command = "codex"
+timeout_seconds = 600
+
+[workflow]
+max_review_iterations = 5
+auto_commit = true
+commit_message_style = "conventional"
+commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
+prompt_change_action = "abort"
+
+[templates]
+planner = "templates/planner.md"
+implementer = "templates/implementer.md"
+reviewer = "templates/reviewer.md"
+completer = "templates/completer.md"
+
+[git]
+auto_branch = true
+branch_format = "ralph/{project_id}"
+sign_commits = false
+base_branch = "master"
+"#;
+        let mut f = std::fs::File::create(&path).expect("create file");
+        f.write_all(raw.as_bytes()).expect("write file");
+        drop(f);
+
+        let config = GlobalConfig::load(&path).expect("load config");
+        let defaults = GlobalConfig::default();
+        assert_eq!(
+            config.backends.claude.models.planner.as_deref(),
+            defaults.backends.claude.models.planner.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.planner.as_deref(),
+            defaults.backends.codex.models.planner.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.implementer.as_deref(),
+            defaults.backends.codex.models.implementer.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.reformatter.as_deref(),
+            defaults.backends.codex.models.reformatter.as_deref(),
+        );
     }
 }
