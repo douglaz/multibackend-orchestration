@@ -45,6 +45,12 @@
             done
           '';
 
+          # Run the 40 conformance tests against the built binary
+          postCheck = ''
+            echo "running ralph validate conformance tests..."
+            target/*/release/ralph validate --bin target/*/release/ralph
+          '';
+
         };
 
         apps.default = flake-utils.lib.mkApp {
