@@ -223,3 +223,49 @@ pub fn assert_no_loop_artifacts(project_dir: &Path) {
         loops_dir.to_string_lossy()
     );
 }
+
+pub fn assert_stderr_contains(output: &Output, needle: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(needle),
+        "expected stderr to contain '{}', got:\n{}",
+        needle,
+        stderr
+    );
+}
+
+pub fn assert_path_not_exists(path: &Path) {
+    assert!(
+        !path.exists(),
+        "expected path to not exist: {}",
+        path.to_string_lossy()
+    );
+}
+
+pub fn git_head_commit(repo_root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git rev-parse should execute");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+pub fn git_tag_commit(repo_root: &Path, tag: &str) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", tag])
+        .current_dir(repo_root)
+        .output()
+        .expect("git rev-parse should execute");
+    assert!(
+        output.status.success(),
+        "git rev-parse {tag} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
