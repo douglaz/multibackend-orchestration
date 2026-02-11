@@ -1,0 +1,14 @@
+async_runtime: tokio
+funding_and_team: self funded until PoC
+libbitcoinkernel_fallback: Skip to pure Rust consensus
+mainnet_goal: Production mainnet node
+nostd_consensus: Nice-to-have, design for it but don't enforce
+p2p_protocol_version: Modern only (v70016+)
+policy_compatibility: Exact policy replication
+project_name: rust-bitcoind
+rust_bitcoin_integration: Use rust-bitcoin primitives
+solo_or_collaborative: Solo/small team initially
+storage_engine: redb (pure Rust, ACID)
+target_core_version: Track latest master
+test_execution_strategy: Fork and minimally adapt
+timeline_expectations: no, take our time
