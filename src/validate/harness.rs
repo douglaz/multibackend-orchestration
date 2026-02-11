@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -21,8 +22,9 @@ pub struct RalphHarness {
 impl RalphHarness {
     pub fn new<P: AsRef<Path>>(bin: P) -> Result<Self> {
         let temp_dir = TempDir::new()?;
-        let repo_root = temp_dir.path().to_path_buf();
+        let repo_root = temp_dir.path().join("repo");
         let ralph_bin = bin.as_ref().to_path_buf();
+        fs::create_dir_all(&repo_root)?;
 
         run_git(&repo_root, &["init"])?;
         run_git(
@@ -53,6 +55,19 @@ impl RalphHarness {
             .current_dir(&self.repo_root)
             .output()?;
         Ok(output)
+    }
+
+    pub fn ralph_env<I, S>(&self, args: I, env_vars: &[(&str, &str)]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new(&self.ralph_bin);
+        command.args(args).current_dir(&self.repo_root);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        Ok(command.output()?)
     }
 
     pub fn ralph_ok<I, S>(&self, args: I) -> Result<String>
@@ -124,6 +139,28 @@ impl RalphHarness {
         Ok(())
     }
 
+    pub fn setup_separate_mock_backends<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        claude_script: P,
+        codex_script: Q,
+    ) -> Result<()> {
+        let claude = claude_script.as_ref().to_string_lossy().into_owned();
+        let codex = codex_script.as_ref().to_string_lossy().into_owned();
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.claude.command".to_owned(),
+            claude,
+        ])?;
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.codex.command".to_owned(),
+            codex,
+        ])?;
+        Ok(())
+    }
+
     pub fn create_project(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
         let prompt_path = self.temp_dir.path().join(format!("{id}-prompt.md"));
         fs::write(&prompt_path, prompt)?;
@@ -139,6 +176,52 @@ impl RalphHarness {
             prompt_path.to_string_lossy().into_owned(),
         ])?;
         Ok(())
+    }
+
+    pub fn project_dir(&self, project_id: &str) -> PathBuf {
+        self.repo_root
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+    }
+
+    pub fn loop_dir(&self, project_id: &str, loop_number: u32) -> Result<Option<PathBuf>> {
+        let loops_dir = self.project_dir(project_id).join("loops");
+        let entries = match fs::read_dir(&loops_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        let prefix = format!("{loop_number:03}-");
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&prefix) {
+                return Ok(Some(entry.path()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn list_artifacts(&self, project_id: &str, loop_number: u32) -> Result<Vec<PathBuf>> {
+        let Some(loop_dir) = self.loop_dir(project_id, loop_number)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut files = Vec::new();
+        for entry in fs::read_dir(loop_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                files.push(entry.path());
+            }
+        }
+        files.sort();
+        Ok(files)
     }
 }
 

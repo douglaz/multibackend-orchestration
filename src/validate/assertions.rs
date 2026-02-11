@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use regex::Regex;
 use serde_json::Value;
+use serde_yaml::Value as YamlValue;
 use toml::Value as TomlValue;
 
 pub fn assert_exit_code(output: &Output, expected: i32) {
@@ -87,6 +89,20 @@ pub fn assert_git_tag_exists(repo_root: &Path, tag: &str) {
     );
 }
 
+pub fn assert_git_tag_not_exists(repo_root: &Path, tag: &str) {
+    let tag_ref = format!("refs/tags/{tag}");
+    let status = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &tag_ref])
+        .current_dir(repo_root)
+        .status()
+        .expect("git should execute");
+    assert!(
+        !status.success(),
+        "expected git tag '{tag}' to NOT exist in {}",
+        repo_root.to_string_lossy()
+    );
+}
+
 pub fn assert_dir_exists(path: &Path) {
     assert!(
         path.is_dir(),
@@ -142,5 +158,68 @@ pub fn assert_json_array_len(value: &Value, field: &str, expected_len: usize) {
         expected_len,
         "expected JSON array '{field}' to have {expected_len} elements, got {}",
         arr.len()
+    );
+}
+
+pub fn assert_artifact_timestamp_naming(path: &Path) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| panic!("artifact path does not have a valid file name: {path:?}"));
+    let re = Regex::new(r"^\d{14}-[a-z0-9-]+\.md$").expect("valid regex");
+    assert!(
+        re.is_match(name),
+        "expected timestamped artifact name, got '{}'",
+        name
+    );
+}
+
+pub fn parse_yaml_frontmatter(path: &Path) -> YamlValue {
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.to_string_lossy()));
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or_default();
+    assert_eq!(
+        first.trim(),
+        "---",
+        "expected '{}' to begin with YAML frontmatter delimiter",
+        path.to_string_lossy()
+    );
+
+    let mut frontmatter = String::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        frontmatter.push_str(line);
+        frontmatter.push('\n');
+    }
+    assert!(
+        closed,
+        "expected '{}' to contain a closing YAML frontmatter delimiter",
+        path.to_string_lossy()
+    );
+
+    serde_yaml::from_str(&frontmatter).unwrap_or_else(|err| {
+        panic!(
+            "failed to parse YAML frontmatter from {}: {err}",
+            path.to_string_lossy()
+        )
+    })
+}
+
+pub fn assert_no_loop_artifacts(project_dir: &Path) {
+    let loops_dir = project_dir.join("loops");
+    if !loops_dir.exists() {
+        return;
+    }
+    let mut entries = fs::read_dir(&loops_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", loops_dir.to_string_lossy()));
+    assert!(
+        entries.next().is_none(),
+        "expected no loop artifacts under '{}'",
+        loops_dir.to_string_lossy()
     );
 }
