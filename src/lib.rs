@@ -7,6 +7,7 @@ pub mod prd;
 pub mod project;
 pub mod prompts;
 pub mod util;
+pub mod validate;
 pub mod workflow;
 pub mod workspace;
 

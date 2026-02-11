@@ -22,7 +22,21 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
     let state = load_project_state(&workspace.project_dir(&project_id))?;
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&state)?);
+        // Emit a top-level JSON array ordered by loop number, combining
+        // feature loops and completion attempts.
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        for loop_state in &state.loops {
+            entries.push(serde_json::to_value(loop_state)?);
+        }
+        for completion in &state.completion_attempts {
+            entries.push(serde_json::to_value(completion)?);
+        }
+        entries.sort_by_key(|v| {
+            v.get("loop_number")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+        });
+        println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
 

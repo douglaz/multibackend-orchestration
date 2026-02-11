@@ -58,16 +58,16 @@ fn test_init_generates_valid_config() {
     assert_eq!(workspace.config.workflow.max_review_iterations, 30);
     assert!(workspace.config.workflow.auto_commit);
 
-    // Verify templates section
-    assert_eq!(workspace.config.templates.planner, "templates/planner.md");
+    // Verify templates section (canonical names)
+    assert_eq!(workspace.config.templates.planner, "templates/spec.md");
     assert_eq!(
         workspace.config.templates.implementer,
-        "templates/implementer.md"
+        "templates/implementation.md"
     );
-    assert_eq!(workspace.config.templates.reviewer, "templates/reviewer.md");
+    assert_eq!(workspace.config.templates.reviewer, "templates/review.md");
     assert_eq!(
         workspace.config.templates.completer,
-        "templates/completer.md"
+        "templates/completion.md"
     );
 
     // Verify git section
@@ -201,42 +201,60 @@ fn test_init_creates_template_files_with_cli_execute() {
     // Execute the actual CLI init flow
     execute(args).expect("cli init execute should succeed");
 
-    // Verify template files exist (created by the real execute function)
+    // Verify canonical template files exist
+    assert!(
+        workspace_root.join("templates/spec.md").exists(),
+        "spec template should exist"
+    );
+    assert!(
+        workspace_root.join("templates/implementation.md").exists(),
+        "implementation template should exist"
+    );
+    assert!(
+        workspace_root.join("templates/review.md").exists(),
+        "review template should exist"
+    );
+    assert!(
+        workspace_root.join("templates/completion.md").exists(),
+        "completion template should exist"
+    );
+
+    // Verify legacy symlinks exist for backward compatibility
     assert!(
         workspace_root.join("templates/planner.md").exists(),
-        "planner template should exist"
+        "legacy planner.md symlink should exist"
     );
     assert!(
         workspace_root.join("templates/implementer.md").exists(),
-        "implementer template should exist"
+        "legacy implementer.md symlink should exist"
     );
     assert!(
         workspace_root.join("templates/reviewer.md").exists(),
-        "reviewer template should exist"
+        "legacy reviewer.md symlink should exist"
     );
     assert!(
         workspace_root.join("templates/completer.md").exists(),
-        "completer template should exist"
+        "legacy completer.md symlink should exist"
     );
 
-    // Verify template content is correct
+    // Verify template content is correct (read via canonical names)
     let planner_content =
-        fs::read_to_string(workspace_root.join("templates/planner.md")).expect("read planner");
+        fs::read_to_string(workspace_root.join("templates/spec.md")).expect("read spec");
     assert!(planner_content.contains("software architect"));
     assert!(planner_content.contains("# Feature:"));
 
     let implementer_content =
-        fs::read_to_string(workspace_root.join("templates/implementer.md")).expect("read impl");
+        fs::read_to_string(workspace_root.join("templates/implementation.md")).expect("read impl");
     assert!(implementer_content.contains("software developer"));
     assert!(implementer_content.contains("# Implementation Notes"));
 
     let reviewer_content =
-        fs::read_to_string(workspace_root.join("templates/reviewer.md")).expect("read reviewer");
+        fs::read_to_string(workspace_root.join("templates/review.md")).expect("read reviewer");
     assert!(reviewer_content.contains("code reviewer"));
     assert!(reviewer_content.contains("# Review: APPROVED"));
 
     let completer_content =
-        fs::read_to_string(workspace_root.join("templates/completer.md")).expect("read completer");
+        fs::read_to_string(workspace_root.join("templates/completion.md")).expect("read completer");
     assert!(completer_content.contains("project completion validator"));
     assert!(completer_content.contains("# Verdict:"));
 }
@@ -297,7 +315,7 @@ fn test_init_cli_with_absolute_path() {
         "templates directory should exist at absolute path"
     );
     assert!(
-        absolute_path.join("templates/planner.md").exists(),
+        absolute_path.join("templates/spec.md").exists(),
         "template files should exist at absolute path"
     );
 }
@@ -356,7 +374,7 @@ fn test_init_cli_with_relative_path() {
         "templates directory should exist at relative path"
     );
     assert!(
-        resolved_path.join("templates/planner.md").exists(),
+        resolved_path.join("templates/spec.md").exists(),
         "template files should exist at relative path"
     );
 }

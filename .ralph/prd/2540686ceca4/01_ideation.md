@@ -2,113 +2,166 @@
 
 ## Core Concept
 
-rust-bitcoind is a production-grade, full Bitcoin node implementation written in Rust, designed to be a drop-in alternative to Bitcoin Core for mainnet operation. The project takes a pure-Rust-from-the-start approach to consensus, leveraging the `rust-bitcoin` crate for primitive types (transactions, blocks, scripts, keys, hashes) and `redb` as its storage engine, while building its own consensus validation, mempool policy, P2P networking (on Tokio), and RPC interface.
+rust-bitcoind is a production-grade, full-node implementation of the Bitcoin protocol written entirely in Rust. It aims for complete consensus compatibility with Bitcoin Core, verified by passing Bitcoin Core's entire Python functional test suite. The project takes a pure-Rust-from-the-start approach to consensus logic — skipping the libbitcoinkernel FFI path — and builds on the existing rust-bitcoin ecosystem for primitive types (transactions, blocks, scripts, hashes) while implementing all validation, peer-to-peer networking, mempool policy, and storage from scratch.
 
-The defining commitment: **pass every test in Bitcoin Core's Python functional test suite**. This is not a research prototype or an "alternative client with different rules" — it is a bit-for-bit consensus-compatible implementation that proves Rust can deliver a safe, performant, and maintainable Bitcoin full node. By skipping the `libbitcoinkernel` C++ FFI fallback entirely, the project accepts a harder initial path but avoids the long-term maintenance burden of binding to C++ and gains a fully auditable, single-language consensus stack.
+The node targets a modern protocol surface (v70016+), uses **redb** as its pure-Rust ACID storage engine, runs its async networking layer on **tokio**, and is structured as a Cargo workspace of composable crates. It replicates Bitcoin Core's policy rules exactly (not just consensus), ensuring drop-in behavioral compatibility for miners, exchanges, and infrastructure operators who depend on specific relay and mempool semantics.
 
-The architecture targets modern Bitcoin network participants only (protocol version 70016+, post-SegWit, post-compact-blocks), shedding legacy protocol baggage that Bitcoin Core still carries. Consensus and storage layers are designed with `no_std` compatibility as a structural goal — traits and core types avoid `std`-only dependencies where practical — so that the consensus engine can eventually be extracted for embedded or WASM targets, though this is not enforced at compile time during initial development.
+The architecture consciously defers non-essential subsystems — ZMQ notification, AssumeUTXO, and security disclosure processes — until post-1.0 or mainnet readiness, focusing initial effort on correctness, test parity, and a clean Rust-native codebase that can eventually run consensus-critical code in `no_std` environments.
 
 ## Target Users
 
-**Node operators seeking defense-in-diversity.** The Bitcoin network's resilience depends on not having a single implementation as a monoculture. Operators running rust-bitcoind alongside or instead of Bitcoin Core reduce the blast radius of implementation-specific bugs. These are technically sophisticated users running infrastructure on Linux servers, comfortable compiling from source.
+**Primary:**
 
-**Bitcoin protocol developers and researchers.** Rust's type system, ownership model, and tooling (Cargo, `clippy`, `miri`, fuzzing via `cargo-fuzz`) make the codebase significantly more approachable for experimentation and auditing than C++. Researchers modeling consensus changes, soft fork proposals, or mempool policy experiments benefit from a codebase where invariants are encoded in types rather than comments.
+- **Node operators and infrastructure providers** who want a memory-safe, performant alternative to Bitcoin Core for running mainnet full nodes — particularly those already operating in Rust-heavy environments (exchanges, Lightning implementations like LDK, mining pool backends).
+- **Bitcoin protocol developers and researchers** seeking a readable, well-structured reference implementation that makes consensus rules explicit in a strongly-typed language, lowering the barrier to auditing and contributing to consensus code.
+- **Rust-ecosystem Bitcoin projects** (LDK, BDK, electrs, Fedimint) that currently shell out to or wrap Bitcoin Core and would benefit from a native Rust node they can link against, embed, or co-deploy without FFI boundaries.
 
-**Mining pool operators and enterprises** requiring high-reliability node software where memory safety vulnerabilities (buffer overflows, use-after-free, data races) are categorically eliminated by the language. These users need mainnet-grade software with deterministic resource usage and clean crash-recovery semantics (provided by redb's ACID guarantees).
+**Secondary:**
 
-**Rust ecosystem contributors** in the Bitcoin space — developers already working with `rust-bitcoin`, `rust-miniscript`, `LDK`, or BDK — who want a full-node backend that speaks their language and composes naturally with their tooling without C++ FFI boundaries.
-
-**Self-sovereign individuals** running personal nodes who value a smaller, easier-to-audit codebase with fewer historical layers of accretion than Bitcoin Core's 15+ year C++ codebase.
+- **Embedded and constrained-environment operators** (future): the `no_std`-friendly consensus design opens a path to running validation logic on hardware wallets, secure enclaves, or WASM runtimes.
+- **Bitcoin Core test infrastructure maintainers** who gain a second independent implementation to validate against, strengthening the network's defense against consensus bugs.
+- **Solo developers and hobbyists** who prefer `cargo build` over autotools/cmake and want to run a full node from source with minimal system dependencies.
 
 ## Key Problems Solved
 
-**Implementation monoculture risk.** Bitcoin Core is effectively the only production consensus implementation. A consensus-compatible Rust implementation provides genuine network-level redundancy. If a CVE affects Core's C++ code (memory corruption, integer overflow in consensus-critical paths), rust-bitcoind nodes remain unaffected and vice versa — the failure modes are uncorrelated.
+1. **Memory safety in consensus-critical code.** Bitcoin Core's C++ codebase has historically been susceptible to memory corruption classes (buffer overflows, use-after-free). Rust's ownership model eliminates these at compile time, reducing the attack surface of the most security-sensitive software in the cryptocurrency ecosystem.
 
-**Memory safety in consensus-critical software.** Bitcoin Core has had multiple memory-safety-adjacent vulnerabilities over its history. Rust eliminates entire vulnerability classes (buffer overflows, use-after-free, data races) at compile time. For software that secures hundreds of billions of dollars in value, this is not a nice-to-have — it is a categorical improvement in the security envelope.
+2. **Implementation monoculture risk.** The Bitcoin network currently relies on a single consensus implementation. A second production-quality implementation — validated against the same test suite — provides defense in depth. If a platform-specific or compiler-specific bug affects Core, rust-bitcoind operators remain unaffected (and vice versa), without risking chain splits because consensus rules are identical.
 
-**Codebase comprehensibility and auditability.** Bitcoin Core's codebase has accumulated significant historical layering — the transition from Satoshi's original code through multiple architectural overhauls creates cognitive overhead. A greenfield Rust implementation, structured with modern idioms (strong typing, explicit error handling via `Result`, algebraic data types for protocol states), is substantially easier to audit end-to-end.
+3. **Dependency complexity and build friction.** Bitcoin Core requires autotools or cmake, Berkeley DB or LevelDB, Boost, libevent, and platform-specific toolchains. rust-bitcoind compiles with `cargo build` on Linux x86_64 (primary) and macOS/Linux aarch64 (secondary), with all dependencies — including the storage engine (redb) and crypto (rust-secp256k1 or k256 under evaluation) — pulled from crates.io. No system libraries required.
 
-**Storage engine reliability.** Bitcoin Core uses LevelDB, a library that was never designed for consensus-critical financial data storage and has known corruption edge cases. redb provides RUST-native ACID transactions, crash-safe writes, and a single-file database format with zero external dependencies — a meaningfully better fit for a node's UTXO set and block index.
+4. **Codebase legibility and contributor onboarding.** Bitcoin Core's consensus logic is interleaved with decades of incremental changes, implicit invariants, and C++ template complexity. A clean-room Rust implementation with explicit types, workspace-separated crates, and modern tooling (clippy, miri, property testing) makes consensus rules more auditable and the project more approachable for new contributors.
 
-**Developer velocity for protocol work.** Cargo's dependency management, integrated testing, benchmarking (`criterion`), fuzzing, and documentation tooling dramatically reduce the friction of contributing to and experimenting with the codebase compared to Bitcoin Core's autotools/CMake + manual dependency management.
+5. **Ecosystem integration friction.** Rust-native Bitcoin projects currently need IPC, RPC, or FFI to interact with Core. rust-bitcoind's crate workspace allows downstream projects to depend on individual crates (e.g., `rust-bitcoind-consensus`, `rust-bitcoind-mempool`) as libraries, enabling tighter integration without process boundaries.
 
-**Legacy protocol debt.** By targeting only protocol version 70016+, rust-bitcoind avoids implementing deprecated message types, pre-SegWit relay logic, and obsolete handshake flows, resulting in a cleaner and more secure networking layer.
+6. **Policy divergence ambiguity.** Alternative node implementations often differ from Core in subtle mempool and relay policy, causing operational surprises (transactions not relaying, fee estimation mismatches). rust-bitcoind replicates Core's policy behavior exactly, making it a true drop-in replacement.
 
 ## Proposed Features
 
 ### Consensus Engine (Pure Rust)
-- Full script interpreter supporting all opcodes through Tapscript, built on `rust-bitcoin` script primitives
-- UTXO set management with redb-backed commitment tracking
-- Complete block validation: header chain, merkle roots, witness commitments, coinbase maturity, BIP30/34 height-in-coinbase, all soft fork activation logic (BIP9/BIP8 deployments)
-- Signature verification using `secp256k1` Rust bindings (the same `libsecp256k1` C library Core uses, via the `secp256k1` crate — this is the one place where C FFI is acceptable, since the cryptographic primitive must be identical)
-- `no_std`-compatible trait boundaries on consensus types so the engine can be extracted as a standalone crate
+- Full script interpreter supporting all historical consensus rules, soft forks, and flag transitions (P2SH, SegWit, Taproot, OP_CSV, OP_CLTV) — built on rust-bitcoin primitives
+- Exact replication of historical consensus bugs (e.g., `FindAndDelete`, `OP_CHECKMULTISIG` off-by-one, BIP-30 duplicate txid handling) to ensure block-for-block IBD compatibility
+- AssumeValid support for fast initial block download, skipping script validation below a hardcoded checkpoint
+- Block and transaction validation pipeline with parallel script verification using rayon or tokio tasks
+- `no_std`-compatible design for the consensus crate (not enforced initially, but no `std`-only dependencies in the critical path)
 
-### P2P Networking (Tokio-based)
-- Async peer management: connection pooling, peer discovery (DNS seeds, addr/addrv2 relay), eviction logic
-- Compact block relay (BIP 152) for efficient block propagation
-- Transaction relay with full policy enforcement (see below)
-- Block-relay-only connections and anchor connections for eclipse attack resistance
-- Tor/I2P/CJDNS transport support via configurable SOCKS5 proxy
-- Peer banning and misbehavior scoring
+### Storage Layer
+- **redb** as the single storage backend: pure Rust, ACID-compliant, single-file database with crash recovery
+- UTXO set, block index, and chain state stored in typed redb tables
+- `txindex` and `blockfilterindex` (BIP 157/158) as opt-in index modules
+- Pruning support for disk-constrained nodes
+- Atomic chain-tip updates with redb's transaction model (no custom write-ahead log needed)
+
+### Peer-to-Peer Networking
+- Modern protocol only: v70016+ (post-SegWit, compact blocks, `wtxid` relay)
+- Tokio-based async connection management with configurable inbound/outbound peer limits
+- Compact block relay (BIP 152) for low-latency block propagation
+- `addr` / `addrv2` (BIP 155) peer discovery with Tor/I2P address support
+- Transaction relay with fee-rate-based filtering, `wtxid`-based inventory
+- Headers-first synchronization with parallel block download
 
 ### Mempool & Policy
-- Exact replication of Bitcoin Core's mempool acceptance policy: fee-rate floor, ancestor/descendant limits, standardness rules, dust thresholds, OP_RETURN limits, RBF (BIP 125) signaling and rules, CPFP, package relay (as Core implements it)
-- This is critical for mining compatibility — a mining operator must be able to swap in rust-bitcoind and produce identical block templates
-
-### Storage Layer (redb)
-- UTXO set stored in redb with ACID transaction semantics
-- Block index and chain state metadata
-- Crash recovery without external repair tools (no equivalent of Core's `-reindex` being required after unclean shutdown)
-- Pruning support: configurable retention of recent blocks with full UTXO set preservation
+- Exact replication of Bitcoin Core's mempool acceptance rules (standardness, dust threshold, signature operation limits, witness size limits)
+- Replace-by-Fee (BIP 125) with Core-compatible conflict resolution semantics
+- CPFP-aware descendant/ancestor package tracking
+- Fee estimation algorithm compatible with Core's `estimatesmartfee`
+- Memory-limited eviction using Core's mining-score-based approach
 
 ### RPC Interface
-- JSON-RPC 2.0 compatible server implementing Core's RPC methods (prioritizing: `getblockchaininfo`, `getblock`, `getblockheader`, `gettxout`, `sendrawtransaction`, `getmempoolinfo`, `getpeerinfo`, `getnetworkinfo`, `estimatesmartfee`, and the wallet-less subset)
-- REST interface for block/tx/UTXO queries
-- ZMQ notification support (`hashblock`, `hashtx`, `rawblock`, `rawtx`) for downstream services
+- JSON-RPC 1.0/2.0 server with exact field-for-field compatibility on supported endpoints
+- Priority endpoints: `getblockchaininfo`, `getblock`, `getblockhash`, `getrawtransaction`, `sendrawtransaction`, `getmempoolinfo`, `getpeerinfo`, `estimatesmartfee`, `gettxout`
+- Authentication via `.cookie` file and `rpcuser`/`rpcpassword` (matching Core's auth model)
+- Batch request support
 
 ### Testing & Validation
-- Fork of Bitcoin Core's Python functional test suite, minimally adapted (shims for RPC differences, startup flags) to run against rust-bitcoind
-- Native Rust unit and integration tests for all modules
-- Continuous fuzzing of consensus-critical paths (script interpreter, deserialization, P2P message parsing)
-- Deterministic chain replay: ability to sync from genesis to tip on mainnet, signet, and testnet with identical UTXO set hash at every block height compared to Core
+- **Bitcoin Core Python test suite**: forked and minimally adapted to run against rust-bitcoind's RPC (same interface, same assertions)
+- Regtest mode for local development, integration testing, and test suite execution
+- Unit tests, integration tests, and property-based tests (proptest/quickcheck) for consensus-critical code
+- Differential fuzzing against Bitcoin Core on script evaluation and transaction validation
+- CI pipeline: fast checks (clippy, fmt, unit tests) on GitHub Actions; full functional test suite on self-hosted infrastructure
 
-### Operational Features
-- Structured logging (via `tracing`) with configurable verbosity
-- Prometheus-compatible metrics endpoint for monitoring
-- Graceful shutdown with state persistence
-- Configuration via TOML file and CLI flags
+### CLI & Configuration
+- `rust-bitcoind` binary with Core-compatible CLI flags (`-datadir`, `-regtest`, `-testnet`, `-port`, `-rpcport`, `-txindex`, etc.)
+- TOML or Core-compatible `bitcoin.conf` configuration file support
+- Signal handling (SIGTERM/SIGINT graceful shutdown)
+- Logging via `tracing` with structured output and configurable verbosity
+
+### Workspace Crate Architecture
+| Crate | Purpose |
+|---|---|
+| `rust-bitcoind-consensus` | Script validation, block/tx validation rules, soft fork activation |
+| `rust-bitcoind-storage` | redb-backed UTXO set, block store, indexes |
+| `rust-bitcoind-mempool` | Policy enforcement, fee estimation, package relay |
+| `rust-bitcoind-net` | P2P protocol, peer management, message serialization |
+| `rust-bitcoind-rpc` | JSON-RPC server, authentication, request routing |
+| `rust-bitcoind-node` | Orchestration crate tying all components together |
+| `rust-bitcoind` | CLI binary |
+
+### Deferred (Post-1.0)
+- AssumeUTXO snapshot loading
+- ZMQ notification interface
+- Wallet functionality
+- GUI
+- Security disclosure process (deferred until mainnet-ready)
+- Additional indexes beyond txindex and blockfilterindex
 
 ## Success Metrics
 
-| Milestone | Criteria | Validation Method |
-|---|---|---|
-| **Consensus parity** | Pass 100% of Bitcoin Core's Python functional tests (consensus subset) | CI runs forked test suite against rust-bitcoind on every commit |
-| **Full mainnet sync** | Sync from genesis block to chain tip on mainnet without error | Automated nightly sync run; compare UTXO set hash at tip against Core |
-| **Policy parity** | Identical mempool acceptance decisions as Core for identical transaction streams | Replay recorded mainnet transaction streams through both implementations; diff acceptance/rejection |
-| **P2P health** | Maintain stable connections to 8+ outbound and accept inbound peers on mainnet for 30+ continuous days | Long-running mainnet node with uptime and peer-count monitoring |
-| **Performance baseline** | Initial block download (IBD) completes within 2x of Bitcoin Core's time on equivalent hardware | Benchmarked IBD on standardized hardware (e.g., 4-core, 16GB RAM, NVMe SSD) |
-| **Safety** | Zero `unsafe` blocks outside of the `secp256k1` FFI boundary; clean `cargo clippy`, `miri` on consensus paths | CI enforcement; periodic `cargo-audit` runs |
-| **External adoption signal** | At least 3 independent operators running rust-bitcoind on mainnet for 90+ days | Voluntary operator reports or identifiable nodes on network crawlers |
-| **Test suite coverage** | >90% line coverage on consensus and policy modules | `cargo-tarpaulin` or `llvm-cov` in CI |
+### Correctness (Gate to any release)
+- **100% pass rate on Bitcoin Core's Python functional test suite** (forked, minimally adapted) on regtest — this is the single most important metric
+- Zero consensus divergence on full mainnet IBD from genesis to tip, verified by comparing UTXO set hash at every 10,000th block against a Core reference node
+- Zero script evaluation differences when differential-fuzzed against Core for 10M+ random and historical transactions
+
+### Initial Block Download (IBD) Performance
+- Complete mainnet IBD (genesis to tip) in under 12 hours on reference hardware (8-core x86_64, NVMe, 32 GB RAM) — competitive with Core
+- Peak memory usage during IBD under 8 GB (UTXO set + mempool + block processing buffers)
+- Storage footprint within 20% of Core for equivalent configuration (unpruned, txindex enabled)
+
+### Steady-State Operation
+- Block validation latency (tip block, fully cached UTXO set): < 500ms p99
+- Mempool acceptance latency for standard transactions: < 10ms p99
+- Stable operation for 30+ consecutive days on mainnet without crash, memory leak, or consensus stall
+- Maintains 8+ outbound and 50+ inbound peer connections continuously
+
+### Build & Developer Experience
+- `cargo build --release` from clean checkout in under 5 minutes on reference hardware
+- Zero `unsafe` blocks in consensus-critical crates (or fully audited and documented if unavoidable)
+- CI green on every merge to main: clippy (zero warnings), rustfmt, all unit/integration tests, miri on consensus crate
+
+### Ecosystem Adoption (Longer-term)
+- At least one downstream Rust-Bitcoin project (LDK, BDK, electrs) integrating a rust-bitcoind crate as a library dependency
+- At least 5 independent mainnet nodes running rust-bitcoind for 90+ consecutive days
+- Contributions from developers outside the founding team
 
 ## Constraints & Assumptions
 
-**Consensus is non-negotiable.** Any deviation from Bitcoin Core's consensus behavior — even in edge cases involving historically invalid blocks, overflow behavior, or SCRIPT_VERIFY flag combinations — is a critical bug. The Python functional tests are the minimum bar, not the ceiling. Supplementary testing (chain replay, differential fuzzing against Core) is assumed necessary.
+### Hard Constraints
+- **MIT license** — maximally permissive, matching rust-bitcoin ecosystem norms
+- **Pure Rust consensus from day one** — no FFI to libbitcoinkernel or Bitcoin Core C++; all consensus logic implemented natively in Rust
+- **Exact policy replication** — not just consensus-valid but relay-compatible; transactions accepted/rejected by rust-bitcoind must match Core's behavior for the same mempool state
+- **Linux x86_64 as primary platform** — all CI, benchmarks, and performance targets reference this platform; macOS and Linux aarch64 are secondary (must compile and pass tests, not performance-optimized)
+- **Self-funded until PoC** — scope decisions must respect solo/small-team capacity; no dependency on grants or external funding for initial milestones
+- **SemVer versioning, independent of Core** — rust-bitcoind 1.0 does not correspond to Bitcoin Core 28.0; version numbers track this project's maturity
 
-**Self-funded, solo/small-team, no timeline pressure.** The project operates without external funding obligations or delivery deadlines. This is a strategic advantage: correctness is never traded for velocity. Features land when they are correct, tested, and reviewed — not when a milestone demands it. The funding model constrains scope (no full-time team of 10), but the absence of deadline pressure means the right architectural decisions can be made without compromise.
+### Technical Assumptions
+- **rust-bitcoin primitives are correct and sufficient** — transaction, block, script, and hash types from rust-bitcoin (latest stable) are used as the foundation; if gaps are found, upstream contributions are preferred over local forks
+- **redb is production-ready for this workload** — ACID guarantees, crash recovery, and performance are assumed sufficient for UTXO set management at mainnet scale (~170M UTXOs); if redb proves inadequate, migration to another pure-Rust engine is possible due to storage abstraction
+- **secp256k1 binding or k256 provides equivalent security** — rust-secp256k1 (C FFI) is the baseline; k256 (pure Rust) will be evaluated for correctness and performance, but the C binding remains the fallback if k256 cannot match Core's edge-case behavior
+- **tokio is stable for long-running network services** — the async runtime is assumed reliable for a process that runs for months without restart
+- **Bitcoin Core's Python tests are the canonical correctness oracle** — if the tests pass, consensus compatibility is assumed; divergences not covered by tests are bugs in the test suite, not acceptable deviations
+- **Historical consensus bugs must be replicated exactly** — this is not a "clean" reimplementation that fixes old mistakes; every quirk that affects block validation on the historical chain must be reproduced
 
-**secp256k1 C FFI is the one acceptable C dependency.** The `secp256k1` crate wraps the same C library Bitcoin Core uses. This is intentional — cryptographic primitives must produce identical results, and the C `libsecp256k1` is the most reviewed and tested implementation. A future pure-Rust secp256k1 implementation could replace it, but that is out of scope.
+### Scope Boundaries
+- **No wallet functionality** — rust-bitcoind is a headless full node; wallet features are out of scope entirely (BDK exists for this)
+- **No GUI** — CLI and RPC only
+- **No ZMQ** — notification via ZMQ is deferred indefinitely; WebSocket or similar may be considered later
+- **No AssumeUTXO until post-1.0** — snapshot-based UTXO loading is complex and not required for initial mainnet viability
+- **Modern P2P only** — no support for protocol versions below 70016; pre-SegWit peers cannot connect
+- **No timeline commitments** — the project ships when it's correct, not when a deadline arrives
 
-**Tracking latest Core master, not a pinned release.** The target is a moving one. As Bitcoin Core evolves (new policy rules, soft fork activations, P2P protocol changes), rust-bitcoind must track these changes. This means the forked test suite must be periodically rebased against Core's upstream tests. This is an ongoing maintenance cost, not a one-time effort.
-
-**redb is a bet.** redb is newer and less battle-tested than LevelDB or RocksDB. The assumption is that its ACID guarantees, pure-Rust implementation, and crash-safety properties outweigh its relative immaturity. If redb proves inadequate under mainnet UTXO set scale (~5GB+), the storage layer is behind a trait boundary and can be swapped.
-
-**No wallet.** rust-bitcoind is a headless, wallet-less node. Wallet functionality is explicitly out of scope — users should pair it with external wallet software (BDK, Sparrow, etc.) that connects via RPC. This dramatically reduces attack surface and scope.
-
-**No GUI.** The interface is CLI, RPC, and metrics endpoints. No Qt, no Electron, no web dashboard. Monitoring is handled via standard infrastructure tooling (Prometheus/Grafana, log aggregation).
-
-**`no_std` consensus is a design aspiration, not a gate.** Core types and traits avoid unnecessary `std` dependencies, and the consensus crate's public API is designed to be `no_std`-feasible. But enforcement (actually compiling with `#![no_std]`) is deferred until the consensus engine is stable. Premature `no_std` enforcement would slow iteration on the primary goal (passing Core's tests on mainnet).
-
-**Modern network only.** Pre-SegWit nodes, nodes running protocol versions below 70016, and deprecated P2P message types are not supported. This simplifies the networking layer but means rust-bitcoind cannot serve as a bridge to very old network participants. This is an acceptable tradeoff — the overwhelming majority of reachable nodes run modern protocol versions.
-
-**Exact policy replication is hard.** Bitcoin Core's mempool policy is not formally specified — it is defined by its C++ implementation. Replicating it means reading Core's code line-by-line and matching behavior, including edge cases around fee calculation rounding, ancestor package tracking, and RBF rules. This is among the most labor-intensive parts of the project and the most likely source of subtle divergence.
+### Risk Acknowledgments
+- **Consensus divergence is an existential risk** — a single validation difference on mainnet could cause a chain split; extensive differential testing and conservative deployment (long parallel-running period before any operator relies on it) are required
+- **redb at scale is unproven for this specific workload** — Bitcoin's UTXO set is one of the largest key-value workloads in any cryptocurrency; redb has not been tested at this scale in production
+- **Solo/small-team sustainability** — a project of this scope requires years of focused work; burnout and funding exhaustion are primary non-technical risks
+- **Upstream rust-bitcoin changes may break assumptions** — tracking latest stable means absorbing breaking changes; a version pinning and migration strategy is needed
+- **k256 may not replicate all secp256k1 edge cases** — subtle differences in point validation, error handling, or nonce generation could cause consensus failures; exhaustive comparison testing is mandatory before any mainnet use

@@ -143,7 +143,16 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
     }
 }
 
+/// Map shorthand alias keys to their canonical dotted form.
+fn resolve_config_alias(key: &str) -> &str {
+    match key {
+        "planner_backend" => "workflow.planner_backend",
+        _ => key,
+    }
+}
+
 fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<()> {
+    let key = resolve_config_alias(key);
     let value = match scope {
         ConfigScope::Global => serde_json::to_value(&workspace.config)?,
         ConfigScope::Project(project_id) => {
@@ -194,6 +203,7 @@ fn execute_set(
     key: &str,
     raw_value: &str,
 ) -> Result<()> {
+    let key = resolve_config_alias(key);
     match scope {
         ConfigScope::Global => {
             set_global_value(&mut workspace.config, key, raw_value)?;
