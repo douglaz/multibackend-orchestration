@@ -133,6 +133,36 @@ pub fn commit_feature_loop(
     Ok(commit_hash)
 }
 
+/// Stage all non-orchestration changes so reviewer diff (`git diff HEAD`)
+/// includes newly created files.
+pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
+    ensure_git_repo(workdir)?;
+    run_git_with_exclusions(workdir, &["add", "-A"], &[ORCHESTRATION_STATE_PATHSPEC])?;
+    Ok(())
+}
+
+/// Undo non-orchestration working-tree/index changes and remove non-orchestration
+/// untracked files. Preserve `.ralph/**`.
+pub fn reset_and_clean_working_tree(workdir: &Path) -> Result<()> {
+    ensure_git_repo(workdir)?;
+
+    if ref_exists(workdir, "HEAD")? {
+        run_git_with_exclusions(
+            workdir,
+            &["checkout", "HEAD"],
+            &[ORCHESTRATION_STATE_PATHSPEC],
+        )?;
+        let _ =
+            run_git_with_exclusions(workdir, &["reset", "HEAD"], &[ORCHESTRATION_STATE_PATHSPEC]);
+    } else {
+        // Unborn branch: clear index entries if any.
+        let _ = run_git(workdir, &["reset"]);
+    }
+
+    run_git(workdir, &["clean", "-fd", "--exclude", ".ralph"])?;
+    Ok(())
+}
+
 pub fn has_uncommitted_changes(workdir: &Path) -> Result<bool> {
     ensure_git_repo(workdir)?;
     let status = run_git_status(workdir, &["diff", "--quiet"])?;

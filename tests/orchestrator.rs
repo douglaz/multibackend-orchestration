@@ -971,6 +971,11 @@ Implement a minimal demo feature.
 - Blocks: none
 EOF
 elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  if [[ -n "${TEST_REPO_ROOT:-}" ]]; then
+    cat <<'EOF' > "${TEST_REPO_ROOT}/new_module.rs"
+pub fn generated_for_review_limit_test() {}
+EOF
+  fi
   if [[ "$prompt" == *"Review Feedback (if responding to review)"* && "$prompt" == *"Required Changes"* ]]; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
@@ -1063,6 +1068,10 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     env.insert("PLANNER_MODE".to_owned(), "feature".to_owned());
     env.insert("REVIEW_MODE".to_owned(), "suggestions".to_owned());
     env.insert("COMPLETER_MODE".to_owned(), "complete".to_owned());
+    env.insert(
+        "TEST_REPO_ROOT".to_owned(),
+        repo_root.to_string_lossy().to_string(),
+    );
 
     workspace.config.backends.claude.command = script_path.to_string_lossy().to_string();
     workspace.config.backends.claude.args = Vec::new();
@@ -1103,6 +1112,7 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
 #[tokio::test]
 async fn review_iteration_limit_rollback() {
     let (_temp, workspace_root, project_id) = setup_workspace_with_always_suggestions();
+    let repo_root = workspace_root.parent().expect("repo root");
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     let mut orchestrator = Orchestrator::new(workspace);
@@ -1145,6 +1155,28 @@ async fn review_iteration_limit_rollback() {
     assert_eq!(
         state.current_loop, 0,
         "current_loop should be 0 after rollback"
+    );
+    assert!(
+        !repo_root.join("new_module.rs").exists(),
+        "rollback should remove implementer-created untracked file"
+    );
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let rerun_result = orchestrator.run(run_options(&project_id)).await;
+    assert!(
+        rerun_result.is_err(),
+        "rerun should still fail at review limit with this fixture"
+    );
+    assert!(
+        matches!(
+            rerun_result.unwrap_err(),
+            RalphError::ReviewIterationLimitExceeded {
+                loop_number: 1,
+                max_iterations: 1
+            }
+        ),
+        "rerun should not be blocked by dirty-tree validation"
     );
 }
 
