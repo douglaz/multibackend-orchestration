@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -50,4 +51,14 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_run::tests());
     tests.extend(tests_commands::tests());
     tests
+}
+
+pub(crate) fn panic_message(e: Box<dyn Any + Send>) -> String {
+    if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = e.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "unknown panic".to_owned()
+    }
 }

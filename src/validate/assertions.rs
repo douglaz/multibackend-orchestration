@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
+use toml::Value as TomlValue;
 
 pub fn assert_exit_code(output: &Output, expected: i32) {
     let code = output.status.code().unwrap_or(-1);
@@ -83,5 +84,63 @@ pub fn assert_git_tag_exists(repo_root: &Path, tag: &str) {
         status.success(),
         "expected git tag '{tag}' to exist in {}",
         repo_root.to_string_lossy()
+    );
+}
+
+pub fn assert_dir_exists(path: &Path) {
+    assert!(
+        path.is_dir(),
+        "expected directory to exist: {}",
+        path.to_string_lossy()
+    );
+}
+
+pub fn assert_file_not_empty(path: &Path) {
+    assert_file_exists(path);
+    let meta = fs::metadata(path)
+        .unwrap_or_else(|err| panic!("failed to stat {}: {err}", path.to_string_lossy()));
+    assert!(
+        meta.len() > 0,
+        "expected file to be non-empty: {}",
+        path.to_string_lossy()
+    );
+}
+
+pub fn load_toml(path: &Path) -> TomlValue {
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.to_string_lossy()));
+    content
+        .parse::<TomlValue>()
+        .unwrap_or_else(|err| panic!("failed to parse TOML {}: {err}", path.to_string_lossy()))
+}
+
+pub fn assert_toml_field(value: &TomlValue, field: &str, expected: &TomlValue) {
+    let mut current = value;
+    for segment in field.split('.') {
+        current = current
+            .get(segment)
+            .unwrap_or_else(|| panic!("missing TOML field segment '{segment}' in '{field}'"));
+    }
+    assert_eq!(
+        current, expected,
+        "unexpected value for TOML field '{field}'"
+    );
+}
+
+pub fn assert_json_array_len(value: &Value, field: &str, expected_len: usize) {
+    let mut current = value;
+    for segment in field.split('.') {
+        current = current
+            .get(segment)
+            .unwrap_or_else(|| panic!("missing JSON field segment '{segment}' in '{field}'"));
+    }
+    let arr = current
+        .as_array()
+        .unwrap_or_else(|| panic!("expected JSON field '{field}' to be an array"));
+    assert_eq!(
+        arr.len(),
+        expected_len,
+        "expected JSON array '{field}' to have {expected_len} elements, got {}",
+        arr.len()
     );
 }
