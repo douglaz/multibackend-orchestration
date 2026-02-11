@@ -5,8 +5,8 @@ use std::process::Command;
 
 use ralph::git::commit::{
     changed_paths_excluding_prefixes, commit_feature_loop, has_uncommitted_changes, ref_exists,
-    reset_hard, rev_parse, staged_diff, unstaged_diff, working_tree_diff,
-    working_tree_diff_excluding_orchestration_state,
+    reset_and_clean_working_tree, reset_hard, rev_parse, stage_implementation_changes, staged_diff,
+    unstaged_diff, working_tree_diff, working_tree_diff_excluding_orchestration_state,
 };
 use ralph::git::{has_conflicts, is_git_repo};
 use tempfile::TempDir;
@@ -150,6 +150,76 @@ fn test_working_tree_diff_excludes_orchestration_state() {
     assert!(
         !diff.contains(".ralph/index.json"),
         "Diff should exclude orchestration runtime artifacts"
+    );
+}
+
+#[test]
+fn test_stage_implementation_changes_includes_new_files() {
+    let temp_dir = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join(".ralph")).unwrap();
+
+    fs::write(temp_dir.path().join("new_module.rs"), "pub fn demo() {}\n").unwrap();
+    fs::write(
+        temp_dir.path().join(".ralph/runtime.json"),
+        "{\"loop\":1}\n",
+    )
+    .unwrap();
+
+    stage_implementation_changes(temp_dir.path()).unwrap();
+
+    let diff = working_tree_diff_excluding_orchestration_state(temp_dir.path()).unwrap();
+    assert!(
+        diff.contains("new_module.rs"),
+        "Reviewer diff should include newly created non-orchestration files"
+    );
+
+    let staged = staged_diff(temp_dir.path()).unwrap();
+    assert!(
+        !staged.contains(".ralph/runtime.json"),
+        "Staging helper should not stage orchestration runtime files"
+    );
+}
+
+#[test]
+fn test_reset_and_clean_working_tree_preserves_ralph() {
+    let temp_dir = init_test_repo();
+    fs::create_dir_all(temp_dir.path().join(".ralph/runtime")).unwrap();
+
+    fs::write(temp_dir.path().join("README.md"), "# Modified\n").unwrap();
+    Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(temp_dir.path())
+        .output()
+        .unwrap();
+
+    fs::write(temp_dir.path().join("scratch.txt"), "temporary\n").unwrap();
+    fs::write(
+        temp_dir.path().join(".ralph/runtime/session.json"),
+        "{\"active\":true}\n",
+    )
+    .unwrap();
+
+    reset_and_clean_working_tree(temp_dir.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(temp_dir.path().join("README.md")).unwrap(),
+        "# Test",
+        "Tracked non-orchestration file should be restored to HEAD"
+    );
+    assert!(
+        !temp_dir.path().join("scratch.txt").exists(),
+        "Untracked non-orchestration file should be removed"
+    );
+    assert!(
+        temp_dir.path().join(".ralph/runtime/session.json").exists(),
+        "Orchestration runtime state should be preserved"
+    );
+
+    let changed =
+        changed_paths_excluding_prefixes(temp_dir.path(), &[".ralph/"]).expect("status parse");
+    assert!(
+        changed.is_empty(),
+        "No non-orchestration changes should remain after cleanup"
     );
 }
 

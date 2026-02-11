@@ -17,8 +17,9 @@ use crate::config::{
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_feature_loop,
-    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
+    changed_paths_excluding_prefixes, commit_feature_loop, reset_and_clean_working_tree,
+    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
+    ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::is_git_repo;
 use crate::project::artifacts::{
@@ -208,6 +209,7 @@ impl Orchestrator {
             handle_prompt_change(
                 &mut state,
                 &project_dir,
+                &self.workspace.root,
                 &prompt_hash,
                 options
                     .on_prompt_change
@@ -445,6 +447,7 @@ impl Orchestrator {
                             loop_state.artifacts.impl_notes = Some(notes_rel);
                         }
 
+                        stage_changes_for_review(&self.workspace.root)?;
                         state.current_phase = Phase::Reviewing;
                         state.phase_iteration = 1;
                         logs.push(format!("loop {loop_number}: implementer wrote impl-notes"));
@@ -539,6 +542,7 @@ impl Orchestrator {
                             });
                         }
 
+                        stage_changes_for_review(&self.workspace.root)?;
                         state.current_phase = Phase::Reviewing;
                         state.phase_iteration = parsed_iteration + 1;
                         logs.push(format!(
@@ -938,7 +942,7 @@ impl Orchestrator {
                     max_iterations = max_iter,
                     "review iteration limit exceeded, rolling back loop"
                 );
-                rollback_current_loop(&mut state, &project_dir)?;
+                rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
                 persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
@@ -1122,9 +1126,19 @@ fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState)
     Ok(())
 }
 
-fn rollback_current_loop(state: &mut ProjectState, project_dir: &Path) -> Result<()> {
+fn rollback_current_loop(
+    state: &mut ProjectState,
+    project_dir: &Path,
+    workspace_root: &Path,
+) -> Result<()> {
     if !state.has_in_progress_loop() {
         return Ok(());
+    }
+
+    if let Some(repo_root) = workspace_root.parent() {
+        if is_git_repo(repo_root) {
+            reset_and_clean_working_tree(repo_root)?;
+        }
     }
 
     let loop_number = state.current_loop;
@@ -1170,6 +1184,7 @@ fn rollback_current_loop(state: &mut ProjectState, project_dir: &Path) -> Result
 fn handle_prompt_change(
     state: &mut ProjectState,
     project_dir: &Path,
+    workspace_root: &Path,
     new_prompt_hash: &str,
     action: PromptChangeAction,
 ) -> Result<()> {
@@ -1192,7 +1207,7 @@ fn handle_prompt_change(
             state.current_loop
         ))),
         PromptChangeAction::RestartLoop => {
-            rollback_current_loop(state, project_dir)?;
+            rollback_current_loop(state, project_dir, workspace_root)?;
             state.prompt_hash = new_prompt_hash.to_owned();
             state.prompt_hash_at_loop_start = new_prompt_hash.to_owned();
             Ok(())
@@ -1541,6 +1556,16 @@ fn current_git_diff(workspace_root: &Path) -> Result<String> {
     working_tree_diff_excluding_orchestration_state(repo_root)
 }
 
+fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {
+    let Some(repo_root) = workspace_root.parent() else {
+        return Ok(());
+    };
+    if !is_git_repo(repo_root) {
+        return Ok(());
+    }
+    stage_implementation_changes(repo_root)
+}
+
 fn generate_commit_message(
     style: &CommitMessageStyle,
     feature_name: &str,
@@ -1598,8 +1623,7 @@ fn extract_reviewer_commit_message(body: &str) -> Option<String> {
 
 fn expected_format_template_for(role: &str, iteration: Option<u32>) -> String {
     match role {
-        "planner" => {
-            "\
+        "planner" => "\
 # Feature: <name>\n\
 ## Description\n\
 ## Acceptance Criteria\n\
@@ -1612,16 +1636,13 @@ OR\n\
 ## Rationale\n\
 ## Summary of Work\n\
 ## Remaining Items"
-                .to_owned()
-        }
-        "implementer-notes" => {
-            "\
+            .to_owned(),
+        "implementer-notes" => "\
 # Implementation Notes\n\
 ## Decisions Made\n\
 ## Spec Deviations\n\
 ## Testing"
-                .to_owned()
-        }
+            .to_owned(),
         "implementer-response" => {
             let n = iteration.unwrap_or(1);
             format!(
@@ -1631,8 +1652,7 @@ OR\n\
 ## Could Not Address"
             )
         }
-        "reviewer" => {
-            "\
+        "reviewer" => "\
 # Review: APPROVED\n\
 ## Acceptance Criteria Checklist\n\
 ## Notes\n\
@@ -1643,10 +1663,8 @@ OR\n\
 # Review: SUGGESTIONS\n\
 ## Required Changes\n\
 ## Recommended Improvements"
-                .to_owned()
-        }
-        "completer" => {
-            "\
+            .to_owned(),
+        "completer" => "\
 # Verdict: COMPLETE\n\
 (list of requirements and how they are satisfied)\n\
 \n\
@@ -1655,8 +1673,7 @@ OR\n\
 # Verdict: CONTINUE\n\
 ## Missing Requirements\n\
 ## Recommended Next Features"
-                .to_owned()
-        }
+            .to_owned(),
         _ => "valid markdown with required H1".to_owned(),
     }
 }

@@ -1,0 +1,36 @@
+{
+  "project_id": "untracked-fix",
+  "project_name": "Fix Untracked Files in Review and Rollback",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "3f0035899c7253d4e4c7141f79932d76e715364b921787a91f24e7edb3d68fcc",
+  "prompt_hash_at_loop_start": "3f0035899c7253d4e4c7141f79932d76e715364b921787a91f24e7edb3d68fcc",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "stage-and-clean-git-tree-for-review-and-rollback",
+      "feature_name": "Stage and Clean Git Tree for Review and Rollback",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/001-stage-and-clean-git-tree-for-review-and-rollback/20260211173440-spec.md",
+        "impl_notes": "loops/001-stage-and-clean-git-tree-for-review-and-rollback/20260211173921-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-stage-and-clean-git-tree-for-review-and-rollback/20260211174100-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-11T17:34:40.033941992Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
