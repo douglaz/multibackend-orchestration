@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::PromptChangeAction;
+use crate::validate;
 use crate::Result;
 
 #[derive(Debug, Parser)]
@@ -30,6 +31,7 @@ pub enum Commands {
     Project(ProjectArgs),
     Run(RunArgs),
     Prd(prd::PrdArgs),
+    Validate(validate::ValidateArgs),
     Status(StatusArgs),
     History(HistoryArgs),
     Tail(TailArgs),
@@ -246,6 +248,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Project(args) => project::execute(args),
         Commands::Run(args) => run::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
+        Commands::Validate(args) => validate::execute(args),
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
         Commands::Tail(args) => tail::execute(args).await,
@@ -368,5 +371,27 @@ mod tests {
             "--non-interactive",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_validate_command_with_expected_arguments() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "validate",
+            "--bin",
+            "/tmp/ralph-under-test",
+            "--filter",
+            "run::",
+            "--list",
+            "--verbose",
+        ]);
+        let Commands::Validate(args) = cli.command else {
+            panic!("expected validate command");
+        };
+
+        assert_eq!(args.bin, std::path::PathBuf::from("/tmp/ralph-under-test"));
+        assert_eq!(args.filter.as_deref(), Some("run::"));
+        assert!(args.list);
+        assert!(args.verbose);
     }
 }

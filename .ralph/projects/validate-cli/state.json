@@ -1,0 +1,36 @@
+{
+  "project_id": "validate-cli",
+  "project_name": "Validate Conformance Test CLI",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "c130b7be16370f34694bc988566f5b253a1d008120e4621661f6654d303985e9",
+  "prompt_hash_at_loop_start": "c130b7be16370f34694bc988566f5b253a1d008120e4621661f6654d303985e9",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "validate-module-skeleton-cli-integration-and-test",
+      "feature_name": "Validate Module Skeleton, CLI Integration, and Test Harness",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/001-validate-module-skeleton-cli-integration-and-test/20260211014604-spec.md",
+        "impl_notes": "loops/001-validate-module-skeleton-cli-integration-and-test/20260211015120-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-validate-module-skeleton-cli-integration-and-test/20260211015220-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-11T01:46:04.204361872Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

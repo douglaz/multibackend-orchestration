@@ -219,8 +219,16 @@ impl GlobalConfig {
         let raw = fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&raw)?;
         let defaults = Self::default();
-        config.backends.claude.models.fill_from(&defaults.backends.claude.models);
-        config.backends.codex.models.fill_from(&defaults.backends.codex.models);
+        config
+            .backends
+            .claude
+            .models
+            .fill_from(&defaults.backends.claude.models);
+        config
+            .backends
+            .codex
+            .models
+            .fill_from(&defaults.backends.codex.models);
         Ok(config)
     }
 

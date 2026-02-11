@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "auto-branch-sync",
+  "active_project": "validate-cli",
   "projects": [
     {
       "id": "tmux-backend",
@@ -89,6 +89,17 @@
       "total_feature_loops": 1,
       "total_completion_attempts": 1,
       "last_loop_number": 2,
+      "parent_project": null
+    },
+    {
+      "id": "validate-cli",
+      "name": "Validate Conformance Test CLI",
+      "status": "in_progress",
+      "created_at": "2026-02-11T01:44:37.006014678Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
       "parent_project": null
     }
   ]
