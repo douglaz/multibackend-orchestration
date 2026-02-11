@@ -2,12 +2,12 @@
 
 use ralph::error::RalphError;
 use ralph::project::lifecycle::{
-    create_project, load_project_state, CreateProjectOptions, PromptSource,
+    create_project, load_project_state, save_project_state, CreateProjectOptions, PromptSource,
 };
 use ralph::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use ralph::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_reviewer_template,
+    default_qa_template, default_reviewer_template,
 };
 use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
@@ -1506,5 +1506,605 @@ async fn parse_retry_reformat_without_role_model_uses_bare_opposite_backend() {
     assert!(
         !codex_model_counter.exists(),
         "bare opposite backend should be used when no reformatter role model is configured"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// QA phase tests
+// ---------------------------------------------------------------------------
+
+/// Backend script that supports QA: always passes QA on first try.
+fn write_qa_pass_backend_script(path: &Path) {
+    let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Implement a minimal demo feature.
+
+## Acceptance Criteria
+- [ ] Demo behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the demo feature
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+elif [[ "$prompt" == *"You are a QA engineer validating"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: passed
+- cargo test: passed
+
+## Verification Summary
+All acceptance criteria verified. Build and tests pass.
+EOF
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Demo behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: demo feature with QA
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"#;
+
+    fs::write(path, script).expect("write qa-pass backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+/// Backend script that fails QA on first iteration, then passes on second.
+fn write_qa_fail_then_pass_backend_script(path: &Path) {
+    let script = r##"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Implement a minimal demo feature.
+
+## Acceptance Criteria
+- [ ] Demo behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the demo feature
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  if [[ "$prompt" == *"# QA: FAIL"* ]]; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Fixed QA failure by addressing reported issues.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+  fi
+elif [[ "$prompt" == *"You are a QA engineer validating"* ]]; then
+  counter_file="${COUNTER_DIR}/qa_attempt_count"
+  count=0
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$counter_file"
+
+  if [ "$count" -le 1 ]; then
+    cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. cargo test fails: 2 test failures in integration tests
+
+## Suggested Fixes
+1. Fix test assertion in tests/integration.rs line 42
+EOF
+  else
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: passed
+- cargo test: passed (after fix)
+
+## Verification Summary
+All acceptance criteria now verified after implementer fix.
+EOF
+  fi
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Demo behavior exists
+
+## Notes
+Implementation satisfies the specification.
+
+## Commit Message
+feat: demo feature after QA retry
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"##;
+
+    fs::write(path, script).expect("write qa-fail-then-pass backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+/// Backend script that always fails QA (for limit testing).
+fn write_qa_always_fail_backend_script(path: &Path) {
+    let script = r##"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Implement a minimal demo feature.
+
+## Acceptance Criteria
+- [ ] Demo behavior exists
+
+## Files to Modify/Create
+- `README.md` - Document the demo feature
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  if [[ "$prompt" == *"# QA: FAIL"* ]]; then
+    # Read iteration from counter file
+    iter_file="${COUNTER_DIR}/qa_response_iteration"
+    iteration=1
+    if [ -f "$iter_file" ]; then
+      iteration=$(cat "$iter_file")
+    fi
+    next=$((iteration + 1))
+    echo "$next" > "$iter_file"
+    cat <<EOF
+# Implementation Response (Iteration $iteration)
+
+## Changes Made
+1. Attempted to fix QA failure.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Kept implementation minimal to satisfy the spec.
+
+## Spec Deviations
+- None
+
+## Testing
+- cargo test
+EOF
+  fi
+elif [[ "$prompt" == *"You are a QA engineer validating"* ]]; then
+  cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. cargo test still fails
+
+## Suggested Fixes
+1. Fix remaining test failures
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"##;
+
+    fs::write(path, script).expect("write qa-always-fail backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn setup_workspace_with_qa(
+    qa_script_writer: fn(&Path),
+    qa_enabled: bool,
+    max_qa_iterations: u32,
+) -> (TempDir, PathBuf, String, PathBuf) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+
+    fs::write(repo_root.join("README.md"), "# demo\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+
+    let script_path = repo_root.join("mock_backend.sh");
+    qa_script_writer(&script_path);
+    git_ok(repo_root, &["add", "mock_backend.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
+
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+    fs::write(
+        workspace_root.join("templates/spec.md"),
+        default_planner_template(),
+    )
+    .expect("write spec template");
+    fs::write(
+        workspace_root.join("templates/implementation.md"),
+        default_implementer_template(),
+    )
+    .expect("write implementation template");
+    fs::write(
+        workspace_root.join("templates/review.md"),
+        default_reviewer_template(),
+    )
+    .expect("write review template");
+    fs::write(
+        workspace_root.join("templates/completion.md"),
+        default_completer_template(),
+    )
+    .expect("write completion template");
+    fs::write(
+        workspace_root.join("templates/qa.md"),
+        default_qa_template(),
+    )
+    .expect("write qa template");
+
+    let counter_dir = repo_root.join("counters");
+    fs::create_dir_all(&counter_dir).expect("create counter dir");
+
+    let mut env = BTreeMap::new();
+    env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir.to_string_lossy().to_string(),
+    );
+
+    workspace.config.backends.claude.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.claude.args = Vec::new();
+    workspace.config.backends.claude.timeout_seconds = 30;
+    workspace.config.backends.claude.env = env.clone();
+
+    workspace.config.backends.codex.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.codex.args = Vec::new();
+    workspace.config.backends.codex.timeout_seconds = 30;
+    workspace.config.backends.codex.env = env;
+
+    workspace.config.workflow.qa_enabled = qa_enabled;
+    workspace.config.workflow.max_qa_iterations = max_qa_iterations;
+
+    workspace.config.git.base_branch =
+        git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save config");
+
+    let prompt_path = repo_root.join("PROMPT.md");
+    fs::write(&prompt_path, "# Build a demo system\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
+
+    let project_id = "01-poc".to_owned();
+    create_project(
+        &mut workspace,
+        CreateProjectOptions {
+            id: project_id.clone(),
+            name: "Proof of Concept".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: Some("claude".to_owned()),
+        },
+    )
+    .expect("create project");
+
+    (temp, workspace_root, project_id, counter_dir)
+}
+
+#[tokio::test]
+async fn qa_disabled_skips_phase() {
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_with_qa(write_qa_pass_backend_script, false, 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("orchestration should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.loops.len(), 1);
+    assert_eq!(state.loops[0].status, LoopStatus::Completed);
+    // QA results should be empty when QA is disabled
+    assert!(
+        state.loops[0].artifacts.qa_results.is_empty(),
+        "QA results should be empty when QA is disabled"
+    );
+    assert!(state.loops[0].commit.is_some());
+}
+
+#[tokio::test]
+async fn qa_pass_proceeds_to_review() {
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_with_qa(write_qa_pass_backend_script, true, 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("orchestration with QA should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.loops.len(), 1);
+    assert_eq!(state.loops[0].status, LoopStatus::Completed);
+    assert!(state.loops[0].commit.is_some());
+
+    // QA should have passed with one exchange
+    assert_eq!(
+        state.loops[0].artifacts.qa_results.len(),
+        1,
+        "expected exactly 1 QA exchange"
+    );
+    assert!(
+        state.loops[0].artifacts.qa_results[0].passed,
+        "QA should have passed"
+    );
+    assert!(
+        state.loops[0].artifacts.pending_qa_feedback.is_none(),
+        "pending_qa_feedback should be cleared after pass"
+    );
+}
+
+#[tokio::test]
+async fn qa_fail_retries_implementer_then_passes() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_with_qa(write_qa_fail_then_pass_backend_script, true, 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("orchestration with QA fail-then-pass should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.loops.len(), 1);
+    assert_eq!(state.loops[0].status, LoopStatus::Completed);
+    assert!(state.loops[0].commit.is_some());
+
+    // QA should have 2 exchanges: first fail, then pass
+    assert_eq!(
+        state.loops[0].artifacts.qa_results.len(),
+        2,
+        "expected 2 QA exchanges (fail + pass)"
+    );
+    assert!(
+        !state.loops[0].artifacts.qa_results[0].passed,
+        "first QA should have failed"
+    );
+    assert!(
+        state.loops[0].artifacts.qa_results[0]
+            .implementer_response
+            .is_some(),
+        "first QA failure should have implementer response"
+    );
+    // Verify the implementer response artifact is specifically an impl-qa-response path.
+    let response_path = state.loops[0].artifacts.qa_results[0]
+        .implementer_response
+        .as_ref()
+        .expect("implementer_response should be set");
+    assert!(
+        response_path.contains("impl-qa-response-"),
+        "implementer response artifact should be an impl-qa-response file, got: {response_path}"
+    );
+    assert!(
+        state.loops[0].artifacts.qa_results[1].passed,
+        "second QA should have passed"
+    );
+
+    // Verify counter dir shows 2 QA attempts
+    let qa_count = fs::read_to_string(counter_dir.join("qa_attempt_count"))
+        .expect("qa counter should exist");
+    assert_eq!(
+        qa_count.trim(),
+        "2",
+        "QA should have been invoked exactly twice"
+    );
+}
+
+#[tokio::test]
+async fn qa_limit_exceeded_rolls_back() {
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_with_qa(write_qa_always_fail_backend_script, true, 1);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let result = orchestrator.run(run_options(&project_id)).await;
+
+    assert!(
+        result.is_err(),
+        "run should fail with QaIterationLimitExceeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RalphError::QaIterationLimitExceeded {
+                loop_number: 1,
+                max_iterations: 1,
+            }
+        ),
+        "expected QaIterationLimitExceeded, got {err:?}"
+    );
+
+    // Verify state was rolled back
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after QA limit rollback"
+    );
+    assert_eq!(state.current_phase, Phase::Planning);
+    assert_eq!(state.phase_iteration, 1);
+    assert_eq!(state.current_loop, 0);
+}
+
+#[tokio::test]
+async fn resume_from_phase_qa() {
+    // Set up workspace with QA-pass backend and run planning + implementing to generate
+    // real artifacts, then manually persist state at Phase::QA and resume from there.
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_with_qa(write_qa_pass_backend_script, true, 3);
+
+    // Run a full loop first so we have real artifacts on disk.
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("initial run should succeed");
+
+    // Load the completed state and extract artifact paths from the finished loop.
+    let completed_state =
+        load_project_state(&workspace_root.join("projects").join(&project_id))
+            .expect("load completed state");
+    assert_eq!(completed_state.loops.len(), 1);
+    assert_eq!(completed_state.loops[0].status, LoopStatus::Completed);
+
+    // Verify the loop has the artifacts QA phase needs on disk.
+    assert!(
+        completed_state.loops[0].artifacts.impl_notes.is_some(),
+        "impl_notes should exist for QA to reference"
+    );
+
+    // Remove the git tag created by the initial run so the resumed commit won't conflict.
+    let repo_root = workspace_root.parent().expect("repo root is parent of .ralph");
+    git_ok(repo_root, &["tag", "-d", "ralph/01-poc/loop-1"]);
+
+    // Now manually construct a new state at Phase::QA, reusing the real artifacts.
+    let mut qa_state = completed_state.clone();
+    qa_state.current_phase = Phase::QA;
+    qa_state.phase_iteration = 1;
+    qa_state.loops[0].status = LoopStatus::InProgress;
+    qa_state.loops[0].commit = None;
+    qa_state.loops[0].completed_at = None;
+    qa_state.loops[0].artifacts.qa_results.clear();
+    qa_state.loops[0].artifacts.pending_qa_feedback = None;
+    qa_state.loops[0].artifacts.reviews.clear();
+    qa_state.loops[0].artifacts.approval = None;
+
+    let project_dir = workspace_root.join("projects").join(&project_id);
+    save_project_state(&project_dir, &qa_state).expect("save state at Phase::QA");
+
+    // Verify persisted state is at QA before resuming.
+    let persisted = load_project_state(&project_dir).expect("reload persisted state");
+    assert_eq!(
+        persisted.current_phase,
+        Phase::QA,
+        "state should be persisted at Phase::QA"
+    );
+    assert!(
+        persisted.loops[0].artifacts.qa_results.is_empty(),
+        "QA results should be empty before resume"
+    );
+
+    // Resume from Phase::QA — the orchestrator should execute QA, pass, proceed to
+    // review, then commit.
+    let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_options(&project_id))
+        .await
+        .expect("resume from Phase::QA should succeed");
+
+    let final_state =
+        load_project_state(&project_dir).expect("load final state");
+    assert_eq!(final_state.loops[0].status, LoopStatus::Completed);
+    assert!(final_state.loops[0].commit.is_some(), "commit should exist after resume");
+
+    // Verify QA actually executed during the resume (not skipped).
+    assert_eq!(
+        final_state.loops[0].artifacts.qa_results.len(),
+        1,
+        "exactly one QA exchange should exist from the resumed run"
+    );
+    assert!(
+        final_state.loops[0].artifacts.qa_results[0].passed,
+        "QA should have passed during resume"
     );
 }

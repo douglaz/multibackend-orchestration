@@ -5,7 +5,7 @@
   "prompt_hash": "1364c8ac8017cde35e58e815c4ca95a3fe0346cc3ae43b09d75fdb0aa1b3865c",
   "prompt_hash_at_loop_start": "1364c8ac8017cde35e58e815c4ca95a3fe0346cc3ae43b09d75fdb0aa1b3865c",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "qa-schema-and-config-plumbing",
       "feature_name": "QA Schema and Config Plumbing",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -27,8 +27,45 @@
         "reviews": [],
         "approval": "loops/001-qa-schema-and-config-plumbing/20260211205117-review-approved.md"
       },
-      "commit": null,
+      "commit": "afdff6e000a60a8b834fa27757269be88a6bc7ab",
       "started_at": "2026-02-11T20:38:21.386869419Z",
+      "completed_at": "2026-02-11T20:51:17.439772326Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "qa-runtime-gate-and-feedback-loop",
+      "feature_name": "QA Runtime Gate and Feedback Loop",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "spec": "loops/002-qa-runtime-gate-and-feedback-loop/20260211205315-spec.md",
+        "impl_notes": "loops/002-qa-runtime-gate-and-feedback-loop/20260211210401-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-qa-runtime-gate-and-feedback-loop/20260211210657-review-001-feedback.md",
+            "response": "loops/002-qa-runtime-gate-and-feedback-loop/20260211211217-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-qa-runtime-gate-and-feedback-loop/20260211211550-review-002-feedback.md",
+            "response": "loops/002-qa-runtime-gate-and-feedback-loop/20260211211755-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/002-qa-runtime-gate-and-feedback-loop/20260211212026-review-003-feedback.md",
+            "response": "loops/002-qa-runtime-gate-and-feedback-loop/20260211212246-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/002-qa-runtime-gate-and-feedback-loop/20260211212517-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-11T20:53:15.526836783Z",
       "completed_at": null
     }
   ],

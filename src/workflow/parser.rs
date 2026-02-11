@@ -33,6 +33,12 @@ pub struct CompleterDecision {
     pub body: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum QaDecision {
+    Pass { body: String },
+    Fail { body: String },
+}
+
 pub fn parse_planner_output(raw: &str) -> Result<PlannerDecision> {
     let body = strip_frontmatter(raw);
     let Some(first_h1) = first_h1_line(&body) else {
@@ -195,6 +201,31 @@ pub fn parse_completer_output(raw: &str) -> Result<CompleterDecision> {
     }
 }
 
+pub fn parse_qa_output(raw: &str) -> Result<QaDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "QA output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    match first_h1.trim() {
+        "# QA: PASS" => {
+            validate_required_section(&body, "## Tests Run", "QA pass report")?;
+            validate_required_section(&body, "## Verification Summary", "QA pass report")?;
+            Ok(QaDecision::Pass { body })
+        }
+        "# QA: FAIL" => {
+            validate_required_section(&body, "## Failures", "QA fail report")?;
+            validate_required_section(&body, "## Suggested Fixes", "QA fail report")?;
+            Ok(QaDecision::Fail { body })
+        }
+        other => Err(RalphError::ParseError(format!(
+            "unsupported QA H1: {other}"
+        ))),
+    }
+}
+
 pub fn extract_commit_message(body: &str) -> Option<String> {
     let mut in_section = false;
     let mut lines = Vec::new();
@@ -284,8 +315,8 @@ fn validate_required_line(body: &str, line: &str, scope: &str) -> Result<()> {
 mod tests {
     use super::{
         extract_commit_message, parse_completer_output, parse_implementer_output,
-        parse_planner_output, parse_reviewer_output, ImplementerDecision, PlannerDecision,
-        ReviewerDecision,
+        parse_planner_output, parse_qa_output, parse_reviewer_output, ImplementerDecision,
+        PlannerDecision, QaDecision, ReviewerDecision,
     };
     use crate::project::state::CompletionVerdict;
 
@@ -419,5 +450,85 @@ mod tests {
             body.starts_with("# Implementation Response"),
             "after stripping frontmatter, H1 should be first; got: {body}"
         );
+    }
+
+    #[test]
+    fn parses_qa_pass() {
+        let text = "# QA: PASS\n\n## Tests Run\n- cargo test\n- cargo check\n\n## Verification Summary\nAll tests pass and build succeeds.";
+        let parsed = parse_qa_output(text).expect("parse should succeed");
+        match parsed {
+            QaDecision::Pass { body } => {
+                assert!(body.contains("## Tests Run"));
+                assert!(body.contains("## Verification Summary"));
+            }
+            _ => panic!("expected QA pass"),
+        }
+    }
+
+    #[test]
+    fn parses_qa_fail() {
+        let text = "# QA: FAIL\n\n## Failures\n1. cargo test fails with 3 errors\n\n## Suggested Fixes\n1. Fix compilation error in src/lib.rs";
+        let parsed = parse_qa_output(text).expect("parse should succeed");
+        match parsed {
+            QaDecision::Fail { body } => {
+                assert!(body.contains("## Failures"));
+                assert!(body.contains("## Suggested Fixes"));
+            }
+            _ => panic!("expected QA fail"),
+        }
+    }
+
+    #[test]
+    fn qa_parser_rejects_malformed_output() {
+        let text = "# Some Random Heading\n\nno valid QA structure";
+        let result = parse_qa_output(text);
+        assert!(result.is_err(), "malformed QA output should fail parsing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported QA H1"),
+            "error should mention unsupported H1: {err}"
+        );
+    }
+
+    #[test]
+    fn qa_pass_requires_all_sections() {
+        // Missing "## Verification Summary"
+        let text = "# QA: PASS\n\n## Tests Run\n- cargo test";
+        let result = parse_qa_output(text);
+        assert!(
+            result.is_err(),
+            "QA pass without Verification Summary should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Verification Summary"), "got: {err}");
+    }
+
+    #[test]
+    fn qa_fail_requires_all_sections() {
+        // Missing "## Suggested Fixes"
+        let text = "# QA: FAIL\n\n## Failures\n1. test broken";
+        let result = parse_qa_output(text);
+        assert!(
+            result.is_err(),
+            "QA fail without Suggested Fixes should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Suggested Fixes"), "got: {err}");
+    }
+
+    #[test]
+    fn qa_parser_rejects_missing_h1() {
+        let text = "no heading at all, just text";
+        let result = parse_qa_output(text);
+        assert!(result.is_err(), "QA output without H1 should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing a top-level H1"), "got: {err}");
+    }
+
+    #[test]
+    fn qa_parser_strips_frontmatter() {
+        let text = "---\nartifact: qa\n---\n# QA: PASS\n\n## Tests Run\n- ok\n\n## Verification Summary\nAll good.";
+        let parsed = parse_qa_output(text).expect("should strip frontmatter and parse");
+        assert!(matches!(parsed, QaDecision::Pass { .. }));
     }
 }
