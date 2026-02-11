@@ -105,12 +105,12 @@
     {
       "id": "untracked-fix",
       "name": "Fix Untracked Files in Review and Rollback",
-      "status": "in_progress",
+      "status": "completed",
       "created_at": "2026-02-11T17:32:24.968908052Z",
-      "completed_at": null,
-      "total_feature_loops": 0,
-      "total_completion_attempts": 0,
-      "last_loop_number": 1,
+      "completed_at": "2026-02-11T18:13:23.692550560Z",
+      "total_feature_loops": 1,
+      "total_completion_attempts": 1,
+      "last_loop_number": 2,
       "parent_project": null
     }
   ]
