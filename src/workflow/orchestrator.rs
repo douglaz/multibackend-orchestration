@@ -268,7 +268,7 @@ impl Orchestrator {
                         "planning",
                         &planner_prompt,
                         parse_planner_output,
-                        expected_format_template("planner"),
+                        &expected_format_template_for("planner", None),
                     )
                     .await?;
                     debug!(loop = loop_number, "planner responded");
@@ -409,7 +409,7 @@ impl Orchestrator {
                             "implementing",
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, None),
-                            expected_format_template("implementer-notes"),
+                            &expected_format_template_for("implementer-notes", None),
                         )
                         .await?;
                         debug!(loop = loop_number, "implementer responded");
@@ -494,7 +494,7 @@ impl Orchestrator {
                             "implementing",
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, Some(iteration)),
-                            expected_format_template("implementer-response"),
+                            &expected_format_template_for("implementer-response", Some(iteration)),
                         )
                         .await?;
 
@@ -645,7 +645,7 @@ impl Orchestrator {
                             "reviewing",
                             &reviewer_prompt,
                             parse_reviewer_output,
-                            expected_format_template("reviewer"),
+                            &expected_format_template_for("reviewer", None),
                         )
                         .await?;
                         debug!(loop = loop_number, "reviewer responded");
@@ -877,7 +877,7 @@ impl Orchestrator {
                         "completing",
                         &completer_prompt,
                         parse_completer_output,
-                        expected_format_template("completer"),
+                        &expected_format_template_for("completer", None),
                     )
                     .await?;
                     debug!(loop = loop_number, "completer responded");
@@ -1596,7 +1596,7 @@ fn extract_reviewer_commit_message(body: &str) -> Option<String> {
     }
 }
 
-fn expected_format_template(role: &str) -> &'static str {
+fn expected_format_template_for(role: &str, iteration: Option<u32>) -> String {
     match role {
         "planner" => {
             "\
@@ -1612,6 +1612,7 @@ OR\n\
 ## Rationale\n\
 ## Summary of Work\n\
 ## Remaining Items"
+                .to_owned()
         }
         "implementer-notes" => {
             "\
@@ -1619,12 +1620,16 @@ OR\n\
 ## Decisions Made\n\
 ## Spec Deviations\n\
 ## Testing"
+                .to_owned()
         }
         "implementer-response" => {
-            "\
-# Implementation Response (Iteration <N>)\n\
+            let n = iteration.unwrap_or(1);
+            format!(
+                "\
+# Implementation Response (Iteration {n})\n\
 ## Changes Made\n\
 ## Could Not Address"
+            )
         }
         "reviewer" => {
             "\
@@ -1638,6 +1643,7 @@ OR\n\
 # Review: SUGGESTIONS\n\
 ## Required Changes\n\
 ## Recommended Improvements"
+                .to_owned()
         }
         "completer" => {
             "\
@@ -1649,8 +1655,9 @@ OR\n\
 # Verdict: CONTINUE\n\
 ## Missing Requirements\n\
 ## Recommended Next Features"
+                .to_owned()
         }
-        _ => "valid markdown with required H1",
+        _ => "valid markdown with required H1".to_owned(),
     }
 }
 
@@ -1661,7 +1668,7 @@ async fn execute_with_parse_retries<T, F>(
     phase: &str,
     original_prompt: &str,
     parse_fn: F,
-    expected_format_template: &str,
+    expected_format: &str,
 ) -> Result<T>
 where
     F: Fn(&str) -> Result<T>,
@@ -1686,19 +1693,20 @@ where
                 role = role,
                 backend = %reformatter_name,
                 error = %parse_error_1,
-                "parse failed, requesting reformat via {reformatter_name} (attempt 2/3)"
+                "parse failed, requesting reformat via {reformatter_name} (attempt 1/3)"
             );
+            // Use ~~~ fences instead of --- to avoid triggering strip_frontmatter()
             let reformat_prompt = format!(
                 "CRITICAL: Your previous response could not be parsed.\n\n\
-                Error: {}\n\n\
-                Your original response was:\n---\n{}\n---\n\n\
+                Error: {parse_error_1}\n\n\
+                Your original response was:\n~~~\n{first_output}\n~~~\n\n\
                 Requirements:\n\
                 1. Your response MUST begin with the correct H1 heading as the VERY FIRST LINE\n\
                 2. No preamble, commentary, or explanation before the H1\n\
                 3. No YAML frontmatter (no lines starting with ---)\n\
                 4. Include ALL required H2 sections\n\n\
-                Required structure:\n{}\n",
-                parse_error_1, first_output, expected_format_template,
+                Required structure:\n{expected_format}\n\n\
+                Respond ONLY with the corrected markdown. No explanation.\n",
             );
 
             let second_output =
@@ -1713,8 +1721,10 @@ where
                 "reformat failed, retrying with format reminder (attempt 2/3)"
             );
             let reminded_prompt = format!(
-                "IMPORTANT: Format your response as parseable markdown. Start with the correct H1 heading immediately (no preamble). Include all required H2 sections. No YAML frontmatter.\n\n{}",
-                original_prompt
+                "IMPORTANT: Format your response as parseable markdown. \
+                Your VERY FIRST LINE must be exactly:\n\n{expected_format}\n\n\
+                No preamble. No commentary before the H1. No YAML frontmatter. \
+                Include all required H2 sections.\n\n{original_prompt}",
             );
             let third_output =
                 execute_with_timeout_retries(backend, role, phase, &reminded_prompt).await?;
