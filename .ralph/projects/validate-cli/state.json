@@ -5,10 +5,10 @@
   "prompt_hash": "c130b7be16370f34694bc988566f5b253a1d008120e4621661f6654d303985e9",
   "prompt_hash_at_loop_start": "c130b7be16370f34694bc988566f5b253a1d008120e4621661f6654d303985e9",
   "parent_project": null,
-  "current_loop": 8,
-  "current_phase": "committing",
+  "current_loop": 9,
+  "current_phase": "completing",
   "phase_iteration": 1,
-  "status": "in_progress",
+  "status": "completed",
   "loops": [
     {
       "loop_number": 1,
@@ -132,7 +132,7 @@
       "slug": "core-cli-contract-compliance-and-validation-build",
       "feature_name": "Core CLI Contract Compliance and Validation Build Stability",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -150,9 +150,9 @@
         ],
         "approval": "loops/008-core-cli-contract-compliance-and-validation-build/20260211042024-review-approved.md"
       },
-      "commit": null,
+      "commit": "d5ba96cab55fb0f9ffad1d3bbf503cc4baefe46a",
       "started_at": "2026-02-11T04:07:17.070257451Z",
-      "completed_at": null
+      "completed_at": "2026-02-11T04:20:24.992977339Z"
     }
   ],
   "completion_attempts": [
@@ -189,6 +189,23 @@
       "verdict": "continue",
       "started_at": "2026-02-11T03:56:38.427022306Z",
       "completed_at": "2026-02-11T04:02:42.225907613Z"
+    },
+    {
+      "loop_number": 9,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/009-completion/20260211042438-termination-request.md",
+        "verdict": "loops/009-completion/20260211042827-completer-verdict.md"
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-11T04:24:38.875293784Z",
+      "completed_at": "2026-02-11T04:28:27.886214727Z"
     }
   ]
 }

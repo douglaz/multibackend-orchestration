@@ -94,12 +94,12 @@
     {
       "id": "validate-cli",
       "name": "Validate Conformance Test CLI",
-      "status": "in_progress",
+      "status": "completed",
       "created_at": "2026-02-11T01:44:37.006014678Z",
-      "completed_at": null,
-      "total_feature_loops": 5,
-      "total_completion_attempts": 2,
-      "last_loop_number": 8,
+      "completed_at": "2026-02-11T04:28:27.886295858Z",
+      "total_feature_loops": 6,
+      "total_completion_attempts": 3,
+      "last_loop_number": 9,
       "parent_project": null
     }
   ]

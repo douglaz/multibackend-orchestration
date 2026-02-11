@@ -1907,4 +1907,40 @@ mod tests {
         let result = validate_tmux_preflight(true, true, || Err(RalphError::TmuxUnavailable));
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn expected_format_template_for_implementer_response_substitutes_iteration() {
+        let template = super::expected_format_template_for("implementer-response", Some(3));
+        assert!(
+            template.contains("(Iteration 3)"),
+            "should substitute actual iteration number; got: {template}"
+        );
+        assert!(
+            !template.contains("<N>"),
+            "should not contain placeholder <N>; got: {template}"
+        );
+    }
+
+    #[test]
+    fn expected_format_template_for_implementer_response_defaults_to_1() {
+        let template = super::expected_format_template_for("implementer-response", None);
+        assert!(
+            template.contains("(Iteration 1)"),
+            "should default to iteration 1; got: {template}"
+        );
+    }
+
+    #[test]
+    fn expected_format_template_for_other_roles_ignores_iteration() {
+        let planner = super::expected_format_template_for("planner", Some(5));
+        assert!(
+            planner.contains("# Feature:"),
+            "planner template should be unaffected by iteration; got: {planner}"
+        );
+        let reviewer = super::expected_format_template_for("reviewer", None);
+        assert!(
+            reviewer.contains("# Review: APPROVED"),
+            "reviewer template should work without iteration; got: {reviewer}"
+        );
+    }
 }

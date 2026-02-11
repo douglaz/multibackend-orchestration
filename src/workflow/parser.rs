@@ -375,4 +375,49 @@ mod tests {
             Some("feat: one more".to_owned())
         );
     }
+
+    #[test]
+    fn strip_frontmatter_removes_yaml_header() {
+        let text = "---\ntitle: test\n---\n# Feature: Foo\n\n## Description\nbar";
+        let body = super::strip_frontmatter(text);
+        assert!(body.starts_with("# Feature: Foo"), "got: {body}");
+    }
+
+    #[test]
+    fn strip_frontmatter_ignores_triple_dash_inside_content() {
+        // Regression: embedded --- inside content (e.g. in a reformat prompt)
+        // should NOT be treated as frontmatter boundaries
+        let text = "# Implementation Response (Iteration 1)\n\n## Changes Made\n- fixed\n\n---\n\nsome separator\n\n## Could Not Address\n- none";
+        let body = super::strip_frontmatter(text);
+        assert!(
+            body.starts_with("# Implementation Response"),
+            "strip_frontmatter should not strip content when first line is not ---; got: {body}"
+        );
+    }
+
+    #[test]
+    fn strip_frontmatter_preserves_tilde_fences() {
+        // ~~~ fences must not trigger frontmatter stripping
+        let text = "# Implementation Response (Iteration 1)\n\n~~~\nembedded content\n~~~\n\n## Changes Made\n- x\n\n## Could Not Address\n- none";
+        let body = super::strip_frontmatter(text);
+        assert!(
+            body.starts_with("# Implementation Response"),
+            "tilde fences should not affect parsing; got: {body}"
+        );
+        assert!(body.contains("~~~"), "tilde fences should be preserved");
+    }
+
+    #[test]
+    fn strip_frontmatter_with_dash_fences_around_raw_output_corrupts_parse() {
+        // This demonstrates the bug that was fixed: if a reformat prompt embeds
+        // raw output between --- fences, strip_frontmatter treats line 1 as
+        // YAML frontmatter start and strips everything up to the closing ---
+        let text = "---\nsome raw output here\n---\n# Implementation Response (Iteration 1)\n\n## Changes Made\n- x\n\n## Could Not Address\n- none";
+        let body = super::strip_frontmatter(text);
+        // After stripping, the H1 should be found
+        assert!(
+            body.starts_with("# Implementation Response"),
+            "after stripping frontmatter, H1 should be first; got: {body}"
+        );
+    }
 }
