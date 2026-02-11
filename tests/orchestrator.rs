@@ -247,6 +247,7 @@ fn run_options(project_id: &str) -> RunOptions {
         planner_backend: None,
         implementer_backend: None,
         reviewer_backend: None,
+        qa_backend: None,
         completer_backend: None,
         tmux: None,
         on_prompt_change: None,

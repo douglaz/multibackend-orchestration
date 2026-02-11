@@ -51,6 +51,7 @@ pub struct BackendRoleModels {
     pub planner: Option<String>,
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
+    pub qa: Option<String>,
     pub completer: Option<String>,
     pub reformatter: Option<String>,
 }
@@ -61,6 +62,7 @@ impl BackendRoleModels {
             "planner" => self.planner.as_deref(),
             "implementer" => self.implementer.as_deref(),
             "reviewer" => self.reviewer.as_deref(),
+            "qa" => self.qa.as_deref(),
             "completer" => self.completer.as_deref(),
             "reformatter" => self.reformatter.as_deref(),
             _ => None,
@@ -77,6 +79,9 @@ impl BackendRoleModels {
         }
         if self.reviewer.is_none() {
             self.reviewer.clone_from(&defaults.reviewer);
+        }
+        if self.qa.is_none() {
+            self.qa.clone_from(&defaults.qa);
         }
         if self.completer.is_none() {
             self.completer.clone_from(&defaults.completer);
@@ -101,7 +106,13 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub reviewer_backend: Option<String>,
     #[serde(default)]
+    pub qa_backend: Option<String>,
+    #[serde(default)]
     pub completer_backend: Option<String>,
+    #[serde(default)]
+    pub qa_enabled: bool,
+    #[serde(default = "default_max_qa_iterations")]
+    pub max_qa_iterations: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +138,8 @@ pub struct TemplateConfig {
     pub implementer: String,
     pub reviewer: String,
     pub completer: String,
+    #[serde(default = "default_qa_template_path")]
+    pub qa: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +170,7 @@ impl Default for GlobalConfig {
                         planner: Some("opus".to_owned()),
                         implementer: Some("opus".to_owned()),
                         reviewer: Some("opus".to_owned()),
+                        qa: Some("opus".to_owned()),
                         completer: Some("opus".to_owned()),
                         reformatter: Some("sonnet".to_owned()),
                     },
@@ -174,6 +188,7 @@ impl Default for GlobalConfig {
                         planner: Some("gpt-5.3-codex-xhigh".to_owned()),
                         implementer: Some("gpt-5.3-codex-high".to_owned()),
                         reviewer: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        qa: Some("gpt-5.3-codex-high".to_owned()),
                         completer: Some("gpt-5.3-codex-xhigh".to_owned()),
                         reformatter: Some("gpt-5.3-codex-medium".to_owned()),
                     },
@@ -188,13 +203,17 @@ impl Default for GlobalConfig {
                 planner_backend: None,
                 implementer_backend: None,
                 reviewer_backend: None,
+                qa_backend: None,
                 completer_backend: None,
+                qa_enabled: false,
+                max_qa_iterations: default_max_qa_iterations(),
             },
             templates: TemplateConfig {
                 planner: "templates/spec.md".to_owned(),
                 implementer: "templates/implementation.md".to_owned(),
                 reviewer: "templates/review.md".to_owned(),
                 completer: "templates/completion.md".to_owned(),
+                qa: default_qa_template_path(),
             },
             git: GitConfig {
                 auto_branch: true,
@@ -212,6 +231,14 @@ fn default_tmux_session() -> String {
 
 fn default_tmux_window_keep_seconds() -> u64 {
     5
+}
+
+fn default_max_qa_iterations() -> u32 {
+    3
+}
+
+fn default_qa_template_path() -> String {
+    "templates/qa.md".to_owned()
 }
 
 impl GlobalConfig {
@@ -257,6 +284,19 @@ mod tests {
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
+        assert!(!config.workflow.qa_enabled);
+        assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert_eq!(
+            config.backends.claude.models.qa.as_deref(),
+            Some("opus"),
+            "claude qa model should default to opus"
+        );
+        assert_eq!(
+            config.backends.codex.models.qa.as_deref(),
+            Some("gpt-5.3-codex-high"),
+            "codex qa model should default to gpt-5.3-codex-high"
+        );
+        assert_eq!(config.templates.qa, "templates/qa.md");
     }
 
     #[test]
@@ -265,6 +305,7 @@ mod tests {
         assert!(models.planner.is_none());
         assert!(models.implementer.is_none());
         assert!(models.reviewer.is_none());
+        assert!(models.qa.is_none());
         assert!(models.completer.is_none());
         assert!(models.reformatter.is_none());
     }
@@ -311,13 +352,19 @@ base_branch = "master"
         assert!(config.backends.claude.models.planner.is_none());
         assert!(config.backends.claude.models.implementer.is_none());
         assert!(config.backends.claude.models.reviewer.is_none());
+        assert!(config.backends.claude.models.qa.is_none());
         assert!(config.backends.claude.models.completer.is_none());
         assert!(config.backends.claude.models.reformatter.is_none());
         assert!(config.backends.codex.models.planner.is_none());
         assert!(config.backends.codex.models.implementer.is_none());
         assert!(config.backends.codex.models.reviewer.is_none());
+        assert!(config.backends.codex.models.qa.is_none());
         assert!(config.backends.codex.models.completer.is_none());
         assert!(config.backends.codex.models.reformatter.is_none());
+        assert!(!config.workflow.qa_enabled);
+        assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert!(config.workflow.qa_backend.is_none());
+        assert_eq!(config.templates.qa, "templates/qa.md");
     }
 
     #[test]
@@ -379,6 +426,7 @@ timeout_seconds = 600
 planner = "opus"
 implementer = "opus"
 reviewer = "opus"
+qa = "opus"
 completer = "opus"
 reformatter = "sonnet"
 
@@ -390,6 +438,7 @@ timeout_seconds = 600
 planner = "gpt-5.3-codex-xhigh"
 implementer = "gpt-5.3-codex-high"
 reviewer = "gpt-5.3-codex-xhigh"
+qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
 
@@ -426,6 +475,7 @@ base_branch = "master"
             config.backends.claude.models.reviewer.as_deref(),
             Some("opus")
         );
+        assert_eq!(config.backends.claude.models.qa.as_deref(), Some("opus"));
         assert_eq!(
             config.backends.claude.models.completer.as_deref(),
             Some("opus")
@@ -447,6 +497,10 @@ base_branch = "master"
             Some("gpt-5.3-codex-xhigh")
         );
         assert_eq!(
+            config.backends.codex.models.qa.as_deref(),
+            Some("gpt-5.3-codex-high")
+        );
+        assert_eq!(
             config.backends.codex.models.completer.as_deref(),
             Some("gpt-5.3-codex-xhigh")
         );
@@ -462,6 +516,7 @@ base_branch = "master"
             planner: Some("planner-model".to_owned()),
             implementer: Some("implementer-model".to_owned()),
             reviewer: Some("reviewer-model".to_owned()),
+            qa: Some("qa-model".to_owned()),
             completer: Some("completer-model".to_owned()),
             reformatter: Some("reformatter-model".to_owned()),
         };
@@ -469,6 +524,7 @@ base_branch = "master"
         assert_eq!(models.for_role("planner"), Some("planner-model"));
         assert_eq!(models.for_role("implementer"), Some("implementer-model"));
         assert_eq!(models.for_role("reviewer"), Some("reviewer-model"));
+        assert_eq!(models.for_role("qa"), Some("qa-model"));
         assert_eq!(models.for_role("completer"), Some("completer-model"));
         assert_eq!(models.for_role("reformatter"), Some("reformatter-model"));
         assert_eq!(models.for_role("unknown-role"), None);
@@ -480,6 +536,7 @@ base_branch = "master"
             planner: Some("custom-planner".to_owned()),
             implementer: None,
             reviewer: None,
+            qa: None,
             completer: Some("custom-completer".to_owned()),
             reformatter: None,
         };
@@ -487,6 +544,7 @@ base_branch = "master"
             planner: Some("default-planner".to_owned()),
             implementer: Some("default-implementer".to_owned()),
             reviewer: Some("default-reviewer".to_owned()),
+            qa: Some("default-qa".to_owned()),
             completer: Some("default-completer".to_owned()),
             reformatter: Some("default-reformatter".to_owned()),
         };
@@ -494,6 +552,7 @@ base_branch = "master"
         assert_eq!(models.planner.as_deref(), Some("custom-planner"));
         assert_eq!(models.implementer.as_deref(), Some("default-implementer"));
         assert_eq!(models.reviewer.as_deref(), Some("default-reviewer"));
+        assert_eq!(models.qa.as_deref(), Some("default-qa"));
         assert_eq!(models.completer.as_deref(), Some("custom-completer"));
         assert_eq!(models.reformatter.as_deref(), Some("default-reformatter"));
     }
@@ -552,6 +611,10 @@ base_branch = "master"
         assert_eq!(
             config.backends.codex.models.implementer.as_deref(),
             defaults.backends.codex.models.implementer.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.qa.as_deref(),
+            defaults.backends.codex.models.qa.as_deref(),
         );
         assert_eq!(
             config.backends.codex.models.reformatter.as_deref(),

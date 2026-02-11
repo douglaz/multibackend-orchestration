@@ -43,6 +43,7 @@ pub struct RoleOverrides {
     pub planner: Option<String>,
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
+    pub qa: Option<String>,
     pub completer: Option<String>,
 }
 
@@ -360,11 +361,20 @@ impl BackendRegistry {
             .reviewer
             .clone()
             .unwrap_or(alternating_reviewer);
+        let planner = self.resolve_backend_for_role(&planner, "planner");
+        let implementer = self.resolve_backend_for_role(&implementer, "implementer");
+        let reviewer = self.resolve_backend_for_role(&reviewer, "reviewer");
+        let qa = if let Some(qa_override) = role_overrides.qa.as_deref() {
+            self.resolve_backend_for_role(qa_override, "qa")
+        } else {
+            planner.clone()
+        };
 
         Ok(FeatureLoopBackends {
-            planner: self.resolve_backend_for_role(&planner, "planner"),
-            implementer: self.resolve_backend_for_role(&implementer, "implementer"),
-            reviewer: self.resolve_backend_for_role(&reviewer, "reviewer"),
+            planner,
+            implementer,
+            reviewer,
+            qa,
         })
     }
 
@@ -400,6 +410,7 @@ impl BackendRegistry {
             "planner",
             "implementer",
             "reviewer",
+            "qa",
             "completer",
             "reformatter",
         ];

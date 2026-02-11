@@ -45,10 +45,11 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             loop_status_label(&loop_state.status)
         );
         println!(
-            "Backends: planner={}, implementer={}, reviewer={}",
+            "Backends: planner={}, implementer={}, reviewer={}, qa={}",
             loop_state.backends.planner,
             loop_state.backends.implementer,
-            loop_state.backends.reviewer
+            loop_state.backends.reviewer,
+            loop_state.backends.qa
         );
 
         if let Some((iteration, lines)) = latest_feedback(&project_dir, &state, loop_state) {
@@ -135,6 +136,7 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
     match phase {
         crate::project::state::Phase::Planning => "planning",
         crate::project::state::Phase::Implementing => "implementing",
+        crate::project::state::Phase::QA => "qa",
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",

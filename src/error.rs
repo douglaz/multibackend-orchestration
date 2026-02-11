@@ -77,6 +77,12 @@ pub enum RalphError {
         max_iterations: u32,
     },
 
+    #[error("QA iteration limit exceeded for loop {loop_number}, max={max_iterations}")]
+    QaIterationLimitExceeded {
+        loop_number: u32,
+        max_iterations: u32,
+    },
+
     #[error("git conflict: {details}")]
     GitConflict { details: String },
 

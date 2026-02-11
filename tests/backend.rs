@@ -162,8 +162,16 @@ fn resolve_backend_for_role_injects_model_when_configured() {
         "claude(opus)"
     );
     assert_eq!(
+        registry.resolve_backend_for_role("claude", "qa"),
+        "claude(opus)"
+    );
+    assert_eq!(
         registry.resolve_backend_for_role("codex", "reformatter"),
         "codex(gpt-5.3-codex-medium)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "qa"),
+        "codex(gpt-5.3-codex-high)"
     );
 }
 
@@ -245,6 +253,7 @@ fn test_assign_feature_backends() {
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
     assert_eq!(backends.reviewer, "claude(opus)");
+    assert_eq!(backends.qa, "claude(opus)");
 
     // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
     let backends = registry
@@ -253,6 +262,26 @@ fn test_assign_feature_backends() {
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
     assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.qa, "codex(gpt-5.3-codex-xhigh)");
+}
+
+#[test]
+fn test_assign_feature_backends_with_qa_override() {
+    let config = test_config();
+    let registry = BackendRegistry::new(&config, tmux_disabled());
+    let role_overrides = RoleOverrides {
+        planner: None,
+        implementer: None,
+        reviewer: None,
+        qa: Some("codex".to_owned()),
+        completer: None,
+    };
+
+    let backends = registry
+        .assign_feature_backends(1, "claude", &role_overrides)
+        .expect("qa override should resolve");
+    assert_eq!(backends.planner, "claude(opus)");
+    assert_eq!(backends.qa, "codex(gpt-5.3-codex-high)");
 }
 
 #[test]
@@ -304,6 +333,7 @@ fn test_assign_feature_backends_with_all_role_overrides() {
         planner: Some("claude(opus)".to_owned()),
         implementer: Some("codex(gpt-5)".to_owned()),
         reviewer: Some("claude(sonnet)".to_owned()),
+        qa: None,
         completer: None,
     };
 
@@ -324,6 +354,7 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         planner: Some("claude(opus)".to_owned()),
         implementer: None,
         reviewer: None,
+        qa: None,
         completer: None,
     };
 
@@ -345,6 +376,7 @@ fn test_assign_feature_backends_bare_role_override_gets_model_injection() {
         planner: Some("claude".to_owned()),
         implementer: None,
         reviewer: None,
+        qa: None,
         completer: None,
     };
 
@@ -421,6 +453,7 @@ fn test_assign_completion_backends_with_all_role_overrides() {
         planner: Some("codex(gpt-5.3-codex)".to_owned()),
         implementer: None,
         reviewer: None,
+        qa: None,
         completer: Some("claude(opus)".to_owned()),
     };
 
@@ -439,6 +472,7 @@ fn test_assign_completion_backends_with_partial_role_overrides() {
         planner: Some("claude(sonnet)".to_owned()),
         implementer: None,
         reviewer: None,
+        qa: None,
         completer: None,
     };
 

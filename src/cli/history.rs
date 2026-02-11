@@ -31,11 +31,7 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
         for completion in &state.completion_attempts {
             entries.push(serde_json::to_value(completion)?);
         }
-        entries.sort_by_key(|v| {
-            v.get("loop_number")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0)
-        });
+        entries.sort_by_key(|v| v.get("loop_number").and_then(|n| n.as_u64()).unwrap_or(0));
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
@@ -81,10 +77,11 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
                             .unwrap_or_else(|| "in-progress".to_owned())
                     );
                     println!(
-                        "  Backends: planner={}, implementer={}, reviewer={}",
+                        "  Backends: planner={}, implementer={}, reviewer={}, qa={}",
                         loop_state.backends.planner,
                         loop_state.backends.implementer,
-                        loop_state.backends.reviewer
+                        loop_state.backends.reviewer,
+                        loop_state.backends.qa
                     );
                     println!(
                         "  Reviews: {} iterations",

@@ -71,6 +71,7 @@ pub struct RunOptions {
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
+    pub qa_backend: Option<String>,
     pub completer_backend: Option<String>,
     pub tmux: Option<bool>,
     pub on_prompt_change: Option<PromptChangeAction>,
@@ -141,6 +142,7 @@ impl Orchestrator {
                 planner_backend: options.planner_backend.as_deref(),
                 implementer_backend: options.implementer_backend.as_deref(),
                 reviewer_backend: options.reviewer_backend.as_deref(),
+                qa_backend: options.qa_backend.as_deref(),
                 completer_backend: options.completer_backend.as_deref(),
             },
         )?;
@@ -148,6 +150,7 @@ impl Orchestrator {
             planner: effective.workflow.planner_backend.clone(),
             implementer: effective.workflow.implementer_backend.clone(),
             reviewer: effective.workflow.reviewer_backend.clone(),
+            qa: effective.workflow.qa_backend.clone(),
             completer: effective.workflow.completer_backend.clone(),
         };
 
@@ -549,6 +552,11 @@ impl Orchestrator {
                             "loop {loop_number}: implementer responded to review iteration {parsed_iteration}"
                         ));
                     }
+                }
+                Phase::QA => {
+                    return Err(RalphError::Unsupported(
+                        "qa phase orchestration is not implemented in this iteration".to_owned(),
+                    ));
                 }
                 Phase::Reviewing => {
                     info!(
@@ -1502,6 +1510,7 @@ fn phase_label(phase: &Phase) -> &'static str {
     match phase {
         Phase::Planning => "planning",
         Phase::Implementing => "implementing",
+        Phase::QA => "qa",
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
@@ -1857,6 +1866,7 @@ mod tests {
             planner: Some("claude-planner".to_owned()),
             implementer: Some("claude-implementer".to_owned()),
             reviewer: Some("claude-reviewer".to_owned()),
+            qa: Some("claude-qa".to_owned()),
             completer: Some("claude-completer".to_owned()),
             reformatter: Some("claude-reformatter".to_owned()),
         };
@@ -1864,6 +1874,7 @@ mod tests {
             planner: Some("codex-planner".to_owned()),
             implementer: Some("codex-implementer".to_owned()),
             reviewer: Some("codex-reviewer".to_owned()),
+            qa: Some("codex-qa".to_owned()),
             completer: Some("codex-completer".to_owned()),
             reformatter: Some("codex-reformatter".to_owned()),
         };
@@ -1876,11 +1887,13 @@ mod tests {
             "claude(claude-planner)",
             "claude(claude-implementer)",
             "claude(claude-reviewer)",
+            "claude(claude-qa)",
             "claude(claude-completer)",
             "claude(claude-reformatter)",
             "codex(codex-planner)",
             "codex(codex-implementer)",
             "codex(codex-reviewer)",
+            "codex(codex-qa)",
             "codex(codex-completer)",
             "codex(codex-reformatter)",
         ] {

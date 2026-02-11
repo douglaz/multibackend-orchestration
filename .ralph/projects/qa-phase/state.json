@@ -1,0 +1,36 @@
+{
+  "project_id": "qa-phase",
+  "project_name": "QA Phase",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "1364c8ac8017cde35e58e815c4ca95a3fe0346cc3ae43b09d75fdb0aa1b3865c",
+  "prompt_hash_at_loop_start": "1364c8ac8017cde35e58e815c4ca95a3fe0346cc3ae43b09d75fdb0aa1b3865c",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "qa-schema-and-config-plumbing",
+      "feature_name": "QA Schema and Config Plumbing",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/001-qa-schema-and-config-plumbing/20260211203821-spec.md",
+        "impl_notes": "loops/001-qa-schema-and-config-plumbing/20260211204931-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-qa-schema-and-config-plumbing/20260211205117-review-approved.md"
+      },
+      "commit": null,
+      "started_at": "2026-02-11T20:38:21.386869419Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

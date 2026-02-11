@@ -18,6 +18,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             planner_backend: args.planner_backend,
             implementer_backend: args.implementer_backend,
             reviewer_backend: args.reviewer_backend,
+            qa_backend: args.qa_backend,
             completer_backend: args.completer_backend,
             on_prompt_change: args.on_prompt_change,
             skip_commit: args.skip_commit,

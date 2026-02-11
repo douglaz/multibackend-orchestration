@@ -14,6 +14,11 @@ pub enum ArtifactKind {
     ReviewFeedback { iteration: u32 },
     ImplResponse { iteration: u32 },
     ReviewApproved { iterations: u32 },
+    QaPass { iteration: u32 },
+    QaFail { iteration: u32 },
+    ImplQaResponse { iteration: u32 },
+    AcceptancePass,
+    AcceptanceFail,
     TerminationRequest,
     CompleterVerdict,
 }
@@ -26,6 +31,11 @@ impl ArtifactKind {
             Self::ReviewFeedback { .. } => "review-feedback",
             Self::ImplResponse { .. } => "impl-response",
             Self::ReviewApproved { .. } => "review-approved",
+            Self::QaPass { .. } => "qa-pass",
+            Self::QaFail { .. } => "qa-fail",
+            Self::ImplQaResponse { .. } => "impl-qa-response",
+            Self::AcceptancePass => "acceptance-pass",
+            Self::AcceptanceFail => "acceptance-fail",
             Self::TerminationRequest => "termination-request",
             Self::CompleterVerdict => "completer-verdict",
         }
@@ -42,6 +52,13 @@ impl ArtifactKind {
                 format!("impl-response-{iteration:03}.md")
             }
             Self::ReviewApproved { .. } => "review-approved.md".to_owned(),
+            Self::QaPass { iteration } => format!("qa-{iteration:03}-pass.md"),
+            Self::QaFail { iteration } => format!("qa-{iteration:03}-fail.md"),
+            Self::ImplQaResponse { iteration } => {
+                format!("impl-qa-response-{iteration:03}.md")
+            }
+            Self::AcceptancePass => "acceptance-pass.md".to_owned(),
+            Self::AcceptanceFail => "acceptance-fail.md".to_owned(),
             Self::TerminationRequest => "termination-request.md".to_owned(),
             Self::CompleterVerdict => "completer-verdict.md".to_owned(),
         }
@@ -53,9 +70,11 @@ impl ArtifactKind {
 
     pub fn iteration(&self) -> Option<u32> {
         match self {
-            Self::ReviewFeedback { iteration } | Self::ImplResponse { iteration } => {
-                Some(*iteration)
-            }
+            Self::ReviewFeedback { iteration }
+            | Self::ImplResponse { iteration }
+            | Self::QaPass { iteration }
+            | Self::QaFail { iteration }
+            | Self::ImplQaResponse { iteration } => Some(*iteration),
             _ => None,
         }
     }
@@ -295,5 +314,38 @@ mod tests {
             resolved,
             "loops/001-demo/20260203060159-review-001-feedback.md"
         );
+    }
+
+    #[test]
+    fn qa_and_acceptance_artifact_kinds_render_expected_names_and_types() {
+        assert_eq!(
+            ArtifactKind::QaPass { iteration: 1 }.file_name(),
+            "qa-001-pass.md"
+        );
+        assert_eq!(
+            ArtifactKind::QaFail { iteration: 7 }.file_name(),
+            "qa-007-fail.md"
+        );
+        assert_eq!(
+            ArtifactKind::ImplQaResponse { iteration: 3 }.file_name(),
+            "impl-qa-response-003.md"
+        );
+        assert_eq!(
+            ArtifactKind::AcceptancePass.file_name(),
+            "acceptance-pass.md"
+        );
+        assert_eq!(
+            ArtifactKind::AcceptanceFail.file_name(),
+            "acceptance-fail.md"
+        );
+
+        assert_eq!(ArtifactKind::QaPass { iteration: 1 }.base_type(), "qa-pass");
+        assert_eq!(ArtifactKind::QaFail { iteration: 1 }.base_type(), "qa-fail");
+        assert_eq!(
+            ArtifactKind::ImplQaResponse { iteration: 1 }.base_type(),
+            "impl-qa-response"
+        );
+        assert_eq!(ArtifactKind::AcceptancePass.base_type(), "acceptance-pass");
+        assert_eq!(ArtifactKind::AcceptanceFail.base_type(), "acceptance-fail");
     }
 }
