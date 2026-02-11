@@ -1871,6 +1871,200 @@ fn setup_workspace_with_qa(
     (temp, workspace_root, project_id, counter_dir)
 }
 
+fn write_acceptance_pass_backend_script(path: &Path) {
+    let script = r###"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  planner_counter="${COUNTER_DIR}/planner_count"
+  planner_count=0
+  if [ -f "$planner_counter" ]; then
+    planner_count=$(cat "$planner_counter")
+  fi
+  planner_count=$((planner_count + 1))
+  echo "$planner_count" > "$planner_counter"
+  printf "%s" "$prompt" > "${COUNTER_DIR}/planner_prompt_${planner_count}.md"
+
+  cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All requirements are already satisfied.
+
+## Summary of Work
+- Existing completed work satisfies the prompt.
+
+## Remaining Items
+- None
+EOF
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Requirement alpha: satisfied by existing implementation
+EOF
+elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptance."* ]]; then
+  qa_counter="${COUNTER_DIR}/acceptance_qa_count"
+  qa_count=0
+  if [ -f "$qa_counter" ]; then
+    qa_count=$(cat "$qa_counter")
+  fi
+  qa_count=$((qa_count + 1))
+  echo "$qa_count" > "$qa_counter"
+
+  missing=0
+  if [[ "$prompt" != *"## Master Prompt"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"## Completed Feature Loop Summary"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"## Git Diff Against Base Branch"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"Verify overall project acceptance, not just a single feature."* ]]; then missing=1; fi
+
+  if [ "$missing" -eq 0 ]; then
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- acceptance verification checklist: passed
+
+## Verification Summary
+Overall project acceptance verified from master prompt, completed-loop summary, and base-branch diff.
+EOF
+  else
+    cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Acceptance prompt is missing required context sections.
+
+## Suggested Fixes
+1. Include master prompt, completed-loop summary, base diff, and global-acceptance instruction.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###;
+
+    fs::write(path, script).expect("write acceptance-pass backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn write_acceptance_fail_then_pass_backend_script(path: &Path) {
+    let script = r###"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  planner_counter="${COUNTER_DIR}/planner_count"
+  planner_count=0
+  if [ -f "$planner_counter" ]; then
+    planner_count=$(cat "$planner_counter")
+  fi
+  planner_count=$((planner_count + 1))
+  echo "$planner_count" > "$planner_counter"
+  printf "%s" "$prompt" > "${COUNTER_DIR}/planner_prompt_${planner_count}.md"
+
+  cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+The project appears complete and should be validated for final acceptance.
+
+## Summary of Work
+- Completed the planned implementation.
+
+## Remaining Items
+- None
+EOF
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Requirement alpha: satisfied by completion attempt 1
+EOF
+elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptance."* ]]; then
+  qa_counter="${COUNTER_DIR}/acceptance_qa_count"
+  qa_count=0
+  if [ -f "$qa_counter" ]; then
+    qa_count=$(cat "$qa_counter")
+  fi
+  qa_count=$((qa_count + 1))
+  echo "$qa_count" > "$qa_counter"
+
+  if [ "$qa_count" -eq 1 ]; then
+    cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Global acceptance check failed: missing end-to-end acceptance evidence.
+
+## Suggested Fixes
+1. Re-run completion planning and provide full acceptance evidence.
+EOF
+  else
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- final acceptance checklist: passed
+
+## Verification Summary
+Project-level acceptance now passes after feedback.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###;
+
+    fs::write(path, script).expect("write acceptance-fail-then-pass backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn setup_workspace_for_acceptance_gate(
+    script_writer: fn(&Path),
+) -> (TempDir, PathBuf, String, PathBuf) {
+    let (temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_with_qa(script_writer, true, 3);
+
+    // Keep test counters under `.ralph/` so they are excluded from dirty-tree
+    // checks when acceptance failure routes back to planning.
+    let counter_dir = workspace_root.join("counters");
+    fs::create_dir_all(&counter_dir).expect("create acceptance counter dir");
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let counter_dir_string = counter_dir.to_string_lossy().to_string();
+    workspace
+        .config
+        .backends
+        .claude
+        .env
+        .insert("COUNTER_DIR".to_owned(), counter_dir_string.clone());
+    workspace
+        .config
+        .backends
+        .codex
+        .env
+        .insert("COUNTER_DIR".to_owned(), counter_dir_string);
+    workspace.save_config().expect("save workspace config");
+
+    (temp, workspace_root, project_id, counter_dir)
+}
+
 #[tokio::test]
 async fn qa_disabled_skips_phase() {
     let (_temp, workspace_root, project_id, _counter_dir) =
@@ -1978,8 +2172,8 @@ async fn qa_fail_retries_implementer_then_passes() {
     );
 
     // Verify counter dir shows 2 QA attempts
-    let qa_count = fs::read_to_string(counter_dir.join("qa_attempt_count"))
-        .expect("qa counter should exist");
+    let qa_count =
+        fs::read_to_string(counter_dir.join("qa_attempt_count")).expect("qa counter should exist");
     assert_eq!(
         qa_count.trim(),
         "2",
@@ -2040,9 +2234,8 @@ async fn resume_from_phase_qa() {
         .expect("initial run should succeed");
 
     // Load the completed state and extract artifact paths from the finished loop.
-    let completed_state =
-        load_project_state(&workspace_root.join("projects").join(&project_id))
-            .expect("load completed state");
+    let completed_state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load completed state");
     assert_eq!(completed_state.loops.len(), 1);
     assert_eq!(completed_state.loops[0].status, LoopStatus::Completed);
 
@@ -2053,7 +2246,9 @@ async fn resume_from_phase_qa() {
     );
 
     // Remove the git tag created by the initial run so the resumed commit won't conflict.
-    let repo_root = workspace_root.parent().expect("repo root is parent of .ralph");
+    let repo_root = workspace_root
+        .parent()
+        .expect("repo root is parent of .ralph");
     git_ok(repo_root, &["tag", "-d", "ralph/01-poc/loop-1"]);
 
     // Now manually construct a new state at Phase::QA, reusing the real artifacts.
@@ -2092,10 +2287,12 @@ async fn resume_from_phase_qa() {
         .await
         .expect("resume from Phase::QA should succeed");
 
-    let final_state =
-        load_project_state(&project_dir).expect("load final state");
+    let final_state = load_project_state(&project_dir).expect("load final state");
     assert_eq!(final_state.loops[0].status, LoopStatus::Completed);
-    assert!(final_state.loops[0].commit.is_some(), "commit should exist after resume");
+    assert!(
+        final_state.loops[0].commit.is_some(),
+        "commit should exist after resume"
+    );
 
     // Verify QA actually executed during the resume (not skipped).
     assert_eq!(
@@ -2106,5 +2303,131 @@ async fn resume_from_phase_qa() {
     assert!(
         final_state.loops[0].artifacts.qa_results[0].passed,
         "QA should have passed during resume"
+    );
+}
+
+#[tokio::test]
+async fn acceptance_gate_pass_keeps_completed() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_acceptance_gate(write_acceptance_pass_backend_script);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let mut options = run_options(&project_id);
+    options.loops = None;
+    options.until_complete = true;
+
+    orchestrator
+        .run(options)
+        .await
+        .expect("orchestration with acceptance-pass should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.status, ProjectStatus::Completed);
+    assert_eq!(state.completion_attempts.len(), 1);
+
+    let attempt = &state.completion_attempts[0];
+    assert_eq!(attempt.verdict, Some(CompletionVerdict::Complete));
+    assert_eq!(attempt.artifacts.acceptance_passed, Some(true));
+    assert_timestamped_artifact(
+        attempt
+            .artifacts
+            .acceptance_result
+            .as_deref()
+            .expect("acceptance-pass artifact should exist"),
+        "acceptance-pass.md",
+    );
+
+    let acceptance_qa_count = fs::read_to_string(counter_dir.join("acceptance_qa_count"))
+        .expect("acceptance QA counter should exist");
+    assert_eq!(
+        acceptance_qa_count.trim(),
+        "1",
+        "acceptance QA should run exactly once on COMPLETE"
+    );
+}
+
+#[tokio::test]
+async fn acceptance_gate_fail_overrides_complete_to_continue() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_acceptance_gate(write_acceptance_fail_then_pass_backend_script);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let mut options = run_options(&project_id);
+    options.loops = None;
+    options.until_complete = true;
+
+    orchestrator
+        .run(options)
+        .await
+        .expect("orchestration with acceptance fail-then-pass should succeed");
+
+    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+        .expect("load project state");
+    assert_eq!(state.completion_attempts.len(), 2);
+
+    let first_attempt = &state.completion_attempts[0];
+    assert_eq!(
+        first_attempt.verdict,
+        Some(CompletionVerdict::Continue),
+        "acceptance failure should force CONTINUE even when completer said COMPLETE"
+    );
+    assert_eq!(first_attempt.artifacts.acceptance_passed, Some(false));
+    assert_timestamped_artifact(
+        first_attempt
+            .artifacts
+            .acceptance_result
+            .as_deref()
+            .expect("acceptance-fail artifact should exist"),
+        "acceptance-fail.md",
+    );
+
+    let second_attempt = &state.completion_attempts[1];
+    assert_eq!(second_attempt.verdict, Some(CompletionVerdict::Complete));
+    assert_eq!(second_attempt.artifacts.acceptance_passed, Some(true));
+    assert_eq!(state.status, ProjectStatus::Completed);
+
+    let acceptance_qa_count = fs::read_to_string(counter_dir.join("acceptance_qa_count"))
+        .expect("acceptance QA counter should exist");
+    assert_eq!(
+        acceptance_qa_count.trim(),
+        "2",
+        "acceptance QA should run twice (fail then pass)"
+    );
+}
+
+#[tokio::test]
+async fn planner_receives_acceptance_failure_context() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_acceptance_gate(write_acceptance_fail_then_pass_backend_script);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let mut options = run_options(&project_id);
+    options.loops = None;
+    options.until_complete = true;
+
+    orchestrator
+        .run(options)
+        .await
+        .expect("orchestration with acceptance fail-then-pass should succeed");
+
+    let planner_prompt_after_fail = fs::read_to_string(counter_dir.join("planner_prompt_2.md"))
+        .expect("second planner prompt should be captured");
+
+    assert!(
+        planner_prompt_after_fail.contains("## Completion Feedback"),
+        "planner prompt should include completion feedback section after acceptance failure"
+    );
+    assert!(
+        planner_prompt_after_fail.contains("Requirement alpha: satisfied by completion attempt 1"),
+        "planner prompt should include completer verdict artifact content"
+    );
+    assert!(
+        planner_prompt_after_fail
+            .contains("Global acceptance check failed: missing end-to-end acceptance evidence."),
+        "planner prompt should include acceptance-fail artifact content"
     );
 }

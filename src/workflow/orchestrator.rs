@@ -21,7 +21,7 @@ use crate::git::commit::{
     stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
     ORCHESTRATION_STATE_PATH_PREFIX,
 };
-use crate::git::is_git_repo;
+use crate::git::{is_git_repo, run_git};
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact, ArtifactKind,
     ArtifactWriteInput,
@@ -690,8 +690,7 @@ impl Orchestrator {
                     ) = {
                         let loop_state = state.current_feature_loop().ok_or_else(|| {
                             RalphError::Orchestration(
-                                "current phase is QA but no current feature loop exists"
-                                    .to_owned(),
+                                "current phase is QA but no current feature loop exists".to_owned(),
                             )
                         })?;
 
@@ -708,8 +707,7 @@ impl Orchestrator {
 
                     let mut qa_limit_hit: Option<(u32, u32)> = None;
                     if state.phase_iteration > effective.workflow.max_qa_iterations {
-                        qa_limit_hit =
-                            Some((loop_number, effective.workflow.max_qa_iterations));
+                        qa_limit_hit = Some((loop_number, effective.workflow.max_qa_iterations));
                     }
 
                     if let Some((ln, max_iter)) = qa_limit_hit {
@@ -719,7 +717,12 @@ impl Orchestrator {
                             "QA iteration limit exceeded, rolling back loop"
                         );
                         rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
-                        persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+                        persist_state_and_index(
+                            &mut self.workspace,
+                            &project_id,
+                            &project_dir,
+                            &state,
+                        )?;
                         if options.until_complete {
                             logs.push(format!(
                                 "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -732,8 +735,7 @@ impl Orchestrator {
                         });
                     }
 
-                    let qa_backend =
-                        registry.get_or_create_for_spec(&qa_backend_name)?;
+                    let qa_backend = registry.get_or_create_for_spec(&qa_backend_name)?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
                     let impl_notes_rel = impl_notes_rel.ok_or_else(|| {
@@ -804,12 +806,13 @@ impl Orchestrator {
                             let qa_pass_rel = artifact_relative_path(&project_dir, &qa_pass_path);
 
                             {
-                                let loop_state = state.current_feature_loop_mut().ok_or_else(|| {
-                                    RalphError::Orchestration(
-                                        "failed to reload current loop after QA pass"
-                                            .to_owned(),
-                                    )
-                                })?;
+                                let loop_state =
+                                    state.current_feature_loop_mut().ok_or_else(|| {
+                                        RalphError::Orchestration(
+                                            "failed to reload current loop after QA pass"
+                                                .to_owned(),
+                                        )
+                                    })?;
                                 loop_state.artifacts.qa_results.push(QaExchange {
                                     iteration,
                                     passed: true,
@@ -820,7 +823,9 @@ impl Orchestrator {
 
                             state.current_phase = Phase::Reviewing;
                             state.phase_iteration = 1;
-                            logs.push(format!("loop {loop_number}: QA passed, proceeding to review"));
+                            logs.push(format!(
+                                "loop {loop_number}: QA passed, proceeding to review"
+                            ));
                         }
                         QaDecision::Fail { body } => {
                             info!(
@@ -843,12 +848,13 @@ impl Orchestrator {
                             let qa_fail_rel = artifact_relative_path(&project_dir, &qa_fail_path);
 
                             {
-                                let loop_state = state.current_feature_loop_mut().ok_or_else(|| {
-                                    RalphError::Orchestration(
-                                        "failed to reload current loop after QA fail"
-                                            .to_owned(),
-                                    )
-                                })?;
+                                let loop_state =
+                                    state.current_feature_loop_mut().ok_or_else(|| {
+                                        RalphError::Orchestration(
+                                            "failed to reload current loop after QA fail"
+                                                .to_owned(),
+                                        )
+                                    })?;
                                 loop_state.artifacts.qa_results.push(QaExchange {
                                     iteration,
                                     passed: false,
@@ -1232,12 +1238,143 @@ impl Orchestrator {
 
                     match completer_decision.verdict {
                         CompletionVerdict::Complete => {
-                            state.status = ProjectStatus::Completed;
-                            state.current_phase = Phase::Completing;
-                            state.phase_iteration = 1;
-                            logs.push(format!(
-                                "loop {loop_number}: completer returned COMPLETE; project finished"
-                            ));
+                            if effective.workflow.qa_enabled {
+                                let acceptance_qa_backend_name =
+                                    if let Some(qa_override) = role_overrides.qa.as_deref() {
+                                        registry.resolve_backend_for_role(qa_override, "qa")
+                                    } else {
+                                        planner_backend_name.clone()
+                                    };
+                                let acceptance_qa_backend =
+                                    registry.get_or_create_for_spec(&acceptance_qa_backend_name)?;
+                                let completed_feature_summary =
+                                    collect_completed_feature_loop_summary(&state)?;
+                                let git_diff_against_base = current_git_diff_against_base(
+                                    &self.workspace.root,
+                                    &effective.global.git.base_branch,
+                                )?;
+                                let acceptance_prompt = build_acceptance_prompt(
+                                    &state,
+                                    &prompt_content,
+                                    acceptance_qa_backend.name(),
+                                    &planner_backend_name,
+                                    &completed_feature_summary,
+                                    &git_diff_against_base,
+                                );
+
+                                registry
+                                    .set_tmux_context(TmuxExecutionContext {
+                                        loop_number: Some(loop_number),
+                                        role: Some("qa".to_owned()),
+                                    })
+                                    .await;
+
+                                info!(
+                                    loop = loop_number,
+                                    backend = acceptance_qa_backend.name(),
+                                    "invoking acceptance QA..."
+                                );
+                                let acceptance_decision = execute_with_parse_retries(
+                                    acceptance_qa_backend,
+                                    &registry,
+                                    "qa",
+                                    "completing",
+                                    &acceptance_prompt,
+                                    parse_qa_output,
+                                    &expected_format_template_for("qa", None),
+                                )
+                                .await?;
+                                debug!(loop = loop_number, "acceptance QA responded");
+
+                                match acceptance_decision {
+                                    QaDecision::Pass { body } => {
+                                        let acceptance_pass_path = write_artifact(
+                                            &project_dir,
+                                            ArtifactWriteInput {
+                                                project_id: &state.project_id,
+                                                loop_number,
+                                                loop_slug: "completion",
+                                                backend: &acceptance_qa_backend_name,
+                                                role: "qa",
+                                                kind: ArtifactKind::AcceptancePass,
+                                                body: &body,
+                                            },
+                                        )?;
+                                        let acceptance_pass_rel = artifact_relative_path(
+                                            &project_dir,
+                                            &acceptance_pass_path,
+                                        );
+
+                                        {
+                                            let completion = state
+                                                .current_completion_attempt_mut()
+                                                .ok_or_else(|| {
+                                                    RalphError::Orchestration(
+                                                        "failed to reload completion attempt for acceptance pass update"
+                                                            .to_owned(),
+                                                    )
+                                                })?;
+                                            completion.artifacts.acceptance_result =
+                                                Some(acceptance_pass_rel);
+                                            completion.artifacts.acceptance_passed = Some(true);
+                                        }
+
+                                        state.status = ProjectStatus::Completed;
+                                        state.current_phase = Phase::Completing;
+                                        state.phase_iteration = 1;
+                                        logs.push(format!(
+                                            "loop {loop_number}: completer returned COMPLETE and acceptance QA passed; project finished"
+                                        ));
+                                    }
+                                    QaDecision::Fail { body } => {
+                                        let acceptance_fail_path = write_artifact(
+                                            &project_dir,
+                                            ArtifactWriteInput {
+                                                project_id: &state.project_id,
+                                                loop_number,
+                                                loop_slug: "completion",
+                                                backend: &acceptance_qa_backend_name,
+                                                role: "qa",
+                                                kind: ArtifactKind::AcceptanceFail,
+                                                body: &body,
+                                            },
+                                        )?;
+                                        let acceptance_fail_rel = artifact_relative_path(
+                                            &project_dir,
+                                            &acceptance_fail_path,
+                                        );
+
+                                        {
+                                            let completion = state
+                                                .current_completion_attempt_mut()
+                                                .ok_or_else(|| {
+                                                    RalphError::Orchestration(
+                                                        "failed to reload completion attempt for acceptance fail update"
+                                                            .to_owned(),
+                                                    )
+                                                })?;
+                                            completion.artifacts.acceptance_result =
+                                                Some(acceptance_fail_rel);
+                                            completion.artifacts.acceptance_passed = Some(false);
+                                            completion.verdict = Some(CompletionVerdict::Continue);
+                                        }
+
+                                        state.status = ProjectStatus::InProgress;
+                                        state.current_phase = Phase::Planning;
+                                        state.phase_iteration = 1;
+                                        logs.push(format!(
+                                            "loop {loop_number}: acceptance QA failed; forcing CONTINUE and returning to planning"
+                                        ));
+                                    }
+                                }
+                            } else {
+                                state.status = ProjectStatus::Completed;
+                                state.current_phase = Phase::Completing;
+                                state.phase_iteration = 1;
+                                logs.push(format!(
+                                    "loop {loop_number}: completer returned COMPLETE; project finished"
+                                ));
+                            }
                         }
                         CompletionVerdict::Continue => {
                             state.status = ProjectStatus::InProgress;
@@ -1575,9 +1712,17 @@ fn build_planner_prompt(
     );
 
     let rendered = render_template(&effective.templates.planner, &vars)?;
-    Ok(format!(
+    let mut prompt = format!(
         "{rendered}\n\n## System Guardrails\n\n{PLANNER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
-    ))
+    );
+
+    if let Some(completion_feedback) = latest_completion_feedback_context(state, project_dir)? {
+        prompt.push_str("\n## Completion Feedback\n\n");
+        prompt.push_str(&completion_feedback);
+        prompt.push('\n');
+    }
+
+    Ok(prompt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1705,6 +1850,70 @@ fn build_completer_prompt(
     ))
 }
 
+fn build_acceptance_prompt(
+    state: &ProjectState,
+    prompt_content: &str,
+    backend: &str,
+    opposite_backend: &str,
+    completed_feature_summary: &str,
+    git_diff_against_base: &str,
+) -> String {
+    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
+    format!(
+        "You are a QA engineer validating overall project acceptance.
+
+Run project-level acceptance validation before final completion is approved.
+
+CRITICAL REQUIREMENTS:
+- Verify overall project acceptance, not just a single feature.
+- Consider all completed feature loops together.
+- Use the full current git diff against the base branch as evidence.
+- Return `# QA: PASS` only if project-wide acceptance is satisfied.
+- Return `# QA: FAIL` with concrete failures and fixes if anything is missing.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+Required output format:
+
+# QA: PASS
+## Tests Run
+## Verification Summary
+
+OR
+
+# QA: FAIL
+## Failures
+## Suggested Fixes
+
+## Context Provided
+
+### Master Prompt
+{prompt_content}
+
+### Completed Feature Loop Summary
+{completed_feature_summary}
+
+### Git Diff Against Base Branch
+```diff
+{git_diff_against_base}
+```
+
+### Project State
+```json
+{state_json}
+```
+
+### Backend Context
+- QA Backend: {backend}
+- Planner Backend: {opposite_backend}
+"
+    )
+}
+
 fn base_vars(
     state: &ProjectState,
     loop_number: u32,
@@ -1764,6 +1973,64 @@ fn collect_qa_history(state: &ProjectState, project_dir: &Path) -> Result<String
     }
 
     Ok(history.join("\n\n"))
+}
+
+fn collect_completed_feature_loop_summary(state: &ProjectState) -> Result<String> {
+    let mut loops = state
+        .loops
+        .iter()
+        .filter(|loop_state| loop_state.status == LoopStatus::Completed)
+        .collect::<Vec<&FeatureLoopState>>();
+    loops.sort_by_key(|loop_state| loop_state.loop_number);
+
+    if loops.is_empty() {
+        return Ok("- None".to_owned());
+    }
+
+    let mut summary = Vec::with_capacity(loops.len());
+    for loop_state in loops {
+        let commit = loop_state.commit.as_deref().unwrap_or("none");
+        summary.push(format!(
+            "- Loop {}: {} (slug: {}, commit: {})",
+            loop_state.loop_number, loop_state.feature_name, loop_state.slug, commit
+        ));
+    }
+    Ok(summary.join("\n"))
+}
+
+fn latest_completion_feedback_context(
+    state: &ProjectState,
+    project_dir: &Path,
+) -> Result<Option<String>> {
+    let latest_completion = state
+        .completion_attempts
+        .iter()
+        .max_by_key(|attempt| attempt.loop_number);
+
+    let Some(completion) = latest_completion else {
+        return Ok(None);
+    };
+
+    if completion.artifacts.acceptance_passed != Some(false) {
+        return Ok(None);
+    }
+
+    let Some(acceptance_fail_rel) = completion.artifacts.acceptance_result.as_deref() else {
+        return Ok(None);
+    };
+
+    let completer_verdict_content = completion
+        .artifacts
+        .verdict
+        .as_deref()
+        .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
+        .transpose()?
+        .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
+    let acceptance_fail_content = read_project_relative_file(project_dir, acceptance_fail_rel)?;
+
+    Ok(Some(format!(
+        "### Completer Verdict Artifact\n\n{completer_verdict_content}\n\n### Acceptance QA Failure Artifact\n\n{acceptance_fail_content}"
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1944,6 +2211,23 @@ fn current_git_diff(workspace_root: &Path) -> Result<String> {
     }
 
     working_tree_diff_excluding_orchestration_state(repo_root)
+}
+
+fn current_git_diff_against_base(workspace_root: &Path, base_branch: &str) -> Result<String> {
+    let Some(repo_root) = workspace_root.parent() else {
+        return Ok(String::new());
+    };
+    if !is_git_repo(repo_root) {
+        return Ok(String::new());
+    }
+
+    let base_ref = format!("{base_branch}...HEAD");
+    let args = ["diff", base_ref.as_str(), "--", ".", ":(exclude).ralph/**"];
+
+    match run_git(repo_root, &args) {
+        Ok(diff) => Ok(diff),
+        Err(_) => current_git_diff(workspace_root),
+    }
 }
 
 fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {
