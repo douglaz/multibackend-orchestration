@@ -28,6 +28,8 @@ pub struct ProjectState {
 pub enum Phase {
     Planning,
     Implementing,
+    #[serde(rename = "qa")]
+    QA,
     Reviewing,
     Committing,
     Completing,
@@ -68,6 +70,8 @@ pub struct FeatureLoopBackends {
     pub planner: String,
     pub implementer: String,
     pub reviewer: String,
+    #[serde(default)]
+    pub qa: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +80,10 @@ pub struct FeatureLoopArtifacts {
     pub impl_notes: Option<String>,
     pub reviews: Vec<ReviewExchange>,
     pub approval: Option<String>,
+    #[serde(default)]
+    pub qa_results: Vec<QaExchange>,
+    #[serde(default)]
+    pub pending_qa_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +91,14 @@ pub struct ReviewExchange {
     pub iteration: u32,
     pub feedback: String,
     pub response: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QaExchange {
+    pub iteration: u32,
+    pub passed: bool,
+    pub report: String,
+    pub implementer_response: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +124,10 @@ pub struct CompletionLoopBackends {
 pub struct CompletionLoopArtifacts {
     pub termination_request: String,
     pub verdict: Option<String>,
+    #[serde(default)]
+    pub acceptance_result: Option<String>,
+    #[serde(default)]
+    pub acceptance_passed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -203,6 +223,8 @@ impl ProjectState {
                 impl_notes: None,
                 reviews: Vec::new(),
                 approval: None,
+                qa_results: Vec::new(),
+                pending_qa_feedback: None,
             },
             commit: None,
             started_at,
@@ -231,6 +253,8 @@ impl ProjectState {
             artifacts: CompletionLoopArtifacts {
                 termination_request: termination_request_path,
                 verdict: None,
+                acceptance_result: None,
+                acceptance_passed: None,
             },
             verdict: None,
             started_at,

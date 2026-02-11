@@ -218,6 +218,10 @@ fn test_init_creates_template_files_with_cli_execute() {
         workspace_root.join("templates/completion.md").exists(),
         "completion template should exist"
     );
+    assert!(
+        workspace_root.join("templates/qa.md").exists(),
+        "qa template should exist"
+    );
 
     // Verify legacy symlinks exist for backward compatibility
     assert!(
@@ -257,6 +261,13 @@ fn test_init_creates_template_files_with_cli_execute() {
         fs::read_to_string(workspace_root.join("templates/completion.md")).expect("read completer");
     assert!(completer_content.contains("project completion validator"));
     assert!(completer_content.contains("# Verdict:"));
+
+    let qa_content =
+        fs::read_to_string(workspace_root.join("templates/qa.md")).expect("read qa template");
+    assert!(qa_content.contains("QA engineer"));
+    assert!(qa_content.contains("# QA: PASS"));
+    assert!(qa_content.contains("# QA: FAIL"));
+    assert!(qa_content.contains("Do NOT edit any source files"));
 }
 
 #[test]

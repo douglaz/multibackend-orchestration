@@ -48,17 +48,23 @@ Ralph manages multiple projects within a single workspace. Each project represen
 │   │       ├── 001-<slug>/
 │   │       │   ├── {TS}-spec.md
 │   │       │   ├── {TS}-impl-notes.md
+│   │       │   ├── {TS}-qa-001-pass.md       # QA pass artifact
+│   │       │   ├── {TS}-qa-001-fail.md       # QA fail artifact
+│   │       │   ├── {TS}-impl-qa-response-001.md  # Implementer QA fix response
 │   │       │   ├── {TS}-review-001-feedback.md
 │   │       │   ├── {TS}-impl-response-001.md
 │   │       │   └── {TS}-review-approved.md
 │   │       └── 002-completion/
 │   │           ├── {TS}-termination-request.md
-│   │           └── {TS}-completer-verdict.md
+│   │           ├── {TS}-completer-verdict.md
+│   │           ├── {TS}-acceptance-pass.md    # QA acceptance pass
+│   │           └── {TS}-acceptance-fail.md    # QA acceptance fail
 │   └── .../
 └── templates/                       # Prompt templates
     ├── planner.md
     ├── implementer.md
     ├── reviewer.md
+    ├── qa.md
     └── completer.md
 ```
 
@@ -68,7 +74,7 @@ Ralph manages multiple projects within a single workspace. Each project represen
 |-------|----------|-------------|
 | Workspace | Projects, PRD cache | Many |
 | Project | Prompt, State, Config, Loops | 1 prompt, 1 state, optional config, many loops |
-| Feature Loop | Artifacts | 1 spec + 1 impl-notes + N review cycles + 1 approval |
+| Feature Loop | Artifacts | 1 spec + 1 impl-notes + N QA cycles + N review cycles + 1 approval |
 | Completion Loop | Artifacts | 1 termination-request + 1 completer-verdict |
 
 ## Backends
@@ -127,6 +133,7 @@ pub struct BackendRoleModels {
     pub planner: Option<String>,
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
+    pub qa: Option<String>,
     pub completer: Option<String>,
     pub reformatter: Option<String>,
 }
@@ -139,6 +146,7 @@ Code defaults (in `GlobalConfig::default()`):
 | planner | opus | gpt-5.3-codex-xhigh |
 | implementer | opus | gpt-5.3-codex-high |
 | reviewer | opus | gpt-5.3-codex-xhigh |
+| qa | opus | gpt-5.3-codex-high |
 | completer | opus | gpt-5.3-codex-xhigh |
 | reformatter | sonnet | gpt-5.3-codex-medium |
 
@@ -175,6 +183,7 @@ tmux_window_keep_seconds = 5    # Window retention after completion
 | **Implementer** | Implements the specification, responds to reviewer feedback | Opposite of Planner (default) |
 | **Reviewer** | Reviews implementation against spec, provides feedback or approval | Same as Planner (default) |
 | **Completer** | Validates Planner's completion request | Opposite of Planner (default) |
+| **QA** | Executes tests and verifies implementation before review | Planner-aligned (default) |
 | **Reformatter** | Fixes unparseable backend output (automatic, not user-invoked) | Opposite of failing backend |
 
 ### Backend Alternation Pattern (Defaults Without Overrides)
@@ -194,7 +203,7 @@ Completion loops also consume loop numbers, maintaining monotonic parity. Comple
 
 Role backends can be overridden at multiple levels:
 
-1. **CLI flags** (highest precedence): `--planner-backend`, `--implementer-backend`, `--reviewer-backend`, `--completer-backend`
+1. **CLI flags** (highest precedence): `--planner-backend`, `--implementer-backend`, `--reviewer-backend`, `--qa-backend`, `--completer-backend`
 2. **Workflow config**: `workflow.planner_backend`, `workflow.implementer_backend`, etc.
 3. **Alternation pattern** (default): loop-number parity
 
@@ -203,32 +212,34 @@ Role backends can be overridden at multiple levels:
 ### Loop Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        FEATURE LOOP N                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────┐    ┌─────────────┐    ┌──────────┐               │
-│  │ Planner  │───▶│ Implementer │───▶│ Reviewer │               │
-│  │(Backend A)│   │ (Backend B) │    │(Backend A)│               │
-│  └──────────┘    └─────────────┘    └────┬─────┘               │
-│                                          │                      │
-│                         ┌────────────────┴────────────────┐    │
-│                         │                                 │    │
-│                         ▼                                 ▼    │
-│                   [Suggestions]                     [Approved] │
-│                         │                                 │    │
-│                         ▼                                 ▼    │
-│                  ┌─────────────┐                    ┌─────────┐│
-│                  │ Implementer │                    │ COMMIT  ││
-│                  │ (Backend B) │                    │  CODE   ││
-│                  └──────┬──────┘                    └────┬────┘│
-│                         │                                │     │
-│                         ▼                                ▼     │
-│                   ┌──────────┐                     ┌──────────┐│
-│                   │ Reviewer │◀── loop until       │NEXT LOOP ││
-│                   │(Backend A)│   approved          └──────────┘│
-│                   └──────────┘                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          FEATURE LOOP N                              │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌──────────┐    ┌─────────────┐    ┌────┐    ┌──────────┐          │
+│  │ Planner  │───▶│ Implementer │───▶│ QA │───▶│ Reviewer │          │
+│  │(Backend A)│   │ (Backend B) │    └──┬─┘    │(Backend A)│          │
+│  └──────────┘    └──────▲──────┘       │      └────┬─────┘          │
+│                         │         [QA fail]        │                 │
+│                         │              │    ┌──────┴─────────┐      │
+│                         └──────────────┘    │                │      │
+│                         │                   ▼                ▼      │
+│                         │             [Suggestions]    [Approved]   │
+│                         │                   │                │      │
+│                         │                   ▼                ▼      │
+│                         │            ┌─────────────┐   ┌─────────┐ │
+│                         │            │ Implementer │   │ COMMIT  │ │
+│                         │            │ (Backend B) │   │  CODE   │ │
+│                         │            └──────┬──────┘   └────┬────┘ │
+│                         │                   │               │      │
+│                         │                   ▼               ▼      │
+│                         │             ┌──────────┐   ┌──────────┐  │
+│                         └─────────────│ Reviewer │   │NEXT LOOP │  │
+│                     review feedback   │(Backend A)│   └──────────┘  │
+│                                       └──────────┘                  │
+└──────────────────────────────────────────────────────────────────────┘
+
+(QA phase is skipped when qa_enabled=false)
 ```
 
 ### Orchestrator State Machine
@@ -239,14 +250,21 @@ Init -> Planning
 Planning -> Implementing    (planner produced feature spec)
 Planning -> Completing      (planner suggested completion)
 
-Implementing -> Reviewing
+Implementing -> QA          (when qa_enabled=true)
+Implementing -> Reviewing   (when qa_enabled=false)
+QA -> Reviewing             (QA pass)
+QA -> Implementing          (QA fail → feedback loop)
+QA -> Planning              (QA iteration limit hit → auto-rollback)
 Reviewing -> Implementing   (review verdict: suggestions)
 Reviewing -> Committing     (review verdict: approved)
 Reviewing -> Planning       (review iteration limit hit → auto-rollback)
 Committing -> Planning      (next loop number)
 
-Completing -> Complete      (completer verdict: COMPLETE)
-Completing -> Planning      (completer verdict: CONTINUE, next loop number)
+Completing -> QA acceptance gate  (completer verdict: COMPLETE, qa_enabled=true)
+Completing -> Complete            (completer verdict: COMPLETE, qa_enabled=false)
+QA acceptance gate -> Complete    (acceptance pass)
+QA acceptance gate -> Planning    (acceptance fail → force CONTINUE)
+Completing -> Planning            (completer verdict: CONTINUE, next loop number)
 ```
 
 ### Parse Retry with Reformatter Agent
@@ -301,6 +319,8 @@ Parsers key off the first markdown H1 line in backend body output:
 | Implementer (feedback response) | `# Implementation Response (Iteration <N>)` | impl-response |
 | Reviewer (approve) | `# Review: APPROVED` | review-approved |
 | Reviewer (suggestions) | `# Review: SUGGESTIONS` | review-feedback |
+| QA (pass) | `# QA: PASS` | qa-pass |
+| QA (fail) | `# QA: FAIL` | qa-fail |
 | Completer (done) | `# Verdict: COMPLETE` | completer-verdict |
 | Completer (continue) | `# Verdict: CONTINUE` | completer-verdict |
 
@@ -316,6 +336,11 @@ Parsers key off the first markdown H1 line in backend body output:
 | `{TS}-review-{III}-feedback.md` | Reviewer | Implementer | Required changes |
 | `{TS}-impl-response-{III}.md` | Implementer | Reviewer | Addressed feedback |
 | `{TS}-review-approved.md` | Reviewer | Orchestrator | Final approval |
+| `{TS}-qa-{III}-pass.md` | QA | Orchestrator | QA verification passed |
+| `{TS}-qa-{III}-fail.md` | QA | Implementer | QA failures requiring fixes |
+| `{TS}-impl-qa-response-{III}.md` | Implementer | QA | Addressed QA feedback |
+| `{TS}-acceptance-pass.md` | QA | Orchestrator | Completion acceptance passed |
+| `{TS}-acceptance-fail.md` | QA | Planner | Completion acceptance failed |
 | `{TS}-termination-request.md` | Planner | Completer | Completion rationale |
 | `{TS}-completer-verdict.md` | Completer | Orchestrator | Continue/Complete |
 
@@ -387,7 +412,8 @@ Frontmatter fields: `artifact`, `loop`, `iteration` (for review cycles), `iterat
 | Phase | Meaning |
 |-------|---------|
 | planning | Always 1 |
-| implementing | 1 for initial; N when responding to review-N feedback |
+| implementing | 1 for initial; N when responding to review-N or QA-N feedback |
+| qa | Next QA iteration to run |
 | reviewing | Next review iteration to run |
 | committing | Always 1 |
 | completing | Always 1 |
@@ -414,6 +440,7 @@ env = {}
 planner = "opus"
 implementer = "opus"
 reviewer = "opus"
+qa = "opus"
 completer = "opus"
 reformatter = "sonnet"
 
@@ -427,6 +454,7 @@ env = {}
 planner = "gpt-5.3-codex-xhigh"
 implementer = "gpt-5.3-codex-high"
 reviewer = "gpt-5.3-codex-xhigh"
+qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
 
@@ -436,6 +464,9 @@ auto_commit = true
 commit_message_style = "conventional"   # conventional | descriptive | minimal
 commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"          # continue | restart-loop | abort
+qa_enabled = false                      # Enable QA phase between implementing and reviewing
+max_qa_iterations = 3                   # Maximum QA retry attempts before rollback
+# qa_backend = "claude(opus)"           # Override QA backend (default: planner-aligned)
 # Per-role backend overrides (optional):
 # planner_backend = "claude(opus)"
 # implementer_backend = "codex(gpt-5.3-codex-high)"
@@ -447,6 +478,7 @@ planner = "templates/planner.md"
 implementer = "templates/implementer.md"
 reviewer = "templates/reviewer.md"
 completer = "templates/completer.md"
+qa = "templates/qa.md"
 
 [git]
 auto_branch = true
@@ -466,6 +498,9 @@ max_review_iterations = 5
 auto_commit = true
 commit_message_style = "conventional"   # or "descriptive"
 prompt_change_action = "abort"          # or "continue" | "restart-loop"
+qa_enabled = true
+max_qa_iterations = 3
+qa_backend = "claude(opus)"
 planner_backend = "claude"
 implementer_backend = "codex"
 reviewer_backend = "claude"
@@ -475,6 +510,7 @@ completer_backend = "codex"
 planner = "custom/planner.md"
 implementer = "custom/implementer.md"
 reviewer = "custom/reviewer.md"
+qa = "custom/qa.md"
 completer = "custom/completer.md"
 ```
 
@@ -528,6 +564,7 @@ OPTIONS:
     --planner-backend <SPEC>    Override planner backend
     --implementer-backend <SPEC> Override implementer backend
     --reviewer-backend <SPEC>   Override reviewer backend
+    --qa-backend <SPEC>         Override QA backend
     --completer-backend <SPEC>  Override completer backend
     --on-prompt-change <ACTION> continue | restart-loop | abort
     --skip-commit               Don't auto-commit after approval
@@ -730,6 +767,7 @@ src/
 | PrdPipelineFailed | 10 |
 | PrdValidationFailed | 11 |
 | PrdMissingInfo | 12 |
+| QaIterationLimitExceeded | 1 |
 | All others (backend failures, parse errors, git conflicts, etc.) | 1 |
 
 ### State Recovery

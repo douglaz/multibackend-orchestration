@@ -4,7 +4,7 @@ use chrono::Utc;
 use ralph::project::state::{
     CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState, CompletionVerdict,
     FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType, Phase,
-    ProjectState, ProjectStatus, ReviewExchange,
+    ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
 use tempfile::TempDir;
 
@@ -46,12 +46,15 @@ fn test_next_loop_number_with_loops() {
         planner: "claude".to_owned(),
         implementer: "codex".to_owned(),
         reviewer: "claude".to_owned(),
+        qa: "claude".to_owned(),
     };
     let artifacts = FeatureLoopArtifacts {
         spec: "loops/001-test/spec.md".to_owned(),
         impl_notes: None,
         reviews: vec![],
         approval: None,
+        qa_results: vec![],
+        pending_qa_feedback: None,
     };
 
     state.loops.push(FeatureLoopState {
@@ -86,6 +89,8 @@ fn test_next_loop_number_with_completion_attempts() {
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/005-completion/termination-request.md".to_owned(),
             verdict: Some("loops/005-completion/completer-verdict.md".to_owned()),
+            acceptance_result: None,
+            acceptance_passed: None,
         },
         verdict: Some(CompletionVerdict::Continue),
         started_at: Utc::now(),
@@ -110,6 +115,7 @@ fn test_save_and_load_round_trip() {
         planner: "claude".to_owned(),
         implementer: "codex".to_owned(),
         reviewer: "claude".to_owned(),
+        qa: "claude".to_owned(),
     };
     original.loops.push(FeatureLoopState {
         loop_number: 1,
@@ -127,6 +133,8 @@ fn test_save_and_load_round_trip() {
                 response: "loops/001-user-auth/impl-response-001.md".to_owned(),
             }],
             approval: Some("loops/001-user-auth/review-approved.md".to_owned()),
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: Some("abc123".to_owned()),
         started_at: Utc::now(),
@@ -153,6 +161,7 @@ fn test_phase_serialization() {
     let phases = vec![
         (Phase::Planning, "planning"),
         (Phase::Implementing, "implementing"),
+        (Phase::QA, "qa"),
         (Phase::Reviewing, "reviewing"),
         (Phase::Committing, "committing"),
         (Phase::Completing, "completing"),
@@ -213,6 +222,7 @@ fn test_register_feature_loop() {
         planner: "claude".to_owned(),
         implementer: "codex".to_owned(),
         reviewer: "claude".to_owned(),
+        qa: "claude".to_owned(),
     };
 
     state.register_feature_loop(
@@ -230,6 +240,8 @@ fn test_register_feature_loop() {
     assert_eq!(state.status, ProjectStatus::InProgress);
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::InProgress);
+    assert!(state.loops[0].artifacts.qa_results.is_empty());
+    assert!(state.loops[0].artifacts.pending_qa_feedback.is_none());
 }
 
 #[test]
@@ -252,6 +264,14 @@ fn test_register_completion_attempt() {
     assert_eq!(state.current_phase, Phase::Completing);
     assert_eq!(state.completion_attempts.len(), 1);
     assert_eq!(state.completion_attempts[0].slug, "completion");
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_result
+        .is_none());
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_passed
+        .is_none());
 }
 
 #[test]
@@ -269,12 +289,15 @@ fn test_has_in_progress_loop() {
             planner: "claude".to_owned(),
             implementer: "codex".to_owned(),
             reviewer: "claude".to_owned(),
+            qa: "claude".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "spec.md".to_owned(),
             impl_notes: None,
             reviews: vec![],
             approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: None,
         started_at: Utc::now(),
@@ -298,12 +321,15 @@ fn test_remove_loop() {
             planner: "claude".to_owned(),
             implementer: "codex".to_owned(),
             reviewer: "claude".to_owned(),
+            qa: "claude".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "spec.md".to_owned(),
             impl_notes: None,
             reviews: vec![],
             approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: None,
         started_at: Utc::now(),
@@ -330,12 +356,15 @@ fn test_last_loop_number() {
             planner: "claude".to_owned(),
             implementer: "codex".to_owned(),
             reviewer: "claude".to_owned(),
+            qa: "claude".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "spec.md".to_owned(),
             impl_notes: None,
             reviews: vec![],
             approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: None,
         started_at: Utc::now(),
@@ -361,12 +390,15 @@ fn test_validate_invariants_rejects_duplicate_loop_numbers() {
             planner: "claude".to_owned(),
             implementer: "codex".to_owned(),
             reviewer: "claude".to_owned(),
+            qa: "claude".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "loops/001-feature/spec.md".to_owned(),
             impl_notes: None,
             reviews: vec![],
             approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: None,
         started_at: Utc::now(),
@@ -385,6 +417,8 @@ fn test_validate_invariants_rejects_duplicate_loop_numbers() {
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/001-completion/termination-request.md".to_owned(),
             verdict: None,
+            acceptance_result: None,
+            acceptance_passed: None,
         },
         verdict: None,
         started_at: Utc::now(),
@@ -410,12 +444,15 @@ fn test_validate_invariants_rejects_missing_current_loop_reference() {
             planner: "claude".to_owned(),
             implementer: "codex".to_owned(),
             reviewer: "claude".to_owned(),
+            qa: "claude".to_owned(),
         },
         artifacts: FeatureLoopArtifacts {
             spec: "loops/001-feature/spec.md".to_owned(),
             impl_notes: None,
             reviews: vec![],
             approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
         },
         commit: None,
         started_at: Utc::now(),
@@ -423,4 +460,166 @@ fn test_validate_invariants_rejects_missing_current_loop_reference() {
     });
 
     assert!(state.validate_invariants().is_err());
+}
+
+#[test]
+fn test_legacy_state_deserializes_with_qa_defaults() {
+    let raw = r#"
+{
+  "project_id": "legacy",
+  "project_name": "Legacy Project",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "abc",
+  "prompt_hash_at_loop_start": "abc",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "implementing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "demo",
+      "feature_name": "Demo",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "implementer": "codex",
+        "reviewer": "claude"
+      },
+      "artifacts": {
+        "spec": "loops/001-demo/spec.md",
+        "impl_notes": "loops/001-demo/impl-notes.md",
+        "reviews": [],
+        "approval": null
+      },
+      "commit": null,
+      "started_at": "2026-02-11T00:00:00Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/termination-request.md",
+        "verdict": "loops/002-completion/completer-verdict.md"
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-11T00:05:00Z",
+      "completed_at": "2026-02-11T00:06:00Z"
+    }
+  ]
+}
+"#;
+
+    let state: ProjectState = serde_json::from_str(raw).expect("legacy state should deserialize");
+    assert_eq!(state.loops.len(), 1);
+    assert_eq!(state.loops[0].backends.qa, "");
+    assert!(state.loops[0].artifacts.qa_results.is_empty());
+    assert!(state.loops[0].artifacts.pending_qa_feedback.is_none());
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_result
+        .is_none());
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_passed
+        .is_none());
+    state
+        .validate_invariants()
+        .expect("legacy state should still satisfy invariants");
+}
+
+#[test]
+fn test_qa_fields_round_trip() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let state_path = temp_dir.path().join("state.json");
+    let mut state = ProjectState::new("qa", "QA", "hash", None);
+    state.current_loop = 1;
+    state.current_phase = Phase::QA;
+    state.phase_iteration = 2;
+    state.status = ProjectStatus::InProgress;
+
+    state.loops.push(FeatureLoopState {
+        loop_number: 1,
+        slug: "demo".to_owned(),
+        feature_name: "Demo".to_owned(),
+        loop_type: LoopType::Feature,
+        status: LoopStatus::InProgress,
+        backends: FeatureLoopBackends {
+            planner: "claude(opus)".to_owned(),
+            implementer: "codex(gpt-5.3-codex-high)".to_owned(),
+            reviewer: "claude(opus)".to_owned(),
+            qa: "codex(gpt-5.3-codex-high)".to_owned(),
+        },
+        artifacts: FeatureLoopArtifacts {
+            spec: "loops/001-demo/spec.md".to_owned(),
+            impl_notes: Some("loops/001-demo/impl-notes.md".to_owned()),
+            reviews: vec![],
+            approval: None,
+            qa_results: vec![QaExchange {
+                iteration: 1,
+                passed: false,
+                report: "loops/001-demo/qa-001-fail.md".to_owned(),
+                implementer_response: Some("loops/001-demo/impl-qa-response-001.md".to_owned()),
+            }],
+            pending_qa_feedback: Some("loops/001-demo/qa-001-fail.md".to_owned()),
+        },
+        commit: None,
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    state.completion_attempts.push(CompletionLoopState {
+        loop_number: 2,
+        slug: "completion".to_owned(),
+        loop_type: LoopType::Completion,
+        status: LoopStatus::InProgress,
+        backends: CompletionLoopBackends {
+            planner: "claude(opus)".to_owned(),
+            completer: "codex(gpt-5.3-codex-xhigh)".to_owned(),
+        },
+        artifacts: CompletionLoopArtifacts {
+            termination_request: "loops/002-completion/termination-request.md".to_owned(),
+            verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+            acceptance_result: Some("loops/002-completion/acceptance-fail.md".to_owned()),
+            acceptance_passed: Some(false),
+        },
+        verdict: Some(CompletionVerdict::Continue),
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    state.save(&state_path).expect("save state");
+    let loaded = ProjectState::load(&state_path).expect("load state");
+    assert_eq!(loaded.current_phase, Phase::QA);
+    assert_eq!(loaded.loops[0].backends.qa, "codex(gpt-5.3-codex-high)");
+    assert_eq!(loaded.loops[0].artifacts.qa_results.len(), 1);
+    assert_eq!(
+        loaded.loops[0].artifacts.pending_qa_feedback.as_deref(),
+        Some("loops/001-demo/qa-001-fail.md")
+    );
+    assert_eq!(
+        loaded.completion_attempts[0]
+            .artifacts
+            .acceptance_result
+            .as_deref(),
+        Some("loops/002-completion/acceptance-fail.md")
+    );
+    assert_eq!(
+        loaded.completion_attempts[0].artifacts.acceptance_passed,
+        Some(false)
+    );
+    loaded
+        .validate_invariants()
+        .expect("qa-enabled state should satisfy invariants");
 }

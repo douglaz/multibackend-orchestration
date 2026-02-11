@@ -7,7 +7,7 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 
-use ralph::validate::{ValidateArgs, execute};
+use ralph::validate::{execute, ValidateArgs};
 
 /// Locate the built `ralph` binary via the CARGO_BIN_EXE mechanism or
 /// fall back to probing common target directory layouts.

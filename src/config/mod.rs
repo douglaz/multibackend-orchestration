@@ -16,7 +16,10 @@ pub struct EffectiveWorkflowConfig {
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
+    pub qa_backend: Option<String>,
     pub completer_backend: Option<String>,
+    pub qa_enabled: bool,
+    pub max_qa_iterations: u32,
     pub max_review_iterations: u32,
     pub auto_commit: bool,
     pub commit_message_style: CommitMessageStyle,
@@ -30,6 +33,7 @@ pub struct RunWorkflowOverrides<'a> {
     pub planner_backend: Option<&'a str>,
     pub implementer_backend: Option<&'a str>,
     pub reviewer_backend: Option<&'a str>,
+    pub qa_backend: Option<&'a str>,
     pub completer_backend: Option<&'a str>,
 }
 
@@ -39,6 +43,7 @@ pub struct EffectiveTemplateConfig {
     pub implementer: PathBuf,
     pub reviewer: PathBuf,
     pub completer: PathBuf,
+    pub qa: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +92,11 @@ pub fn resolve_effective_config(
         project_ref.and_then(|p| p.workflow.completer_backend.as_deref()),
         global.workflow.completer_backend.as_deref(),
     );
+    let qa_backend = resolve_optional_backend_override(
+        run_overrides.qa_backend,
+        project_ref.and_then(|p| p.workflow.qa_backend.as_deref()),
+        global.workflow.qa_backend.as_deref(),
+    );
 
     if let Some(spec) = planner_backend.as_deref() {
         validate_backend_spec(&global, spec, "planner backend override")?;
@@ -100,13 +110,23 @@ pub fn resolve_effective_config(
     if let Some(spec) = completer_backend.as_deref() {
         validate_backend_spec(&global, spec, "completer backend override")?;
     }
+    if let Some(spec) = qa_backend.as_deref() {
+        validate_backend_spec(&global, spec, "qa backend override")?;
+    }
 
     let workflow = EffectiveWorkflowConfig {
         starting_backend,
         planner_backend,
         implementer_backend,
         reviewer_backend,
+        qa_backend,
         completer_backend,
+        qa_enabled: project_ref
+            .and_then(|p| p.workflow.qa_enabled)
+            .unwrap_or(global.workflow.qa_enabled),
+        max_qa_iterations: project_ref
+            .and_then(|p| p.workflow.max_qa_iterations)
+            .unwrap_or(global.workflow.max_qa_iterations),
         max_review_iterations: project_ref
             .and_then(|p| p.workflow.max_review_iterations)
             .unwrap_or(global.workflow.max_review_iterations),
@@ -146,6 +166,12 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.completer.as_deref()),
             &global.templates.completer,
+        ),
+        qa: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.qa.as_deref()),
+            &global.templates.qa,
         ),
     };
 
@@ -303,5 +329,50 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown backend configured as implementer backend override"));
+    }
+
+    #[test]
+    fn resolve_effective_config_resolves_qa_precedence_and_template_paths() {
+        let mut global = GlobalConfig::default();
+        global.workflow.qa_backend = Some("claude(opus)".to_owned());
+        global.workflow.qa_enabled = false;
+        global.workflow.max_qa_iterations = 3;
+        global.templates.qa = "templates/qa-global.md".to_owned();
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                qa_backend: Some("codex".to_owned()),
+                qa_enabled: Some(true),
+                max_qa_iterations: Some(9),
+                ..ProjectWorkflowOverrides::default()
+            },
+            templates: crate::config::project::ProjectTemplateOverrides {
+                qa: Some("templates/qa-project.md".to_owned()),
+                ..crate::config::project::ProjectTemplateOverrides::default()
+            },
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project-a"),
+            global,
+            Some(project),
+            RunWorkflowOverrides {
+                qa_backend: Some("claude(sonnet)"),
+                ..RunWorkflowOverrides::default()
+            },
+        )
+        .expect("qa settings should resolve");
+
+        assert_eq!(
+            effective.workflow.qa_backend.as_deref(),
+            Some("claude(sonnet)")
+        );
+        assert!(effective.workflow.qa_enabled);
+        assert_eq!(effective.workflow.max_qa_iterations, 9);
+        assert_eq!(
+            effective.templates.qa,
+            Path::new("/workspace/project-a/templates/qa-project.md")
+        );
     }
 }

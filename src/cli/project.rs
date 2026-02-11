@@ -137,10 +137,11 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             if let Some(loop_state) = state.current_feature_loop() {
                 println!("Current Feature: {}", loop_state.feature_name);
                 println!(
-                    "Current Backends: planner={}, implementer={}, reviewer={}",
+                    "Current Backends: planner={}, implementer={}, reviewer={}, qa={}",
                     loop_state.backends.planner,
                     loop_state.backends.implementer,
-                    loop_state.backends.reviewer
+                    loop_state.backends.reviewer,
+                    loop_state.backends.qa
                 );
             } else if let Some(attempt) = state.current_completion_attempt() {
                 println!("Current Completion Attempt: loop {}", attempt.loop_number);
@@ -166,6 +167,7 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
     match phase {
         crate::project::state::Phase::Planning => "planning",
         crate::project::state::Phase::Implementing => "implementing",
+        crate::project::state::Phase::QA => "qa",
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",

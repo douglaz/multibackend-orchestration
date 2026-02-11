@@ -67,9 +67,7 @@ fn status_shows_info(h: &RalphHarness) -> TestResult {
         h.create_project("status-test", "Status Test Project", "Status prompt")
             .expect("create_project failed");
 
-        let output = h
-            .ralph(["status"])
-            .expect("ralph status should execute");
+        let output = h.ralph(["status"]).expect("ralph status should execute");
         assert_exit_code(&output, 0);
 
         // Output should include project identity and phase/status fields
@@ -84,9 +82,7 @@ fn status_no_active_project(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
         // Do NOT create or activate any project
 
-        let output = h
-            .ralph(["status"])
-            .expect("ralph status should execute");
+        let output = h.ralph(["status"]).expect("ralph status should execute");
 
         // Should fail with exit code 2 (not a crash)
         assert_exit_code(&output, 2);
@@ -113,9 +109,7 @@ fn history_shows_loops(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        let output = h
-            .ralph(["history"])
-            .expect("ralph history should execute");
+        let output = h.ralph(["history"]).expect("ralph history should execute");
         assert_exit_code(&output, 0);
 
         // History output should list loop entries
@@ -195,31 +189,36 @@ fn rollback_removes_loops(h: &RalphHarness) -> TestResult {
         assert_eq!(loops.len(), 2, "expected two loops before rollback");
 
         // Verify loop-2 dir exists
-        let loop2_dir = h
-            .loop_dir(project_id, 2)
-            .expect("loop_dir should succeed");
-        assert!(loop2_dir.is_some(), "expected loop-2 directory to exist before rollback");
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_some(),
+            "expected loop-2 directory to exist before rollback"
+        );
 
         // Rollback to loop 1
         h.ralph_ok(["rollback", "1"])
             .expect("ralph rollback 1 should succeed");
 
         // After rollback: loop-1 should remain, loop-2 should be gone
-        let state = h.load_state(project_id).expect("load_state after rollback failed");
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback failed");
         let loops = state["loops"].as_array().expect("loops should be an array");
         assert_eq!(loops.len(), 1, "expected one loop after rollback");
 
         // loop-1 artifacts should still exist
-        let loop1_dir = h
-            .loop_dir(project_id, 1)
-            .expect("loop_dir should succeed");
-        assert!(loop1_dir.is_some(), "expected loop-1 directory to remain after rollback");
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
+        assert!(
+            loop1_dir.is_some(),
+            "expected loop-1 directory to remain after rollback"
+        );
 
         // loop-2 artifacts should be removed
-        let loop2_dir = h
-            .loop_dir(project_id, 2)
-            .expect("loop_dir should succeed");
-        assert!(loop2_dir.is_none(), "expected loop-2 directory to be removed after rollback");
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_none(),
+            "expected loop-2 directory to be removed after rollback"
+        );
     })
 }
 
@@ -245,7 +244,9 @@ fn rollback_resets_phase(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["rollback", "0"])
             .expect("ralph rollback 0 should succeed");
 
-        let state = h.load_state(project_id).expect("load_state after rollback failed");
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback failed");
         assert_json_field(&state, "current_phase", &json!("planning"));
 
         // Assert iteration reset semantics
@@ -276,7 +277,9 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
             .expect("ralph rollback --hard 1 should succeed");
 
         // Verify state is rolled back
-        let state = h.load_state(project_id).expect("load_state after rollback failed");
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback failed");
         let loops = state["loops"].as_array().expect("loops should be an array");
         assert_eq!(loops.len(), 1, "expected one loop after hard rollback");
         assert_json_field(&state, "current_phase", &json!("planning"));
@@ -289,17 +292,13 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
         );
 
         // Verify artifact rollback: loop-2 artifacts removed, loop-1 artifacts remain
-        let loop1_dir = h
-            .loop_dir(project_id, 1)
-            .expect("loop_dir should succeed");
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
         assert!(
             loop1_dir.is_some(),
             "expected loop-1 artifacts to remain after --hard rollback"
         );
 
-        let loop2_dir = h
-            .loop_dir(project_id, 2)
-            .expect("loop_dir should succeed");
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
         assert!(
             loop2_dir.is_none(),
             "expected loop-2 artifacts to be removed after --hard rollback"
@@ -349,9 +348,7 @@ fn config_set(h: &RalphHarness) -> TestResult {
 fn exit_code_workspace_not_found(h: &RalphHarness) -> TestResult {
     run_case(|| {
         // Do NOT initialize workspace - run a workspace-dependent command
-        let output = h
-            .ralph(["status"])
-            .expect("ralph status should execute");
+        let output = h.ralph(["status"]).expect("ralph status should execute");
         assert_exit_code(&output, 2);
     })
 }

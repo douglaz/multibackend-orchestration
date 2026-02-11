@@ -1,6 +1,6 @@
 pub(crate) mod backend_spec;
 mod config;
-mod history;
+pub mod history;
 pub mod init;
 mod prd;
 mod project;
@@ -105,6 +105,8 @@ pub struct RunArgs {
     pub implementer_backend: Option<String>,
     #[arg(long = "reviewer-backend")]
     pub reviewer_backend: Option<String>,
+    #[arg(long = "qa-backend")]
+    pub qa_backend: Option<String>,
     #[arg(long = "completer-backend")]
     pub completer_backend: Option<String>,
     #[arg(long)]

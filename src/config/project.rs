@@ -21,12 +21,15 @@ pub struct ProjectConfig {
 pub struct ProjectWorkflowOverrides {
     pub starting_backend: Option<String>,
     pub max_review_iterations: Option<u32>,
+    pub max_qa_iterations: Option<u32>,
     pub auto_commit: Option<bool>,
     pub commit_message_style: Option<CommitMessageStyle>,
     pub prompt_change_action: Option<PromptChangeAction>,
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
+    pub qa_backend: Option<String>,
+    pub qa_enabled: Option<bool>,
     pub completer_backend: Option<String>,
 }
 
@@ -37,6 +40,7 @@ pub struct ProjectTemplateOverrides {
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
     pub completer: Option<String>,
+    pub qa: Option<String>,
 }
 
 impl ProjectConfig {

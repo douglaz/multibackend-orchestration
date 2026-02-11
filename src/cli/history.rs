@@ -31,11 +31,7 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
         for completion in &state.completion_attempts {
             entries.push(serde_json::to_value(completion)?);
         }
-        entries.sort_by_key(|v| {
-            v.get("loop_number")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0)
-        });
+        entries.sort_by_key(|v| v.get("loop_number").and_then(|n| n.as_u64()).unwrap_or(0));
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
@@ -81,14 +77,19 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
                             .unwrap_or_else(|| "in-progress".to_owned())
                     );
                     println!(
-                        "  Backends: planner={}, implementer={}, reviewer={}",
+                        "  Backends: planner={}, implementer={}, reviewer={}, qa={}",
                         loop_state.backends.planner,
                         loop_state.backends.implementer,
-                        loop_state.backends.reviewer
+                        loop_state.backends.reviewer,
+                        loop_state.backends.qa
                     );
                     println!(
                         "  Reviews: {} iterations",
                         loop_state.artifacts.reviews.len()
+                    );
+                    println!(
+                        "  {}",
+                        format_qa_line(&loop_state.artifacts.qa_results)
                     );
                     println!(
                         "  Commit: {}",
@@ -185,4 +186,20 @@ impl<'a> HistoryEntry<'a> {
             Self::Completion(completion) => completion.loop_number,
         }
     }
+}
+
+pub fn format_qa_line(qa_results: &[crate::project::state::QaExchange]) -> String {
+    let qa_count = qa_results.len();
+    let qa_verdict = qa_results
+        .last()
+        .map(|q| if q.passed { "pass" } else { "fail" })
+        .unwrap_or("none");
+    let qa_report = qa_results
+        .last()
+        .map(|q| q.report.as_str())
+        .unwrap_or("none");
+    format!(
+        "QA: {} attempts, last={}, report={}",
+        qa_count, qa_verdict, qa_report
+    )
 }

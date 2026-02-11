@@ -54,12 +54,7 @@ fn creates_template_files(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("ralph init should succeed");
 
         let templates = h.repo_root.join(".ralph").join("templates");
-        for name in &[
-            "spec.md",
-            "implementation.md",
-            "review.md",
-            "completion.md",
-        ] {
+        for name in &["spec.md", "implementation.md", "review.md", "completion.md"] {
             assert_file_not_empty(&templates.join(name));
         }
     })) {
@@ -152,4 +147,3 @@ fn rejects_nonempty_dir(h: &RalphHarness) -> TestResult {
         Err(e) => TestResult::Fail(panic_message(e)),
     }
 }
-

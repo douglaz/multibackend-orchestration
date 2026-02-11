@@ -121,7 +121,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
+                    "qa_backend": effective.workflow.qa_backend,
                     "completer_backend": effective.workflow.completer_backend,
+                    "qa_enabled": effective.workflow.qa_enabled,
+                    "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
                     "auto_commit": effective.workflow.auto_commit,
                     "commit_message_style": effective.workflow.commit_message_style,
@@ -133,6 +136,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "completer": effective.templates.completer,
+                    "qa": effective.templates.qa,
                 },
                 "git": effective.global.git,
                 "project_overrides": project_config,
@@ -147,6 +151,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
 fn resolve_config_alias(key: &str) -> &str {
     match key {
         "planner_backend" => "workflow.planner_backend",
+        "qa_backend" => "workflow.qa_backend",
         _ => key,
     }
 }
@@ -174,7 +179,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
+                    "qa_backend": effective.workflow.qa_backend,
                     "completer_backend": effective.workflow.completer_backend,
+                    "qa_enabled": effective.workflow.qa_enabled,
+                    "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
                     "auto_commit": effective.workflow.auto_commit,
                     "commit_message_style": effective.workflow.commit_message_style,
@@ -186,6 +194,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "completer": effective.templates.completer,
+                    "qa": effective.templates.qa,
                 },
                 "git": effective.global.git,
             })
@@ -318,13 +327,23 @@ fn set_global_value(
         "workflow.reviewer_backend" => {
             config.workflow.reviewer_backend = parse_optional_backend(raw_value)?;
         }
+        "workflow.qa_backend" => {
+            config.workflow.qa_backend = parse_optional_backend(raw_value)?;
+        }
         "workflow.completer_backend" => {
             config.workflow.completer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.qa_enabled" => {
+            config.workflow.qa_enabled = parse_bool(raw_value, key)?;
+        }
+        "workflow.max_qa_iterations" => {
+            config.workflow.max_qa_iterations = parse_u32(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
         "templates.completer" => config.templates.completer = raw_value.to_owned(),
+        "templates.qa" => config.templates.qa = raw_value.to_owned(),
         "git.auto_branch" => config.git.auto_branch = parse_bool(raw_value, key)?,
         "git.branch_format" => config.git.branch_format = raw_value.to_owned(),
         "git.sign_commits" => config.git.sign_commits = parse_bool(raw_value, key)?,
@@ -391,13 +410,23 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "workflow.reviewer_backend" => {
             config.workflow.reviewer_backend = parse_optional_backend(raw_value)?;
         }
+        "workflow.qa_backend" => {
+            config.workflow.qa_backend = parse_optional_backend(raw_value)?;
+        }
         "workflow.completer_backend" => {
             config.workflow.completer_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.qa_enabled" => {
+            config.workflow.qa_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.max_qa_iterations" => {
+            config.workflow.max_qa_iterations = parse_optional_u32(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
+        "templates.qa" => config.templates.qa = parse_optional_string(raw_value),
         _ => {
             return Err(RalphError::Validation(format!(
                 "unsupported project config key: {key}"
@@ -611,5 +640,10 @@ mod tests {
     #[test]
     fn parse_optional_backend_rejects_malformed() {
         parse_optional_backend("claude()").expect_err("malformed spec should fail");
+    }
+
+    #[test]
+    fn resolve_config_alias_maps_qa_backend() {
+        assert_eq!(resolve_config_alias("qa_backend"), "workflow.qa_backend");
     }
 }

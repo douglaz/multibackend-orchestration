@@ -4,7 +4,7 @@ use std::os::unix::fs as unix_fs;
 use crate::cli::InitArgs;
 use crate::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_reviewer_template,
+    default_qa_template, default_reviewer_template,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -27,6 +27,7 @@ pub fn execute(args: InitArgs) -> Result<()> {
         templates_dir.join("completion.md"),
         default_completer_template(),
     )?;
+    fs::write(templates_dir.join("qa.md"), default_qa_template())?;
 
     // Create legacy symlinks for backward compatibility.
     // If symlinking fails for a reason other than the link already existing,

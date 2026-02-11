@@ -45,16 +45,34 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             loop_status_label(&loop_state.status)
         );
         println!(
-            "Backends: planner={}, implementer={}, reviewer={}",
+            "Backends: planner={}, implementer={}, reviewer={}, qa={}",
             loop_state.backends.planner,
             loop_state.backends.implementer,
-            loop_state.backends.reviewer
+            loop_state.backends.reviewer,
+            loop_state.backends.qa
         );
 
         if let Some((iteration, lines)) = latest_feedback(&project_dir, &state, loop_state) {
             println!("Latest Feedback (iteration {iteration}):");
             if lines.is_empty() {
                 println!("  (present but could not extract summary lines)");
+            } else {
+                for line in lines {
+                    println!("  • {line}");
+                }
+            }
+        }
+
+        if let Some(latest_qa) = loop_state.artifacts.qa_results.last() {
+            let verdict = if latest_qa.passed { "PASS" } else { "FAIL" };
+            println!(
+                "Latest QA (iteration {}): {} [{}]",
+                latest_qa.iteration, verdict, latest_qa.report
+            );
+            let lines =
+                extract_qa_summary_lines(&project_dir, latest_qa);
+            if lines.is_empty() {
+                println!("  (no summary available)");
             } else {
                 for line in lines {
                     println!("  • {line}");
@@ -135,6 +153,7 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
     match phase {
         crate::project::state::Phase::Planning => "planning",
         crate::project::state::Phase::Implementing => "implementing",
+        crate::project::state::Phase::QA => "qa",
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",
@@ -219,6 +238,52 @@ fn extract_required_change_lines(body: &str) -> Vec<String> {
     lines
 }
 
+fn extract_qa_summary_lines(
+    project_dir: &Path,
+    qa: &crate::project::state::QaExchange,
+) -> Vec<String> {
+    let full_path = project_dir.join(&qa.report);
+    let raw = match fs::read_to_string(&full_path) {
+        Ok(content) => content,
+        Err(_) => return Vec::new(),
+    };
+    let body = strip_frontmatter(&raw);
+    let section = if qa.passed {
+        "## Verification Summary"
+    } else {
+        "## Failures"
+    };
+    extract_section_lines(&body, section)
+}
+
+fn extract_section_lines(body: &str, section_header: &str) -> Vec<String> {
+    let mut in_section = false;
+    let mut lines = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed == section_header {
+            in_section = true;
+            continue;
+        }
+
+        if in_section {
+            if trimmed.starts_with("## ") {
+                break;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            lines.push(trimmed.to_owned());
+            if lines.len() == 3 {
+                break;
+            }
+        }
+    }
+
+    lines
+}
+
 fn strip_frontmatter(raw: &str) -> String {
     let trimmed = raw.trim();
     if !trimmed.starts_with("---") {
@@ -247,5 +312,115 @@ fn strip_frontmatter(raw: &str) -> String {
         trimmed.to_owned()
     } else {
         out.trim().to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_section_lines_returns_up_to_3_lines_from_verification_summary() {
+        let body = "\
+# QA: PASS
+
+## Tests Run
+- cargo test: all 42 tests passed
+
+## Verification Summary
+All acceptance criteria satisfied.
+Build succeeds with no warnings.
+Integration tests cover the new endpoint.
+Extra line that should be excluded.
+
+## Notes
+Cleanup suggestions.
+";
+        let lines = extract_section_lines(body, "## Verification Summary");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "All acceptance criteria satisfied.");
+        assert_eq!(lines[1], "Build succeeds with no warnings.");
+        assert_eq!(lines[2], "Integration tests cover the new endpoint.");
+    }
+
+    #[test]
+    fn extract_section_lines_returns_up_to_3_lines_from_failures() {
+        let body = "\
+# QA: FAIL
+
+## Failures
+- cargo test fails: 2 tests broken
+- missing validation for empty input
+
+## Suggested Fixes
+- Add empty-input guard
+";
+        let lines = extract_section_lines(body, "## Failures");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "- cargo test fails: 2 tests broken");
+        assert_eq!(lines[1], "- missing validation for empty input");
+    }
+
+    #[test]
+    fn extract_section_lines_returns_empty_when_section_missing() {
+        let body = "\
+# QA: PASS
+
+## Tests Run
+- all good
+";
+        let lines = extract_section_lines(body, "## Verification Summary");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_section_lines_returns_empty_when_section_has_no_content() {
+        let body = "\
+# QA: FAIL
+
+## Failures
+
+## Suggested Fixes
+- something
+";
+        let lines = extract_section_lines(body, "## Failures");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn extract_section_lines_handles_body_with_frontmatter_stripped() {
+        let raw = "\
+---
+artifact: qa-pass
+loop: 1
+---
+
+# QA: PASS
+
+## Verification Summary
+Everything works.
+";
+        let body = strip_frontmatter(raw);
+        let lines = extract_section_lines(&body, "## Verification Summary");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "Everything works.");
+    }
+
+    #[test]
+    fn extract_required_change_lines_unchanged_behavior() {
+        let body = "\
+# Review: SUGGESTIONS
+
+## Required Changes
+- Fix the error handling in auth module
+- Add unit tests for the new endpoint
+- Update the API documentation
+
+## Optional Improvements
+- Consider caching
+";
+        let lines = extract_required_change_lines(body);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "- Fix the error handling in auth module");
     }
 }

@@ -728,6 +728,7 @@ fn phase_label(phase: &Phase) -> &'static str {
     match phase {
         Phase::Planning => "planning",
         Phase::Implementing => "implementing",
+        Phase::QA => "qa",
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
@@ -926,12 +927,15 @@ mod tests {
                 planner: "planner-a".to_owned(),
                 implementer: "impl-a".to_owned(),
                 reviewer: "reviewer-a".to_owned(),
+                qa: "qa-a".to_owned(),
             },
             artifacts: FeatureLoopArtifacts {
                 spec: "loops/001-feature-a/spec.md".to_owned(),
                 impl_notes: Some("loops/001-feature-a/impl-notes.md".to_owned()),
                 reviews: Vec::new(),
                 approval: Some("loops/001-feature-a/review-approved.md".to_owned()),
+                qa_results: Vec::new(),
+                pending_qa_feedback: None,
             },
             commit: Some("abc123".to_owned()),
             started_at: parse_utc("2026-02-06T21:00:00Z"),
@@ -950,6 +954,8 @@ mod tests {
             artifacts: CompletionLoopArtifacts {
                 termination_request: "loops/002-completion/termination-request.md".to_owned(),
                 verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+                acceptance_result: None,
+                acceptance_passed: None,
             },
             verdict: Some(CompletionVerdict::Continue),
             started_at: parse_utc("2026-02-06T21:06:00Z"),
