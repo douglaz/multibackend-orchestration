@@ -191,10 +191,10 @@ impl Default for GlobalConfig {
                 completer_backend: None,
             },
             templates: TemplateConfig {
-                planner: "templates/planner.md".to_owned(),
-                implementer: "templates/implementer.md".to_owned(),
-                reviewer: "templates/reviewer.md".to_owned(),
-                completer: "templates/completer.md".to_owned(),
+                planner: "templates/spec.md".to_owned(),
+                implementer: "templates/implementation.md".to_owned(),
+                reviewer: "templates/review.md".to_owned(),
+                completer: "templates/completion.md".to_owned(),
             },
             git: GitConfig {
                 auto_branch: true,
@@ -292,10 +292,10 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 
 [templates]
-planner = "templates/planner.md"
-implementer = "templates/implementer.md"
-reviewer = "templates/reviewer.md"
-completer = "templates/completer.md"
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+completer = "templates/completion.md"
 
 [git]
 auto_branch = true
@@ -346,10 +346,10 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 
 [templates]
-planner = "templates/planner.md"
-implementer = "templates/implementer.md"
-reviewer = "templates/reviewer.md"
-completer = "templates/completer.md"
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+completer = "templates/completion.md"
 
 [git]
 auto_branch = true
@@ -401,10 +401,10 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 
 [templates]
-planner = "templates/planner.md"
-implementer = "templates/implementer.md"
-reviewer = "templates/reviewer.md"
-completer = "templates/completer.md"
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+completer = "templates/completion.md"
 
 [git]
 auto_branch = true
@@ -524,10 +524,10 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 
 [templates]
-planner = "templates/planner.md"
-implementer = "templates/implementer.md"
-reviewer = "templates/reviewer.md"
-completer = "templates/completer.md"
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+completer = "templates/completion.md"
 
 [git]
 auto_branch = true

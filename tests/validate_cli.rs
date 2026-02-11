@@ -10,21 +10,69 @@ use std::path::PathBuf;
 use ralph::validate::{ValidateArgs, execute};
 
 /// Locate the built `ralph` binary via the CARGO_BIN_EXE mechanism or
-/// fall back to building the path from `CARGO_MANIFEST_DIR`.
+/// fall back to probing common target directory layouts.
 fn ralph_bin_absolute() -> PathBuf {
     // cargo sets CARGO_BIN_EXE_ralph when running integration tests after build
     if let Ok(p) = env::var("CARGO_BIN_EXE_ralph") {
         return PathBuf::from(p);
     }
 
-    // Fallback: derive from target directory
+    // Fallback: try common target directory layouts (debug, release, Nix store)
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
-    let target_dir = PathBuf::from(manifest).join("target").join("debug").join("ralph");
-    assert!(
-        target_dir.exists(),
-        "ralph binary not found at {target_dir:?}; run `cargo build` first"
+    let manifest_path = PathBuf::from(&manifest);
+
+    // Collect target dirs to search: local `target/` and CARGO_TARGET_DIR if set
+    let mut target_roots = vec![manifest_path.join("target")];
+    if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        target_roots.push(PathBuf::from(target_dir));
+    }
+
+    let profiles = &["debug", "release"];
+
+    for target_root in &target_roots {
+        // Direct profile layout: target/{debug,release}/ralph
+        for profile in profiles {
+            let candidate = target_root.join(profile).join("ralph");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        // Target-triple layout: target/<triple>/{debug,release}/ralph
+        // This covers Nix builds that use e.g. target/x86_64-unknown-linux-gnu/release/
+        if let Ok(entries) = std::fs::read_dir(target_root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Target triples contain at least two hyphens (arch-vendor-os or arch-vendor-os-env)
+                if name_str.matches('-').count() >= 2 {
+                    for profile in profiles {
+                        let candidate = entry.path().join(profile).join("ralph");
+                        if candidate.exists() {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Try locating via `which` as a last resort
+    if let Ok(output) = std::process::Command::new("which").arg("ralph").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !path.is_empty() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+
+    panic!(
+        "ralph binary not found; run `cargo build` first. \
+         Searched: target/{{debug,release}}/ralph, \
+         target/<triple>/{{debug,release}}/ralph, \
+         CARGO_TARGET_DIR (same layouts), PATH"
     );
-    target_dir
 }
 
 /// Build a relative path from `cwd` to `target` by stripping the common prefix.

@@ -68,25 +68,25 @@ fn setup_workspace_with_project(
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
-        workspace_root.join("templates/planner.md"),
+        workspace_root.join("templates/spec.md"),
         default_planner_template(),
     )
-    .expect("write planner template");
+    .expect("write spec template");
     fs::write(
-        workspace_root.join("templates/implementer.md"),
+        workspace_root.join("templates/implementation.md"),
         default_implementer_template(),
     )
-    .expect("write implementer template");
+    .expect("write implementation template");
     fs::write(
-        workspace_root.join("templates/reviewer.md"),
+        workspace_root.join("templates/review.md"),
         default_reviewer_template(),
     )
-    .expect("write reviewer template");
+    .expect("write review template");
     fs::write(
-        workspace_root.join("templates/completer.md"),
+        workspace_root.join("templates/completion.md"),
         default_completer_template(),
     )
-    .expect("write completer template");
+    .expect("write completion template");
 
     let mut env = BTreeMap::new();
     env.insert("PLANNER_MODE".to_owned(), planner_mode.to_owned());
@@ -731,25 +731,25 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
-        workspace_root.join("templates/planner.md"),
+        workspace_root.join("templates/spec.md"),
         default_planner_template(),
     )
-    .expect("write planner template");
+    .expect("write spec template");
     fs::write(
-        workspace_root.join("templates/implementer.md"),
+        workspace_root.join("templates/implementation.md"),
         default_implementer_template(),
     )
-    .expect("write implementer template");
+    .expect("write implementation template");
     fs::write(
-        workspace_root.join("templates/reviewer.md"),
+        workspace_root.join("templates/review.md"),
         default_reviewer_template(),
     )
-    .expect("write reviewer template");
+    .expect("write review template");
     fs::write(
-        workspace_root.join("templates/completer.md"),
+        workspace_root.join("templates/completion.md"),
         default_completer_template(),
     )
-    .expect("write completer template");
+    .expect("write completion template");
 
     // Counter directory – lives inside the temp dir so scripts can track calls
     let counter_dir = repo_root.join("counters");
@@ -1039,25 +1039,25 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
-        workspace_root.join("templates/planner.md"),
+        workspace_root.join("templates/spec.md"),
         default_planner_template(),
     )
-    .expect("write planner template");
+    .expect("write spec template");
     fs::write(
-        workspace_root.join("templates/implementer.md"),
+        workspace_root.join("templates/implementation.md"),
         default_implementer_template(),
     )
-    .expect("write implementer template");
+    .expect("write implementation template");
     fs::write(
-        workspace_root.join("templates/reviewer.md"),
+        workspace_root.join("templates/review.md"),
         default_reviewer_template(),
     )
-    .expect("write reviewer template");
+    .expect("write review template");
     fs::write(
-        workspace_root.join("templates/completer.md"),
+        workspace_root.join("templates/completion.md"),
         default_completer_template(),
     )
-    .expect("write completer template");
+    .expect("write completion template");
 
     let mut env = BTreeMap::new();
     env.insert("PLANNER_MODE".to_owned(), "feature".to_owned());
@@ -1345,25 +1345,25 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
-        workspace_root.join("templates/planner.md"),
+        workspace_root.join("templates/spec.md"),
         default_planner_template(),
     )
-    .expect("write planner template");
+    .expect("write spec template");
     fs::write(
-        workspace_root.join("templates/implementer.md"),
+        workspace_root.join("templates/implementation.md"),
         default_implementer_template(),
     )
-    .expect("write implementer template");
+    .expect("write implementation template");
     fs::write(
-        workspace_root.join("templates/reviewer.md"),
+        workspace_root.join("templates/review.md"),
         default_reviewer_template(),
     )
-    .expect("write reviewer template");
+    .expect("write review template");
     fs::write(
-        workspace_root.join("templates/completer.md"),
+        workspace_root.join("templates/completion.md"),
         default_completer_template(),
     )
-    .expect("write completer template");
+    .expect("write completion template");
 
     let counter_dir = repo_root.join("counters");
     fs::create_dir_all(&counter_dir).expect("create counter dir");
