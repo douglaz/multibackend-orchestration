@@ -1,6 +1,6 @@
 pub(crate) mod backend_spec;
 mod config;
-mod history;
+pub mod history;
 pub mod init;
 mod prd;
 mod project;

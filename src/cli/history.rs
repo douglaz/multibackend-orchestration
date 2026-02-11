@@ -88,6 +88,10 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
                         loop_state.artifacts.reviews.len()
                     );
                     println!(
+                        "  {}",
+                        format_qa_line(&loop_state.artifacts.qa_results)
+                    );
+                    println!(
                         "  Commit: {}",
                         loop_state.commit.as_deref().unwrap_or("none")
                     );
@@ -182,4 +186,20 @@ impl<'a> HistoryEntry<'a> {
             Self::Completion(completion) => completion.loop_number,
         }
     }
+}
+
+pub fn format_qa_line(qa_results: &[crate::project::state::QaExchange]) -> String {
+    let qa_count = qa_results.len();
+    let qa_verdict = qa_results
+        .last()
+        .map(|q| if q.passed { "pass" } else { "fail" })
+        .unwrap_or("none");
+    let qa_report = qa_results
+        .last()
+        .map(|q| q.report.as_str())
+        .unwrap_or("none");
+    format!(
+        "QA: {} attempts, last={}, report={}",
+        qa_count, qa_verdict, qa_report
+    )
 }
