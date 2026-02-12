@@ -245,7 +245,7 @@ fn test_assign_feature_backends() {
     let config = test_config();
     let registry = BackendRegistry::new(&config, tmux_disabled());
 
-    // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude
+    // Loop 1 (odd): planner=claude, implementer=codex, reviewer=claude, qa=codex (opposite)
     // With default role models, these become model-injected specs
     let backends = registry
         .assign_feature_backends(1, "claude", &no_role_overrides())
@@ -253,16 +253,16 @@ fn test_assign_feature_backends() {
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
     assert_eq!(backends.reviewer, "claude(opus)");
-    assert_eq!(backends.qa, "claude(opus)");
+    assert_eq!(backends.qa, "codex(gpt-5.3-codex-high)");
 
-    // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex
+    // Loop 2 (even): planner=codex, implementer=claude, reviewer=codex, qa=claude (opposite)
     let backends = registry
         .assign_feature_backends(2, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
     assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
-    assert_eq!(backends.qa, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.qa, "claude(opus)");
 }
 
 #[test]

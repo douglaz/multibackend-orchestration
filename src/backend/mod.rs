@@ -367,7 +367,7 @@ impl BackendRegistry {
         let qa = if let Some(qa_override) = role_overrides.qa.as_deref() {
             self.resolve_backend_for_role(qa_override, "qa")
         } else {
-            planner.clone()
+            implementer.clone()
         };
 
         Ok(FeatureLoopBackends {

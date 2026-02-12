@@ -1246,7 +1246,7 @@ impl Orchestrator {
                                     if let Some(qa_override) = role_overrides.qa.as_deref() {
                                         registry.resolve_backend_for_role(qa_override, "qa")
                                     } else {
-                                        planner_backend_name.clone()
+                                        completer_backend_name.clone()
                                     };
                                 let acceptance_qa_backend =
                                     registry.get_or_create_for_spec(&acceptance_qa_backend_name)?;
