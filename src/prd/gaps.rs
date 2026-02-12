@@ -179,7 +179,7 @@ pub async fn run_llm_validation(
     unreachable!("loop should return or error before reaching this point")
 }
 
-fn extract_fenced_json(raw: &str) -> Result<&str> {
+pub(crate) fn extract_fenced_json(raw: &str) -> Result<&str> {
     let fence_start = raw
         .find("```json")
         .ok_or_else(|| RalphError::ParseError("missing opening ```json fence".to_owned()))?;
