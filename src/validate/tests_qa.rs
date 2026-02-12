@@ -40,6 +40,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "qa::acceptance_gate_fail_forces_continue",
             func: acceptance_gate_fail_forces_continue,
         },
+        ConformanceTest {
+            name: "qa::history_verbose_shows_qa",
+            func: history_verbose_shows_qa,
+        },
+        ConformanceTest {
+            name: "qa::status_shows_qa_info",
+            func: status_shows_qa_info,
+        },
     ]
 }
 
@@ -584,6 +592,60 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
             last_attempt["artifacts"]["acceptance_passed"],
             json!(true),
             "expected final completion attempt to have acceptance_passed == true"
+        );
+    })
+}
+
+fn history_verbose_shows_qa(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-history-verbose";
+        setup_with_mock_script(h, project_id, "qa-history-verbose.sh", &qa_pass_mock_script());
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let stdout = h
+            .ralph_ok(["history", "--verbose"])
+            .expect("ralph history --verbose should succeed");
+
+        assert!(
+            stdout.contains("QA: 1 attempts, last=pass"),
+            "expected verbose history output to contain QA attempts and pass verdict, got:\n{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("qa="),
+            "expected verbose history output to contain qa backend field, got:\n{}",
+            stdout
+        );
+    })
+}
+
+fn status_shows_qa_info(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-status";
+        setup_with_mock_script(h, project_id, "qa-status.sh", &qa_pass_mock_script());
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let stdout = h
+            .ralph_ok(["status"])
+            .expect("ralph status should succeed");
+
+        assert!(
+            stdout.contains("Latest QA (iteration 1): PASS"),
+            "expected status output to contain latest QA verdict information, got:\n{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("qa="),
+            "expected status output to contain qa backend field, got:\n{}",
+            stdout
         );
     })
 }
