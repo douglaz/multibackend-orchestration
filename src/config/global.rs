@@ -168,7 +168,7 @@ impl Default for GlobalConfig {
                         "--permission-mode".to_owned(),
                         "acceptEdits".to_owned(),
                         "--allowedTools".to_owned(),
-                        "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch".to_owned(),
+                        "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
                     ],
                     timeout_seconds: 600,
                     env: BTreeMap::new(),
