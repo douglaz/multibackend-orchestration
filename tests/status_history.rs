@@ -31,9 +31,7 @@ fn make_loop(loop_number: u32, qa_results: Vec<QaExchange>) -> FeatureLoopState 
         backends: make_backends(),
         artifacts: FeatureLoopArtifacts {
             spec: format!("loops/{loop_number:03}-test-feature/spec.md"),
-            impl_notes: Some(format!(
-                "loops/{loop_number:03}-test-feature/impl-notes.md"
-            )),
+            impl_notes: Some(format!("loops/{loop_number:03}-test-feature/impl-notes.md")),
             reviews: vec![],
             approval: None,
             qa_results,
@@ -92,9 +90,7 @@ fn status_latest_qa_fail_shows_iteration_and_verdict() {
             iteration: 1,
             passed: false,
             report: "loops/001-test-feature/qa-001-fail.md".to_owned(),
-            implementer_response: Some(
-                "loops/001-test-feature/impl-qa-response-001.md".to_owned(),
-            ),
+            implementer_response: Some("loops/001-test-feature/impl-qa-response-001.md".to_owned()),
         },
         QaExchange {
             iteration: 2,
@@ -187,9 +183,7 @@ fn history_verbose_with_qa_fail_shows_count_and_verdict() {
             iteration: 1,
             passed: false,
             report: "loops/001-test-feature/qa-001-fail.md".to_owned(),
-            implementer_response: Some(
-                "loops/001-test-feature/impl-qa-response-001.md".to_owned(),
-            ),
+            implementer_response: Some("loops/001-test-feature/impl-qa-response-001.md".to_owned()),
         },
         QaExchange {
             iteration: 2,

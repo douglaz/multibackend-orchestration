@@ -87,10 +87,7 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
                         "  Reviews: {} iterations",
                         loop_state.artifacts.reviews.len()
                     );
-                    println!(
-                        "  {}",
-                        format_qa_line(&loop_state.artifacts.qa_results)
-                    );
+                    println!("  {}", format_qa_line(&loop_state.artifacts.qa_results));
                     println!(
                         "  Commit: {}",
                         loop_state.commit.as_deref().unwrap_or("none")

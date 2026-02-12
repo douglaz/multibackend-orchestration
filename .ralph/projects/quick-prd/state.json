@@ -5,7 +5,7 @@
   "prompt_hash": "ea653899bfb412f003b1a00bbe36a086586a5b3f72fd931148487b2ed9e04f10",
   "prompt_hash_at_loop_start": "ea653899bfb412f003b1a00bbe36a086586a5b3f72fd931148487b2ed9e04f10",
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -46,7 +46,7 @@
       "slug": "quickprd-runtime-pipeline-and-artifact-persistence",
       "feature_name": "QuickPrd Runtime Pipeline and Artifact Persistence",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -68,8 +68,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "8b367c66608d43540a5041c38356699d6e312e4f",
       "started_at": "2026-02-12T18:44:19.498242734Z",
+      "completed_at": "2026-02-12T18:56:30.909437943Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "cli-wiring-command-registration-and-cli-parsing",
+      "feature_name": "CLI wiring, command registration, and CLI parsing tests for quick-prd",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/003-cli-wiring-command-registration-and-cli-parsing/20260212185843-spec.md",
+        "impl_notes": "loops/003-cli-wiring-command-registration-and-cli-parsing/20260212190053-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-cli-wiring-command-registration-and-cli-parsing/20260212190321-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-cli-wiring-command-registration-and-cli-parsing/20260212190247-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-12T18:58:43.617121685Z",
       "completed_at": null
     }
   ],

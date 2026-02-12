@@ -301,13 +301,15 @@ impl QuickPrdPipeline {
             // Build review prompt
             let review_prompt = render_prompt(
                 REVIEW_PROMPT,
-                &[("{{idea}}", &self.options.idea), ("{{spec}}", &current_spec)],
+                &[
+                    ("{{idea}}", &self.options.idea),
+                    ("{{spec}}", &current_spec),
+                ],
             );
 
             // Run review with retry
             let review_start = Instant::now();
-            let feedback =
-                run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
+            let feedback = run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
             review_times_secs.push(review_start.elapsed().as_secs_f64());
 
             // Cache review
@@ -525,10 +527,10 @@ mod tests {
     #[tokio::test]
     async fn test_review_parse_retry_success() {
         // First response is malformed, second is valid
-        let backend = Arc::new(MockBackend::new("reviewer", vec![
-            "no json here".to_string(),
-            mock_approved_review(),
-        ]));
+        let backend = Arc::new(MockBackend::new(
+            "reviewer",
+            vec!["no json here".to_string(), mock_approved_review()],
+        ));
 
         let feedback = run_review_with_retry(backend.clone(), "review this".to_string())
             .await
@@ -541,11 +543,10 @@ mod tests {
     #[tokio::test]
     async fn test_review_parse_retry_exhaustion() {
         // All 3 responses are malformed
-        let backend = Arc::new(MockBackend::new("reviewer", vec![
-            "bad1".to_string(),
-            "bad2".to_string(),
-            "bad3".to_string(),
-        ]));
+        let backend = Arc::new(MockBackend::new(
+            "reviewer",
+            vec!["bad1".to_string(), "bad2".to_string(), "bad3".to_string()],
+        ));
 
         let err = run_review_with_retry(backend.clone(), "review this".to_string())
             .await
@@ -557,8 +558,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_issues_auto_approval() {
         // approved: false but empty issues → treated as approved
-        let reviewer_response =
-            "```json\n{\"approved\": false, \"issues\": []}\n```".to_string();
+        let reviewer_response = "```json\n{\"approved\": false, \"issues\": []}\n```".to_string();
         let writer = Arc::new(MockBackend::new("writer", vec![valid_spec().to_string()]));
         let reviewer = Arc::new(MockBackend::new("reviewer", vec![reviewer_response]));
 
@@ -585,14 +585,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_revision_artifact_writing() {
-        let writer = Arc::new(MockBackend::new("writer", vec![
-            valid_spec().to_string(),        // draft
-            valid_spec().to_string(),        // revision-1
-        ]));
-        let reviewer = Arc::new(MockBackend::new("reviewer", vec![
-            mock_rejected_review(),          // review-1 (rejected)
-            mock_approved_review(),          // review-2 (approved)
-        ]));
+        let writer = Arc::new(MockBackend::new(
+            "writer",
+            vec![
+                valid_spec().to_string(), // draft
+                valid_spec().to_string(), // revision-1
+            ],
+        ));
+        let reviewer = Arc::new(MockBackend::new(
+            "reviewer",
+            vec![
+                mock_rejected_review(), // review-1 (rejected)
+                mock_approved_review(), // review-2 (approved)
+            ],
+        ));
 
         let temp = tempfile::TempDir::new().unwrap();
         let working_dir = temp.path().to_path_buf();
@@ -625,14 +631,15 @@ mod tests {
     async fn test_section_retry_limit() {
         // Writer returns incomplete spec all 3 times (1 initial + 2 retries)
         let incomplete = "## Summary\nBody\n## Acceptance Criteria\nBody";
-        let writer = Arc::new(MockBackend::new("writer", vec![
-            incomplete.to_string(),
-            incomplete.to_string(),
-            incomplete.to_string(),
-        ]));
-        let reviewer = Arc::new(MockBackend::new("reviewer", vec![
-            mock_approved_review(),
-        ]));
+        let writer = Arc::new(MockBackend::new(
+            "writer",
+            vec![
+                incomplete.to_string(),
+                incomplete.to_string(),
+                incomplete.to_string(),
+            ],
+        ));
+        let reviewer = Arc::new(MockBackend::new("reviewer", vec![mock_approved_review()]));
 
         let temp = tempfile::TempDir::new().unwrap();
         let working_dir = temp.path().to_path_buf();
