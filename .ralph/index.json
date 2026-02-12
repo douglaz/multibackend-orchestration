@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "qa-phase",
+  "active_project": "qa-validate",
   "projects": [
     {
       "id": "tmux-backend",
@@ -122,6 +122,17 @@
       "total_feature_loops": 4,
       "total_completion_attempts": 1,
       "last_loop_number": 5,
+      "parent_project": null
+    },
+    {
+      "id": "qa-validate",
+      "name": "QA Conformance Tests",
+      "status": "completed",
+      "created_at": "2026-02-12T00:36:31.580181123Z",
+      "completed_at": "2026-02-12T01:07:23.247114369Z",
+      "total_feature_loops": 3,
+      "total_completion_attempts": 1,
+      "last_loop_number": 4,
       "parent_project": null
     }
   ]
