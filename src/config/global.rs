@@ -163,7 +163,13 @@ impl Default for GlobalConfig {
             backends: BackendConfigs {
                 claude: BackendConfig {
                     command: "claude".to_owned(),
-                    args: vec!["--dangerously-skip-permissions".to_owned()],
+                    args: vec![
+                        "-p".to_owned(),
+                        "--permission-mode".to_owned(),
+                        "acceptEdits".to_owned(),
+                        "--allowedTools".to_owned(),
+                        "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch".to_owned(),
+                    ],
                     timeout_seconds: 600,
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
