@@ -32,7 +32,10 @@ use crate::project::state::{
     CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState, ProjectStatus,
     QaExchange, ReviewExchange,
 };
-use crate::prompts::templates::render_template;
+use crate::prompts::templates::{
+    default_completer_template, default_implementer_template, default_planner_template,
+    default_qa_template, default_reviewer_template, render_template_with_fallback,
+};
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::util::slug::slugify_feature_name;
@@ -1711,7 +1714,11 @@ fn build_planner_prompt(
         collect_previous_specs(state, project_dir)?,
     );
 
-    let rendered = render_template(&effective.templates.planner, &vars)?;
+    let rendered = render_template_with_fallback(
+        &effective.templates.planner,
+        &vars,
+        default_planner_template(),
+    )?;
     let mut prompt = format!(
         "{rendered}\n\n## System Guardrails\n\n{PLANNER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
     );
@@ -1763,7 +1770,11 @@ fn build_implementer_prompt(
         collect_review_history(state, project_dir)?,
     );
 
-    let rendered = render_template(&effective.templates.implementer, &vars)?;
+    let rendered = render_template_with_fallback(
+        &effective.templates.implementer,
+        &vars,
+        default_implementer_template(),
+    )?;
     Ok(format!(
         "{rendered}\n\n## System Guardrails\n\n{IMPLEMENTER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Review Feedback\n\n{}\n",
         review_feedback.unwrap_or("(none)")
@@ -1811,7 +1822,11 @@ fn build_reviewer_prompt(
         collect_review_history(state, project_dir)?,
     );
 
-    let rendered = render_template(&effective.templates.reviewer, &vars)?;
+    let rendered = render_template_with_fallback(
+        &effective.templates.reviewer,
+        &vars,
+        default_reviewer_template(),
+    )?;
     Ok(format!(
         "{rendered}\n\n## System Guardrails\n\n{REVIEWER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Latest Implementation Response\n\n{}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n",
         impl_response_content.unwrap_or("(none)")
@@ -1844,7 +1859,11 @@ fn build_completer_prompt(
     vars.insert("previous_specs".to_owned(), previous_specs.to_owned());
     vars.insert("state_content".to_owned(), state_json.clone());
 
-    let rendered = render_template(&effective.templates.completer, &vars)?;
+    let rendered = render_template_with_fallback(
+        &effective.templates.completer,
+        &vars,
+        default_completer_template(),
+    )?;
     Ok(format!(
         "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Completion Request\n\n{termination_request_content}\n\n## Prior Specs\n\n{previous_specs}\n\n## State\n\n```json\n{state_json}\n```\n"
     ))
@@ -2066,7 +2085,11 @@ fn build_qa_prompt(
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
     vars.insert("qa_history".to_owned(), qa_history.to_owned());
 
-    let rendered = render_template(&effective.templates.qa, &vars)?;
+    let rendered = render_template_with_fallback(
+        &effective.templates.qa,
+        &vars,
+        default_qa_template(),
+    )?;
     Ok(format!(
         "{rendered}\n\n## System Guardrails\n\n{QA_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Prior QA History\n\n{}\n",
         if qa_history.is_empty() { "(none)" } else { qa_history }
@@ -2096,7 +2119,13 @@ fn response_rel_path(
     iteration: u32,
 ) -> Result<String> {
     let suffix = format!("impl-response-{iteration:03}.md");
-    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix)?.ok_or_else(
+    if let Some(path) =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix)?
+    {
+        return Ok(path);
+    }
+    let qa_suffix = format!("impl-qa-response-{iteration:03}.md");
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?.ok_or_else(
         || {
             RalphError::Orchestration(format!(
                 "missing implementer response artifact for loop {loop_number} iteration {iteration}"

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use ralph::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_reviewer_template, render_template,
+    default_reviewer_template, render_template, render_template_with_fallback,
 };
 use tempfile::TempDir;
 
@@ -151,4 +151,30 @@ fn test_default_completer_template_contains_required_sections() {
     assert!(template.contains("{{state_content}}"));
     assert!(template.contains("{{previous_specs}}"));
     assert!(template.contains("{{termination_request_content}}"));
+}
+
+#[test]
+fn test_render_template_with_fallback_uses_default_when_file_missing() {
+    let missing = Path::new("/nonexistent/template.md");
+    let mut vars = BTreeMap::new();
+    vars.insert("name".to_owned(), "World".to_owned());
+
+    let result =
+        render_template_with_fallback(missing, &vars, "Hello, {{name}}!").unwrap();
+    assert_eq!(result, "Hello, World!");
+}
+
+#[test]
+fn test_render_template_with_fallback_prefers_file_when_present() {
+    let temp_dir = TempDir::new().unwrap();
+    let template_path = temp_dir.path().join("test.md");
+    fs::write(&template_path, "From file: {{name}}").unwrap();
+
+    let mut vars = BTreeMap::new();
+    vars.insert("name".to_owned(), "World".to_owned());
+
+    let result =
+        render_template_with_fallback(&template_path, &vars, "From fallback: {{name}}")
+            .unwrap();
+    assert_eq!(result, "From file: World");
 }

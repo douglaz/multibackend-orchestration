@@ -13,6 +13,23 @@ pub fn render_template(path: &Path, vars: &BTreeMap<String, String>) -> Result<S
     Ok(template)
 }
 
+pub fn render_template_with_fallback(
+    path: &Path,
+    vars: &BTreeMap<String, String>,
+    fallback: &str,
+) -> Result<String> {
+    let mut template = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fallback.to_owned(),
+        Err(e) => return Err(e.into()),
+    };
+    for (key, value) in vars {
+        let needle = format!("{{{{{key}}}}}");
+        template = template.replace(&needle, value);
+    }
+    Ok(template)
+}
+
 pub fn default_planner_template() -> &'static str {
     r#"You are a software architect planning features for a project.
 
