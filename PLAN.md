@@ -61,11 +61,11 @@ Ralph manages multiple projects within a single workspace. Each project represen
 │   │           └── {TS}-acceptance-fail.md    # QA acceptance fail
 │   └── .../
 └── templates/                       # Prompt templates
-    ├── planner.md
-    ├── implementer.md
-    ├── reviewer.md
-    ├── qa.md
-    └── completer.md
+    ├── spec.md                      # Planner template (legacy symlink: planner.md)
+    ├── implementation.md            # Implementer template (legacy symlink: implementer.md)
+    ├── review.md                    # Reviewer template (legacy symlink: reviewer.md)
+    ├── qa.md                        # QA template
+    └── completion.md                # Completer template (legacy symlink: completer.md)
 ```
 
 ### Hierarchy Summary
@@ -75,7 +75,7 @@ Ralph manages multiple projects within a single workspace. Each project represen
 | Workspace | Projects, PRD cache | Many |
 | Project | Prompt, State, Config, Loops | 1 prompt, 1 state, optional config, many loops |
 | Feature Loop | Artifacts | 1 spec + 1 impl-notes + N QA cycles + N review cycles + 1 approval |
-| Completion Loop | Artifacts | 1 termination-request + 1 completer-verdict |
+| Completion Loop | Artifacts | 1 termination-request + 1 completer-verdict + optional acceptance-pass/fail |
 
 ## Backends
 
@@ -254,10 +254,10 @@ Implementing -> QA          (when qa_enabled=true)
 Implementing -> Reviewing   (when qa_enabled=false)
 QA -> Reviewing             (QA pass)
 QA -> Implementing          (QA fail → feedback loop)
-QA -> Planning              (QA iteration limit hit → auto-rollback)
+QA -> [rollback + error]    (QA iteration limit hit → auto-rollback, or retry if --until-complete)
 Reviewing -> Implementing   (review verdict: suggestions)
 Reviewing -> Committing     (review verdict: approved)
-Reviewing -> Planning       (review iteration limit hit → auto-rollback)
+Reviewing -> [rollback + error] (review iteration limit hit → auto-rollback, or retry if --until-complete)
 Committing -> Planning      (next loop number)
 
 Completing -> QA acceptance gate  (completer verdict: COMPLETE, qa_enabled=true)
@@ -474,10 +474,10 @@ max_qa_iterations = 3                   # Maximum QA retry attempts before rollb
 # completer_backend = "codex(gpt-5.3-codex-xhigh)"
 
 [templates]
-planner = "templates/planner.md"
-implementer = "templates/implementer.md"
-reviewer = "templates/reviewer.md"
-completer = "templates/completer.md"
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+completer = "templates/completion.md"
 qa = "templates/qa.md"
 
 [git]
@@ -507,11 +507,11 @@ reviewer_backend = "claude"
 completer_backend = "codex"
 
 [templates]
-planner = "custom/planner.md"
-implementer = "custom/implementer.md"
-reviewer = "custom/reviewer.md"
+planner = "custom/spec.md"
+implementer = "custom/implementation.md"
+reviewer = "custom/review.md"
 qa = "custom/qa.md"
-completer = "custom/completer.md"
+completer = "custom/completion.md"
 ```
 
 ### Backend Selection Precedence
@@ -547,6 +547,7 @@ COMMANDS:
     tail                Stream loop artifacts / attach to tmux
     rollback            Rollback to a previous loop state
     config              Manage configuration (show/get/set/edit)
+    validate            Run conformance test suite against a ralph binary
 ```
 
 ### `ralph run`
@@ -676,6 +677,20 @@ OPTIONS:
     --dry-run         Preview without executing
 ```
 
+### `ralph validate`
+
+```
+ralph validate [OPTIONS]
+
+OPTIONS:
+    --bin <PATH>      Path to the ralph binary under test (required)
+    --filter <PATTERN> Only run tests matching pattern (e.g., "run::", "init::")
+    --list            List available tests without running them
+    --verbose         Show detailed output per test
+```
+
+Runs 40 black-box conformance tests against an arbitrary ralph binary. Tests cover init, project, run, and command behaviors. Used in `nix build` via `postCheck` to validate the built binary.
+
 ## Source Architecture
 
 ```
@@ -707,11 +722,12 @@ src/
 │   └── tmux_backend.rs         # TmuxBackend wrapper with RAII temp files
 ├── workflow/
 │   ├── mod.rs
-│   ├── orchestrator.rs         # Main 5-phase state machine loop,
+│   ├── orchestrator.rs         # Main 6-phase state machine loop (incl. QA),
 │   │                           #   parse retry, auto-rollback, auto-branch sync,
-│   │                           #   prompt change detection, tmux context
+│   │                           #   prompt change detection, tmux context,
+│   │                           #   QA feedback loop, acceptance gate
 │   └── parser.rs               # Agent output parsers (planner, implementer,
-│                               #   reviewer, completer), strip_frontmatter()
+│                               #   reviewer, qa, completer), strip_frontmatter()
 ├── workspace/
 │   ├── mod.rs                  # Workspace struct
 │   ├── index.rs                # WorkspaceIndex (projects list, active project)
@@ -743,11 +759,24 @@ src/
 │   ├── global.rs               # GlobalConfig, BackendConfig, BackendRoleModels,
 │   │                           #   WorkflowConfig, GitConfig, fill_from() defaults
 │   └── project.rs              # Per-project config (starting_backend, etc.)
+├── validate/
+│   ├── mod.rs                  # Conformance test suite module
+│   ├── harness.rs              # Test harness (workspace setup, binary invocation)
+│   ├── runner.rs               # Test runner and result reporting
+│   ├── assertions.rs           # Custom assertion helpers
+│   ├── mock_scripts.rs         # Mock backend scripts for testing
+│   ├── tests_init.rs           # Init command conformance tests
+│   ├── tests_project.rs        # Project command conformance tests
+│   ├── tests_run.rs            # Run command conformance tests
+│   └── tests_commands.rs       # Status/history/config/rollback conformance tests
 ├── git/
 │   ├── mod.rs                  # Git utility functions (run_git, ensure_git_repo, etc.)
 │   ├── branch.rs               # Branch create/checkout/exists, merge_base_branch()
 │   └── commit.rs               # commit_feature_loop(), changed_paths(),
-│                               #   read_porcelain_status()
+│                               #   read_porcelain_status(),
+│                               #   stage_implementation_changes(),
+│                               #   reset_and_clean_working_tree(),
+│                               #   working_tree_diff_excluding_orchestration_state()
 └── util/
     ├── mod.rs
     ├── hash.rs                 # sha256_hex()
@@ -807,18 +836,34 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 which = "7"
-
-[dev-dependencies]
 tempfile = "3"
 ```
 
 ## Build & Test
 
 ```bash
-nix build     # Builds + runs all tests in sandbox
+nix build     # Builds + runs all tests in sandbox (unit, integration, 40 conformance)
 ```
 
 The `postPatch` in `flake.nix` replaces `#!/usr/bin/env bash` with nix store bash path in all test files for sandbox compatibility. Tests that modify PATH use a `lock_path()` mutex to avoid race conditions.
+
+### Test Suite
+
+| Test file | Coverage |
+|-----------|----------|
+| `tests/orchestrator.rs` | End-to-end orchestration: feature loops, review cycles, QA phase, rollback, resume, completion |
+| `tests/backend.rs` | Backend spec parsing, role model injection, feature backend assignment |
+| `tests/state.rs` | State serialization, deserialization, backward compatibility, QA fields |
+| `tests/status_history.rs` | Status/history CLI output formatting including QA data |
+| `tests/templates.rs` | Template loading, variable substitution |
+| `tests/init_command.rs` | Workspace initialization, template creation |
+| `tests/tail_tmux.rs` | Tail command parsing, tmux attach behavior |
+| `tests/prd.rs` | PRD pipeline stages and gap analysis |
+| `tests/recovery.rs` | State corruption auto-recovery |
+| `tests/git.rs` | Git utility functions |
+| `tests/backend_tmux.rs` | Tmux backend wrapper |
+| `tests/validate_cli.rs` | Validate command argument parsing |
+| `src/validate/` (40 tests) | Black-box conformance: init, project, run, commands |
 
 ## License
 
