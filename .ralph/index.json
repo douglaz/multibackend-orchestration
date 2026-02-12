@@ -127,12 +127,12 @@
     {
       "id": "qa-validate",
       "name": "QA Conformance Tests",
-      "status": "in_progress",
+      "status": "completed",
       "created_at": "2026-02-12T00:36:31.580181123Z",
-      "completed_at": null,
-      "total_feature_loops": 2,
-      "total_completion_attempts": 0,
-      "last_loop_number": 3,
+      "completed_at": "2026-02-12T01:07:23.247114369Z",
+      "total_feature_loops": 3,
+      "total_completion_attempts": 1,
+      "last_loop_number": 4,
       "parent_project": null
     }
   ]
