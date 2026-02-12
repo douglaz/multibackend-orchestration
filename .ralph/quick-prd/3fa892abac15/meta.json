@@ -1,0 +1,19 @@
+{
+  "idea": "add exponential backoff retry logic to Backend::execute() with configurable max retries and base delay",
+  "idea_hash": "3fa892abac15",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-12T19:58:18Z",
+  "completed_at": "2026-02-12T20:13:05Z",
+  "revision_count": 2,
+  "approved": false,
+  "draft_time_secs": 216.591158061,
+  "review_times_secs": [
+    104.048326248,
+    177.617830114
+  ],
+  "revision_times_secs": [
+    183.59269762,
+    205.439822956
+  ]
+}

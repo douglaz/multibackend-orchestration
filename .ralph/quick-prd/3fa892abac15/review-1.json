@@ -1,0 +1,33 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Architecture / ownership",
+      "feedback": "The spec is internally inconsistent about where retries live. It says retries move into the backend layer and retry policy is stored on `CliBackend`/`TmuxBackend`, but `execute_with_retries(backend, policy)` still requires policy at call sites and works on `&dyn Backend` (which has no retry-policy accessor). Define one model clearly: internal retries per concrete backend, or an explicit wrapper backend inserted by the registry."
+    },
+    {
+      "area": "Retry semantics",
+      "feedback": "`max_retries` meaning is ambiguous (retries vs total attempts). The pseudocode uses `0..=max_retries` (total attempts = retries + 1), which changes behavior from current 3 total attempts to 4 if default stays 3. Acceptance criteria should state exact attempt semantics with an example."
+    },
+    {
+      "area": "Control-flow correctness",
+      "feedback": "The provided `execute_with_retries()` pseudocode does not actually return `BackendRetriesExhausted` on the last retryable failure; it returns the raw error in the `Err(e)` arm, making the final wrapped error path effectively unreachable. This needs correction in the design."
+    },
+    {
+      "area": "Mock behavior conflict",
+      "feedback": "AC #8 says `MockBackend` is unaffected (no retry wrapping), but the proposed helper wraps any `Backend` and the tests propose retry behavior using a mock backend. Clarify whether tests should use a dedicated retry-test backend, or whether mock should support retries."
+    },
+    {
+      "area": "Tmux feasibility",
+      "feedback": "Retrying `BackendCommandFailed` based on detail substrings like `429`/`503` is not feasible for current tmux execution path, which reports generic exit-code details and does not capture stderr text. The spec needs either tmux stderr capture changes or a scoped rule (e.g., command-failure retry classification only where detailed error text exists)."
+    },
+    {
+      "area": "Backoff robustness",
+      "feedback": "Backoff math (`base_delay.as_millis() * 2^attempt`) can overflow for high attempts/delays and loses precision. Add checked/saturating behavior and ideally a max-delay cap to keep runtime bounded."
+    },
+    {
+      "area": "Test completeness",
+      "feedback": "Testing plan misses deterministic jitter handling and boundary cases. Add a deterministic RNG/jitter injector (or no-jitter mode) for stable tests, plus tests for final wrapped exhaustion error, case-insensitive indicator matching, and large-attempt/overflow behavior."
+    }
+  ]
+}

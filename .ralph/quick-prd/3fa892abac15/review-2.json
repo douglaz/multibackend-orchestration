@@ -1,0 +1,29 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Technical feasibility (retry classification)",
+      "feedback": "AC #2 says `BackendCommandFailed` retries are CliBackend-only, but `is_retryable(err)` only inspects `details` text. In current code, tmux command-failure diagnostics include `\"disappeared or timed out\"` (`src/backend/tmux_backend.rs:239`), which would match the `\"timed out\"` indicator and be retried incorrectly. Also, `TmuxBackend::name()` returns the inner backend name, so backend name cannot distinguish tmux vs CLI transport."
+    },
+    {
+      "area": "Acceptance criteria consistency",
+      "feedback": "AC #8 says `execute_with_retries()` accepts a `JitterStrategy` parameter, but the proposed API puts jitter on `RetryPolicy` and the function signature has no jitter parameter. Pick one contract and align AC + implementation."
+    },
+    {
+      "area": "Edge-case correctness",
+      "feedback": "`total_attempts = policy.max_retries + 1` can overflow when `max_retries == u32::MAX`. Also `as_millis() as u64` can truncate/wrap for very large durations. Add explicit bounds/validation (or saturating arithmetic on `u128`) so the retry loop and delay math stay safe for all inputs."
+    },
+    {
+      "area": "Completeness of rollout scope",
+      "feedback": "Spec text says `Backend::execute()` calls are wrapped, but changes only target orchestrator parse flow. Other paths still call `backend.execute()` directly (`src/prd/pipeline.rs:194`, `src/prd/gaps.rs:127`, `src/prd/quick.rs:196`/`338`/`394`). Either include these callers or explicitly scope the feature to orchestrator-only retries."
+    },
+    {
+      "area": "Configurability requirement",
+      "feedback": "Feature idea asks for configurable max retries/base delay, but orchestrator call sites hardcode `RetryPolicy::default()`. This is only code-level configurability, not runtime/user configurability. Clarify intended config surface (CLI/env/config file) or mark runtime config explicitly out-of-scope in acceptance criteria."
+    },
+    {
+      "area": "Testing coverage gaps",
+      "feedback": "Test plan misses a key regression: tmux `BackendCommandFailed` containing `\"timed out\"` should not be retried if AC #2 is enforced. It also lacks an orchestrator-level test proving old timeout wrapper removal does not change total attempt behavior unexpectedly in parse+retry flows. Add those, and make retry tests avoid real sleeps (paused Tokio clock or zero base delay) to keep suite fast/stable."
+    }
+  ]
+}
