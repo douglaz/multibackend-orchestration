@@ -87,6 +87,11 @@ fn setup_workspace_with_project(
         default_completer_template(),
     )
     .expect("write completion template");
+    fs::write(
+        workspace_root.join("templates/qa.md"),
+        default_qa_template(),
+    )
+    .expect("write qa template");
 
     let mut env = BTreeMap::new();
     env.insert("PLANNER_MODE".to_owned(), planner_mode.to_owned());
@@ -222,6 +227,16 @@ The project satisfies all requirements:
 - Demo requirement: satisfied by Demo Feature
 EOF
   fi
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -581,6 +596,16 @@ The project satisfies all requirements:
 - API Layer: satisfied
 EOF
 
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "claude: unrecognized prompt" >&2
   exit 1
@@ -686,6 +711,16 @@ The project satisfies all requirements:
 - API Layer: satisfied
 EOF
 
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "codex: unrecognized prompt" >&2
   exit 1
@@ -751,6 +786,11 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
         default_completer_template(),
     )
     .expect("write completion template");
+    fs::write(
+        workspace_root.join("templates/qa.md"),
+        default_qa_template(),
+    )
+    .expect("write qa template");
 
     // Counter directory – lives inside the temp dir so scripts can track calls
     let counter_dir = repo_root.join("counters");
@@ -1011,6 +1051,16 @@ elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match sp
    - Expected: strict
    - Reference: spec
 EOF
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -1064,6 +1114,11 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
         default_completer_template(),
     )
     .expect("write completion template");
+    fs::write(
+        workspace_root.join("templates/qa.md"),
+        default_qa_template(),
+    )
+    .expect("write qa template");
 
     let mut env = BTreeMap::new();
     env.insert("PLANNER_MODE".to_owned(), "feature".to_owned());
@@ -1235,6 +1290,16 @@ elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
 The project satisfies all requirements:
 - Demo requirement satisfied
 EOF
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "claude: unrecognized prompt" >&2
   exit 1
@@ -1339,6 +1404,16 @@ elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
 The project satisfies all requirements:
 - Demo requirement satisfied
 EOF
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified.
+EOF
 else
   echo "codex: unrecognized prompt" >&2
   exit 1
@@ -1397,6 +1472,11 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
         default_completer_template(),
     )
     .expect("write completion template");
+    fs::write(
+        workspace_root.join("templates/qa.md"),
+        default_qa_template(),
+    )
+    .expect("write qa template");
 
     let counter_dir = repo_root.join("counters");
     fs::create_dir_all(&counter_dir).expect("create counter dir");

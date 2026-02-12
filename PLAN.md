@@ -464,7 +464,7 @@ auto_commit = true
 commit_message_style = "conventional"   # conventional | descriptive | minimal
 commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"          # continue | restart-loop | abort
-qa_enabled = false                      # Enable QA phase between implementing and reviewing
+qa_enabled = true                       # Enable QA phase between implementing and reviewing
 max_qa_iterations = 3                   # Maximum QA retry attempts before rollback
 # qa_backend = "claude(opus)"           # Override QA backend (default: planner-aligned)
 # Per-role backend overrides (optional):

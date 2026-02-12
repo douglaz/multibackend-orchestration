@@ -109,7 +109,7 @@ pub struct WorkflowConfig {
     pub qa_backend: Option<String>,
     #[serde(default)]
     pub completer_backend: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_qa_enabled")]
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
     pub max_qa_iterations: u32,
@@ -205,7 +205,7 @@ impl Default for GlobalConfig {
                 reviewer_backend: None,
                 qa_backend: None,
                 completer_backend: None,
-                qa_enabled: false,
+                qa_enabled: true,
                 max_qa_iterations: default_max_qa_iterations(),
             },
             templates: TemplateConfig {
@@ -231,6 +231,10 @@ fn default_tmux_session() -> String {
 
 fn default_tmux_window_keep_seconds() -> u64 {
     5
+}
+
+fn default_qa_enabled() -> bool {
+    true
 }
 
 fn default_max_qa_iterations() -> u32 {
@@ -284,7 +288,7 @@ mod tests {
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
-        assert!(!config.workflow.qa_enabled);
+        assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert_eq!(
             config.backends.claude.models.qa.as_deref(),
@@ -361,7 +365,7 @@ base_branch = "master"
         assert!(config.backends.codex.models.qa.is_none());
         assert!(config.backends.codex.models.completer.is_none());
         assert!(config.backends.codex.models.reformatter.is_none());
-        assert!(!config.workflow.qa_enabled);
+        assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.qa_backend.is_none());
         assert_eq!(config.templates.qa, "templates/qa.md");

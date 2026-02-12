@@ -56,6 +56,9 @@ fn disabled_skips_phase(h: &RalphHarness) -> TestResult {
         let project_id = "qa-disabled";
         setup_with_mock_script(h, project_id, "qa-pass.sh", &qa_pass_mock_script());
 
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("config set qa_enabled failed");
+
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
@@ -231,8 +234,8 @@ fn config_get_set(h: &RalphHarness) -> TestResult {
             .expect("config get workflow.qa_enabled failed");
         assert_eq!(
             qa_enabled_default.trim(),
-            "false",
-            "expected workflow.qa_enabled default to be false"
+            "true",
+            "expected workflow.qa_enabled default to be true"
         );
 
         let max_qa_iterations_default = h
