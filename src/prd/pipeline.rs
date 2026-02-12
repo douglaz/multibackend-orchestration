@@ -13,8 +13,7 @@ use crate::Result;
 use super::answers::AnswerStore;
 use super::cache::CacheManager;
 use super::gaps::{
-    gap_report_has_questions, run_llm_gap_analysis, run_llm_validation, GapReport, Question,
-    QuestionKind, ValidationIssue,
+    gap_report_has_questions, run_llm_gap_analysis, run_llm_validation, Question, ValidationIssue,
 };
 use super::interaction::{InteractionContext, UserInteraction};
 use super::stages::{check_stage_output, StagePromptBuilder};
@@ -240,17 +239,38 @@ impl PrdPipeline {
         if gap_report_has_questions(&gap_report) {
             let max_rounds_reached = self.context.question_rounds >= self.options.ask_max;
             if !self.interaction.is_interactive() || max_rounds_reached {
-                let reason = if !self.interaction.is_interactive() {
-                    "Pipeline is running in non-interactive mode.".to_owned()
-                } else {
-                    format!(
-                        "Maximum question rounds reached ({}/{}).",
-                        self.context.question_rounds, self.options.ask_max
-                    )
-                };
-                let report = format_gap_missing_info_report(stage, &gap_report, &reason);
-                self.cache.write_missing_info_report(&report)?;
-                return Err(RalphError::PrdMissingInfo);
+                // Auto-apply suggested defaults instead of aborting.
+                let mut auto_answers = BTreeMap::new();
+
+                // Source 1: suggested_default on each Question
+                for question in &gap_report.questions {
+                    if let Some(default) = &question.suggested_default {
+                        auto_answers.insert(question.key.clone(), default.clone());
+                    }
+                }
+
+                // Source 2: gap_report.suggested_defaults (keyed by .key → .value)
+                for sd in &gap_report.suggested_defaults {
+                    auto_answers.entry(sd.key.clone()).or_insert_with(|| sd.value.clone());
+                }
+
+                if !auto_answers.is_empty() {
+                    let keys: Vec<&str> = auto_answers.keys().map(|k| k.as_str()).collect();
+                    self.interaction.status(&format!(
+                        "Auto-applying {} suggested default(s): {}",
+                        auto_answers.len(),
+                        keys.join(", ")
+                    ));
+                }
+
+                self.answer_store.merge(auto_answers);
+                self.answer_store.save()?;
+                self.context.answers = self.answer_store.answers().clone();
+                self.context.answers_hash = self.answer_store.hash()?;
+
+                let rerun_stage = min_question_impact_stage(&gap_report.questions)
+                    .unwrap_or(stage);
+                return Ok(PrdPhase::MaybeRerun(rerun_stage));
             }
 
             self.pending_gap_stage = Some(stage);
@@ -410,77 +430,6 @@ fn format_deterministic_missing_info_report(stage: Stage, missing_sections: &[St
     report.push_str("\n## Next Step\n");
     report.push_str("Regenerate the stage output with all required headings.\n");
     report
-}
-
-fn format_gap_missing_info_report(stage: Stage, report: &GapReport, reason: &str) -> String {
-    let mut markdown = String::from("# Missing Information Report\n\n");
-    markdown.push_str(&format!("## Stage\n`{stage:?}`\n\n"));
-    markdown.push_str(&format!("## Pipeline Stopped\n{reason}\n\n"));
-
-    markdown.push_str("## Questions\n");
-    if report.questions.is_empty() {
-        markdown.push_str("- None\n");
-    } else {
-        for question in &report.questions {
-            markdown.push_str(&format!(
-                "- **{}** (`{:?}`): {}\n",
-                question.key, question.impact_stage, question.prompt
-            ));
-            markdown.push_str(&format!(
-                "  Type: {}\n",
-                format_question_kind(&question.kind)
-            ));
-            if let Some(default) = &question.suggested_default {
-                markdown.push_str(&format!("  Suggested default: {default}\n"));
-            }
-        }
-    }
-    markdown.push('\n');
-
-    markdown.push_str("## Missing Fields\n");
-    if report.missing_fields.is_empty() {
-        markdown.push_str("- None\n");
-    } else {
-        for field in &report.missing_fields {
-            markdown.push_str(&format!("- **{}**: {}\n", field.field, field.description));
-        }
-    }
-    markdown.push('\n');
-
-    markdown.push_str("## Ambiguities\n");
-    if report.ambiguities.is_empty() {
-        markdown.push_str("- None\n");
-    } else {
-        for ambiguity in &report.ambiguities {
-            markdown.push_str(&format!(
-                "- **{}**: {}\n",
-                ambiguity.area, ambiguity.description
-            ));
-        }
-    }
-    markdown.push('\n');
-
-    markdown.push_str("## Suggested Defaults\n");
-    if report.suggested_defaults.is_empty() {
-        markdown.push_str("- None\n");
-    } else {
-        for default in &report.suggested_defaults {
-            markdown.push_str(&format!(
-                "- **{}** = `{}` ({})\n",
-                default.key, default.value, default.rationale
-            ));
-        }
-    }
-
-    markdown
-}
-
-fn format_question_kind(kind: &QuestionKind) -> String {
-    match kind {
-        QuestionKind::FreeText => "FreeText".to_owned(),
-        QuestionKind::Choice(options) => format!("Choice [{}]", options.join(", ")),
-        QuestionKind::YesNo => "YesNo".to_owned(),
-    }
 }
 
 fn format_validation_failure_report(issues: &[ValidationIssue]) -> String {

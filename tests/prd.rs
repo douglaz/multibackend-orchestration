@@ -193,6 +193,40 @@ fn gap_report_with_question(key: &str, prompt: &str, impact_stage: Stage) -> Str
     )
 }
 
+fn gap_report_with_defaults(
+    key: &str,
+    prompt: &str,
+    suggested_default: &str,
+    impact_stage: Stage,
+) -> String {
+    format!(
+        r#"
+```json
+{{
+  "missing_fields": [],
+  "ambiguities": [],
+  "questions": [
+    {{
+      "key": "{key}",
+      "prompt": "{prompt}",
+      "kind": "FreeText",
+      "suggested_default": "{suggested_default}",
+      "impact_stage": "{impact_stage:?}"
+    }}
+  ],
+  "suggested_defaults": [
+    {{
+      "key": "extra_default",
+      "value": "auto_value",
+      "rationale": "reasonable default"
+    }}
+  ]
+}}
+```
+"#
+    )
+}
+
 fn invalid_gap_response(body: &str) -> String {
     format!("not parseable as fenced json: {body}")
 }
@@ -304,13 +338,16 @@ async fn llm_gap_detected_questions_answered_reruns_from_correct_stage_then_succ
 }
 
 #[tokio::test]
-async fn max_question_rounds_exceeded_returns_prd_missing_info_exit_12() {
+async fn max_question_rounds_exceeded_auto_applies_defaults_and_continues() {
     let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
     let idea = "ask max exceeded";
-    let cache = CacheManager::new(temp.path(), idea).expect("cache manager");
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
     let answers_path = cache.cache_dir().join("answers.yaml");
     let answer_store = AnswerStore::new(&answers_path);
 
+    // Flow: ideation → gap (ask user) → rerun ideation → gap (max reached, auto-apply)
+    //       → rerun ideation → clean gap → research → ... → PRD → validate
     let backend = Arc::new(MockBackend::new(
         "mock",
         vec![
@@ -320,12 +357,23 @@ async fn max_question_rounds_exceeded_returns_prd_missing_info_exit_12() {
                 "Who exactly are the primary users?",
                 Stage::Ideation,
             ),
-            make_ideation_output("rerun"),
+            // After user answers round 1, rerun ideation
+            make_ideation_output("rerun1"),
             gap_report_with_question(
                 "target_users",
                 "Who exactly are the primary users?",
                 Stage::Ideation,
             ),
+            // Max rounds reached → auto-apply (no defaults) → rerun ideation
+            make_ideation_output("rerun2"),
+            empty_gap_report(),
+            make_research_output("rerun2"),
+            empty_gap_report(),
+            make_synthesis_output("rerun2"),
+            empty_gap_report(),
+            make_prd_output("rerun2"),
+            empty_gap_report(),
+            validation_pass(),
         ],
     ));
 
@@ -345,27 +393,27 @@ async fn max_question_rounds_exceeded_returns_prd_missing_info_exit_12() {
     )
     .expect("pipeline creation");
 
-    let err = pipeline.run().await.expect_err("should fail");
-    assert!(matches!(err, RalphError::PrdMissingInfo));
-    assert_eq!(err.exit_code(), 12);
-    assert_eq!(backend.call_count().await, 4);
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
 
-    let report = std::fs::read_to_string(cache.cache_dir().join("missing_info_report.md"))
-        .expect("read report");
-    assert!(report.contains("Maximum question rounds reached"));
-    assert!(report.contains("Who exactly are the primary users?"));
-    assert!(report.contains("Missing Fields"));
-    assert!(report.contains("Ambiguities"));
+    // 4 calls for initial + gap + rerun + gap, then 9 for final full run
+    assert_eq!(backend.call_count().await, 13);
+    assert_eq!(result.meta.question_rounds, 1);
+    assert!(workspace_root.join("PRD.md").exists());
 }
 
 #[tokio::test]
-async fn non_interactive_mode_with_llm_gaps_returns_prd_missing_info_exit_12() {
+async fn non_interactive_mode_with_llm_gaps_auto_applies_defaults_and_continues() {
     let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
     let idea = "non-interactive llm gap";
-    let cache = CacheManager::new(temp.path(), idea).expect("cache manager");
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
     let answers_path = cache.cache_dir().join("answers.yaml");
     let answer_store = AnswerStore::new(&answers_path);
 
+    // After the gap report, the pipeline auto-applies defaults and reruns from
+    // the impact stage (Ideation). We need mock responses for the full rerun.
     let backend = Arc::new(MockBackend::new(
         "mock",
         vec![
@@ -375,6 +423,16 @@ async fn non_interactive_mode_with_llm_gaps_returns_prd_missing_info_exit_12() {
                 "What is the expected launch timeline?",
                 Stage::Ideation,
             ),
+            // Rerun from Ideation after auto-apply (no defaults to apply, best-effort)
+            make_ideation_output("rerun"),
+            empty_gap_report(),
+            make_research_output("rerun"),
+            empty_gap_report(),
+            make_synthesis_output("rerun"),
+            empty_gap_report(),
+            make_prd_output("rerun"),
+            empty_gap_report(),
+            validation_pass(),
         ],
     ));
 
@@ -389,15 +447,75 @@ async fn non_interactive_mode_with_llm_gaps_returns_prd_missing_info_exit_12() {
     )
     .expect("pipeline creation");
 
-    let err = pipeline.run().await.expect_err("should fail");
-    assert!(matches!(err, RalphError::PrdMissingInfo));
-    assert_eq!(err.exit_code(), 12);
-    assert_eq!(backend.call_count().await, 2);
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
 
-    let report = std::fs::read_to_string(cache.cache_dir().join("missing_info_report.md"))
-        .expect("read report");
-    assert!(report.contains("non-interactive mode"));
-    assert!(report.contains("What is the expected launch timeline?"));
+    // 2 calls for initial ideation + gap, then 9 for full rerun
+    assert_eq!(backend.call_count().await, 11);
+    assert_eq!(result.meta.question_rounds, 0);
+    assert!(workspace_root.join("PRD.md").exists());
+}
+
+#[tokio::test]
+async fn non_interactive_auto_applies_suggested_defaults_into_answers() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "non-interactive with defaults";
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("initial"),
+            gap_report_with_defaults(
+                "timeline",
+                "What is the expected launch timeline?",
+                "Q3 2026",
+                Stage::Ideation,
+            ),
+            // Rerun from Ideation after auto-applying defaults
+            make_ideation_output("rerun"),
+            empty_gap_report(),
+            make_research_output("rerun"),
+            empty_gap_report(),
+            make_synthesis_output("rerun"),
+            empty_gap_report(),
+            make_prd_output("rerun"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction = Box::new(NonInteractiveInteraction::new());
+
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 11);
+    assert!(workspace_root.join("PRD.md").exists());
+
+    // Verify that suggested defaults were persisted in the answers file
+    let answers_content = std::fs::read_to_string(&answers_path).expect("read answers");
+    assert!(answers_content.contains("timeline"));
+    assert!(answers_content.contains("Q3 2026"));
+    assert!(answers_content.contains("extra_default"));
+    assert!(answers_content.contains("auto_value"));
+
+    // Ideation was rerun (rerun stage tracked)
+    assert_eq!(result.meta.rerun_stages, vec![Stage::Ideation]);
 }
 
 #[tokio::test]
