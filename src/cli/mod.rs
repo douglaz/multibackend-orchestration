@@ -1,3 +1,4 @@
+mod auto;
 pub(crate) mod backend_spec;
 mod config;
 pub mod history;
@@ -33,6 +34,7 @@ pub enum Commands {
     Run(RunArgs),
     Prd(prd::PrdArgs),
     QuickPrd(quick_prd::QuickPrdArgs),
+    Auto(auto::AutoArgs),
     Validate(validate::ValidateArgs),
     Status(StatusArgs),
     History(HistoryArgs),
@@ -263,6 +265,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Run(args) => run::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
         Commands::QuickPrd(args) => quick_prd::execute(args).await,
+        Commands::Auto(args) => auto::execute(args).await,
         Commands::Validate(args) => validate::execute(args),
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),

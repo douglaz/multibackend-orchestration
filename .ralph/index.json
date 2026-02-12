@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "quick-prd",
+  "active_project": "auto-cmd",
   "projects": [
     {
       "id": "tmux-backend",
@@ -166,6 +166,17 @@
       "total_feature_loops": 3,
       "total_completion_attempts": 1,
       "last_loop_number": 5,
+      "parent_project": null
+    },
+    {
+      "id": "auto-cmd",
+      "name": "Add auto command",
+      "status": "in_progress",
+      "created_at": "2026-02-12T21:32:32.374535876Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
       "parent_project": null
     }
   ]
