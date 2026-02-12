@@ -19,6 +19,8 @@ use super::interaction::{InteractionContext, UserInteraction};
 use super::stages::{check_stage_output, StagePromptBuilder};
 use super::state::{PipelineContext, PrdMeta, PrdPhase, Stage};
 
+const MAX_SECTION_RETRIES: u8 = 2;
+
 /// Options for PRD pipeline execution.
 #[derive(Debug, Clone)]
 pub struct PrdOptions {
@@ -60,6 +62,7 @@ pub struct PrdPipeline {
     pending_answers: Option<BTreeMap<String, String>>,
     pending_gap_stage: Option<Stage>,
     skipped_stages: std::collections::BTreeSet<Stage>,
+    stage_section_retries: BTreeMap<Stage, u8>,
 }
 
 impl PrdPipeline {
@@ -103,6 +106,7 @@ impl PrdPipeline {
             pending_answers: None,
             pending_gap_stage: None,
             skipped_stages: BTreeSet::new(),
+            stage_section_retries: BTreeMap::new(),
         })
     }
 
@@ -229,9 +233,28 @@ impl PrdPipeline {
 
         let check = check_stage_output(stage, &stage_output);
         if !check.missing_sections.is_empty() {
-            let report = format_deterministic_missing_info_report(stage, &check.missing_sections);
-            self.cache.write_missing_info_report(&report)?;
-            return Err(RalphError::PrdMissingInfo);
+            let retries = self.stage_section_retries.entry(stage).or_insert(0);
+            if *retries < MAX_SECTION_RETRIES {
+                *retries += 1;
+                self.interaction.status(&format!(
+                    "{:?} stage output missing {} required section(s) (retry {}/{})",
+                    stage,
+                    check.missing_sections.len(),
+                    *retries,
+                    MAX_SECTION_RETRIES
+                ));
+                self.context.stage_outputs.remove(&stage);
+                self.context.stage_input_hashes.remove(&stage);
+                self.skipped_stages.remove(&stage);
+                return Ok(PrdPhase::RunStage(stage));
+            }
+
+            self.interaction.status(&format!(
+                "WARNING: {:?} stage output still missing {} required section(s) after {} retries; continuing best-effort",
+                stage,
+                check.missing_sections.len(),
+                MAX_SECTION_RETRIES
+            ));
         }
 
         let gap_report =
@@ -270,6 +293,12 @@ impl PrdPipeline {
 
                 let rerun_stage = min_question_impact_stage(&gap_report.questions)
                     .unwrap_or(stage);
+                if rerun_stage > stage {
+                    return Ok(match next_stage(stage) {
+                        Some(next) => PrdPhase::RunStage(next),
+                        None => PrdPhase::ValidatePrd,
+                    });
+                }
                 return Ok(PrdPhase::MaybeRerun(rerun_stage));
             }
 
@@ -340,7 +369,7 @@ impl PrdPipeline {
 
         self.pending_questions.clear();
 
-        Ok(PrdPhase::MaybeRerun(rerun_stage))
+        Ok(PrdPhase::MaybeRerun(rerun_stage.min(fallback_stage)))
     }
 
     fn maybe_rerun_phase(&mut self, rerun_stage: Stage) -> PrdPhase {
@@ -418,18 +447,6 @@ fn next_stage(stage: Stage) -> Option<Stage> {
 
 fn min_question_impact_stage(questions: &[Question]) -> Option<Stage> {
     questions.iter().map(|question| question.impact_stage).min()
-}
-
-fn format_deterministic_missing_info_report(stage: Stage, missing_sections: &[String]) -> String {
-    let mut report = String::from("# Missing Information Report\n\n");
-    report.push_str(&format!("## Stage\n`{stage:?}`\n\n"));
-    report.push_str("## Missing Required Sections\n");
-    for section in missing_sections {
-        report.push_str(&format!("- {section}\n"));
-    }
-    report.push_str("\n## Next Step\n");
-    report.push_str("Regenerate the stage output with all required headings.\n");
-    report
 }
 
 fn format_validation_failure_report(issues: &[ValidationIssue]) -> String {

@@ -231,6 +231,10 @@ fn invalid_gap_response(body: &str) -> String {
     format!("not parseable as fenced json: {body}")
 }
 
+fn malformed_stage_output(label: &str) -> String {
+    format!("Malformed stage output ({label}) with no required markdown headings.")
+}
+
 fn base_options(idea: &str, ask_max: u32) -> PrdOptions {
     PrdOptions {
         idea: idea.to_string(),
@@ -516,6 +520,208 @@ async fn non_interactive_auto_applies_suggested_defaults_into_answers() {
 
     // Ideation was rerun (rerun stage tracked)
     assert_eq!(result.meta.rerun_stages, vec![Stage::Ideation]);
+}
+
+#[tokio::test]
+async fn forward_impact_stage_advances_without_skipping_stages() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "forward impact stage";
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("initial"),
+            empty_gap_report(),
+            make_research_output("initial"),
+            gap_report_with_question(
+                "launch_scope",
+                "Which scope should the launch prioritize?",
+                Stage::Prd,
+            ),
+            make_synthesis_output("continued"),
+            empty_gap_report(),
+            make_prd_output("continued"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction = Box::new(NonInteractiveInteraction::new());
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 0),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 9);
+    assert!(result.meta.rerun_stages.is_empty());
+    let synthesis = cache
+        .read_stage_output(Stage::Synthesis)
+        .expect("read synthesis")
+        .expect("missing synthesis");
+    assert!(synthesis.contains("continued product vision"));
+}
+
+#[tokio::test]
+async fn apply_answers_caps_rerun_to_current_stage() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "apply answers rerun cap";
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            make_ideation_output("initial"),
+            empty_gap_report(),
+            make_research_output("initial"),
+            gap_report_with_question(
+                "platform_focus",
+                "Which platform should be prioritized first?",
+                Stage::Prd,
+            ),
+            make_research_output("rerun"),
+            empty_gap_report(),
+            make_synthesis_output("rerun"),
+            empty_gap_report(),
+            make_prd_output("rerun"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let mut answers = BTreeMap::new();
+    answers.insert("platform_focus".to_string(), "web".to_string());
+    let interaction = Box::new(MockInteraction::new(vec![Some(answers)]));
+
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        interaction,
+        cache.clone(),
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    let result = pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 11);
+    assert_eq!(result.meta.rerun_stages, vec![Stage::Research]);
+    let synthesis = cache
+        .read_stage_output(Stage::Synthesis)
+        .expect("read synthesis")
+        .expect("missing synthesis");
+    assert!(synthesis.contains("rerun product vision"));
+}
+
+#[tokio::test]
+async fn missing_sections_retried_then_succeeds() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "missing sections retried";
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            malformed_stage_output("ideation attempt 1"),
+            make_ideation_output("ideation attempt 2"),
+            empty_gap_report(),
+            make_research_output("steady"),
+            empty_gap_report(),
+            make_synthesis_output("steady"),
+            empty_gap_report(),
+            make_prd_output("steady"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction = MockInteraction::new(vec![]);
+    let interaction_handle = interaction.clone();
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        Box::new(interaction),
+        cache,
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 10);
+    assert!(interaction_handle
+        .status_messages()
+        .iter()
+        .any(|msg| msg.contains("retry 1/2")));
+}
+
+#[tokio::test]
+async fn missing_sections_retry_exhaustion_continues_best_effort() {
+    let temp = TempDir::new().expect("temp dir");
+    let workspace_root = temp.path();
+    let idea = "missing sections retry exhaustion";
+    let cache = CacheManager::new(workspace_root, idea).expect("cache manager");
+    let answers_path = cache.cache_dir().join("answers.yaml");
+    let answer_store = AnswerStore::new(&answers_path);
+
+    let backend = Arc::new(MockBackend::new(
+        "mock",
+        vec![
+            malformed_stage_output("ideation attempt 1"),
+            malformed_stage_output("ideation attempt 2"),
+            malformed_stage_output("ideation attempt 3"),
+            empty_gap_report(),
+            make_research_output("steady"),
+            empty_gap_report(),
+            make_synthesis_output("steady"),
+            empty_gap_report(),
+            make_prd_output("steady"),
+            empty_gap_report(),
+            validation_pass(),
+        ],
+    ));
+
+    let interaction = MockInteraction::new(vec![]);
+    let interaction_handle = interaction.clone();
+    let pipeline = PrdPipeline::new(
+        backend.clone(),
+        Box::new(interaction),
+        cache,
+        answer_store,
+        base_options(idea, 3),
+    )
+    .expect("pipeline creation");
+
+    let _cwd_guard = acquire_cwd_lock();
+    let _cwd = CwdGuard::enter(workspace_root);
+    pipeline.run().await.expect("pipeline run");
+
+    assert_eq!(backend.call_count().await, 11);
+    assert!(interaction_handle
+        .status_messages()
+        .iter()
+        .any(|msg| msg.contains("continuing best-effort")));
 }
 
 #[tokio::test]

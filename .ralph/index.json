@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "qa-validate",
+  "active_project": "fix-stage-skip",
   "projects": [
     {
       "id": "tmux-backend",
@@ -133,6 +133,17 @@
       "total_feature_loops": 3,
       "total_completion_attempts": 1,
       "last_loop_number": 4,
+      "parent_project": null
+    },
+    {
+      "id": "fix-stage-skip",
+      "name": "Fix stage-skip bug and section-check retry",
+      "status": "in_progress",
+      "created_at": "2026-02-12T04:54:52.327338445Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
       "parent_project": null
     }
   ]
