@@ -419,6 +419,13 @@ mod tests {
     }
 
     #[test]
+    fn test_dry_run_renders_prompt() {
+        let idea = "add retry logic to backend execute()";
+        let rendered = render_prompt(DRAFT_PROMPT, &[("{{idea}}", idea)]);
+        assert!(rendered.contains(idea));
+    }
+
+    #[test]
     fn test_check_spec_sections_all_present() {
         let (cleaned, missing) = check_spec_sections(valid_spec());
         assert_eq!(cleaned, valid_spec());

@@ -447,6 +447,17 @@ mod tests {
     }
 
     #[test]
+    fn test_quick_prd_dry_run_skips_backends() {
+        let cli = Cli::parse_from(["ralph", "quick-prd", "--idea", "test", "--dry-run"]);
+        let Commands::QuickPrd(args) = cli.command else {
+            panic!("expected quick-prd command");
+        };
+
+        assert_eq!(args.idea, "test");
+        assert!(args.dry_run);
+    }
+
+    #[test]
     fn parses_validate_command_with_expected_arguments() {
         let cli = Cli::parse_from([
             "ralph",

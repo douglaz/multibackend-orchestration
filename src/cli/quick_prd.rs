@@ -6,7 +6,7 @@ use super::parse_positive_u32;
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
 use crate::error::RalphError;
-use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
+use crate::prd::quick::{render_prompt, QuickPrdOptions, QuickPrdPipeline, DRAFT_PROMPT};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -34,6 +34,12 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
         return Err(RalphError::Validation(
             "--idea must not be empty".to_owned(),
         ));
+    }
+
+    if args.dry_run {
+        let prompt = render_prompt(DRAFT_PROMPT, &[("{{idea}}", &idea)]);
+        println!("{prompt}");
+        return Ok(());
     }
 
     let workspace = Workspace::discover()?;
@@ -71,20 +77,22 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
     let non_interactive =
         args.non_interactive || (!std::io::stdin().is_terminal() && !args.interactive);
 
-    println!("Starting quick PRD pipeline...");
-    println!("  idea: {idea}");
-    println!("  writer backend: {writer_spec}");
-    println!("  reviewer backend: {reviewer_spec}");
-    println!(
-        "  mode: {}",
-        if non_interactive {
-            "non-interactive"
-        } else {
-            "interactive"
-        }
-    );
-    println!("  max revisions: {}", args.max_revisions);
-    println!();
+    if !non_interactive {
+        println!("Starting quick PRD pipeline...");
+        println!("  idea: {idea}");
+        println!("  writer backend: {writer_spec}");
+        println!("  reviewer backend: {reviewer_spec}");
+        println!(
+            "  mode: {}",
+            if non_interactive {
+                "non-interactive"
+            } else {
+                "interactive"
+            }
+        );
+        println!("  max revisions: {}", args.max_revisions);
+        println!();
+    }
 
     let options = QuickPrdOptions {
         idea,
@@ -97,15 +105,20 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
     let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
     let result = pipeline.run().await?;
 
-    println!("Quick PRD pipeline completed!");
-    println!("  Spec written to: {}", result.spec_path.display());
-    println!("  Cache directory: {}", result.cache_dir.display());
-    println!("  Revisions used: {}", result.revision_count);
-    if !result.approved {
-        println!("  warning: reviewer did not approve before max revisions were exhausted");
+    if !non_interactive {
+        println!("Quick PRD pipeline completed!");
+        println!("  Spec written to: {}", result.spec_path.display());
+        println!("  Cache directory: {}", result.cache_dir.display());
+        println!("  Revisions used: {}", result.revision_count);
+        println!("  {}", result.summary);
+        println!();
+    } else {
+        println!("{}", result.spec_path.display());
     }
-    println!("  {}", result.summary);
-    println!();
+
+    if !result.approved {
+        eprintln!("warning: reviewer did not approve before max revisions were exhausted");
+    }
 
     Ok(())
 }
