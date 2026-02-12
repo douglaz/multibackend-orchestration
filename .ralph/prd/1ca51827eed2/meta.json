@@ -1,0 +1,18 @@
+{
+  "idea": "a CLI tool that converts CSV files to JSON",
+  "idea_hash": "1ca51827eed2",
+  "backend": "claude",
+  "started_at": "2026-02-12T12:39:52Z",
+  "completed_at": "2026-02-12T13:03:51Z",
+  "stage_timings": {
+    "Ideation": 49.112890419,
+    "Research": 381.028941111,
+    "Synthesis": 146.57609608,
+    "Prd": 260.87929799
+  },
+  "question_rounds": 0,
+  "rerun_stages": [
+    "Ideation",
+    "Prd"
+  ]
+}

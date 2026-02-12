@@ -1,0 +1,58 @@
+bom_handling: Yes
+boolean_inference: 'Strict: true/false only'
+boolean_inference_scope: 'Strict: true/false only'
+completions_flag_canonical: --completions <SHELL>
+custom_delimiter: Support custom delimiters via --delimiter flag
+delimiter_tab_syntax: Both literal and \t escape sequence (tool interprets backslash escapes)
+disable_type_inference: Yes
+embedded_json_handling: Keep as string (safe default)
+empty_csv_output: 'Empty JSON array: []'
+exit_code_for_schema: Add exit code 4 for schema errors
+exit_code_schema: '4'
+exit_code_strategy: Distinct exit codes per error category
+header_trimming: Yes
+impl_language: Rust
+json_schema_draft: 2020-12
+key_by_duplicates: Warn to stderr, last value wins
+key_ordering: Yes
+large_number_precision: Preserve as string to avoid precision loss
+leading_zeros: Preserve as strings
+license: MIT OR Apache-2.0
+msrv: Current stable minus 2 (N-2 policy)
+multiple_file_input: Single file only per invocation
+nan_infinity_handling: Keep as strings (never convert to numbers)
+negative_zero: Treat as number 0 (JSON number -0 normalizes to 0 in most parsers)
+no_header_mode: --no-header flag with auto-generated keys (field_0, field_1, ...)
+no_inference_empty_cells: null (empty cells are always null regardless of inference)
+non_utf8_encoding: UTF-8 only in v0.1, encoding support in a future version
+null_case_sensitivity: 'Case-insensitive: any casing of ''null'''
+null_inference: Empty string and literal null/NULL map to JSON null
+null_representation: Empty string + null/NULL
+numeric_leading_zeros: Preserve as strings (safe default)
+on_error_default: fail (exit on first error)
+on_error_flag_v01: Omit until v0.3
+output_file_flag: Support -o/--output flag
+output_file_overwrite: Yes
+per_cell_vs_per_column_inference: per-cell (each value independently)
+plus_sign_numbers: Yes
+pretty_print_behavior: Compact by default, --pretty to enable
+quoted_field_inference: Infer types regardless of quoting (CSV quotes are structural, not semantic)
+ragged_csv_handling: 'Configurable: default to null-padding with --strict to error'
+schema_headers_only: 'Emit schema with all properties typed as {"type": "null"}'
+schema_mixed_type_strategy: Union type array (more precise)
+schema_mixed_types: Union type array
+schema_output_scope: Standalone mode (outputs schema instead of data)
+schema_required_array: All columns in required array
+scientific_notation: Yes
+shell_completions: Yes
+stdin_support: Yes
+stdin_tty_behavior: Print a help hint to stderr then wait for input
+strict_extra_columns: Both fewer and more fields are errors
+strict_flag_expansion: Ragged rows only (narrow scope)
+strict_flag_scope: Ragged rows only
+telemetry: No telemetry at all
+tool_name: csv2json
+version_output_format: 'Simple: csv2json 0.1.0'
+whitespace_only_cells: Null (trim first, then apply inference)
+whitespace_trimming: Trim whitespace
+windows_support: Linux + macOS + Windows from day one
