@@ -18,7 +18,7 @@ pub struct QuickPrdArgs {
     pub writer_backend: String,
     #[arg(long, default_value = "codex")]
     pub reviewer_backend: String,
-    #[arg(long, default_value_t = 2, value_parser = parse_positive_u32)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_u32)]
     pub max_revisions: u32,
     #[arg(long, conflicts_with = "interactive")]
     pub non_interactive: bool,

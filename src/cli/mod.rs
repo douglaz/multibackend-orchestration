@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(args.idea, "add retry logic");
         assert_eq!(args.writer_backend, "claude");
         assert_eq!(args.reviewer_backend, "codex");
-        assert_eq!(args.max_revisions, 2);
+        assert_eq!(args.max_revisions, 1);
         assert!(!args.non_interactive);
         assert!(!args.interactive);
         assert!(!args.dry_run);

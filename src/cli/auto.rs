@@ -21,7 +21,7 @@ pub struct AutoArgs {
     pub spec_writer: String,
     #[arg(long, default_value = "codex")]
     pub spec_reviewer: String,
-    #[arg(long, default_value_t = 2, value_parser = parse_positive_u32)]
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_u32)]
     pub max_spec_revisions: u32,
     #[arg(long)]
     pub project_id: Option<String>,
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(args.idea, "test feature");
         assert_eq!(args.spec_writer, "claude");
         assert_eq!(args.spec_reviewer, "codex");
-        assert_eq!(args.max_spec_revisions, 2);
+        assert_eq!(args.max_spec_revisions, 1);
         assert!(args.project_id.is_none());
         assert!(args.backend.is_none());
         assert!(args.planner_backend.is_none());
