@@ -5,7 +5,7 @@
   "prompt_hash": "cd858f9637f044ed2d710e8ae6d862597029f2233317314248ef96698f13049b",
   "prompt_hash_at_loop_start": "cd858f9637f044ed2d710e8ae6d862597029f2233317314248ef96698f13049b",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "core-qa-conformance-tests",
       "feature_name": "Core QA Conformance Tests",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -30,8 +30,38 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "976e48f2da63cb9d6c1ad9a046426415585932d8",
       "started_at": "2026-02-12T00:39:19.779485021Z",
+      "completed_at": "2026-02-12T00:49:34.779270414Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "acceptance-gate-qa-conformance-tests",
+      "feature_name": "Acceptance Gate QA Conformance Tests",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-xhigh)",
+        "qa": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "spec": "loops/002-acceptance-gate-qa-conformance-tests/20260212005131-spec.md",
+        "impl_notes": "loops/002-acceptance-gate-qa-conformance-tests/20260212005657-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-acceptance-gate-qa-conformance-tests/20260212005912-review-001-feedback.md",
+            "response": "loops/002-acceptance-gate-qa-conformance-tests/20260212005947-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-acceptance-gate-qa-conformance-tests/20260212010202-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-12T00:51:31.582778468Z",
       "completed_at": null
     }
   ],
