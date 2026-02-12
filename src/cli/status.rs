@@ -69,8 +69,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
                 "Latest QA (iteration {}): {} [{}]",
                 latest_qa.iteration, verdict, latest_qa.report
             );
-            let lines =
-                extract_qa_summary_lines(&project_dir, latest_qa);
+            let lines = extract_qa_summary_lines(&project_dir, latest_qa);
             if lines.is_empty() {
                 println!("  (no summary available)");
             } else {

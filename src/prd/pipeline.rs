@@ -274,7 +274,9 @@ impl PrdPipeline {
 
                 // Source 2: gap_report.suggested_defaults (keyed by .key → .value)
                 for sd in &gap_report.suggested_defaults {
-                    auto_answers.entry(sd.key.clone()).or_insert_with(|| sd.value.clone());
+                    auto_answers
+                        .entry(sd.key.clone())
+                        .or_insert_with(|| sd.value.clone());
                 }
 
                 if !auto_answers.is_empty() {
@@ -291,8 +293,7 @@ impl PrdPipeline {
                 self.context.answers = self.answer_store.answers().clone();
                 self.context.answers_hash = self.answer_store.hash()?;
 
-                let rerun_stage = min_question_impact_stage(&gap_report.questions)
-                    .unwrap_or(stage);
+                let rerun_stage = min_question_impact_stage(&gap_report.questions).unwrap_or(stage);
                 if rerun_stage > stage {
                     return Ok(match next_stage(stage) {
                         Some(next) => PrdPhase::RunStage(next),

@@ -159,8 +159,7 @@ fn test_render_template_with_fallback_uses_default_when_file_missing() {
     let mut vars = BTreeMap::new();
     vars.insert("name".to_owned(), "World".to_owned());
 
-    let result =
-        render_template_with_fallback(missing, &vars, "Hello, {{name}}!").unwrap();
+    let result = render_template_with_fallback(missing, &vars, "Hello, {{name}}!").unwrap();
     assert_eq!(result, "Hello, World!");
 }
 
@@ -174,7 +173,6 @@ fn test_render_template_with_fallback_prefers_file_when_present() {
     vars.insert("name".to_owned(), "World".to_owned());
 
     let result =
-        render_template_with_fallback(&template_path, &vars, "From fallback: {{name}}")
-            .unwrap();
+        render_template_with_fallback(&template_path, &vars, "From fallback: {{name}}").unwrap();
     assert_eq!(result, "From file: World");
 }

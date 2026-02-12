@@ -2085,11 +2085,8 @@ fn build_qa_prompt(
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
     vars.insert("qa_history".to_owned(), qa_history.to_owned());
 
-    let rendered = render_template_with_fallback(
-        &effective.templates.qa,
-        &vars,
-        default_qa_template(),
-    )?;
+    let rendered =
+        render_template_with_fallback(&effective.templates.qa, &vars, default_qa_template())?;
     Ok(format!(
         "{rendered}\n\n## System Guardrails\n\n{QA_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Prior QA History\n\n{}\n",
         if qa_history.is_empty() { "(none)" } else { qa_history }

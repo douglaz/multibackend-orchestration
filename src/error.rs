@@ -98,6 +98,9 @@ pub enum RalphError {
     #[error("PRD missing information -- see missing_info_report.md")]
     PrdMissingInfo,
 
+    #[error("quick PRD failed: {0}")]
+    QuickPrdFailed(String),
+
     #[error("PRD cache mismatch: {0}")]
     PrdCacheMismatch(String),
 
@@ -117,6 +120,7 @@ impl RalphError {
             Self::PrdPipelineFailed(_) => 10,
             Self::PrdValidationFailed(_) => 11,
             Self::PrdMissingInfo => 12,
+            Self::QuickPrdFailed(_) => 13,
             _ => 1,
         }
     }

@@ -4,6 +4,7 @@ pub mod history;
 pub mod init;
 mod prd;
 mod project;
+mod quick_prd;
 mod rollback;
 mod run;
 mod status;
@@ -31,6 +32,7 @@ pub enum Commands {
     Project(ProjectArgs),
     Run(RunArgs),
     Prd(prd::PrdArgs),
+    QuickPrd(quick_prd::QuickPrdArgs),
     Validate(validate::ValidateArgs),
     Status(StatusArgs),
     History(HistoryArgs),
@@ -244,12 +246,23 @@ fn parse_positive_u64(value: &str) -> std::result::Result<u64, String> {
     Ok(parsed)
 }
 
+fn parse_positive_u32(value: &str) -> std::result::Result<u32, String> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid value '{value}': expected positive integer"))?;
+    if parsed == 0 {
+        return Err("must be greater than 0".to_owned());
+    }
+    Ok(parsed)
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args),
         Commands::Project(args) => project::execute(args),
         Commands::Run(args) => run::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
+        Commands::QuickPrd(args) => quick_prd::execute(args).await,
         Commands::Validate(args) => validate::execute(args),
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
@@ -373,6 +386,75 @@ mod tests {
             "--non-interactive",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_quick_prd_with_defaults() {
+        let cli = Cli::parse_from(["ralph", "quick-prd", "--idea", "add retry logic"]);
+        let Commands::QuickPrd(args) = cli.command else {
+            panic!("expected quick-prd command");
+        };
+
+        assert_eq!(args.idea, "add retry logic");
+        assert_eq!(args.writer_backend, "claude");
+        assert_eq!(args.reviewer_backend, "codex");
+        assert_eq!(args.max_revisions, 2);
+        assert!(!args.non_interactive);
+        assert!(!args.interactive);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn parses_quick_prd_with_all_args() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "quick-prd",
+            "--idea",
+            "add retry logic to backend execute()",
+            "--writer-backend",
+            "claude(opus)",
+            "--reviewer-backend",
+            "codex(gpt-5)",
+            "--max-revisions",
+            "4",
+            "--interactive",
+            "--dry-run",
+        ]);
+        let Commands::QuickPrd(args) = cli.command else {
+            panic!("expected quick-prd command");
+        };
+
+        assert_eq!(args.idea, "add retry logic to backend execute()");
+        assert_eq!(args.writer_backend, "claude(opus)");
+        assert_eq!(args.reviewer_backend, "codex(gpt-5)");
+        assert_eq!(args.max_revisions, 4);
+        assert!(!args.non_interactive);
+        assert!(args.interactive);
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn rejects_quick_prd_with_conflicting_interactive_flags() {
+        let result = Cli::try_parse_from([
+            "ralph",
+            "quick-prd",
+            "--idea",
+            "add retry logic",
+            "--interactive",
+            "--non-interactive",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quick_prd_dry_run_skips_backends() {
+        let cli = Cli::parse_from(["ralph", "quick-prd", "--idea", "test", "--dry-run"]);
+        let Commands::QuickPrd(args) = cli.command else {
+            panic!("expected quick-prd command");
+        };
+
+        assert_eq!(args.idea, "test");
+        assert!(args.dry_run);
     }
 
     #[test]

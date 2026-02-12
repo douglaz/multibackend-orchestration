@@ -3,6 +3,7 @@ pub mod cache;
 pub mod gaps;
 pub mod interaction;
 pub mod pipeline;
+pub mod quick;
 pub mod stages;
 pub mod state;
 
