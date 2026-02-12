@@ -5,7 +5,7 @@
   "prompt_hash": "ea653899bfb412f003b1a00bbe36a086586a5b3f72fd931148487b2ed9e04f10",
   "prompt_hash_at_loop_start": "ea653899bfb412f003b1a00bbe36a086586a5b3f72fd931148487b2ed9e04f10",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "core-types-prompts-helper-functions-and-unit",
       "feature_name": "Core types, prompts, helper functions, and unit tests for quick-prd pipeline",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -37,8 +37,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "7e82c2990d6b6f2a1215931db5be96bf057369ef",
       "started_at": "2026-02-12T18:37:19.143024957Z",
+      "completed_at": "2026-02-12T18:41:54.767616372Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "quickprd-runtime-pipeline-and-artifact-persistence",
+      "feature_name": "QuickPrd Runtime Pipeline and Artifact Persistence",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-xhigh)",
+        "qa": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "spec": "loops/002-quickprd-runtime-pipeline-and-artifact-persistence/20260212184419-spec.md",
+        "impl_notes": "loops/002-quickprd-runtime-pipeline-and-artifact-persistence/20260212184929-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-quickprd-runtime-pipeline-and-artifact-persistence/20260212185630-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-quickprd-runtime-pipeline-and-artifact-persistence/20260212185316-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-12T18:44:19.498242734Z",
       "completed_at": null
     }
   ],

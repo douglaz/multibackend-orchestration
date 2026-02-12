@@ -1,10 +1,18 @@
-//! Quick PRD foundational types, prompts, and helper functions.
+//! Quick PRD foundational types, prompts, helper functions, and runtime pipeline.
 
+use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::backend::Backend;
+use crate::error::RalphError;
 use crate::prd::gaps::extract_fenced_json;
+use crate::util::hash::sha256_hex;
+use crate::util::time::now_iso8601;
 use crate::workflow::parser::strip_frontmatter;
 use crate::Result;
 
@@ -173,6 +181,226 @@ pub fn format_issues(issues: &[ReviewIssue]) -> String {
         .join("\n")
 }
 
+const MAX_SECTION_RETRIES: u8 = 2;
+
+/// Runs a review backend call with up to 3 parse attempts.
+/// On parse failure, retries with a strict reformat prompt requesting a single fenced JSON block.
+/// Returns an error if all 3 attempts fail (no silent fallback).
+pub async fn run_review_with_retry(
+    backend: Arc<dyn Backend>,
+    prompt: String,
+) -> Result<ReviewFeedback> {
+    let mut current_prompt = prompt;
+
+    for attempt in 1..=3_u8 {
+        let raw = backend.execute(&current_prompt).await?;
+        match parse_review_feedback(&raw) {
+            Ok(feedback) => return Ok(feedback),
+            Err(parse_error) => {
+                if attempt == 3 {
+                    return Err(RalphError::QuickPrdFailed(format!(
+                        "failed to parse review feedback after 3 attempts: {parse_error}"
+                    )));
+                }
+                current_prompt = format!(
+                    "CRITICAL: Your previous review response could not be parsed.\n\n\
+                     Error: {parse_error}\n\n\
+                     Return ONLY a single fenced JSON block with this exact schema:\n\
+                     ```json\n\
+                     {{\"approved\": true/false, \"issues\": [{{\"area\": \"...\", \"feedback\": \"...\"}}]}}\n\
+                     ```\n\
+                     Use valid JSON, no prose before or after the fenced block.\n\n\
+                     Previous response:\n---\n{raw}\n---\n"
+                );
+            }
+        }
+    }
+
+    unreachable!("loop should return or error before reaching this point")
+}
+
+/// Exclusive file lock for quick-prd cache directory.
+#[derive(Debug)]
+struct QuickPrdLock {
+    _file: File,
+}
+
+impl QuickPrdLock {
+    fn acquire(lock_path: &PathBuf) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+
+        if file.try_lock_exclusive().is_err() {
+            return Err(RalphError::QuickPrdFailed(format!(
+                "quick-prd cache is locked: {}",
+                lock_path.display()
+            )));
+        }
+
+        Ok(Self { _file: file })
+    }
+}
+
+/// The quick-prd pipeline driver.
+pub struct QuickPrdPipeline {
+    writer: Arc<dyn Backend>,
+    reviewer: Arc<dyn Backend>,
+    options: QuickPrdOptions,
+}
+
+impl QuickPrdPipeline {
+    pub fn new(
+        writer: Arc<dyn Backend>,
+        reviewer: Arc<dyn Backend>,
+        options: QuickPrdOptions,
+    ) -> Self {
+        Self {
+            writer,
+            reviewer,
+            options,
+        }
+    }
+
+    pub async fn run(self) -> Result<QuickPrdResult> {
+        self.run_in(std::env::current_dir()?).await
+    }
+
+    async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
+        let started_at = now_iso8601();
+        let idea_hash = sha256_hex(&self.options.idea)[..12].to_owned();
+
+        // Create cache directory and acquire lock
+        let cache_dir = working_dir
+            .join(".ralph")
+            .join("quick-prd")
+            .join(&idea_hash);
+        fs::create_dir_all(&cache_dir)?;
+        let lock_path = cache_dir.join(".lock");
+        let _lock = QuickPrdLock::acquire(&lock_path)?;
+
+        // --- Draft step ---
+        let draft_prompt = render_prompt(DRAFT_PROMPT, &[("{{idea}}", &self.options.idea)]);
+        let draft_start = Instant::now();
+        let mut current_spec = self.run_draft_with_section_retry(&draft_prompt).await?;
+        let draft_time_secs = draft_start.elapsed().as_secs_f64();
+
+        // Cache draft
+        fs::write(cache_dir.join("draft.md"), &current_spec)?;
+
+        // --- Review/Revision loop ---
+        let mut review_times_secs = Vec::new();
+        let mut revision_times_secs = Vec::new();
+        let mut approved = false;
+        let mut revision_count: u32 = 0;
+
+        for n in 1..=self.options.max_revisions {
+            // Build review prompt
+            let review_prompt = render_prompt(
+                REVIEW_PROMPT,
+                &[("{{idea}}", &self.options.idea), ("{{spec}}", &current_spec)],
+            );
+
+            // Run review with retry
+            let review_start = Instant::now();
+            let feedback =
+                run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
+            review_times_secs.push(review_start.elapsed().as_secs_f64());
+
+            // Cache review
+            let review_json = serde_json::to_string_pretty(&feedback)?;
+            fs::write(cache_dir.join(format!("review-{n}.json")), &review_json)?;
+
+            // Check approval (treat approved:false with empty issues as approved)
+            if feedback.approved || feedback.issues.is_empty() {
+                approved = true;
+                break;
+            }
+
+            // Build revision prompt
+            let formatted_issues = format_issues(&feedback.issues);
+            let revision_prompt = render_prompt(
+                REVISION_PROMPT,
+                &[
+                    ("{{idea}}", &self.options.idea),
+                    ("{{spec}}", &current_spec),
+                    ("{{issues}}", &formatted_issues),
+                ],
+            );
+
+            // Run revision
+            let revision_start = Instant::now();
+            let revised = self.writer.execute(&revision_prompt).await?;
+            revision_times_secs.push(revision_start.elapsed().as_secs_f64());
+
+            // Section-check revision output
+            let (cleaned, _missing) = check_spec_sections(&revised);
+            current_spec = cleaned;
+
+            // Cache revision
+            fs::write(cache_dir.join(format!("revision-{n}.md")), &current_spec)?;
+            revision_count = n;
+        }
+
+        // --- Finalization ---
+        let spec_path = working_dir.join("SPEC.md");
+        fs::write(&spec_path, &current_spec)?;
+
+        let meta = QuickPrdMeta {
+            idea: self.options.idea.clone(),
+            idea_hash,
+            writer_backend: self.options.writer_spec.clone(),
+            reviewer_backend: self.options.reviewer_spec.clone(),
+            started_at,
+            completed_at: now_iso8601(),
+            revision_count,
+            approved,
+            draft_time_secs,
+            review_times_secs,
+            revision_times_secs,
+        };
+        let meta_json = serde_json::to_string_pretty(&meta)?;
+        fs::write(cache_dir.join("meta.json"), format!("{meta_json}\n"))?;
+
+        let summary = if approved {
+            format!(
+                "Quick PRD completed: approved after {} revision(s)",
+                revision_count
+            )
+        } else {
+            format!(
+                "Quick PRD completed: NOT approved after {} revision(s) (max revisions exhausted)",
+                revision_count
+            )
+        };
+
+        Ok(QuickPrdResult {
+            spec_path,
+            cache_dir,
+            revision_count,
+            approved,
+            summary,
+        })
+    }
+
+    /// Runs the draft step with up to MAX_SECTION_RETRIES retries for missing sections.
+    async fn run_draft_with_section_retry(&self, prompt: &str) -> Result<String> {
+        for attempt in 0..=MAX_SECTION_RETRIES {
+            let raw = self.writer.execute(prompt).await?;
+            let (cleaned, missing) = check_spec_sections(&raw);
+
+            if missing.is_empty() || attempt == MAX_SECTION_RETRIES {
+                return Ok(cleaned);
+            }
+        }
+
+        unreachable!("loop should return before reaching this point")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +508,153 @@ mod tests {
             formatted,
             "1. acceptance criteria: add timeout behavior\n2. technical approach: include rollback strategy"
         );
+    }
+
+    // --- Async pipeline tests ---
+
+    use crate::backend::MockBackend;
+
+    fn mock_approved_review() -> String {
+        "```json\n{\"approved\": true, \"issues\": []}\n```".to_string()
+    }
+
+    fn mock_rejected_review() -> String {
+        "```json\n{\"approved\": false, \"issues\": [{\"area\": \"testing\", \"feedback\": \"add edge case tests\"}]}\n```".to_string()
+    }
+
+    #[tokio::test]
+    async fn test_review_parse_retry_success() {
+        // First response is malformed, second is valid
+        let backend = Arc::new(MockBackend::new("reviewer", vec![
+            "no json here".to_string(),
+            mock_approved_review(),
+        ]));
+
+        let feedback = run_review_with_retry(backend.clone(), "review this".to_string())
+            .await
+            .expect("should succeed on retry");
+        assert!(feedback.approved);
+        assert!(feedback.issues.is_empty());
+        assert_eq!(backend.call_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_review_parse_retry_exhaustion() {
+        // All 3 responses are malformed
+        let backend = Arc::new(MockBackend::new("reviewer", vec![
+            "bad1".to_string(),
+            "bad2".to_string(),
+            "bad3".to_string(),
+        ]));
+
+        let err = run_review_with_retry(backend.clone(), "review this".to_string())
+            .await
+            .expect_err("should fail after 3 attempts");
+        assert!(matches!(err, RalphError::QuickPrdFailed(_)));
+        assert_eq!(backend.call_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_empty_issues_auto_approval() {
+        // approved: false but empty issues → treated as approved
+        let reviewer_response =
+            "```json\n{\"approved\": false, \"issues\": []}\n```".to_string();
+        let writer = Arc::new(MockBackend::new("writer", vec![valid_spec().to_string()]));
+        let reviewer = Arc::new(MockBackend::new("reviewer", vec![reviewer_response]));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let working_dir = temp.path().to_path_buf();
+
+        let options = QuickPrdOptions {
+            idea: "test idea".to_string(),
+            writer_spec: "mock-writer".to_string(),
+            reviewer_spec: "mock-reviewer".to_string(),
+            max_revisions: 2,
+            dry_run: false,
+        };
+
+        let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
+        let result = pipeline
+            .run_in(working_dir.clone())
+            .await
+            .expect("pipeline should succeed");
+
+        assert!(result.approved);
+        assert_eq!(result.revision_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_revision_artifact_writing() {
+        let writer = Arc::new(MockBackend::new("writer", vec![
+            valid_spec().to_string(),        // draft
+            valid_spec().to_string(),        // revision-1
+        ]));
+        let reviewer = Arc::new(MockBackend::new("reviewer", vec![
+            mock_rejected_review(),          // review-1 (rejected)
+            mock_approved_review(),          // review-2 (approved)
+        ]));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let working_dir = temp.path().to_path_buf();
+
+        let options = QuickPrdOptions {
+            idea: "revision test".to_string(),
+            writer_spec: "mock-writer".to_string(),
+            reviewer_spec: "mock-reviewer".to_string(),
+            max_revisions: 3,
+            dry_run: false,
+        };
+
+        let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
+        let result = pipeline
+            .run_in(working_dir.clone())
+            .await
+            .expect("pipeline should succeed");
+
+        assert!(result.approved);
+        assert_eq!(result.revision_count, 1);
+        assert!(result.cache_dir.join("draft.md").exists());
+        assert!(result.cache_dir.join("review-1.json").exists());
+        assert!(result.cache_dir.join("revision-1.md").exists());
+        assert!(result.cache_dir.join("review-2.json").exists());
+        assert!(working_dir.join("SPEC.md").exists());
+        assert!(result.cache_dir.join("meta.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_section_retry_limit() {
+        // Writer returns incomplete spec all 3 times (1 initial + 2 retries)
+        let incomplete = "## Summary\nBody\n## Acceptance Criteria\nBody";
+        let writer = Arc::new(MockBackend::new("writer", vec![
+            incomplete.to_string(),
+            incomplete.to_string(),
+            incomplete.to_string(),
+        ]));
+        let reviewer = Arc::new(MockBackend::new("reviewer", vec![
+            mock_approved_review(),
+        ]));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let working_dir = temp.path().to_path_buf();
+
+        let options = QuickPrdOptions {
+            idea: "section retry".to_string(),
+            writer_spec: "mock-writer".to_string(),
+            reviewer_spec: "mock-reviewer".to_string(),
+            max_revisions: 1,
+            dry_run: false,
+        };
+
+        let pipeline = QuickPrdPipeline::new(writer.clone(), reviewer, options);
+        let result = pipeline
+            .run_in(working_dir.clone())
+            .await
+            .expect("pipeline should succeed with best-effort");
+
+        // Writer called 3 times for draft (1 + 2 retries)
+        // Even though sections missing, pipeline proceeds best-effort
+        assert_eq!(writer.call_count().await, 3);
+        assert!(working_dir.join("SPEC.md").exists());
+        assert!(result.approved);
     }
 }
