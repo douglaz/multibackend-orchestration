@@ -51,6 +51,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: config_set,
         },
         ConformanceTest {
+            name: "commands::config_show_global",
+            func: config_show_global,
+        },
+        ConformanceTest {
+            name: "commands::config_show_project",
+            func: config_show_project,
+        },
+        ConformanceTest {
+            name: "commands::project_list_empty",
+            func: project_list_empty,
+        },
+        ConformanceTest {
+            name: "commands::project_list_multiple",
+            func: project_list_multiple,
+        },
+        ConformanceTest {
             name: "commands::exit_code_workspace_not_found",
             func: exit_code_workspace_not_found,
         },
@@ -342,6 +358,106 @@ fn config_set(h: &RalphHarness) -> TestResult {
             value.contains("codex"),
             "expected config get planner_backend to return 'codex' after set, got: '{value}'"
         );
+    })
+}
+
+fn config_show_global(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let output = h
+            .ralph(["config", "show", "--global"])
+            .expect("ralph config show --global should execute");
+        assert_exit_code(&output, 0);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("config show --global output should be valid JSON");
+        assert!(
+            parsed.get("workspace").is_some(),
+            "expected global config JSON to include 'workspace'"
+        );
+        assert!(
+            parsed.get("backends").is_some(),
+            "expected global config JSON to include 'backends'"
+        );
+        assert!(
+            parsed.get("workflow").is_some(),
+            "expected global config JSON to include 'workflow'"
+        );
+        assert!(
+            parsed.get("templates").is_some(),
+            "expected global config JSON to include 'templates'"
+        );
+    })
+}
+
+fn config_show_project(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project(
+            "config-show-proj",
+            "Config Show Project",
+            "Project config show prompt",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["config", "show", "--project", "config-show-proj"])
+            .expect("ralph config show --project should execute");
+        assert_exit_code(&output, 0);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("config show --project output should be valid JSON");
+        assert_json_field(&parsed, "scope.type", &json!("project"));
+        assert_json_field(&parsed, "scope.project", &json!("config-show-proj"));
+        assert!(
+            parsed.get("workflow").is_some(),
+            "expected project config JSON to include 'workflow'"
+        );
+        assert!(
+            parsed.get("templates").is_some(),
+            "expected project config JSON to include 'templates'"
+        );
+        assert!(
+            parsed.get("backends").is_some(),
+            "expected project config JSON to include 'backends'"
+        );
+    })
+}
+
+fn project_list_empty(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let output = h
+            .ralph(["project", "list"])
+            .expect("ralph project list should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "PROJECTS IN WORKSPACE");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line_count = stdout.lines().count();
+        assert!(
+            line_count <= 4,
+            "expected empty project list to include only header lines, got {line_count} lines:\n{stdout}"
+        );
+    })
+}
+
+fn project_list_multiple(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("list-proj-a", "List Project A", "List project A prompt")
+            .expect("create first project failed");
+        h.create_project("list-proj-b", "List Project B", "List project B prompt")
+            .expect("create second project failed");
+
+        let output = h
+            .ralph(["project", "list"])
+            .expect("ralph project list should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "list-proj-a");
+        assert_stdout_contains(&output, "list-proj-b");
     })
 }
 

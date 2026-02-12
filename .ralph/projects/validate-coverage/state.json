@@ -1,0 +1,46 @@
+{
+  "project_id": "validate-coverage",
+  "project_name": "Expand validate conformance suite",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "535dc21c7ed5fce1c165539e26be337467e9a1636d925bb09145940816f9c917",
+  "prompt_hash_at_loop_start": "535dc21c7ed5fce1c165539e26be337467e9a1636d925bb09145940816f9c917",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "expand-validate-conformance-suite-with-tail",
+      "feature_name": "Expand validate conformance suite with tail, config-show, project-list, and template-fallback tests",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/001-expand-validate-conformance-suite-with-tail/20260212170822-spec.md",
+        "impl_notes": "loops/001-expand-validate-conformance-suite-with-tail/20260212171255-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-expand-validate-conformance-suite-with-tail/20260212171621-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-expand-validate-conformance-suite-with-tail/20260212171509-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-12T17:08:22.078119037Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

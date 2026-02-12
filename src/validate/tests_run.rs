@@ -71,6 +71,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "run::loops_flag",
             func: loops_flag,
         },
+        ConformanceTest {
+            name: "run::template_fallback_when_file_missing",
+            func: template_fallback_when_file_missing,
+        },
     ]
 }
 
@@ -462,6 +466,41 @@ fn loops_flag(h: &RalphHarness) -> TestResult {
                 "all loop entries should be completed"
             );
         }
+    })
+}
+
+fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-template-fallback";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        let qa_template = h.repo_root.join(".ralph").join("templates").join("qa.md");
+        fs::remove_file(&qa_template).expect("failed to remove workspace qa template");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(loops.len(), 1, "expected one loop entry");
+
+        let qa_results = loops[0]["artifacts"]["qa_results"]
+            .as_array()
+            .expect("artifacts.qa_results should be an array");
+        assert!(
+            !qa_results.is_empty(),
+            "expected qa_results to be non-empty when QA is enabled"
+        );
+        assert_eq!(
+            loops[0]["status"],
+            json!("completed"),
+            "expected loop status to be completed"
+        );
     })
 }
 

@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::validate::assertions::{
     assert_exit_code, assert_file_contains, assert_file_exists, assert_git_tag_exists,
-    assert_git_tag_not_exists, assert_json_array_len, assert_json_field,
-    assert_no_loop_artifacts, assert_stderr_contains,
+    assert_git_tag_not_exists, assert_json_array_len, assert_json_field, assert_no_loop_artifacts,
+    assert_stderr_contains,
 };
 use crate::validate::harness::RalphHarness;
 use serde_json::json;
@@ -602,7 +602,12 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
 fn history_verbose_shows_qa(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qa-history-verbose";
-        setup_with_mock_script(h, project_id, "qa-history-verbose.sh", &qa_pass_mock_script());
+        setup_with_mock_script(
+            h,
+            project_id,
+            "qa-history-verbose.sh",
+            &qa_pass_mock_script(),
+        );
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
 
@@ -636,9 +641,7 @@ fn status_shows_qa_info(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        let stdout = h
-            .ralph_ok(["status"])
-            .expect("ralph status should succeed");
+        let stdout = h.ralph_ok(["status"]).expect("ralph status should succeed");
 
         assert!(
             stdout.contains("Latest QA (iteration 1): PASS"),

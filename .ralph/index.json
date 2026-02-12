@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "fix-stage-skip",
+  "active_project": "validate-coverage",
   "projects": [
     {
       "id": "tmux-backend",
@@ -144,6 +144,17 @@
       "total_feature_loops": 1,
       "total_completion_attempts": 1,
       "last_loop_number": 2,
+      "parent_project": null
+    },
+    {
+      "id": "validate-coverage",
+      "name": "Expand validate conformance suite",
+      "status": "in_progress",
+      "created_at": "2026-02-12T17:06:53.676162229Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
       "parent_project": null
     }
   ]
