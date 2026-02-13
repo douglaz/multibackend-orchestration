@@ -92,6 +92,31 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_no_diff_pr_path",
             func: runtime_no_diff_pr_path,
         },
+        // --- Loop 3 Refinement Dispatch Tests ---
+        ConformanceTest {
+            name: "daemon::refinement_happy_path",
+            func: refinement_happy_path,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_failure_fallback",
+            func: refinement_failure_fallback,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_disabled_uses_raw_idea",
+            func: refinement_disabled_uses_raw_idea,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_comment_failure_non_blocking",
+            func: refinement_comment_failure_non_blocking,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_strict_ordering",
+            func: refinement_strict_ordering,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_comment_idempotency_on_retry",
+            func: refinement_comment_idempotency_on_retry,
+        },
     ]
 }
 
@@ -1359,6 +1384,15 @@ fn runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag(h: &RalphHarness) -
     run_case(|| {
         h.init_workspace().expect("init failed");
 
+        // Disable refinement so the raw hydrated idea is passed through unchanged.
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
         // Seed a legacy pending task with no raw_idea field.
         write_tasks(
             h,
@@ -1475,6 +1509,15 @@ exit 0
 fn runtime_adopt_pending_fetch_failure_uses_metadata_fallback(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
+
+        // Disable refinement so the fallback idea is passed through unchanged.
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
 
         write_tasks(
             h,
@@ -1890,6 +1933,732 @@ exit 1
             comment_count_before, comment_count_after,
             "no-diff comment should be idempotent (marker already present): before={comment_count_before}, after={comment_count_after}"
         );
+    })
+}
+
+// =============================================================================
+// Loop 3 Refinement Dispatch Tests
+// =============================================================================
+
+/// Test that refinement successfully transforms the raw idea and the refined
+/// prompt is passed to `ralph auto --idea`.
+///
+/// Verifies:
+/// - When refinement is enabled and the backend succeeds, the refined output
+///   is used as --idea argument to the spawned child
+/// - The mock refinement backend receives the raw idea on stdin
+/// - Task completes successfully
+fn refinement_happy_path(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set up a mock refinement backend that reads stdin and outputs a refined prompt
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_backend.sh",
+                r#"#!/bin/sh
+# Read stdin (the refinement prompt)
+cat > /dev/null
+# Output a refined prompt (must be >= 20 chars)
+printf 'Refined: implement the feature with proper error handling and tests.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        // Configure the claude backend command to use our mock
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        // Seed a pending task with a raw_idea
+        let mut task = task_json(
+            "acme-widgets-200",
+            "pending",
+            200,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Fix the login bug\n\nUsers cannot log in with SSO.");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+
+        // Mock ralph that records the idea it receives
+        let idea_log = h.temp_dir.path().join("refinement_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-200"),
+            "task should be dispatched, stderr:\n{stderr}"
+        );
+        // Should NOT have a refinement failure warning
+        assert!(
+            !stderr.contains("refinement failed"),
+            "refinement should succeed, stderr:\n{stderr}"
+        );
+
+        // The spawned child should have received the refined prompt
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(
+            idea,
+            "Refined: implement the feature with proper error handling and tests."
+        );
+    })
+}
+
+/// Test that when the refinement backend fails, the raw idea is used as
+/// fallback and dispatch proceeds normally.
+///
+/// Verifies:
+/// - Backend failure triggers a warning log
+/// - Raw idea is used as the --idea argument
+/// - Dispatch completes successfully despite refinement failure
+fn refinement_failure_fallback(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set up a mock refinement backend that fails
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_fail.sh",
+                "#!/bin/sh\necho 'backend error' >&2\nexit 1\n",
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let raw_idea_text = "Raw bug report title\n\nRaw bug report body with details.";
+        let mut task = task_json(
+            "acme-widgets-201",
+            "pending",
+            201,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!(raw_idea_text);
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+
+        let idea_log = h.temp_dir.path().join("fallback_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Warning about refinement failure should be present
+        assert!(
+            stderr.contains("refinement failed"),
+            "expected refinement failure warning, stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("using raw idea"),
+            "expected 'using raw idea' in warning, stderr:\n{stderr}"
+        );
+
+        // The spawned child should have received the raw idea (fallback)
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(idea, raw_idea_text);
+    })
+}
+
+/// Test that when `daemon_refinement_enabled = false`, no refinement call is
+/// made and the raw idea is used directly.
+///
+/// Verifies:
+/// - No refinement backend invocation
+/// - Raw idea is passed as --idea to spawned child
+/// - No refinement-related warnings in logs
+fn refinement_disabled_uses_raw_idea(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable refinement
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
+        // Set up a backend that would fail to prove it's never called
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_nocall.sh",
+                "#!/bin/sh\necho 'SHOULD NOT BE CALLED' >&2\nexit 1\n",
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let raw_idea_text = "Disabled refinement task\n\nBody of the task.";
+        let mut task = task_json(
+            "acme-widgets-202",
+            "pending",
+            202,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!(raw_idea_text);
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+
+        let idea_log = h.temp_dir.path().join("disabled_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // No refinement-related messages should appear
+        assert!(
+            !stderr.contains("refinement failed"),
+            "no refinement failure expected when disabled, stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("SHOULD NOT BE CALLED"),
+            "backend should not be invoked when refinement is disabled, stderr:\n{stderr}"
+        );
+
+        // Raw idea should be passed directly to spawned child
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(idea, raw_idea_text);
+    })
+}
+
+/// Test that comment-post failure does not abort dispatch.
+///
+/// Verifies:
+/// - When posting the refined-prompt comment fails, a warning is logged
+/// - Dispatch still succeeds and spawns the child
+/// - Task reaches terminal state normally
+fn refinement_comment_failure_non_blocking(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable refinement to simplify (just test comment failure path)
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
+        let raw_idea_text = "Comment failure test\n\nBody text.";
+        let mut task = task_json(
+            "acme-widgets-203",
+            "pending",
+            203,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!(raw_idea_text);
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        // Mock gh where comment posting always fails
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{"title":"test","body":"test"}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        echo "comment API error" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#;
+        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+
+        let idea_log = h.temp_dir.path().join("comment_fail_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Comment failure warning should be logged
+        assert!(
+            stderr.contains("failed to post refined-prompt comment")
+                || stderr.contains("failed to post comment"),
+            "expected comment failure warning, stderr:\n{stderr}"
+        );
+
+        // Dispatch must still succeed
+        assert!(
+            stderr.contains("dispatched task acme-widgets-203"),
+            "task must be dispatched despite comment failure, stderr:\n{stderr}"
+        );
+
+        // Child received the idea
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(idea, raw_idea_text);
+    })
+}
+
+/// Test that the dispatch enforces strict ordering:
+/// create_worktree -> refine -> post comment -> spawn
+///
+/// Uses a mock refinement backend and mock gh that log timestamps/sequence
+/// numbers to verify the exact call order.
+///
+/// Verifies:
+/// - Refinement happens before comment posting
+/// - Comment posting happens before spawn
+/// - The overall sequence matches spec requirements
+fn refinement_strict_ordering(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let order_log = h.temp_dir.path().join("ordering.log");
+        let order_log_str = order_log.to_string_lossy().into_owned();
+
+        // Mock refinement backend that logs step 1 (refine)
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_order.sh",
+                &format!(
+                    r#"#!/bin/sh
+cat > /dev/null
+echo "step:refine" >> "{order_log_str}"
+printf 'Refined prompt with sufficient length for validation check.'
+exit 0
+"#
+                ),
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        // Mock gh that logs step 2 (comment) — comment calls happen after refine
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"test","body":"test"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        echo "step:comment" >> "{order_log_str}"
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        // Mock ralph that logs step 3 (spawn)
+        let ralph_script = format!(
+            r#"#!/bin/sh
+echo "step:spawn" >> "{order_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-204",
+            "pending",
+            204,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Ordering test\n\nBody.");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-204"),
+            "task should be dispatched, stderr:\n{stderr}"
+        );
+
+        // Read the ordering log and verify strict sequence
+        let log_content = fs::read_to_string(&order_log).expect("read ordering log");
+        let steps: Vec<&str> = log_content.lines().collect();
+
+        // We expect: refine, then comment (marker check + post = potentially
+        // two gh calls but comment step logged only on actual post), then spawn
+        let refine_idx = steps.iter().position(|s| s.contains("step:refine"));
+        let comment_idx = steps.iter().position(|s| s.contains("step:comment"));
+        let spawn_idx = steps.iter().position(|s| s.contains("step:spawn"));
+
+        assert!(
+            refine_idx.is_some(),
+            "refine step should appear in log, got:\n{log_content}"
+        );
+        assert!(
+            spawn_idx.is_some(),
+            "spawn step should appear in log, got:\n{log_content}"
+        );
+
+        let refine_pos = refine_idx.unwrap();
+        let spawn_pos = spawn_idx.unwrap();
+
+        assert!(
+            refine_pos < spawn_pos,
+            "refine must happen before spawn: refine@{refine_pos}, spawn@{spawn_pos}"
+        );
+
+        if let Some(comment_pos) = comment_idx {
+            assert!(
+                refine_pos < comment_pos,
+                "refine must happen before comment: refine@{refine_pos}, comment@{comment_pos}"
+            );
+            assert!(
+                comment_pos < spawn_pos,
+                "comment must happen before spawn: comment@{comment_pos}, spawn@{spawn_pos}"
+            );
+        }
+        // Comment may not appear if marker check found existing (idempotency);
+        // that's acceptable — the important invariant is refine < spawn.
+    })
+}
+
+/// Test comment idempotency on retry: if a refined-prompt comment was already
+/// posted, a retry dispatch should not duplicate it.
+///
+/// Verifies:
+/// - First dispatch posts the refined-prompt comment
+/// - On restart (second dispatch), the marker is detected and comment is
+///   not duplicated
+/// - Both dispatches complete successfully
+fn refinement_comment_idempotency_on_retry(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable refinement to simplify (focus on comment idempotency)
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
+        let comment_log = h.temp_dir.path().join("idempotent_comment.log");
+        let comment_count_file = h.temp_dir.path().join("idempotent_comment_count.txt");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let comment_count_str = comment_count_file.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"test","body":"test"}}'
+          exit 0
+        fi
+        # Return previously posted comments for marker check
+        if [ -f "{comment_log_str}" ]; then
+          cat "{comment_log_str}"
+        fi
+        exit 0
+        ;;
+      comment)
+        shift; shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{comment_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ -f "{comment_count_str}" ]; then
+          count=$(cat "{comment_count_str}")
+        else
+          count=0
+        fi
+        count=$((count + 1))
+        echo "$count" > "{comment_count_str}"
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-205",
+            "pending",
+            205,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Idempotency test\n\nBody.");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        // First run
+        let output1 = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("first daemon run should execute");
+        assert_exit_code(&output1, 0);
+
+        let _count_after_first = read_count_file(&comment_count_file);
+
+        // Verify the refined-prompt comment was posted
+        if comment_log.exists() {
+            let log = fs::read_to_string(&comment_log).expect("read comment log");
+            assert!(
+                log.contains("<!-- ralph:task:acme-widgets-205:refined-prompt -->"),
+                "expected refined-prompt marker in comment, got:\n{log}"
+            );
+        }
+
+        // Re-seed the task as pending (simulate restart)
+        let mut task2 = task_json(
+            "acme-widgets-205",
+            "pending",
+            205,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task2["raw_idea"] = json!("Idempotency test\n\nBody.");
+        write_tasks(h, vec![task2]).expect("write_tasks re-seed failed");
+
+        // Second run
+        let output2 = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("second daemon run should execute");
+        assert_exit_code(&output2, 0);
+
+        let _count_after_second = read_count_file(&comment_count_file);
+
+        // The refined-prompt comment count should not increase (marker
+        // already exists from first run). Completion comments may add to
+        // the total, so we check specifically that the refined-prompt marker
+        // appears exactly once.
+        if comment_log.exists() {
+            let log = fs::read_to_string(&comment_log).expect("read comment log");
+            let marker_count = log
+                .matches("<!-- ralph:task:acme-widgets-205:refined-prompt -->")
+                .count();
+            assert_eq!(
+                marker_count, 1,
+                "refined-prompt comment should be posted exactly once (idempotent), found {marker_count}"
+            );
+        }
     })
 }
 

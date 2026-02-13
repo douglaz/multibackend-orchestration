@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::config::GlobalConfig;
 use crate::daemon::github;
 use crate::daemon::process;
+use crate::daemon::refine;
 use crate::daemon::worktree;
 use crate::daemon::{format_task_id, DaemonTask, TaskState, TaskStore};
 use crate::error::RalphError;
@@ -262,12 +263,43 @@ fn dispatch_task(
     // Create worktree
     let wt_path = worktree::create_worktree(&config.repo_root, workspace_root, &task.task_id)?;
 
-    // Use raw issue content for the child idea. Legacy tasks are hydrated
-    // from GitHub if `raw_idea` is missing.
-    let idea = match &task.raw_idea {
+    // Resolve raw idea. Legacy tasks are hydrated from GitHub if `raw_idea`
+    // is missing.
+    let raw_idea = match &task.raw_idea {
         Some(idea) => idea.clone(),
         None => fetch_and_persist_raw_idea(store, task)?,
     };
+
+    // Refine the prompt if enabled, falling back to raw idea on failure.
+    let idea = if config.refinement_enabled {
+        match refine::refine_prompt(&raw_idea, &config.refinement_backend, &config.global_config) {
+            Ok(refined) => refined,
+            Err(err) => {
+                eprintln!(
+                    "warning: refinement failed for task {}, using raw idea: {err}",
+                    task.task_id
+                );
+                raw_idea
+            }
+        }
+    } else {
+        raw_idea
+    };
+
+    // Post refined-prompt comment (best-effort, never aborts dispatch).
+    if let Err(err) = github::post_idempotent_comment(
+        &task.owner,
+        &task.repo,
+        task.issue_number,
+        &task.task_id,
+        "refined-prompt",
+        &idea,
+    ) {
+        eprintln!(
+            "warning: failed to post refined-prompt comment for {}: {err}",
+            task.task_id
+        );
+    }
 
     // Spawn child process
     let spawned = process::spawn_ralph_auto(&config.ralph_bin, &wt_path, &idea)?;

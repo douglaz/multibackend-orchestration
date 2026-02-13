@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "3e6fd955ff3c9cb02b53592a9184ce574614a6087484061a192d2507b97073a5",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "data-layer-configuration-and-argv-foundation",
       "feature_name": "Data Layer, Configuration, and Argv Foundation",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -45,8 +45,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "e1640aaa5eda586dcdfaab77388bd5665a28e49a",
       "started_at": "2026-02-13T22:20:48.658823474Z",
+      "completed_at": "2026-02-13T22:48:41.698628260Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "prompt-refinement-dispatch-integration",
+      "feature_name": "Prompt Refinement Dispatch Integration",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-prompt-refinement-dispatch-integration/20260213225045-spec.md",
+        "impl_notes": "loops/002-prompt-refinement-dispatch-integration/20260213230406-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-prompt-refinement-dispatch-integration/20260213231019-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-prompt-refinement-dispatch-integration/20260213230725-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T22:50:45.795852310Z",
       "completed_at": null
     }
   ],
