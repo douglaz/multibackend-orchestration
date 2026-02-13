@@ -117,7 +117,7 @@ fn maybe_create_project_branch(
     Ok(())
 }
 
-fn validate_project_id(id: &str) -> Result<()> {
+pub(crate) fn validate_project_id(id: &str) -> Result<()> {
     if id.is_empty() {
         return Err(RalphError::Validation(
             "project id cannot be empty".to_owned(),

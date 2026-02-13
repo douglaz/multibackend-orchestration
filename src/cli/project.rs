@@ -1,10 +1,13 @@
+use std::fs;
+
 use crate::cli::backend_spec::validate_backend_spec_name;
 use crate::cli::{ProjectArgs, ProjectCommand};
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::is_git_repo;
 use crate::project::lifecycle::{
-    create_project, load_project_state, CreateProjectOptions, PromptSource,
+    create_project, load_project_state, validate_project_id, CreateProjectOptions, PromptSource,
 };
+use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -151,6 +154,30 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
                     attempt.backends.planner, attempt.backends.completer
                 );
             }
+            Ok(())
+        }
+        ProjectCommand::Delete(delete_args) => {
+            validate_project_id(&delete_args.project_id)?;
+
+            let workspace = Workspace::discover()?;
+            let project_id = delete_args.project_id;
+
+            if !workspace.project_exists(&project_id) {
+                return Err(RalphError::ProjectNotFound(project_id));
+            }
+
+            if workspace.active_project_id().as_deref() == Some(project_id.as_str()) {
+                return Err(RalphError::Validation(format!(
+                    "cannot delete the active project '{project_id}'; run `ralph project use <other-id>` first"
+                )));
+            }
+
+            let project_dir = workspace.project_dir(&project_id);
+            let project_lock = ProjectLock::acquire(&project_dir, &project_id)?;
+            drop(project_lock);
+
+            fs::remove_dir_all(&project_dir)?;
+            println!("project '{project_id}' deleted");
             Ok(())
         }
     }

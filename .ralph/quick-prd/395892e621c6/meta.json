@@ -1,0 +1,17 @@
+{
+  "idea": "Add a 'ralph project delete <id>' CLI command that deletes a project directory under .ralph/projects/<id>/ after confirming the project exists. It should refuse to delete the currently active project (user must switch first). It should print a confirmation message. Add a validate conformance test for the new command.",
+  "idea_hash": "395892e621c6",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-13T18:03:49Z",
+  "completed_at": "2026-02-13T18:10:30Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 133.004864556,
+  "review_times_secs": [
+    145.907417903
+  ],
+  "revision_times_secs": [
+    122.094655433
+  ]
+}

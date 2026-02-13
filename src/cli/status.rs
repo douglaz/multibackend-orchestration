@@ -7,7 +7,6 @@ use crate::project::lifecycle::load_project_state;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
-
 pub fn execute(args: StatusArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
     let project_id = workspace.resolve_project_id(args.project.as_deref())?;

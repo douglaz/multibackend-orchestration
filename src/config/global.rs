@@ -640,7 +640,10 @@ base_branch = "master"
         assert_eq!(models.for_role("reviewer"), Some("reviewer-model"));
         assert_eq!(models.for_role("qa"), Some("qa-model"));
         assert_eq!(models.for_role("completer"), Some("completer-model"));
-        assert_eq!(models.for_role("acceptance_qa"), Some("acceptance-qa-model"));
+        assert_eq!(
+            models.for_role("acceptance_qa"),
+            Some("acceptance-qa-model")
+        );
         assert_eq!(models.for_role("reformatter"), Some("reformatter-model"));
         assert_eq!(models.for_role("unknown-role"), None);
     }
@@ -671,7 +674,10 @@ base_branch = "master"
         assert_eq!(models.reviewer.as_deref(), Some("default-reviewer"));
         assert_eq!(models.qa.as_deref(), Some("default-qa"));
         assert_eq!(models.completer.as_deref(), Some("custom-completer"));
-        assert_eq!(models.acceptance_qa.as_deref(), Some("default-acceptance-qa"));
+        assert_eq!(
+            models.acceptance_qa.as_deref(),
+            Some("default-acceptance-qa")
+        );
         assert_eq!(models.reformatter.as_deref(), Some("default-reformatter"));
     }
 

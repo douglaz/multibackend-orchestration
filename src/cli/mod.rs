@@ -62,6 +62,7 @@ pub enum ProjectCommand {
     List,
     Use(ProjectUseArgs),
     Show(ProjectShowArgs),
+    Delete(ProjectDeleteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +89,11 @@ pub struct ProjectShowArgs {
     pub project_id: Option<String>,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectDeleteArgs {
+    pub project_id: String,
 }
 
 #[derive(Debug, Args)]

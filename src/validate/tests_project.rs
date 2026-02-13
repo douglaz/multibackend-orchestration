@@ -1,8 +1,8 @@
 use super::*;
 
 use crate::validate::assertions::{
-    assert_file_exists, assert_git_branch_exists, assert_json_field, assert_stderr_contains,
-    assert_stdout_contains,
+    assert_file_exists, assert_git_branch_exists, assert_json_field, assert_path_not_exists,
+    assert_stderr_contains, assert_stdout_contains,
 };
 use crate::validate::harness::RalphHarness;
 use serde_json::json;
@@ -36,6 +36,22 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "project::use_switches_active",
             func: use_switches_active,
+        },
+        ConformanceTest {
+            name: "project::delete_removes_directory",
+            func: delete_removes_directory,
+        },
+        ConformanceTest {
+            name: "project::delete_refuses_active",
+            func: delete_refuses_active,
+        },
+        ConformanceTest {
+            name: "project::delete_nonexistent_fails",
+            func: delete_nonexistent_fails,
+        },
+        ConformanceTest {
+            name: "project::delete_no_active_project",
+            func: delete_no_active_project,
         },
         ConformanceTest {
             name: "project::show_displays_info",
@@ -116,9 +132,7 @@ fn new_activates_project(h: &RalphHarness) -> TestResult {
             .expect("create_project failed");
 
         // First project should be auto-activated via worktree-local storage
-        let active = h
-            .load_active_project()
-            .expect("load_active_project failed");
+        let active = h.load_active_project().expect("load_active_project failed");
         assert_eq!(
             active.as_deref(),
             Some("act-test"),
@@ -207,9 +221,7 @@ fn use_switches_active(h: &RalphHarness) -> TestResult {
             .expect("create second project failed");
 
         // After creating two projects, the first should be active
-        let active = h
-            .load_active_project()
-            .expect("load_active_project failed");
+        let active = h.load_active_project().expect("load_active_project failed");
         assert_eq!(
             active.as_deref(),
             Some("proj-a"),
@@ -228,6 +240,90 @@ fn use_switches_active(h: &RalphHarness) -> TestResult {
             Some("proj-b"),
             "active project should be proj-b after use"
         );
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn delete_removes_directory(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("del-test", "Delete Test", "prompt")
+            .expect("create first project failed");
+        h.create_project("keep-test", "Keep Test", "prompt")
+            .expect("create second project failed");
+        h.ralph_ok(["project", "use", "keep-test"])
+            .expect("project use should succeed");
+
+        let stdout = h
+            .ralph_ok(["project", "delete", "del-test"])
+            .expect("project delete should succeed");
+
+        assert!(
+            stdout.contains("project 'del-test' deleted"),
+            "expected delete confirmation, got:\n{}",
+            stdout
+        );
+        assert_path_not_exists(&h.project_dir("del-test"));
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn delete_refuses_active(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("active-del", "Active Delete", "prompt")
+            .expect("create project failed");
+
+        let output = h
+            .ralph_exit(["project", "delete", "active-del"], 2)
+            .expect("project delete should execute");
+        assert_stderr_contains(&output, "cannot delete the active project 'active-del'");
+        assert_file_exists(&h.project_dir("active-del").join("state.json"));
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn delete_nonexistent_fails(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        let output = h
+            .ralph_exit(["project", "delete", "no-such-proj"], 2)
+            .expect("project delete should execute");
+        assert_stderr_contains(&output, "project not found: no-such-proj");
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn delete_no_active_project(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("orphan-del", "Orphan Delete", "prompt")
+            .expect("create project failed");
+
+        let active_path = h.repo_root.join(".git").join("ralph-active-project");
+        std::fs::write(&active_path, "\n").expect("clear active-project file");
+        let active = h
+            .load_active_project()
+            .expect("load_active_project should succeed");
+        assert_eq!(active, None, "active project should be cleared");
+
+        let stdout = h
+            .ralph_ok(["project", "delete", "orphan-del"])
+            .expect("project delete should succeed");
+        assert!(
+            stdout.contains("project 'orphan-del' deleted"),
+            "expected delete confirmation, got:\n{}",
+            stdout
+        );
+        assert_path_not_exists(&h.project_dir("orphan-del"));
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -313,17 +409,18 @@ fn migration_from_legacy_index(h: &RalphHarness) -> TestResult {
             "active_project": "mig-test",
             "projects": []
         });
-        std::fs::write(&index_path, serde_json::to_string_pretty(&legacy_index).unwrap())
-            .expect("write legacy index.json");
+        std::fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&legacy_index).unwrap(),
+        )
+        .expect("write legacy index.json");
 
         // Now run any command that triggers Workspace::load (e.g., project list)
         let output = h.ralph(["project", "list"]).expect("ralph project list");
         assert_stderr_contains(&output, "migrated active project");
 
         // The worktree-local active-project file should now be set
-        let active = h
-            .load_active_project()
-            .expect("load_active_project failed");
+        let active = h.load_active_project().expect("load_active_project failed");
         assert_eq!(
             active.as_deref(),
             Some("mig-test"),

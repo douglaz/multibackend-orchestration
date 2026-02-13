@@ -425,7 +425,6 @@ async fn handle_config_show(args: Value) -> Result<Value, String> {
     };
 
     if let Some(project_id) = project_id {
-
         let project_dir = workspace.project_dir(&project_id);
         let project_config = load_project_config_if_exists(&project_dir).map_err(map_err)?;
         let effective = resolve_effective_config(

@@ -120,9 +120,9 @@ impl Orchestrator {
         validate_termination_controls(&options)?;
 
         let explicit_project = options.project.is_some();
-        let project_id =
-            self.workspace
-                .resolve_project_id(options.project.as_deref())?;
+        let project_id = self
+            .workspace
+            .resolve_project_id(options.project.as_deref())?;
 
         let project_dir = self.workspace.project_dir(&project_id);
         if !project_dir.exists() {
@@ -1342,7 +1342,9 @@ impl Orchestrator {
                             if effective.workflow.qa_enabled {
                                 let acceptance_backends = ["claude", "codex"]
                                     .iter()
-                                    .map(|family| registry.resolve_backend_for_role(family, "acceptance_qa"))
+                                    .map(|family| {
+                                        registry.resolve_backend_for_role(family, "acceptance_qa")
+                                    })
                                     .collect::<Vec<_>>();
                                 let state_snapshot_json =
                                     serde_json::to_string_pretty(&state).unwrap_or_default();
@@ -2388,10 +2390,7 @@ fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<Stri
     Ok(content)
 }
 
-fn persist_state(
-    project_dir: &Path,
-    state: &ProjectState,
-) -> Result<()> {
+fn persist_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
     save_project_state(project_dir, state)
 }
 
