@@ -38,35 +38,34 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "project_show",
-            "description": "Show project details and state",
+            "description": "Show project details and state (always returns JSON)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Project ID (defaults to active project)" },
-                    "json": { "type": "boolean", "description": "Return machine-readable JSON output" }
+                    "project": { "type": "string", "description": "Project ID (defaults to active project)" }
                 },
                 "required": []
             }
         }),
         json!({
             "name": "run",
-            "description": "Run orchestration loops for a project",
+            "description": "Run orchestration loops for a project (tmux is not available via MCP)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
-                    "loops": { "type": "integer", "minimum": 1 },
-                    "until_review": { "type": "boolean" },
-                    "until_complete": { "type": "boolean" },
-                    "dry_run": { "type": "boolean" },
-                    "backend": { "type": "string" },
-                    "planner_backend": { "type": "string" },
-                    "implementer_backend": { "type": "string" },
-                    "reviewer_backend": { "type": "string" },
-                    "qa_backend": { "type": "string" },
-                    "completer_backend": { "type": "string" },
-                    "on_prompt_change": { "type": "string" },
-                    "skip_commit": { "type": "boolean" }
+                    "project": { "type": "string", "description": "Project ID (defaults to active project)" },
+                    "loops": { "type": "integer", "minimum": 1, "description": "Number of feature loops to run" },
+                    "until_review": { "type": "boolean", "description": "Stop after first review" },
+                    "until_complete": { "type": "boolean", "description": "Run until completion check" },
+                    "dry_run": { "type": "boolean", "description": "Preview without executing" },
+                    "backend": { "type": "string", "description": "Default backend for all roles" },
+                    "planner_backend": { "type": "string", "description": "Backend for planner role" },
+                    "implementer_backend": { "type": "string", "description": "Backend for implementer role" },
+                    "reviewer_backend": { "type": "string", "description": "Backend for reviewer role" },
+                    "qa_backend": { "type": "string", "description": "Backend for QA role" },
+                    "completer_backend": { "type": "string", "description": "Backend for completer role" },
+                    "on_prompt_change": { "type": "string", "description": "Action on prompt change: continue, restart-loop, abort", "enum": ["continue", "restart-loop", "abort"] },
+                    "skip_commit": { "type": "boolean", "description": "Skip git commit after loop completion" }
                 },
                 "required": []
             }
@@ -84,56 +83,50 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "history",
-            "description": "Show feature loop history",
+            "description": "Show feature loop history (always returns JSON)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
-                    "verbose": { "type": "boolean" },
-                    "json": { "type": "boolean" }
+                    "project": { "type": "string", "description": "Project ID (defaults to active project)" }
                 },
                 "required": []
             }
         }),
         json!({
             "name": "tail",
-            "description": "Stream recent project artifact events",
+            "description": "Return recent project artifact events as JSON (follow/tmux not available via MCP)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
-                    "last": { "type": "integer", "minimum": 1 },
-                    "follow": { "type": "boolean" },
-                    "poll_interval_ms": { "type": "integer", "minimum": 1 },
-                    "json": { "type": "boolean" },
-                    "tmux": { "type": "boolean" }
+                    "project": { "type": "string", "description": "Project ID (defaults to active project)" },
+                    "last": { "type": "integer", "minimum": 1, "description": "Return only the N most recent events" }
                 },
                 "required": []
             }
         }),
         json!({
             "name": "quick_prd",
-            "description": "Generate a quick product requirements draft",
+            "description": "Generate a quick product requirements draft (always non-interactive via MCP)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "idea": { "type": "string" },
-                    "writer_backend": { "type": "string" },
-                    "reviewer_backend": { "type": "string" },
-                    "max_revisions": { "type": "integer", "minimum": 1 },
-                    "dry_run": { "type": "boolean" }
+                    "idea": { "type": "string", "description": "Feature idea to generate a PRD for" },
+                    "writer_backend": { "type": "string", "description": "Backend for writing the spec (default: claude)" },
+                    "reviewer_backend": { "type": "string", "description": "Backend for reviewing the spec (default: codex)" },
+                    "max_revisions": { "type": "integer", "minimum": 1, "description": "Maximum revision iterations" },
+                    "dry_run": { "type": "boolean", "description": "Return rendered prompt without executing backends" }
                 },
                 "required": ["idea"]
             }
         }),
         json!({
             "name": "config_show",
-            "description": "Show effective config in project or global scope",
+            "description": "Show effective config (project and global are mutually exclusive; defaults to active project if set, otherwise global)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string" },
-                    "global": { "type": "boolean" }
+                    "project": { "type": "string", "description": "Project ID to show config for" },
+                    "global": { "type": "boolean", "description": "Show global config only" }
                 },
                 "required": [],
                 "not": {
@@ -188,6 +181,45 @@ mod tests {
             assert!(schema["properties"].is_object());
             assert!(schema["required"].is_array());
         }
+    }
+
+    #[test]
+    fn run_excludes_tmux_and_includes_on_prompt_change_enum() {
+        let tools = tool_definitions();
+        let run = tools
+            .iter()
+            .find(|tool| tool["name"] == "run")
+            .expect("run must exist");
+        let props = &run["inputSchema"]["properties"];
+        assert!(props.get("tmux").is_none());
+        assert!(props.get("no_tmux").is_none());
+        assert!(props["on_prompt_change"]["enum"].is_array());
+    }
+
+    #[test]
+    fn tail_excludes_cli_only_controls() {
+        let tools = tool_definitions();
+        let tail = tools
+            .iter()
+            .find(|tool| tool["name"] == "tail")
+            .expect("tail must exist");
+        let props = &tail["inputSchema"]["properties"];
+        assert!(props.get("follow").is_none());
+        assert!(props.get("poll_interval_ms").is_none());
+        assert!(props.get("json").is_none());
+        assert!(props.get("tmux").is_none());
+    }
+
+    #[test]
+    fn quick_prd_excludes_interactive_flags() {
+        let tools = tool_definitions();
+        let quick_prd = tools
+            .iter()
+            .find(|tool| tool["name"] == "quick_prd")
+            .expect("quick_prd must exist");
+        let props = &quick_prd["inputSchema"]["properties"];
+        assert!(props.get("interactive").is_none());
+        assert!(props.get("non_interactive").is_none());
     }
 
     #[test]

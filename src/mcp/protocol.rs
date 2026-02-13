@@ -74,6 +74,24 @@ impl JsonRpcResponse {
     }
 }
 
+impl CallToolResult {
+    pub fn success_json(output: Value) -> Value {
+        serde_json::to_value(Self {
+            content: vec![ContentBlock::text(output.to_string())],
+            is_error: false,
+        })
+        .expect("CallToolResult serialization cannot fail")
+    }
+
+    pub fn error_text(message: impl Into<String>) -> Value {
+        serde_json::to_value(Self {
+            content: vec![ContentBlock::text(message)],
+            is_error: true,
+        })
+        .expect("CallToolResult serialization cannot fail")
+    }
+}
+
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
         Self {

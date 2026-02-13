@@ -5,7 +5,7 @@
   "prompt_hash": "b6e5739a9825e138dd1ed9f2d4d24bd0dd915b8e8a62c21d3cff37cf848c7aec",
   "prompt_hash_at_loop_start": "b6e5739a9825e138dd1ed9f2d4d24bd0dd915b8e8a62c21d3cff37cf848c7aec",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "mcp-protocol-types-transport-and-server-core",
       "feature_name": "MCP Protocol Types, Transport, and Server Core",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -37,8 +37,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "06bcf54a19dd56578186e3c48b230deda84e4d30",
       "started_at": "2026-02-13T01:25:45.735300800Z",
+      "completed_at": "2026-02-13T01:37:06.135467793Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "mcp-tool-handlers-and-tail-event-execution",
+      "feature_name": "MCP Tool Handlers and Tail Event Execution",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-xhigh)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-mcp-tool-handlers-and-tail-event-execution/20260213014113-spec.md",
+        "impl_notes": "loops/002-mcp-tool-handlers-and-tail-event-execution/20260213015548-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-mcp-tool-handlers-and-tail-event-execution/20260213020023-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-mcp-tool-handlers-and-tail-event-execution/20260213015724-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T01:41:13.760690695Z",
       "completed_at": null
     }
   ],
