@@ -85,6 +85,7 @@
                 clippy
                 rust-analyzer
                 git
+                gh
                 jq
               ];
 
