@@ -14,6 +14,8 @@ pub struct ProjectConfig {
     pub workflow: ProjectWorkflowOverrides,
     #[serde(default)]
     pub templates: ProjectTemplateOverrides,
+    #[serde(default)]
+    pub daemon: ProjectDaemonOverrides,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -44,6 +46,15 @@ pub struct ProjectTemplateOverrides {
     pub prompt_reviewer: Option<String>,
     pub completer: Option<String>,
     pub qa: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDaemonOverrides {
+    pub poll_seconds: Option<u64>,
+    pub max_concurrent: Option<u32>,
+    pub labels: Option<Vec<String>>,
+    pub repo: Option<String>,
 }
 
 impl ProjectConfig {

@@ -140,6 +140,12 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
                 },
+                "daemon": {
+                    "poll_seconds": effective.daemon.poll_seconds,
+                    "max_concurrent": effective.daemon.max_concurrent,
+                    "labels": effective.daemon.labels,
+                    "repo": effective.daemon.repo,
+                },
                 "templates": {
                     "planner": effective.templates.planner,
                     "implementer": effective.templates.implementer,
@@ -200,6 +206,12 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "commit_message_style": effective.workflow.commit_message_style,
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
+                },
+                "daemon": {
+                    "poll_seconds": effective.daemon.poll_seconds,
+                    "max_concurrent": effective.daemon.max_concurrent,
+                    "labels": effective.daemon.labels,
+                    "repo": effective.daemon.repo,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -315,6 +327,18 @@ fn set_global_value(
         }
         "workspace.tmux_window_keep_seconds" => {
             config.workspace.tmux_window_keep_seconds = parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_poll_seconds" => {
+            config.workspace.daemon_poll_seconds = parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_max_concurrent" => {
+            config.workspace.daemon_max_concurrent = parse_u32(raw_value, key)?;
+        }
+        "workspace.daemon_labels" => {
+            config.workspace.daemon_labels = parse_string_list(raw_value)?;
+        }
+        "workspace.daemon_repo" => {
+            config.workspace.daemon_repo = parse_optional_string(raw_value);
         }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
@@ -465,6 +489,16 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
         "templates.qa" => config.templates.qa = parse_optional_string(raw_value),
+        "daemon.poll_seconds" => {
+            config.daemon.poll_seconds = parse_optional_u64(raw_value, key)?;
+        }
+        "daemon.max_concurrent" => {
+            config.daemon.max_concurrent = parse_optional_u32(raw_value, key)?;
+        }
+        "daemon.labels" => {
+            config.daemon.labels = parse_optional_string_list(raw_value)?;
+        }
+        "daemon.repo" => config.daemon.repo = parse_optional_string(raw_value),
         _ => {
             return Err(RalphError::Validation(format!(
                 "unsupported project config key: {key}"
@@ -502,6 +536,13 @@ fn parse_optional_u32(raw: &str, key: &str) -> Result<Option<u32>> {
         return Ok(None);
     }
     Ok(Some(parse_u32(raw, key)?))
+}
+
+fn parse_optional_u64(raw: &str, key: &str) -> Result<Option<u64>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_u64(raw, key)?))
 }
 
 fn parse_commit_message_style(raw: &str) -> Result<CommitMessageStyle> {
@@ -558,6 +599,13 @@ fn parse_optional_string(raw: &str) -> Option<String> {
     } else {
         Some(raw.to_owned())
     }
+}
+
+fn parse_optional_string_list(raw: &str) -> Result<Option<Vec<String>>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_string_list(raw)?))
 }
 
 fn set_backend_model(

@@ -1,0 +1,48 @@
+{
+  "project_id": "github-daemon",
+  "project_name": "Add a 'ralph daemon' command that watches GitHub repositorie",
+  "created_at": "2026-02-13T18:49:36.329708414Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "3db956bac46442f980507994417831453aed4a9bdccb7f127fa8f285367dc431",
+  "prompt_hash_at_loop_start": "3db956bac46442f980507994417831453aed4a9bdccb7f127fa8f285367dc431",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "daemon-foundation-task-state-model-taskstore-with",
+      "feature_name": "Daemon Foundation — Task State Model, TaskStore with File Locking, CLI Skeleton, Config, and Conformance Tests",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-daemon-foundation-task-state-model-taskstore-with/20260213185256-spec.md",
+        "impl_notes": "loops/001-daemon-foundation-task-state-model-taskstore-with/20260213190316-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-daemon-foundation-task-state-model-taskstore-with/20260213190629-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-daemon-foundation-task-state-model-taskstore-with/20260213190439-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T18:52:56.706217929Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

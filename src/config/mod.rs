@@ -8,7 +8,7 @@ use crate::error::RalphError;
 use crate::Result;
 
 pub use global::{CommitMessageStyle, GlobalConfig, PromptChangeAction};
-pub use project::ProjectConfig;
+pub use project::{ProjectConfig, ProjectDaemonOverrides};
 
 #[derive(Debug, Clone)]
 pub struct EffectiveWorkflowConfig {
@@ -50,9 +50,18 @@ pub struct EffectiveTemplateConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct EffectiveDaemonConfig {
+    pub poll_seconds: u64,
+    pub max_concurrent: u32,
+    pub labels: Vec<String>,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EffectiveConfig {
     pub workflow: EffectiveWorkflowConfig,
     pub templates: EffectiveTemplateConfig,
+    pub daemon: EffectiveDaemonConfig,
     pub global: GlobalConfig,
     pub project: Option<ProjectConfig>,
 }
@@ -65,6 +74,7 @@ pub fn resolve_effective_config(
     run_overrides: RunWorkflowOverrides<'_>,
 ) -> Result<EffectiveConfig> {
     let project_ref = project.as_ref();
+    let daemon = resolve_daemon_config(&global, project_ref);
 
     let starting_backend = if let Some(override_backend) = run_overrides.starting_backend {
         override_backend.to_owned()
@@ -199,9 +209,31 @@ pub fn resolve_effective_config(
     Ok(EffectiveConfig {
         workflow,
         templates,
+        daemon,
         global,
         project,
     })
+}
+
+pub fn resolve_daemon_config(
+    global: &GlobalConfig,
+    project: Option<&ProjectConfig>,
+) -> EffectiveDaemonConfig {
+    let daemon_overrides = project.map(|cfg| &cfg.daemon);
+    EffectiveDaemonConfig {
+        poll_seconds: daemon_overrides
+            .and_then(|cfg| cfg.poll_seconds)
+            .unwrap_or(global.workspace.daemon_poll_seconds),
+        max_concurrent: daemon_overrides
+            .and_then(|cfg| cfg.max_concurrent)
+            .unwrap_or(global.workspace.daemon_max_concurrent),
+        labels: daemon_overrides
+            .and_then(|cfg| cfg.labels.clone())
+            .unwrap_or_else(|| global.workspace.daemon_labels.clone()),
+        repo: daemon_overrides
+            .and_then(|cfg| cfg.repo.clone())
+            .or_else(|| global.workspace.daemon_repo.clone()),
+    }
 }
 
 fn resolve_template_path(
@@ -243,7 +275,8 @@ mod tests {
     use std::path::Path;
 
     use crate::config::{
-        project::ProjectWorkflowOverrides, resolve_effective_config, GlobalConfig, ProjectConfig,
+        project::{ProjectDaemonOverrides, ProjectWorkflowOverrides},
+        resolve_daemon_config, resolve_effective_config, GlobalConfig, ProjectConfig,
         RunWorkflowOverrides,
     };
 
@@ -377,6 +410,7 @@ mod tests {
                 prompt_reviewer: Some("templates/prompt-reviewer-project.md".to_owned()),
                 ..crate::config::project::ProjectTemplateOverrides::default()
             },
+            ..ProjectConfig::default()
         };
 
         let effective = resolve_effective_config(
@@ -426,5 +460,36 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown backend configured as prompt review backend override"));
+    }
+
+    #[test]
+    fn resolve_daemon_config_applies_project_overrides_over_workspace_defaults() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_poll_seconds = 60;
+        global.workspace.daemon_max_concurrent = 1;
+        global.workspace.daemon_labels = vec!["ralph:ready".to_owned()];
+        global.workspace.daemon_repo = Some("acme/global".to_owned());
+
+        let project = ProjectConfig {
+            daemon: ProjectDaemonOverrides {
+                poll_seconds: Some(15),
+                max_concurrent: Some(3),
+                labels: Some(vec!["l1".to_owned(), "l2".to_owned()]),
+                repo: Some("acme/project".to_owned()),
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_daemon_config(&global, Some(&project));
+        assert_eq!(effective.poll_seconds, 15);
+        assert_eq!(effective.max_concurrent, 3);
+        assert_eq!(effective.labels, vec!["l1".to_owned(), "l2".to_owned()]);
+        assert_eq!(effective.repo.as_deref(), Some("acme/project"));
+
+        let no_project = resolve_daemon_config(&global, None);
+        assert_eq!(no_project.poll_seconds, 60);
+        assert_eq!(no_project.max_concurrent, 1);
+        assert_eq!(no_project.labels, vec!["ralph:ready".to_owned()]);
+        assert_eq!(no_project.repo.as_deref(), Some("acme/global"));
     }
 }

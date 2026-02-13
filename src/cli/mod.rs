@@ -1,6 +1,7 @@
 mod auto;
 pub(crate) mod backend_spec;
 mod config;
+mod daemon;
 pub mod history;
 pub mod init;
 mod prd;
@@ -42,6 +43,7 @@ pub enum Commands {
     Tail(TailArgs),
     Rollback(RollbackArgs),
     Config(ConfigArgs),
+    Daemon(daemon::DaemonArgs),
 }
 
 #[derive(Debug, Args)]
@@ -295,6 +297,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Tail(args) => tail::execute(args).await,
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
+        Commands::Daemon(args) => daemon::execute(args),
     }
 }
 
@@ -533,5 +536,51 @@ mod tests {
         assert_eq!(args.filter.as_deref(), Some("run::"));
         assert!(args.list);
         assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_daemon_start_with_all_overrides() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "daemon",
+            "start",
+            "--repo",
+            "acme/widgets",
+            "--poll-seconds",
+            "30",
+            "--max-concurrent",
+            "2",
+            "--label",
+            "ralph:ready",
+            "--label",
+            "bug",
+        ]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Start(start_args) = args.command else {
+            panic!("expected daemon start command");
+        };
+
+        assert_eq!(start_args.repo.as_deref(), Some("acme/widgets"));
+        assert_eq!(start_args.poll_seconds, Some(30));
+        assert_eq!(start_args.max_concurrent, Some(2));
+        assert_eq!(
+            start_args.labels,
+            vec!["ralph:ready".to_owned(), "bug".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parses_daemon_abort_with_task_selector() {
+        let cli = Cli::parse_from(["ralph", "daemon", "abort", "acme-widgets-42"]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Abort(abort_args) = args.command else {
+            panic!("expected daemon abort command");
+        };
+
+        assert_eq!(abort_args.task_id_or_number, "acme-widgets-42");
     }
 }

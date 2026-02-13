@@ -1,0 +1,17 @@
+{
+  "idea": "Add a 'ralph daemon' command that watches GitHub repositories for issues with configurable label tags (e.g. 'ralph', 'auto-fix'). The daemon should:\n\n1. **Poll GitHub issues** using the 'gh' CLI tool at a configurable interval. Watch one or more repositories specified in ralph.toml config under a new [daemon] section (repos, poll_interval, labels).\n\n2. **Issue lifecycle management**: When a new matching issue is found, the daemon should:\n   - Add a comment acknowledging the issue ('Ralph is working on this...')\n   - Update the issue label to 'ralph:in-progress'\n   - Create a ralph project from the issue title/body using 'ralph auto --idea <issue body> --project-id github-<issue-number>'\n   - Run the project in a subprocess\n   - On completion: comment with results summary, add 'ralph:completed' label, remove 'ralph:in-progress' label, create a PR referencing the issue\n   - On failure: comment with error details, add 'ralph:failed' label\n\n3. **Task tracking and persistence**: The daemon should maintain a task queue in .ralph/daemon/tasks.json tracking all issues it has picked up, their status (pending, in_progress, completed, failed, aborted), the ralph project ID, and the subprocess PID. This allows resuming after daemon restart.\n\n4. **Abort and resume**: \n   - On startup, the daemon should check tasks.json for any in_progress tasks and attempt to resume them (check if the subprocess is still running, if not restart it)\n   - Support 'ralph daemon abort <issue-number>' to kill a running task and update the GitHub issue\n   - Support 'ralph daemon status' to show all tracked tasks\n\n5. **Concurrency control**: Run at most N tasks in parallel (configurable, default 1). Queue additional issues.\n\n6. **Signal handling**: On SIGTERM/SIGINT, gracefully stop: finish saving state, update GitHub issues for any in-progress tasks to 'ralph:paused', then exit.\n\nThe daemon should be a long-running process that logs its activity. Use the existing ralph infrastructure (workspace, config, project lifecycle) rather than reinventing.",
+  "idea_hash": "b4b60cd6cfec",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-13T18:32:52Z",
+  "completed_at": "2026-02-13T18:49:36Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 226.667907324,
+  "review_times_secs": [
+    162.621583151
+  ],
+  "revision_times_secs": [
+    614.981098206
+  ]
+}

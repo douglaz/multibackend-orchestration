@@ -1,0 +1,53 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Core architecture",
+      "feedback": "The spec contradicts itself on execution model: requirements call for running each issue in a subprocess, but Technical Approach says `Orchestrator::run()` in `tokio::spawn`. In-process tasks cannot satisfy persisted PID tracking, cross-process abort, or reliable restart/resume semantics."
+    },
+    {
+      "area": "Task PID model",
+      "feedback": "`pid: Option<u32>` is described as \"OS PID of the tokio task\", which is not a real concept. Tokio tasks do not have OS PIDs. If you need PID-based lifecycle/abort from `ralph daemon abort`, you must spawn real child processes (and preferably process groups)."
+    },
+    {
+      "area": "Multi-repo feasibility",
+      "feedback": "Watching multiple GitHub repos is underspecified against current architecture, which operates on one local workspace/git checkout. Creating fixes and PRs for arbitrary `owner/repo` values is not feasible without a repo-to-local-checkout mapping or clone/worktree management."
+    },
+    {
+      "area": "Concurrency feasibility",
+      "feedback": "`max_concurrent > 1` is not feasible in a single working tree with current orchestrator behavior (branch checkout/merge, file writes, commits). Parallel runs will interfere. Either constrain to `1` or isolate each task in its own git worktree/clone."
+    },
+    {
+      "area": "Identity and collisions",
+      "feedback": "Using `project_id = github-<issue-number>` and `abort <issue-number>` is ambiguous across repos and will collide (e.g., issue 42 in two repos). Task identity and CLI abort target must include repo (or a globally unique task ID)."
+    },
+    {
+      "area": "Lifecycle consistency",
+      "feedback": "Signal-handling acceptance criterion says in-progress tasks become `pending`, but the feature requires updating GitHub issues to `ralph:paused`. Paused state/label transitions are not defined in task status model or acceptance criteria."
+    },
+    {
+      "area": "Polling correctness",
+      "feedback": "`gh issue list` defaults and label semantics are not fully specified. Without explicit pagination/limit handling, issues can be missed. Also clarify whether configured labels are `ANY` or `ALL` match semantics."
+    },
+    {
+      "area": "Idempotency and duplicate side effects",
+      "feedback": "Restart/retry behavior can duplicate comments, labels, and PR creation. Spec needs idempotency rules (e.g., marker in comments, existing-PR detection, safe re-entry for partially completed lifecycle steps)."
+    },
+    {
+      "area": "State consistency",
+      "feedback": "`tasks.json` mutation from daemon loop, worker completions, and `status/abort` commands is race-prone. Atomic rename alone is not sufficient for concurrent writers; define locking strategy (file lock + in-process mutex) and conflict handling."
+    },
+    {
+      "area": "Abort semantics",
+      "feedback": "Abort flow is incomplete: behavior for stale/nonexistent PID, daemon-not-running, and cleanup of GitHub labels (`in-progress` removal, `aborted` add) is not fully specified. Also define whether abort is best-effort graceful or hard kill after timeout."
+    },
+    {
+      "area": "PR creation path",
+      "feedback": "`gh pr create` requirements are incomplete: branch/head source, no-diff cases, already-open PRs, and fork/base handling are unspecified. These are common failure modes that affect completion/failed labeling."
+    },
+    {
+      "area": "Testing completeness",
+      "feedback": "The test plan misses mandatory validate conformance coverage for new CLI behavior. Per project rules, new command(s) must have `src/validate/tests_<feature>.rs` and registration in `src/validate/mod.rs`; unit/integration tests alone are insufficient."
+    }
+  ]
+}

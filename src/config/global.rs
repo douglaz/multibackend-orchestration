@@ -26,6 +26,14 @@ pub struct WorkspaceConfig {
     pub tmux_session: String,
     #[serde(default = "default_tmux_window_keep_seconds")]
     pub tmux_window_keep_seconds: u64,
+    #[serde(default = "default_daemon_poll_seconds")]
+    pub daemon_poll_seconds: u64,
+    #[serde(default = "default_daemon_max_concurrent")]
+    pub daemon_max_concurrent: u32,
+    #[serde(default = "default_daemon_labels")]
+    pub daemon_labels: Vec<String>,
+    #[serde(default)]
+    pub daemon_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +178,10 @@ impl Default for GlobalConfig {
                 tmux: false,
                 tmux_session: "ralph".to_owned(),
                 tmux_window_keep_seconds: 5,
+                daemon_poll_seconds: default_daemon_poll_seconds(),
+                daemon_max_concurrent: default_daemon_max_concurrent(),
+                daemon_labels: default_daemon_labels(),
+                daemon_repo: None,
             },
             backends: BackendConfigs {
                 claude: BackendConfig {
@@ -255,6 +267,18 @@ fn default_tmux_window_keep_seconds() -> u64 {
     5
 }
 
+fn default_daemon_poll_seconds() -> u64 {
+    60
+}
+
+fn default_daemon_max_concurrent() -> u32 {
+    1
+}
+
+fn default_daemon_labels() -> Vec<String> {
+    vec!["ralph:ready".to_owned()]
+}
+
 fn default_qa_enabled() -> bool {
     true
 }
@@ -322,6 +346,10 @@ mod tests {
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
+        assert_eq!(config.workspace.daemon_poll_seconds, 60);
+        assert_eq!(config.workspace.daemon_max_concurrent, 1);
+        assert_eq!(config.workspace.daemon_labels, vec!["ralph:ready".to_owned()]);
+        assert!(config.workspace.daemon_repo.is_none());
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.prompt_review_enabled);
@@ -396,6 +424,10 @@ base_branch = "master"
         assert!(!config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
+        assert_eq!(config.workspace.daemon_poll_seconds, 60);
+        assert_eq!(config.workspace.daemon_max_concurrent, 1);
+        assert_eq!(config.workspace.daemon_labels, vec!["ralph:ready".to_owned()]);
+        assert!(config.workspace.daemon_repo.is_none());
         assert!(config.backends.claude.models.planner.is_none());
         assert!(config.backends.claude.models.implementer.is_none());
         assert!(config.backends.claude.models.reviewer.is_none());
@@ -432,6 +464,10 @@ default_backend = "claude"
 tmux = true
 tmux_session = "demo"
 tmux_window_keep_seconds = 10
+daemon_poll_seconds = 30
+daemon_max_concurrent = 2
+daemon_labels = ["ralph:ready", "triage"]
+daemon_repo = "acme/widgets"
 
 [backends.claude]
 command = "claude"
@@ -465,6 +501,13 @@ base_branch = "master"
         assert!(config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "demo");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 10);
+        assert_eq!(config.workspace.daemon_poll_seconds, 30);
+        assert_eq!(config.workspace.daemon_max_concurrent, 2);
+        assert_eq!(
+            config.workspace.daemon_labels,
+            vec!["ralph:ready".to_owned(), "triage".to_owned()]
+        );
+        assert_eq!(config.workspace.daemon_repo.as_deref(), Some("acme/widgets"));
     }
 
     #[test]
