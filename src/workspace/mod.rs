@@ -1,25 +1,23 @@
 pub mod active;
 pub mod discovery;
-pub mod index;
 pub mod summary;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
 use crate::project::state::ProjectState;
-use crate::util::time::now_utc;
 use crate::Result;
 
-use self::index::{ProjectRef, WorkspaceIndex};
 use self::summary::{summarize_project, ProjectSummary};
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
     pub root: PathBuf,
     pub config: GlobalConfig,
-    pub index: WorkspaceIndex,
 }
 
 impl Workspace {
@@ -32,20 +30,7 @@ impl Workspace {
         let config_path = root.join("ralph.toml");
         let config = GlobalConfig::load(&config_path)?;
 
-        let index_path = root.join("index.json");
-        let index = if index_path.is_file() {
-            WorkspaceIndex::load(&index_path).unwrap_or_else(|_| {
-                WorkspaceIndex::new(&config.workspace.version, now_utc())
-            })
-        } else {
-            WorkspaceIndex::new(&config.workspace.version, now_utc())
-        };
-
-        let ws = Self {
-            root,
-            config,
-            index,
-        };
+        let ws = Self { root, config };
 
         // One-time migration: seed worktree-local active project from legacy
         // index.json if the local file doesn't exist yet.
@@ -58,6 +43,11 @@ impl Workspace {
     /// `index.json` contains an `active_project` for an existing project,
     /// copy it to local storage. Errors are silently ignored.
     fn migrate_active_project_from_index(&self) {
+        #[derive(Deserialize)]
+        struct LegacyIndexFile {
+            active_project: Option<String>,
+        }
+
         // Only migrate if no local active project file exists yet.
         if self.active_project_id().is_some() {
             return;
@@ -68,14 +58,25 @@ impl Workspace {
             return;
         }
 
-        if let Some(ref legacy_id) = self.index.active_project {
-            if self.project_exists(legacy_id) {
-                if active::write_active_project(&self.root, legacy_id).is_ok() {
-                    eprintln!(
-                        "migrated active project '{}' from index.json to worktree-local storage",
-                        legacy_id
-                    );
-                }
+        let index_path = self.root.join("index.json");
+        let raw = match fs::read_to_string(&index_path) {
+            Ok(raw) => raw,
+            Err(_) => return,
+        };
+        let legacy = match serde_json::from_str::<LegacyIndexFile>(&raw) {
+            Ok(legacy) => legacy,
+            Err(_) => return,
+        };
+
+        if let Some(legacy_id) = legacy.active_project {
+            if !self.project_exists(&legacy_id) {
+                return;
+            }
+            if active::write_active_project(&self.root, &legacy_id).is_ok() {
+                eprintln!(
+                    "migrated active project '{}' from index.json to worktree-local storage",
+                    legacy_id
+                );
             }
         }
     }
@@ -97,17 +98,10 @@ impl Workspace {
         let config = GlobalConfig::default();
         config.save(&root.join("ralph.toml"))?;
 
-        let index = WorkspaceIndex::new(&config.workspace.version, now_utc());
-
         Ok(Self {
             root: root.to_path_buf(),
             config,
-            index,
         })
-    }
-
-    pub fn save_index(&self) -> Result<()> {
-        self.index.save(&self.root.join("index.json"))
     }
 
     pub fn save_config(&self) -> Result<()> {
@@ -203,10 +197,6 @@ impl Workspace {
             return Err(RalphError::ProjectNotFound(id.to_owned()));
         }
         active::write_active_project(&self.root, id)
-    }
-
-    pub fn active_project(&self) -> Option<&ProjectRef> {
-        self.index.active_project_ref()
     }
 }
 

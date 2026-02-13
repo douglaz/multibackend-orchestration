@@ -6,7 +6,7 @@
   "prompt_hash_at_loop_start": "fd29e1692e9fce085050a2c85fb7c95b40ce86bd0b4d05417ba75b18c770557a",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -47,7 +47,7 @@
       "slug": "project-surface-migration-off-indexjson",
       "feature_name": "Project Surface Migration Off `index.json`",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -75,8 +75,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "db1b92138c6d6b881239a79ec88636433aa77d02",
       "started_at": "2026-02-13T16:26:20.743468390Z",
+      "completed_at": "2026-02-13T16:51:24.835147209Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "remove-workspaceindex-and-complete-index",
+      "feature_name": "Remove WorkspaceIndex and Complete Index Elimination",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-remove-workspaceindex-and-complete-index/20260213165312-spec.md",
+        "impl_notes": "loops/003-remove-workspaceindex-and-complete-index/20260213165514-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-remove-workspaceindex-and-complete-index/20260213165818-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-remove-workspaceindex-and-complete-index/20260213165725-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T16:53:12.999012982Z",
       "completed_at": null
     }
   ],

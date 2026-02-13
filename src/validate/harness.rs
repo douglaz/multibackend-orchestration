@@ -124,10 +124,6 @@ impl RalphHarness {
         load_json(&path)
     }
 
-    pub fn load_index(&self) -> Result<Value> {
-        load_json(&self.repo_root.join(".ralph").join("index.json"))
-    }
-
     /// Read the worktree-local active-project file (`.git/ralph-active-project`).
     /// Returns `Ok(None)` if the file is absent, empty, or whitespace-only.
     pub fn load_active_project(&self) -> Result<Option<String>> {
