@@ -114,9 +114,7 @@ fn runs_and_rewrites_prompt(h: &RalphHarness) -> TestResult {
             "role field should be present"
         );
         assert!(
-            fm.get("loop").is_none()
-                || fm["loop"].is_null()
-                || fm["loop"].as_str() == Some(""),
+            fm.get("loop").is_none() || fm["loop"].is_null() || fm["loop"].as_str() == Some(""),
             "project-scoped artifact must not include loop field"
         );
 
@@ -165,12 +163,7 @@ fn auto_skip_flag_bypasses(h: &RalphHarness) -> TestResult {
 
         let output = h
             .ralph_env(
-                [
-                    "auto",
-                    "--idea",
-                    "auto skip test",
-                    "--skip-prompt-review",
-                ],
+                ["auto", "--idea", "auto skip test", "--skip-prompt-review"],
                 &[("RALPH_COMPLETE", "yes")],
             )
             .expect("ralph auto --skip-prompt-review should execute");
@@ -277,11 +270,9 @@ fn existing_project_migration(h: &RalphHarness) -> TestResult {
         // Manually remove prompt_review_completed from state to simulate legacy.
         let state_path = h.project_dir(project_id).join("state.json");
         let state_json = fs::read_to_string(&state_path).expect("read state");
-        let mut state: serde_json::Value =
-            serde_json::from_str(&state_json).expect("parse state");
+        let mut state: serde_json::Value = serde_json::from_str(&state_json).expect("parse state");
         state["prompt_review_completed"] = json!(false);
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap())
-            .expect("write state");
+        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).expect("write state");
 
         // Remove the prompt-review.md and prompt-original.md so we can detect if
         // prompt review re-ran.
@@ -430,9 +421,7 @@ fn nested_refined_prompt_headings(h: &RalphHarness) -> TestResult {
         );
         // Project-scoped artifact must not include loop-scoped fields.
         assert!(
-            fm.get("loop").is_none()
-                || fm["loop"].is_null()
-                || fm["loop"].as_str() == Some(""),
+            fm.get("loop").is_none() || fm["loop"].is_null() || fm["loop"].as_str() == Some(""),
             "project-scoped artifact must not include loop field"
         );
         assert!(

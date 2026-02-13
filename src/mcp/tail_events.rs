@@ -459,6 +459,7 @@ mod tests {
             artifacts: CompletionLoopArtifacts {
                 termination_request: "loops/002-completion/termination-request.md".to_owned(),
                 verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+                acceptance_results: Vec::new(),
                 acceptance_result: None,
                 acceptance_passed: None,
             },

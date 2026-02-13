@@ -30,8 +30,8 @@ use crate::project::artifacts::{
 use crate::project::lifecycle::{load_project_state, save_project_state};
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
-    CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState, ProjectStatus,
-    QaExchange, ReviewExchange,
+    AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
+    ProjectStatus, QaExchange, ReviewExchange,
 };
 use crate::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
@@ -210,13 +210,7 @@ impl Orchestrator {
         }
 
         if options.dry_run {
-            return dry_run_summary(
-                &state,
-                &effective,
-                &registry,
-                &role_overrides,
-                &options,
-            );
+            return dry_run_summary(&state, &effective, &registry, &role_overrides, &options);
         }
 
         // --- Prompt review pre-loop step ---
@@ -248,12 +242,14 @@ impl Orchestrator {
             info!("running prompt review...");
 
             let prompt_path = project_dir.join(&state.prompt_file);
-            let prompt_content = fs::read_to_string(&prompt_path)?;
+            let prompt_content = fs::read_to_string(&prompt_path).map_err(|e| {
+                RalphError::Orchestration(format!(
+                    "failed to read prompt file '{}': {e}",
+                    prompt_path.display()
+                ))
+            })?;
 
-            let prompt_reviewer_prompt = build_prompt_reviewer_prompt(
-                &effective,
-                &prompt_content,
-            )?;
+            let prompt_reviewer_prompt = build_prompt_reviewer_prompt(&effective, &prompt_content)?;
 
             let pr_backend_spec = &effective.workflow.prompt_review_backend;
             let pr_backend = registry.get_or_create_for_spec(pr_backend_spec)?;
@@ -265,10 +261,7 @@ impl Orchestrator {
                 })
                 .await;
 
-            info!(
-                backend = pr_backend.name(),
-                "invoking prompt reviewer..."
-            );
+            info!(backend = pr_backend.name(), "invoking prompt reviewer...");
             let decision = execute_with_parse_retries(
                 pr_backend,
                 &registry,
@@ -324,7 +317,12 @@ impl Orchestrator {
 
         for _ in 0..MAX_PHASE_STEPS_PER_RUN {
             let prompt_path = project_dir.join(&state.prompt_file);
-            let prompt_content = fs::read_to_string(&prompt_path)?;
+            let prompt_content = fs::read_to_string(&prompt_path).map_err(|e| {
+                RalphError::Orchestration(format!(
+                    "failed to read prompt file '{}': {e}",
+                    prompt_path.display()
+                ))
+            })?;
             let prompt_hash = sha256_hex(&prompt_content);
 
             handle_prompt_change(
@@ -1425,9 +1423,13 @@ impl Orchestrator {
                                                             .to_owned(),
                                                     )
                                                 })?;
-                                            completion.artifacts.acceptance_result =
-                                                Some(acceptance_pass_rel);
-                                            completion.artifacts.acceptance_passed = Some(true);
+                                            completion.artifacts.upsert_acceptance_result(
+                                                AcceptanceQaResult {
+                                                    backend: acceptance_qa_backend_name.clone(),
+                                                    passed: true,
+                                                    artifact: acceptance_pass_rel,
+                                                },
+                                            );
                                         }
 
                                         state.status = ProjectStatus::Completed;
@@ -1464,9 +1466,13 @@ impl Orchestrator {
                                                             .to_owned(),
                                                     )
                                                 })?;
-                                            completion.artifacts.acceptance_result =
-                                                Some(acceptance_fail_rel);
-                                            completion.artifacts.acceptance_passed = Some(false);
+                                            completion.artifacts.upsert_acceptance_result(
+                                                AcceptanceQaResult {
+                                                    backend: acceptance_qa_backend_name.clone(),
+                                                    passed: false,
+                                                    artifact: acceptance_fail_rel,
+                                                },
+                                            );
                                             completion.verdict = Some(CompletionVerdict::Continue);
                                         }
 
@@ -2167,11 +2173,13 @@ fn latest_completion_feedback_context(
         return Ok(None);
     };
 
-    if completion.artifacts.acceptance_passed != Some(false) {
-        return Ok(None);
-    }
-
-    let Some(acceptance_fail_rel) = completion.artifacts.acceptance_result.as_deref() else {
+    let Some(acceptance_fail_rel) = completion
+        .artifacts
+        .acceptance_results
+        .iter()
+        .find(|result| !result.passed)
+        .map(|result| result.artifact.as_str())
+    else {
         return Ok(None);
     };
 

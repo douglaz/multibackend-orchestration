@@ -2520,13 +2520,17 @@ async fn acceptance_gate_pass_keeps_completed() {
 
     let attempt = &state.completion_attempts[0];
     assert_eq!(attempt.verdict, Some(CompletionVerdict::Complete));
-    assert_eq!(attempt.artifacts.acceptance_passed, Some(true));
+    assert_eq!(attempt.artifacts.acceptance_results.len(), 1);
+    assert!(
+        attempt.artifacts.acceptance_results[0].passed,
+        "acceptance result should be PASS"
+    );
+    assert_eq!(
+        attempt.artifacts.acceptance_results[0].backend,
+        attempt.backends.completer
+    );
     assert_timestamped_artifact(
-        attempt
-            .artifacts
-            .acceptance_result
-            .as_deref()
-            .expect("acceptance-pass artifact should exist"),
+        &attempt.artifacts.acceptance_results[0].artifact,
         "acceptance-pass.md",
     );
 
@@ -2565,19 +2569,27 @@ async fn acceptance_gate_fail_overrides_complete_to_continue() {
         Some(CompletionVerdict::Continue),
         "acceptance failure should force CONTINUE even when completer said COMPLETE"
     );
-    assert_eq!(first_attempt.artifacts.acceptance_passed, Some(false));
+    assert_eq!(first_attempt.artifacts.acceptance_results.len(), 1);
+    assert!(
+        !first_attempt.artifacts.acceptance_results[0].passed,
+        "first attempt acceptance result should be FAIL"
+    );
+    assert_eq!(
+        first_attempt.artifacts.acceptance_results[0].backend,
+        first_attempt.backends.completer
+    );
     assert_timestamped_artifact(
-        first_attempt
-            .artifacts
-            .acceptance_result
-            .as_deref()
-            .expect("acceptance-fail artifact should exist"),
+        &first_attempt.artifacts.acceptance_results[0].artifact,
         "acceptance-fail.md",
     );
 
     let second_attempt = &state.completion_attempts[1];
     assert_eq!(second_attempt.verdict, Some(CompletionVerdict::Complete));
-    assert_eq!(second_attempt.artifacts.acceptance_passed, Some(true));
+    assert_eq!(second_attempt.artifacts.acceptance_results.len(), 1);
+    assert!(
+        second_attempt.artifacts.acceptance_results[0].passed,
+        "second attempt acceptance result should be PASS"
+    );
     assert_eq!(state.status, ProjectStatus::Completed);
 
     let acceptance_qa_count = fs::read_to_string(counter_dir.join("acceptance_qa_count"))

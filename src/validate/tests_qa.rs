@@ -526,15 +526,27 @@ fn acceptance_gate_pass(h: &RalphHarness) -> TestResult {
         );
 
         let first_attempt = &attempts[0];
+        let acceptance_results = first_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("acceptance_results should be an array");
         assert_eq!(
-            first_attempt["artifacts"]["acceptance_passed"],
+            acceptance_results.len(),
+            1,
+            "expected first completion attempt to have exactly one acceptance result"
+        );
+        assert_eq!(
+            acceptance_results[0]["passed"],
             json!(true),
-            "expected first completion attempt to have acceptance_passed == true"
+            "expected first completion attempt to have acceptance_results[0].passed == true"
+        );
+        assert!(
+            acceptance_results[0]["backend"].as_str().is_some(),
+            "acceptance backend should be present"
         );
 
-        let acceptance_result_rel = first_attempt["artifacts"]["acceptance_result"]
+        let acceptance_result_rel = acceptance_results[0]["artifact"]
             .as_str()
-            .expect("acceptance_result artifact path should exist");
+            .expect("acceptance artifact path should exist");
         let project_dir = h.project_dir(project_id);
         let acceptance_path = project_dir.join(acceptance_result_rel);
         assert_file_exists(&acceptance_path);
@@ -569,16 +581,24 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
             attempts.len()
         );
 
-        // First completion attempt: acceptance_passed == false
+        // First completion attempt: acceptance_results[0].passed == false
         let first_attempt = &attempts[0];
+        let first_acceptance_results = first_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("first attempt acceptance_results should be an array");
         assert_eq!(
-            first_attempt["artifacts"]["acceptance_passed"],
-            json!(false),
-            "expected first completion attempt to have acceptance_passed == false"
+            first_acceptance_results.len(),
+            1,
+            "expected first completion attempt to have exactly one acceptance result"
         );
-        let first_acceptance_rel = first_attempt["artifacts"]["acceptance_result"]
+        assert_eq!(
+            first_acceptance_results[0]["passed"],
+            json!(false),
+            "expected first completion attempt to have acceptance_results[0].passed == false"
+        );
+        let first_acceptance_rel = first_acceptance_results[0]["artifact"]
             .as_str()
-            .expect("first acceptance_result artifact should exist");
+            .expect("first acceptance artifact should exist");
         let project_dir = h.project_dir(project_id);
         let first_acceptance_path = project_dir.join(first_acceptance_rel);
         assert_file_exists(&first_acceptance_path);
@@ -599,12 +619,20 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
             loops.len()
         );
 
-        // Last completion attempt: acceptance_passed == true
+        // Last completion attempt: acceptance_results[0].passed == true
         let last_attempt = &attempts[attempts.len() - 1];
+        let last_acceptance_results = last_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("last attempt acceptance_results should be an array");
         assert_eq!(
-            last_attempt["artifacts"]["acceptance_passed"],
+            last_acceptance_results.len(),
+            1,
+            "expected final completion attempt to have exactly one acceptance result"
+        );
+        assert_eq!(
+            last_acceptance_results[0]["passed"],
             json!(true),
-            "expected final completion attempt to have acceptance_passed == true"
+            "expected final completion attempt to have acceptance_results[0].passed == true"
         );
     })
 }

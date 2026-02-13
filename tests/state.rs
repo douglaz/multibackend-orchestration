@@ -2,9 +2,9 @@
 
 use chrono::Utc;
 use ralph::project::state::{
-    CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState, CompletionVerdict,
-    FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType, Phase,
-    ProjectState, ProjectStatus, QaExchange, ReviewExchange,
+    AcceptanceQaResult, CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState,
+    CompletionVerdict, FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus,
+    LoopType, Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
 use tempfile::TempDir;
 
@@ -89,6 +89,7 @@ fn test_next_loop_number_with_completion_attempts() {
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/005-completion/termination-request.md".to_owned(),
             verdict: Some("loops/005-completion/completer-verdict.md".to_owned()),
+            acceptance_results: vec![],
             acceptance_result: None,
             acceptance_passed: None,
         },
@@ -266,12 +267,8 @@ fn test_register_completion_attempt() {
     assert_eq!(state.completion_attempts[0].slug, "completion");
     assert!(state.completion_attempts[0]
         .artifacts
-        .acceptance_result
-        .is_none());
-    assert!(state.completion_attempts[0]
-        .artifacts
-        .acceptance_passed
-        .is_none());
+        .acceptance_results
+        .is_empty());
 }
 
 #[test]
@@ -417,6 +414,7 @@ fn test_validate_invariants_rejects_duplicate_loop_numbers() {
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/001-completion/termination-request.md".to_owned(),
             verdict: None,
+            acceptance_results: vec![],
             acceptance_result: None,
             acceptance_passed: None,
         },
@@ -528,12 +526,8 @@ fn test_legacy_state_deserializes_with_qa_defaults() {
     assert!(state.loops[0].artifacts.pending_qa_feedback.is_none());
     assert!(state.completion_attempts[0]
         .artifacts
-        .acceptance_result
-        .is_none());
-    assert!(state.completion_attempts[0]
-        .artifacts
-        .acceptance_passed
-        .is_none());
+        .acceptance_results
+        .is_empty());
     state
         .validate_invariants()
         .expect("legacy state should still satisfy invariants");
@@ -591,8 +585,13 @@ fn test_qa_fields_round_trip() {
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/002-completion/termination-request.md".to_owned(),
             verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
-            acceptance_result: Some("loops/002-completion/acceptance-fail.md".to_owned()),
-            acceptance_passed: Some(false),
+            acceptance_results: vec![AcceptanceQaResult {
+                backend: "claude".to_owned(),
+                passed: false,
+                artifact: "loops/002-completion/acceptance-fail.md".to_owned(),
+            }],
+            acceptance_result: None,
+            acceptance_passed: None,
         },
         verdict: Some(CompletionVerdict::Continue),
         started_at: Utc::now(),
@@ -609,17 +608,325 @@ fn test_qa_fields_round_trip() {
         Some("loops/001-demo/qa-001-fail.md")
     );
     assert_eq!(
-        loaded.completion_attempts[0]
-            .artifacts
-            .acceptance_result
-            .as_deref(),
-        Some("loops/002-completion/acceptance-fail.md")
-    );
-    assert_eq!(
-        loaded.completion_attempts[0].artifacts.acceptance_passed,
-        Some(false)
+        loaded.completion_attempts[0].artifacts.acceptance_results,
+        vec![AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: false,
+            artifact: "loops/002-completion/acceptance-fail.md".to_owned(),
+        }]
     );
     loaded
         .validate_invariants()
         .expect("qa-enabled state should satisfy invariants");
+}
+
+#[test]
+fn test_acceptance_helper_semantics() {
+    let mut artifacts = CompletionLoopArtifacts {
+        termination_request: "termination-request.md".to_owned(),
+        verdict: None,
+        acceptance_results: vec![],
+        acceptance_result: None,
+        acceptance_passed: None,
+    };
+
+    assert!(!artifacts.has_acceptance_result_for("claude"));
+    assert!(!artifacts.acceptance_all_required_passed(&["claude", "codex"]));
+    assert!(!artifacts.acceptance_any_required_failed(&["claude", "codex"]));
+
+    artifacts.acceptance_results = vec![
+        AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: true,
+            artifact: "acceptance-pass-claude.md".to_owned(),
+        },
+        AcceptanceQaResult {
+            backend: "codex".to_owned(),
+            passed: true,
+            artifact: "acceptance-pass-codex.md".to_owned(),
+        },
+    ];
+    assert!(artifacts.has_acceptance_result_for("claude"));
+    assert!(artifacts.acceptance_all_required_passed(&["claude", "codex"]));
+    assert!(!artifacts.acceptance_any_required_failed(&["claude", "codex"]));
+
+    artifacts.acceptance_results = vec![
+        AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: false,
+            artifact: "acceptance-fail-claude.md".to_owned(),
+        },
+        AcceptanceQaResult {
+            backend: "codex".to_owned(),
+            passed: false,
+            artifact: "acceptance-fail-codex.md".to_owned(),
+        },
+    ];
+    assert!(!artifacts.acceptance_all_required_passed(&["claude", "codex"]));
+    assert!(artifacts.acceptance_any_required_failed(&["claude", "codex"]));
+
+    artifacts.acceptance_results = vec![
+        AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: true,
+            artifact: "acceptance-pass-claude.md".to_owned(),
+        },
+        AcceptanceQaResult {
+            backend: "codex".to_owned(),
+            passed: false,
+            artifact: "acceptance-fail-codex.md".to_owned(),
+        },
+    ];
+    assert!(!artifacts.acceptance_all_required_passed(&["claude", "codex"]));
+    assert!(artifacts.acceptance_any_required_failed(&["claude", "codex"]));
+}
+
+#[test]
+fn test_upsert_acceptance_result_replaces_existing_and_appends_new() {
+    let mut artifacts = CompletionLoopArtifacts {
+        termination_request: "termination-request.md".to_owned(),
+        verdict: None,
+        acceptance_results: vec![AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: false,
+            artifact: "acceptance-fail-claude.md".to_owned(),
+        }],
+        acceptance_result: None,
+        acceptance_passed: None,
+    };
+
+    artifacts.upsert_acceptance_result(AcceptanceQaResult {
+        backend: "claude".to_owned(),
+        passed: true,
+        artifact: "acceptance-pass-claude.md".to_owned(),
+    });
+    artifacts.upsert_acceptance_result(AcceptanceQaResult {
+        backend: "codex".to_owned(),
+        passed: false,
+        artifact: "acceptance-fail-codex.md".to_owned(),
+    });
+
+    assert_eq!(artifacts.acceptance_results.len(), 2);
+    assert_eq!(
+        artifacts.acceptance_results[0],
+        AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: true,
+            artifact: "acceptance-pass-claude.md".to_owned(),
+        }
+    );
+    assert_eq!(
+        artifacts.acceptance_results[1],
+        AcceptanceQaResult {
+            backend: "codex".to_owned(),
+            passed: false,
+            artifact: "acceptance-fail-codex.md".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn test_load_migrates_legacy_acceptance_fields_when_new_field_empty() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let state_path = temp_dir.path().join("state.json");
+    let raw = r#"
+{
+  "project_id": "legacy-migrate",
+  "project_name": "Legacy Migrate",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "hash",
+  "prompt_hash_at_loop_start": "hash",
+  "prompt_review_completed": false,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/termination-request.md",
+        "verdict": "loops/002-completion/completer-verdict.md",
+        "acceptance_result": "loops/002-completion/acceptance-fail.md",
+        "acceptance_passed": false
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-11T00:05:00Z",
+      "completed_at": null
+    }
+  ]
+}
+"#;
+    std::fs::write(&state_path, raw).expect("write state");
+
+    let state = ProjectState::load(&state_path).expect("load state");
+    assert_eq!(
+        state.completion_attempts[0].artifacts.acceptance_results,
+        vec![AcceptanceQaResult {
+            backend: "unknown".to_owned(),
+            passed: false,
+            artifact: "loops/002-completion/acceptance-fail.md".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn test_load_migration_prefers_non_empty_new_acceptance_results() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let state_path = temp_dir.path().join("state.json");
+    let raw = r#"
+{
+  "project_id": "legacy-precedence",
+  "project_name": "Legacy Precedence",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "hash",
+  "prompt_hash_at_loop_start": "hash",
+  "prompt_review_completed": false,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/termination-request.md",
+        "verdict": "loops/002-completion/completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude",
+            "passed": true,
+            "artifact": "loops/002-completion/acceptance-pass-claude.md"
+          }
+        ],
+        "acceptance_result": "loops/002-completion/acceptance-fail-legacy.md",
+        "acceptance_passed": false
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-11T00:05:00Z",
+      "completed_at": null
+    }
+  ]
+}
+"#;
+    std::fs::write(&state_path, raw).expect("write state");
+
+    let state = ProjectState::load(&state_path).expect("load state");
+    assert_eq!(
+        state.completion_attempts[0].artifacts.acceptance_results,
+        vec![AcceptanceQaResult {
+            backend: "claude".to_owned(),
+            passed: true,
+            artifact: "loops/002-completion/acceptance-pass-claude.md".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn test_load_does_not_migrate_partial_legacy_acceptance_fields() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let state_path = temp_dir.path().join("state.json");
+    let raw = r#"
+{
+  "project_id": "legacy-partial",
+  "project_name": "Legacy Partial",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "hash",
+  "prompt_hash_at_loop_start": "hash",
+  "prompt_review_completed": false,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude",
+        "completer": "codex"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/termination-request.md",
+        "verdict": "loops/002-completion/completer-verdict.md",
+        "acceptance_result": "loops/002-completion/acceptance-fail.md"
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-11T00:05:00Z",
+      "completed_at": null
+    }
+  ]
+}
+"#;
+    std::fs::write(&state_path, raw).expect("write state");
+
+    let state = ProjectState::load(&state_path).expect("load state");
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_results
+        .is_empty());
+}
+
+#[test]
+fn test_serialization_emits_acceptance_results_and_omits_legacy_fields() {
+    let mut state = ProjectState::new("serialize", "Serialize", "hash", None);
+    state.current_loop = 2;
+    state.current_phase = Phase::Completing;
+    state.phase_iteration = 1;
+    state.status = ProjectStatus::InProgress;
+    state.completion_attempts.push(CompletionLoopState {
+        loop_number: 2,
+        slug: "completion".to_owned(),
+        loop_type: LoopType::Completion,
+        status: LoopStatus::InProgress,
+        backends: CompletionLoopBackends {
+            planner: "claude".to_owned(),
+            completer: "codex".to_owned(),
+        },
+        artifacts: CompletionLoopArtifacts {
+            termination_request: "loops/002-completion/termination-request.md".to_owned(),
+            verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+            acceptance_results: vec![AcceptanceQaResult {
+                backend: "claude".to_owned(),
+                passed: true,
+                artifact: "loops/002-completion/acceptance-pass-claude.md".to_owned(),
+            }],
+            acceptance_result: Some("loops/002-completion/legacy.md".to_owned()),
+            acceptance_passed: Some(false),
+        },
+        verdict: Some(CompletionVerdict::Complete),
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    let serialized = serde_json::to_value(&state).expect("serialize state");
+    let artifacts = &serialized["completion_attempts"][0]["artifacts"];
+    assert_eq!(
+        artifacts["acceptance_results"].as_array().map(|v| v.len()),
+        Some(1)
+    );
+    assert!(artifacts.get("acceptance_result").is_none());
+    assert!(artifacts.get("acceptance_passed").is_none());
 }

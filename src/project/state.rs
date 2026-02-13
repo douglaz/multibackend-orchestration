@@ -127,9 +127,18 @@ pub struct CompletionLoopArtifacts {
     pub termination_request: String,
     pub verdict: Option<String>,
     #[serde(default)]
+    pub acceptance_results: Vec<AcceptanceQaResult>,
+    #[serde(default, skip_serializing)]
     pub acceptance_result: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub acceptance_passed: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AcceptanceQaResult {
+    pub backend: String,
+    pub passed: bool,
+    pub artifact: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,7 +181,8 @@ impl ProjectState {
 
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
-        let state = serde_json::from_str(&raw)?;
+        let mut state: Self = serde_json::from_str(&raw)?;
+        state.migrate_legacy_acceptance_results();
         Ok(state)
     }
 
@@ -256,6 +266,7 @@ impl ProjectState {
             artifacts: CompletionLoopArtifacts {
                 termination_request: termination_request_path,
                 verdict: None,
+                acceptance_results: Vec::new(),
                 acceptance_result: None,
                 acceptance_passed: None,
             },
@@ -363,6 +374,66 @@ impl ProjectState {
         }
 
         Ok(())
+    }
+
+    fn migrate_legacy_acceptance_results(&mut self) {
+        for attempt in &mut self.completion_attempts {
+            attempt.artifacts.migrate_legacy_acceptance_result();
+        }
+    }
+}
+
+impl CompletionLoopArtifacts {
+    pub fn has_acceptance_result_for(&self, backend: &str) -> bool {
+        self.acceptance_results
+            .iter()
+            .any(|result| result.backend == backend)
+    }
+
+    pub fn upsert_acceptance_result(&mut self, result: AcceptanceQaResult) {
+        if let Some(existing) = self
+            .acceptance_results
+            .iter_mut()
+            .find(|existing| existing.backend == result.backend)
+        {
+            *existing = result;
+            return;
+        }
+
+        self.acceptance_results.push(result);
+    }
+
+    pub fn acceptance_all_required_passed(&self, required: &[&str]) -> bool {
+        required.iter().all(|backend| {
+            self.acceptance_results
+                .iter()
+                .any(|result| result.backend == *backend && result.passed)
+        })
+    }
+
+    pub fn acceptance_any_required_failed(&self, required: &[&str]) -> bool {
+        required.iter().any(|backend| {
+            self.acceptance_results
+                .iter()
+                .any(|result| result.backend == *backend && !result.passed)
+        })
+    }
+
+    fn migrate_legacy_acceptance_result(&mut self) {
+        if self.acceptance_results.is_empty() {
+            if let (Some(artifact), Some(passed)) =
+                (self.acceptance_result.clone(), self.acceptance_passed)
+            {
+                self.acceptance_results.push(AcceptanceQaResult {
+                    backend: "unknown".to_owned(),
+                    passed,
+                    artifact,
+                });
+            }
+        }
+
+        self.acceptance_result = None;
+        self.acceptance_passed = None;
     }
 }
 
