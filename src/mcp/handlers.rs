@@ -39,7 +39,9 @@ pub async fn handle_tool_call(name: &str, arguments: Value) -> Result<Value, Str
 // ---------------------------------------------------------------------------
 
 fn get_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(ToOwned::to_owned)
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
 }
 
 fn get_bool(args: &Value, key: &str) -> Option<bool> {
@@ -144,7 +146,9 @@ async fn handle_project_list(_args: Value) -> Result<Value, String> {
         })
         .collect();
 
-    Ok(CallToolResult::success_json(json!({ "projects": projects })))
+    Ok(CallToolResult::success_json(
+        json!({ "projects": projects }),
+    ))
 }
 
 async fn handle_project_show(args: Value) -> Result<Value, String> {
@@ -240,10 +244,7 @@ async fn handle_status(args: Value) -> Result<Value, String> {
             }),
         );
     } else if let Some(attempt) = state.current_completion_attempt() {
-        obj.insert(
-            "completion_loop".to_owned(),
-            json!(attempt.loop_number),
-        );
+        obj.insert("completion_loop".to_owned(), json!(attempt.loop_number));
         obj.insert(
             "backends".to_owned(),
             json!({
@@ -475,16 +476,14 @@ mod tests {
     async fn project_new_requires_id_and_name() {
         let result = handle_tool_call("project_new", json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing required argument: id"));
+        assert!(result
+            .unwrap_err()
+            .contains("missing required argument: id"));
     }
 
     #[tokio::test]
     async fn project_new_requires_prompt_source() {
-        let result = handle_tool_call(
-            "project_new",
-            json!({ "id": "test", "name": "Test" }),
-        )
-        .await;
+        let result = handle_tool_call("project_new", json!({ "id": "test", "name": "Test" })).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -504,9 +503,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("mutually exclusive"));
+        assert!(result.unwrap_err().contains("mutually exclusive"));
     }
 
     #[tokio::test]
@@ -527,11 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_rejects_invalid_on_prompt_change() {
-        let result = handle_tool_call(
-            "run",
-            json!({ "on_prompt_change": "invalid-value" }),
-        )
-        .await;
+        let result = handle_tool_call("run", json!({ "on_prompt_change": "invalid-value" })).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid on_prompt_change"));
     }
@@ -540,7 +533,9 @@ mod tests {
     async fn quick_prd_requires_idea() {
         let result = handle_tool_call("quick_prd", json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing required argument: idea"));
+        assert!(result
+            .unwrap_err()
+            .contains("missing required argument: idea"));
     }
 
     #[tokio::test]
@@ -564,7 +559,10 @@ mod tests {
         let text = &parsed.content[0].text;
         let inner: Value = serde_json::from_str(text).unwrap();
         assert_eq!(inner["dry_run"], true);
-        assert!(inner["prompt"].as_str().unwrap().contains("add retry logic"));
+        assert!(inner["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("add retry logic"));
     }
 
     #[tokio::test]

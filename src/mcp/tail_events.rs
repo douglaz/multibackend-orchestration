@@ -45,7 +45,10 @@ pub fn collect_tail_events(
         .map(|count| events.len().saturating_sub(count))
         .unwrap_or(0);
 
-    Ok(events[start_idx..].iter().map(|e| e.value.clone()).collect())
+    Ok(events[start_idx..]
+        .iter()
+        .map(|e| e.value.clone())
+        .collect())
 }
 
 fn collect_artifact_events(project_dir: &Path, project_id: &str) -> crate::Result<Vec<RawEvent>> {
@@ -482,10 +485,7 @@ mod tests {
             .collect();
         assert!(state_events.len() >= 3);
 
-        let git_events: Vec<&Value> = events
-            .iter()
-            .filter(|e| e["event_type"] == "git")
-            .collect();
+        let git_events: Vec<&Value> = events.iter().filter(|e| e["event_type"] == "git").collect();
         assert_eq!(git_events.len(), 1);
         assert_eq!(git_events[0]["commit_hash"], "abc123");
         assert_eq!(git_events[0]["loop_number"], 1);

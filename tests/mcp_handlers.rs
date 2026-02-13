@@ -210,12 +210,7 @@ async fn e2e_project_show_unknown_project_returns_is_error_true() {
 #[tokio::test]
 async fn e2e_status_returns_structured_state() {
     let (_temp, ws_root) = create_test_workspace();
-    let responses = run_tool_call(
-        "status",
-        json!({ "project": "test-project" }),
-        &ws_root,
-    )
-    .await;
+    let responses = run_tool_call("status", json!({ "project": "test-project" }), &ws_root).await;
 
     let ctr = extract_tool_result(&responses);
     assert!(!ctr.is_error, "status should succeed");
@@ -229,12 +224,7 @@ async fn e2e_status_returns_structured_state() {
 #[tokio::test]
 async fn e2e_history_returns_empty_loops() {
     let (_temp, ws_root) = create_test_workspace();
-    let responses = run_tool_call(
-        "history",
-        json!({ "project": "test-project" }),
-        &ws_root,
-    )
-    .await;
+    let responses = run_tool_call("history", json!({ "project": "test-project" }), &ws_root).await;
 
     let ctr = extract_tool_result(&responses);
     assert!(!ctr.is_error, "history should succeed");
@@ -248,12 +238,7 @@ async fn e2e_history_returns_empty_loops() {
 #[tokio::test]
 async fn e2e_tail_returns_events_array() {
     let (_temp, ws_root) = create_test_workspace();
-    let responses = run_tool_call(
-        "tail",
-        json!({ "project": "test-project" }),
-        &ws_root,
-    )
-    .await;
+    let responses = run_tool_call("tail", json!({ "project": "test-project" }), &ws_root).await;
 
     let ctr = extract_tool_result(&responses);
     assert!(!ctr.is_error, "tail should succeed");
@@ -324,7 +309,10 @@ async fn e2e_quick_prd_dry_run_succeeds() {
 
     let inner = parse_inner(&ctr);
     assert_eq!(inner["dry_run"], true);
-    assert!(inner["prompt"].as_str().unwrap().contains("add retry logic"));
+    assert!(inner["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("add retry logic"));
 }
 
 #[tokio::test]
