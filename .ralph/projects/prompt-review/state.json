@@ -1,0 +1,46 @@
+{
+  "project_id": "prompt-review",
+  "project_name": "Add a prompt review phase as the very first step of project ",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "d84cb5b714fe02ec19380805c6f17dbabc570983ba66f3117e842312af0b6e00",
+  "prompt_hash_at_loop_start": "d84cb5b714fe02ec19380805c6f17dbabc570983ba66f3117e842312af0b6e00",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "prompt-review-foundation-state-config-parser-and",
+      "feature_name": "Prompt Review Foundation — State, Config, Parser, and Template",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-prompt-review-foundation-state-config-parser-and/20260213043543-spec.md",
+        "impl_notes": "loops/001-prompt-review-foundation-state-config-parser-and/20260213044058-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-prompt-review-foundation-state-config-parser-and/20260213044503-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-prompt-review-foundation-state-config-parser-and/20260213044408-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T04:35:43.300709639Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

@@ -6,7 +6,8 @@ use std::path::Path;
 
 use ralph::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_reviewer_template, render_template, render_template_with_fallback,
+    default_prompt_reviewer_template, default_reviewer_template, render_template,
+    render_template_with_fallback,
 };
 use tempfile::TempDir;
 
@@ -151,6 +152,16 @@ fn test_default_completer_template_contains_required_sections() {
     assert!(template.contains("{{state_content}}"));
     assert!(template.contains("{{previous_specs}}"));
     assert!(template.contains("{{termination_request_content}}"));
+}
+
+#[test]
+fn test_default_prompt_reviewer_template_contains_required_sections() {
+    let template = default_prompt_reviewer_template();
+    assert!(template.starts_with("You are a prompt reviewer"));
+    assert!(template.contains("# Prompt Review"));
+    assert!(template.contains("## Issues Found"));
+    assert!(template.contains("## Refined Prompt"));
+    assert!(template.contains("{{prompt_content}}"));
 }
 
 #[test]

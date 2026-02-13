@@ -13,6 +13,8 @@ pub use project::ProjectConfig;
 #[derive(Debug, Clone)]
 pub struct EffectiveWorkflowConfig {
     pub starting_backend: String,
+    pub prompt_review_enabled: bool,
+    pub prompt_review_backend: String,
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
@@ -42,6 +44,7 @@ pub struct EffectiveTemplateConfig {
     pub planner: PathBuf,
     pub implementer: PathBuf,
     pub reviewer: PathBuf,
+    pub prompt_reviewer: PathBuf,
     pub completer: PathBuf,
     pub qa: PathBuf,
 }
@@ -97,6 +100,9 @@ pub fn resolve_effective_config(
         project_ref.and_then(|p| p.workflow.qa_backend.as_deref()),
         global.workflow.qa_backend.as_deref(),
     );
+    let prompt_review_backend = project_ref
+        .and_then(|p| p.workflow.prompt_review_backend.clone())
+        .unwrap_or_else(|| global.workflow.prompt_review_backend.clone());
 
     if let Some(spec) = planner_backend.as_deref() {
         validate_backend_spec(&global, spec, "planner backend override")?;
@@ -113,9 +119,18 @@ pub fn resolve_effective_config(
     if let Some(spec) = qa_backend.as_deref() {
         validate_backend_spec(&global, spec, "qa backend override")?;
     }
+    validate_backend_spec(
+        &global,
+        &prompt_review_backend,
+        "prompt review backend override",
+    )?;
 
     let workflow = EffectiveWorkflowConfig {
         starting_backend,
+        prompt_review_enabled: project_ref
+            .and_then(|p| p.workflow.prompt_review_enabled)
+            .unwrap_or(global.workflow.prompt_review_enabled),
+        prompt_review_backend,
         planner_backend,
         implementer_backend,
         reviewer_backend,
@@ -160,6 +175,12 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.reviewer.as_deref()),
             &global.templates.reviewer,
+        ),
+        prompt_reviewer: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.prompt_reviewer.as_deref()),
+            &global.templates.prompt_reviewer,
         ),
         completer: resolve_template_path(
             workspace_root,
@@ -337,17 +358,23 @@ mod tests {
         global.workflow.qa_backend = Some("claude(opus)".to_owned());
         global.workflow.qa_enabled = false;
         global.workflow.max_qa_iterations = 3;
+        global.workflow.prompt_review_enabled = true;
+        global.workflow.prompt_review_backend = "codex(gpt-5.3-codex-xhigh)".to_owned();
         global.templates.qa = "templates/qa-global.md".to_owned();
+        global.templates.prompt_reviewer = "templates/prompt-reviewer-global.md".to_owned();
 
         let project = ProjectConfig {
             workflow: ProjectWorkflowOverrides {
                 qa_backend: Some("codex".to_owned()),
                 qa_enabled: Some(true),
                 max_qa_iterations: Some(9),
+                prompt_review_enabled: Some(false),
+                prompt_review_backend: Some("claude(opus)".to_owned()),
                 ..ProjectWorkflowOverrides::default()
             },
             templates: crate::config::project::ProjectTemplateOverrides {
                 qa: Some("templates/qa-project.md".to_owned()),
+                prompt_reviewer: Some("templates/prompt-reviewer-project.md".to_owned()),
                 ..crate::config::project::ProjectTemplateOverrides::default()
             },
         };
@@ -370,9 +397,34 @@ mod tests {
         );
         assert!(effective.workflow.qa_enabled);
         assert_eq!(effective.workflow.max_qa_iterations, 9);
+        assert!(!effective.workflow.prompt_review_enabled);
+        assert_eq!(effective.workflow.prompt_review_backend, "claude(opus)");
         assert_eq!(
             effective.templates.qa,
             Path::new("/workspace/project-a/templates/qa-project.md")
         );
+        assert_eq!(
+            effective.templates.prompt_reviewer,
+            Path::new("/workspace/project-a/templates/prompt-reviewer-project.md")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_unknown_prompt_review_backend() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backend = "unknown(model)".to_owned();
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("unknown prompt review backend should fail validation");
+
+        assert!(error
+            .to_string()
+            .contains("unknown backend configured as prompt review backend override"));
     }
 }

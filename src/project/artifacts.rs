@@ -98,6 +98,16 @@ pub struct ArtifactWriteInput<'a> {
     pub body: &'a str,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectScopedArtifactWriteInput<'a> {
+    pub artifact: &'a str,
+    pub file_name: &'a str,
+    pub project_id: &'a str,
+    pub backend: &'a str,
+    pub role: &'a str,
+    pub body: &'a str,
+}
+
 pub fn write_artifact(project_dir: &Path, input: ArtifactWriteInput<'_>) -> Result<PathBuf> {
     let loop_dir_name = format!("{:03}-{}", input.loop_number, input.loop_slug);
     let loop_dir = project_dir.join("loops").join(loop_dir_name);
@@ -118,6 +128,29 @@ pub fn write_artifact(project_dir: &Path, input: ArtifactWriteInput<'_>) -> Resu
     if let Some(iterations) = input.kind.iterations() {
         fm.push_str(&format!("iterations: {iterations}\n"));
     }
+    fm.push_str(&format!("project: {}\n", input.project_id));
+    fm.push_str(&format!("backend: {}\n", input.backend));
+    fm.push_str(&format!("role: {}\n", input.role));
+    fm.push_str(&format!("created_at: {created_at}\n"));
+    fm.push_str("---\n\n");
+
+    let content = format!("{}{body}\n", fm);
+    fs::write(&artifact_path, content)?;
+
+    Ok(artifact_path)
+}
+
+pub fn write_project_scoped_artifact(
+    project_dir: &Path,
+    input: ProjectScopedArtifactWriteInput<'_>,
+) -> Result<PathBuf> {
+    let now = now_utc();
+    let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let artifact_path = project_dir.join(input.file_name);
+    let body = strip_backend_frontmatter(input.body);
+
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("artifact: {}\n", input.artifact));
     fm.push_str(&format!("project: {}\n", input.project_id));
     fm.push_str(&format!("backend: {}\n", input.backend));
     fm.push_str(&format!("role: {}\n", input.role));
@@ -254,7 +287,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        resolve_artifact_path_by_suffix, write_artifact, ArtifactKind, ArtifactWriteInput,
+        resolve_artifact_path_by_suffix, write_artifact, write_project_scoped_artifact,
+        ArtifactKind, ArtifactWriteInput, ProjectScopedArtifactWriteInput,
     };
 
     #[test]
@@ -347,5 +381,49 @@ mod tests {
         );
         assert_eq!(ArtifactKind::AcceptancePass.base_type(), "acceptance-pass");
         assert_eq!(ArtifactKind::AcceptanceFail.base_type(), "acceptance-fail");
+    }
+
+    #[test]
+    fn write_project_scoped_artifact_writes_project_frontmatter_schema() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_dir = temp.path();
+
+        let path = write_project_scoped_artifact(
+            project_dir,
+            ProjectScopedArtifactWriteInput {
+                artifact: "prompt-review",
+                file_name: "prompt-review.md",
+                project_id: "demo",
+                backend: "codex(gpt-5.3-codex-xhigh)",
+                role: "prompt_reviewer",
+                body: "# Prompt Review\n\n## Issues Found\n- mock\n\n## Refined Prompt\nThis is a sufficiently long refined prompt.",
+            },
+        )
+        .expect("write project artifact");
+
+        assert_eq!(
+            path,
+            project_dir.join("prompt-review.md"),
+            "project-scoped artifact should be written directly under project root"
+        );
+
+        let content = std::fs::read_to_string(path).expect("read artifact");
+        assert!(content.contains("artifact: prompt-review"));
+        assert!(content.contains("project: demo"));
+        assert!(content.contains("backend: codex(gpt-5.3-codex-xhigh)"));
+        assert!(content.contains("role: prompt_reviewer"));
+        assert!(content.contains("created_at: "));
+        assert!(
+            !content.contains("\nloop: "),
+            "project-scoped artifact must not include loop field"
+        );
+        assert!(
+            !content.contains("\niteration: "),
+            "project-scoped artifact must not include iteration field"
+        );
+        assert!(
+            !content.contains("\niterations: "),
+            "project-scoped artifact must not include iterations field"
+        );
     }
 }

@@ -99,6 +99,10 @@ pub struct WorkflowConfig {
     pub commit_message_style: CommitMessageStyle,
     pub commit_tag_format: String,
     pub prompt_change_action: PromptChangeAction,
+    #[serde(default = "default_prompt_review_enabled")]
+    pub prompt_review_enabled: bool,
+    #[serde(default = "default_prompt_review_backend")]
+    pub prompt_review_backend: String,
     #[serde(default)]
     pub planner_backend: Option<String>,
     #[serde(default)]
@@ -137,6 +141,8 @@ pub struct TemplateConfig {
     pub planner: String,
     pub implementer: String,
     pub reviewer: String,
+    #[serde(default = "default_prompt_reviewer_template_path")]
+    pub prompt_reviewer: String,
     pub completer: String,
     #[serde(default = "default_qa_template_path")]
     pub qa: String,
@@ -206,6 +212,8 @@ impl Default for GlobalConfig {
                 commit_message_style: CommitMessageStyle::Conventional,
                 commit_tag_format: "ralph/{project_id}/loop-{loop_number}".to_owned(),
                 prompt_change_action: PromptChangeAction::Abort,
+                prompt_review_enabled: default_prompt_review_enabled(),
+                prompt_review_backend: default_prompt_review_backend(),
                 planner_backend: None,
                 implementer_backend: None,
                 reviewer_backend: None,
@@ -218,6 +226,7 @@ impl Default for GlobalConfig {
                 planner: "templates/spec.md".to_owned(),
                 implementer: "templates/implementation.md".to_owned(),
                 reviewer: "templates/review.md".to_owned(),
+                prompt_reviewer: default_prompt_reviewer_template_path(),
                 completer: "templates/completion.md".to_owned(),
                 qa: default_qa_template_path(),
             },
@@ -243,8 +252,20 @@ fn default_qa_enabled() -> bool {
     true
 }
 
+fn default_prompt_review_enabled() -> bool {
+    true
+}
+
+fn default_prompt_review_backend() -> String {
+    "codex(gpt-5.3-codex-xhigh)".to_owned()
+}
+
 fn default_max_qa_iterations() -> u32 {
     3
+}
+
+fn default_prompt_reviewer_template_path() -> String {
+    "templates/prompt_reviewer.md".to_owned()
 }
 
 fn default_qa_template_path() -> String {
@@ -296,6 +317,11 @@ mod tests {
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert!(config.workflow.prompt_review_enabled);
+        assert_eq!(
+            config.workflow.prompt_review_backend,
+            "codex(gpt-5.3-codex-xhigh)"
+        );
         assert_eq!(
             config.backends.claude.models.qa.as_deref(),
             Some("opus"),
@@ -307,6 +333,10 @@ mod tests {
             "codex qa model should default to gpt-5.3-codex-high"
         );
         assert_eq!(config.templates.qa, "templates/qa.md");
+        assert_eq!(
+            config.templates.prompt_reviewer,
+            "templates/prompt_reviewer.md"
+        );
     }
 
     #[test]
@@ -374,7 +404,16 @@ base_branch = "master"
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.qa_backend.is_none());
+        assert!(config.workflow.prompt_review_enabled);
+        assert_eq!(
+            config.workflow.prompt_review_backend,
+            "codex(gpt-5.3-codex-xhigh)"
+        );
         assert_eq!(config.templates.qa, "templates/qa.md");
+        assert_eq!(
+            config.templates.prompt_reviewer,
+            "templates/prompt_reviewer.md"
+        );
     }
 
     #[test]
@@ -419,6 +458,53 @@ base_branch = "master"
         assert!(config.workspace.tmux);
         assert_eq!(config.workspace.tmux_session, "demo");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 10);
+    }
+
+    #[test]
+    fn deserializes_prompt_review_fields_when_present() {
+        let raw = r#"
+[workspace]
+version = "1.0"
+default_backend = "claude"
+
+[backends.claude]
+command = "claude"
+timeout_seconds = 600
+
+[backends.codex]
+command = "codex"
+timeout_seconds = 600
+
+[workflow]
+max_review_iterations = 5
+auto_commit = true
+commit_message_style = "conventional"
+commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
+prompt_change_action = "abort"
+prompt_review_enabled = false
+prompt_review_backend = "claude(opus)"
+
+[templates]
+planner = "templates/spec.md"
+implementer = "templates/implementation.md"
+reviewer = "templates/review.md"
+prompt_reviewer = "templates/custom-prompt-reviewer.md"
+completer = "templates/completion.md"
+
+[git]
+auto_branch = true
+branch_format = "ralph/{project_id}"
+sign_commits = false
+base_branch = "master"
+"#;
+
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert!(!config.workflow.prompt_review_enabled);
+        assert_eq!(config.workflow.prompt_review_backend, "claude(opus)");
+        assert_eq!(
+            config.templates.prompt_reviewer,
+            "templates/custom-prompt-reviewer.md"
+        );
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub struct ProjectWorkflowOverrides {
     pub auto_commit: Option<bool>,
     pub commit_message_style: Option<CommitMessageStyle>,
     pub prompt_change_action: Option<PromptChangeAction>,
+    pub prompt_review_enabled: Option<bool>,
+    pub prompt_review_backend: Option<String>,
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
@@ -39,6 +41,7 @@ pub struct ProjectTemplateOverrides {
     pub planner: Option<String>,
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
+    pub prompt_reviewer: Option<String>,
     pub completer: Option<String>,
     pub qa: Option<String>,
 }

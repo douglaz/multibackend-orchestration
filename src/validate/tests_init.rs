@@ -54,7 +54,14 @@ fn creates_template_files(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("ralph init should succeed");
 
         let templates = h.repo_root.join(".ralph").join("templates");
-        for name in &["spec.md", "implementation.md", "review.md", "completion.md"] {
+        for name in &[
+            "spec.md",
+            "implementation.md",
+            "review.md",
+            "prompt_reviewer.md",
+            "completion.md",
+            "qa.md",
+        ] {
             assert_file_not_empty(&templates.join(name));
         }
     })) {

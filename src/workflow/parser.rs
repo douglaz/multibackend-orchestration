@@ -39,6 +39,12 @@ pub enum QaDecision {
     Fail { body: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct PromptReviewerDecision {
+    pub body: String,
+    pub refined_prompt: String,
+}
+
 pub fn parse_planner_output(raw: &str) -> Result<PlannerDecision> {
     let body = strip_frontmatter(raw);
     let Some(first_h1) = first_h1_line(&body) else {
@@ -226,6 +232,70 @@ pub fn parse_qa_output(raw: &str) -> Result<QaDecision> {
     }
 }
 
+pub fn parse_prompt_reviewer_output(raw: &str) -> Result<PromptReviewerDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "prompt reviewer output is missing a top-level H1".to_owned(),
+        ));
+    };
+    if first_h1.trim() != "# Prompt Review" {
+        return Err(RalphError::ParseError(format!(
+            "unsupported prompt reviewer H1: {}",
+            first_h1.trim()
+        )));
+    }
+
+    let issues_idx = body
+        .lines()
+        .position(|line| line.trim() == "## Issues Found")
+        .ok_or_else(|| {
+            RalphError::ParseError(
+                "missing required section '## Issues Found' in prompt review".to_owned(),
+            )
+        })?;
+    let refined_idx = body
+        .lines()
+        .position(|line| line.trim() == "## Refined Prompt")
+        .ok_or_else(|| {
+            RalphError::ParseError(
+                "missing required section '## Refined Prompt' in prompt review".to_owned(),
+            )
+        })?;
+    if issues_idx >= refined_idx {
+        return Err(RalphError::ParseError(
+            "invalid prompt review section order: '## Issues Found' must appear before '## Refined Prompt'"
+                .to_owned(),
+        ));
+    }
+
+    let mut capture_refined = false;
+    let mut refined_lines = String::new();
+    for line in body.lines() {
+        if capture_refined {
+            refined_lines.push_str(line);
+            refined_lines.push('\n');
+            continue;
+        }
+
+        if line.trim() == "## Refined Prompt" {
+            capture_refined = true;
+        }
+    }
+
+    let refined_prompt = refined_lines.trim().to_owned();
+    if refined_prompt.chars().count() < 10 {
+        return Err(RalphError::ParseError(
+            "refined prompt is empty or too short".to_owned(),
+        ));
+    }
+
+    Ok(PromptReviewerDecision {
+        body,
+        refined_prompt,
+    })
+}
+
 pub fn extract_commit_message(body: &str) -> Option<String> {
     let mut in_section = false;
     let mut lines = Vec::new();
@@ -315,8 +385,8 @@ fn validate_required_line(body: &str, line: &str, scope: &str) -> Result<()> {
 mod tests {
     use super::{
         extract_commit_message, parse_completer_output, parse_implementer_output,
-        parse_planner_output, parse_qa_output, parse_reviewer_output, ImplementerDecision,
-        PlannerDecision, QaDecision, ReviewerDecision,
+        parse_planner_output, parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output,
+        ImplementerDecision, PlannerDecision, QaDecision, ReviewerDecision,
     };
     use crate::project::state::CompletionVerdict;
 
@@ -530,5 +600,89 @@ mod tests {
         let text = "---\nartifact: qa\n---\n# QA: PASS\n\n## Tests Run\n- ok\n\n## Verification Summary\nAll good.";
         let parsed = parse_qa_output(text).expect("should strip frontmatter and parse");
         assert!(matches!(parsed, QaDecision::Pass { .. }));
+    }
+
+    #[test]
+    fn parses_prompt_reviewer_output() {
+        let text = "# Prompt Review\n\n## Issues Found\n- clarify acceptance criteria\n\n## Refined Prompt\n# Feature: Better Prompt\n\n## Description\nA more specific prompt.";
+        let parsed = parse_prompt_reviewer_output(text).expect("parse should succeed");
+        assert!(parsed.body.contains("## Issues Found"));
+        assert!(parsed
+            .refined_prompt
+            .starts_with("# Feature: Better Prompt"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_requires_h1() {
+        let text = "## Issues Found\n- x\n\n## Refined Prompt\nLong enough prompt body.";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "missing h1 should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_requires_issues_found() {
+        let text = "# Prompt Review\n\n## Refined Prompt\nThis refined prompt is long enough.";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "missing issues section should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("## Issues Found"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_requires_refined_prompt_section() {
+        let text = "# Prompt Review\n\n## Issues Found\n- x";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "missing refined section should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("## Refined Prompt"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_rejects_empty_refined_prompt() {
+        let text = "# Prompt Review\n\n## Issues Found\n- x\n\n## Refined Prompt\n   \n\t";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "empty refined prompt should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("refined prompt is empty or too short"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_rejects_too_short_refined_prompt() {
+        let text = "# Prompt Review\n\n## Issues Found\n- x\n\n## Refined Prompt\nshort";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "short refined prompt should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("refined prompt is empty or too short"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_extracts_refined_prompt_to_eof_with_nested_headings() {
+        let text = "# Prompt Review\n\n## Issues Found\n- x\n\n## Refined Prompt\n# Feature: Prompt\n\n## Description\nNested heading remains.\n\n## Acceptance Criteria\n- [ ] one";
+        let parsed = parse_prompt_reviewer_output(text).expect("parse should succeed");
+        assert!(parsed.refined_prompt.contains("## Description"));
+        assert!(parsed.refined_prompt.contains("## Acceptance Criteria"));
+    }
+
+    #[test]
+    fn prompt_reviewer_output_rejects_wrong_section_order() {
+        let text = "# Prompt Review\n\n## Refined Prompt\nThis refined prompt is long enough.\n\n## Issues Found\n- listed too late";
+        let result = parse_prompt_reviewer_output(text);
+        assert!(result.is_err(), "wrong section order should fail");
+        assert!(result
+            .expect_err("expected error")
+            .to_string()
+            .contains("must appear before"));
     }
 }

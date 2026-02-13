@@ -1,0 +1,17 @@
+{
+  "idea": "Add a prompt review phase as the very first step of project execution. Currently ralph starts implementing the project prompt as-is without any review. Add a new phase called 'prompt_review' that runs before the first planning loop. In this phase, an AI agent reviews the project prompt (prompt.md) for completeness, ambiguity, missing acceptance criteria, and feasibility, then rewrites/refines it in place. The refined prompt replaces the original prompt.md so subsequent loops work from the improved version. This should be configurable: workflow.prompt_review_enabled (default true), workflow.prompt_review_backend (default 'codex(gpt-5.3-codex-xhigh)'). The prompt review agent should output a structured response with sections: '## Issues Found', '## Refined Prompt' (the full rewritten prompt). A new template file templates/prompt_reviewer.md should define the system prompt. The phase should be skippable via --skip-prompt-review CLI flag on both 'run' and 'auto' commands. State should track whether prompt review has been completed so it only runs once per project (not on resume). Add validate conformance tests for the new phase.",
+  "idea_hash": "4d9c53378093",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-13T04:12:40Z",
+  "completed_at": "2026-02-13T04:33:33Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 664.936775704,
+  "review_times_secs": [
+    229.184218866
+  ],
+  "revision_times_secs": [
+    358.731344831
+  ]
+}

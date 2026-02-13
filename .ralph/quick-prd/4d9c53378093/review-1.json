@@ -1,0 +1,37 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Parser / output contract",
+      "feedback": "The spec says to extract `## Refined Prompt` until the next H2 or EOF. A full rewritten prompt will often include H2 headings, so this would truncate valid output. Require a fenced block payload or extract from `## Refined Prompt` to EOF."
+    },
+    {
+      "area": "Migration and resume behavior",
+      "feedback": "With `#[serde(default)] prompt_review_completed = false`, existing projects (including resumed in-progress loops) will run prompt review unexpectedly. That conflicts with 'before the first planning loop'. Add a guard so review only runs when the project has never started looping."
+    },
+    {
+      "area": "Config precedence clarity",
+      "feedback": "AC7 states CLI > project > global precedence for `workflow.prompt_review_backend`, but the spec explicitly excludes a CLI backend flag. This is contradictory. Either add the CLI flag or define precedence as project > global."
+    },
+    {
+      "area": "Config command completeness",
+      "feedback": "The file list omits `src/cli/config.rs`. Without updates there, `ralph config set/get/show` will not support `workflow.prompt_review_enabled`, `workflow.prompt_review_backend`, or `templates.prompt_reviewer`, weakening the 'configurable' requirement."
+    },
+    {
+      "area": "Prompt path handling",
+      "feedback": "The implementation steps hardcode `prompt.md`, but state already supports `state.prompt_file`. The phase should read/write/backup using `state.prompt_file` for correctness and forward compatibility."
+    },
+    {
+      "area": "Failure safety",
+      "feedback": "The overwrite flow is not fully specified for parse failure, empty refined prompt, existing `prompt-original.md`, or write errors. Add explicit atomicity/rollback expectations and require non-empty refined prompt before replacing the file."
+    },
+    {
+      "area": "Testing coverage",
+      "feedback": "Coverage is missing for `auto --skip-prompt-review`, dry-run prompt-review summary behavior, and parser cases where the refined prompt contains nested `##` headings. These are high-risk paths for regressions."
+    },
+    {
+      "area": "Artifact contract clarity",
+      "feedback": "`prompt-review.md` is project-scoped, but 'standard frontmatter' is loop-oriented today. Define an explicit frontmatter schema for this artifact (fields and whether `loop` is omitted) to avoid ambiguity."
+    }
+  ]
+}

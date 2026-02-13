@@ -14,6 +14,8 @@ pub struct ProjectState {
     pub prompt_file: String,
     pub prompt_hash: String,
     pub prompt_hash_at_loop_start: String,
+    #[serde(default)]
+    pub prompt_review_completed: bool,
     pub parent_project: Option<String>,
     pub current_loop: u32,
     pub current_phase: Phase,
@@ -157,6 +159,7 @@ impl ProjectState {
             prompt_file: "prompt.md".to_owned(),
             prompt_hash: prompt_hash.to_owned(),
             prompt_hash_at_loop_start: prompt_hash.to_owned(),
+            prompt_review_completed: false,
             parent_project,
             current_loop: 0,
             current_phase: Phase::Planning,
@@ -360,5 +363,29 @@ impl ProjectState {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectState;
+
+    #[test]
+    fn new_state_defaults_prompt_review_completed_to_false() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        assert!(!state.prompt_review_completed);
+    }
+
+    #[test]
+    fn legacy_state_without_prompt_review_field_deserializes_to_false() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        let mut value = serde_json::to_value(&state).expect("serialize state");
+        value
+            .as_object_mut()
+            .expect("state should serialize as object")
+            .remove("prompt_review_completed");
+
+        let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
+        assert!(!parsed.prompt_review_completed);
     }
 }

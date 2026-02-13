@@ -4,7 +4,7 @@ use std::os::unix::fs as unix_fs;
 use crate::cli::InitArgs;
 use crate::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_qa_template, default_reviewer_template,
+    default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -23,6 +23,10 @@ pub fn execute(args: InitArgs) -> Result<()> {
         default_implementer_template(),
     )?;
     fs::write(templates_dir.join("review.md"), default_reviewer_template())?;
+    fs::write(
+        templates_dir.join("prompt_reviewer.md"),
+        default_prompt_reviewer_template(),
+    )?;
     fs::write(
         templates_dir.join("completion.md"),
         default_completer_template(),

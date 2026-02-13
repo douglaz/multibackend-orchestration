@@ -118,6 +118,8 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 "backends": effective.global.backends,
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
+                    "prompt_review_enabled": effective.workflow.prompt_review_enabled,
+                    "prompt_review_backend": effective.workflow.prompt_review_backend,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -135,6 +137,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "planner": effective.templates.planner,
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
+                    "prompt_reviewer": effective.templates.prompt_reviewer,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                 },
@@ -176,6 +179,8 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 "backends": effective.global.backends,
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
+                    "prompt_review_enabled": effective.workflow.prompt_review_enabled,
+                    "prompt_review_backend": effective.workflow.prompt_review_backend,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -193,6 +198,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "planner": effective.templates.planner,
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
+                    "prompt_reviewer": effective.templates.prompt_reviewer,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                 },
@@ -318,6 +324,13 @@ fn set_global_value(
         "workflow.prompt_change_action" => {
             config.workflow.prompt_change_action = parse_prompt_change_action(raw_value)?;
         }
+        "workflow.prompt_review_enabled" => {
+            config.workflow.prompt_review_enabled = parse_bool(raw_value, key)?;
+        }
+        "workflow.prompt_review_backend" => {
+            ensure_backend(raw_value)?;
+            config.workflow.prompt_review_backend = raw_value.to_owned();
+        }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
         }
@@ -342,6 +355,7 @@ fn set_global_value(
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
+        "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
         "templates.completer" => config.templates.completer = raw_value.to_owned(),
         "templates.qa" => config.templates.qa = raw_value.to_owned(),
         "git.auto_branch" => config.git.auto_branch = parse_bool(raw_value, key)?,
@@ -401,6 +415,12 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "workflow.prompt_change_action" => {
             config.workflow.prompt_change_action = parse_optional_prompt_change_action(raw_value)?;
         }
+        "workflow.prompt_review_enabled" => {
+            config.workflow.prompt_review_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.prompt_review_backend" => {
+            config.workflow.prompt_review_backend = parse_optional_backend(raw_value)?;
+        }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
         }
@@ -425,6 +445,9 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
+        "templates.prompt_reviewer" => {
+            config.templates.prompt_reviewer = parse_optional_string(raw_value)
+        }
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
         "templates.qa" => config.templates.qa = parse_optional_string(raw_value),
         _ => {
