@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "mcp-validate",
+  "active_project": "musl-static",
   "projects": [
     {
       "id": "tmux-backend",
@@ -195,6 +195,17 @@
       "name": "MCP validate conformance tests",
       "status": "in_progress",
       "created_at": "2026-02-13T02:48:08.305234312Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
+      "parent_project": null
+    },
+    {
+      "id": "musl-static",
+      "name": "Compile ralph as a static binary using musl libc by default.",
+      "status": "in_progress",
+      "created_at": "2026-02-13T03:19:03.351691140Z",
       "completed_at": null,
       "total_feature_loops": 0,
       "total_completion_attempts": 0,

@@ -10,9 +10,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-      in
-      {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
+        isLinux = pkgs.stdenv.hostPlatform.isLinux;
+
+        commonArgs = {
           pname = "ralph";
           version = "0.1.0";
           src = ./.;
@@ -22,16 +22,11 @@
           };
 
           nativeBuildInputs = [
-            pkgs.pkg-config
             pkgs.git
           ];
 
           nativeCheckInputs = [
             pkgs.bash
-          ];
-
-          buildInputs = [
-            pkgs.openssl
           ];
 
           # Tests generate mock backend scripts at runtime with
@@ -45,31 +40,71 @@
             done
           '';
 
-          # Run the 40 conformance tests against the built binary
+          # Run conformance tests against the built binary
           postCheck = ''
             echo "running ralph validate conformance tests..."
             target/*/release/ralph validate --bin target/*/release/ralph
           '';
-
         };
+
+        staticPackage = pkgs.pkgsStatic.rustPlatform.buildRustPackage (commonArgs // {
+          postInstall = ''
+            echo "verifying static linkage..."
+            file_output="$(${pkgs.file}/bin/file "$out/bin/ralph")"
+            echo "$file_output"
+            if ! echo "$file_output" | grep -Eq "statically linked|static-pie linked"; then
+              echo "FAIL: binary is NOT statically linked"
+              exit 1
+            fi
+          '';
+        });
+
+        dynamicPackage = pkgs.rustPlatform.buildRustPackage commonArgs;
+      in
+      {
+        packages =
+          {
+            default = if isLinux then staticPackage else dynamicPackage;
+            dynamic = dynamicPackage;
+          }
+          // pkgs.lib.optionalAttrs isLinux {
+            static = staticPackage;
+          };
 
         apps.default = flake-utils.lib.mkApp {
           drv = self.packages.${system}.default;
         };
 
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            rustc
-            rustfmt
-            clippy
-            rust-analyzer
-            pkg-config
-            openssl
-            git
-          ];
+        devShells =
+          {
+            default = pkgs.mkShell {
+              packages = with pkgs; [
+                cargo
+                rustc
+                rustfmt
+                clippy
+                rust-analyzer
+                git
+              ];
 
-          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
-        };
+              RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            };
+          }
+          // pkgs.lib.optionalAttrs isLinux {
+            musl = pkgs.mkShell {
+              packages = [
+                pkgs.pkgsStatic.buildPackages.cargo
+                pkgs.pkgsStatic.buildPackages.rustc
+                pkgs.pkgsStatic.stdenv.cc
+                pkgs.git
+                pkgs.bash
+              ];
+
+              CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER =
+                "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
+              RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+            };
+          };
       });
 }
