@@ -1,5 +1,10 @@
 # TODO
 
+## Open
+
+### Acceptance QA: short-circuit on first failure
+The acceptance QA loop runs both backends sequentially even when the first one fails. Since all must pass, a failure from the first backend means the verdict is already "continue" — the second QA call wastes money. Change the `for` loop at `src/workflow/orchestrator.rs:~1363` to break after the first FAIL, record only that failure, and proceed to the "continue" verdict immediately.
+
 ## Resolved
 
 ### Bug: QA phase fails with "No such file or directory" — artifact name mismatch
