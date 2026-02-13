@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "auto-cmd",
+  "active_project": "mcp-server",
   "projects": [
     {
       "id": "tmux-backend",
@@ -177,6 +177,17 @@
       "total_feature_loops": 0,
       "total_completion_attempts": 0,
       "last_loop_number": 1,
+      "parent_project": null
+    },
+    {
+      "id": "mcp-server",
+      "name": "Add an MCP (Model Context Protocol) server to ralph that exp",
+      "status": "in_progress",
+      "created_at": "2026-02-13T01:23:40.207244823Z",
+      "completed_at": null,
+      "total_feature_loops": 3,
+      "total_completion_attempts": 2,
+      "last_loop_number": 6,
       "parent_project": null
     }
   ]
