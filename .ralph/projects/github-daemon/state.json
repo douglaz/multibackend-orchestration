@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "3db956bac46442f980507994417831453aed4a9bdccb7f127fa8f285367dc431",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "daemon-foundation-task-state-model-taskstore-with",
       "feature_name": "Daemon Foundation — Task State Model, TaskStore with File Locking, CLI Skeleton, Config, and Conformance Tests",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -39,8 +39,60 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "c4867ad19824e5fbdb46627fb73db895e42baede",
       "started_at": "2026-02-13T18:52:56.706217929Z",
+      "completed_at": "2026-02-13T19:06:29.562111509Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "daemon-runtime-polling-worktree-execution-and",
+      "feature_name": "Daemon Runtime — Polling, Worktree Execution, and GitHub Completion Flow",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213190944-spec.md",
+        "impl_notes": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213192037-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213192658-review-001-feedback.md",
+            "response": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213193450-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213193754-review-002-feedback.md",
+            "response": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213194551-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213194757-review-003-feedback.md",
+            "response": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213195042-impl-response-003.md"
+          },
+          {
+            "iteration": 4,
+            "feedback": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213195450-review-004-feedback.md",
+            "response": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213195856-impl-response-004.md"
+          }
+        ],
+        "approval": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213200136-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-daemon-runtime-polling-worktree-execution-and/20260213192445-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T19:09:44.253829374Z",
       "completed_at": null
     }
   ],

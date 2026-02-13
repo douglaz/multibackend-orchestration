@@ -3,6 +3,7 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 
 use crate::config::resolve_daemon_config;
+use crate::daemon::runtime::DaemonRuntimeConfig;
 use crate::daemon::{abort_task, TaskStore};
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
@@ -31,6 +32,10 @@ pub struct DaemonStartArgs {
     pub max_concurrent: Option<u32>,
     #[arg(long = "label")]
     pub labels: Vec<String>,
+    /// Run a single poll/claim/dispatch/collect iteration and exit.
+    /// Used by conformance tests for deterministic behavior.
+    #[arg(long)]
+    pub single_iteration: bool,
 }
 
 #[derive(Debug, Args)]
@@ -72,14 +77,40 @@ fn execute_start(args: DaemonStartArgs) -> Result<()> {
         },
     };
 
+    let (owner, repo_name) = parse_repo_slug(&repo)?;
+
     println!(
-        "daemon start validated for repo {} (poll={}s, max_concurrent={}, labels={}); polling loop is not implemented in this iteration",
+        "daemon start validated for repo {} (poll={}s, max_concurrent={}, labels={})",
         repo,
         poll_seconds,
         max_concurrent,
         labels.join(",")
     );
-    Ok(())
+
+    // Resolve ralph binary path (env override for testing, else current executable)
+    let ralph_bin = match std::env::var("RALPH_DAEMON_BIN") {
+        Ok(path) if !path.is_empty() => std::path::PathBuf::from(path),
+        _ => std::env::current_exe().map_err(|err| {
+            RalphError::Orchestration(format!("cannot determine ralph binary path: {err}"))
+        })?,
+    };
+
+    // Resolve git repo root for worktree operations
+    let repo_root = resolve_git_root(&workspace)?;
+
+    let store = TaskStore::new(&workspace.root);
+    let runtime_config = DaemonRuntimeConfig {
+        owner,
+        repo: repo_name,
+        poll_seconds,
+        max_concurrent,
+        labels,
+        single_iteration: args.single_iteration,
+        ralph_bin,
+        repo_root,
+    };
+
+    crate::daemon::runtime::run(&store, &runtime_config)
 }
 
 fn execute_status() -> Result<()> {
@@ -160,6 +191,20 @@ fn validate_repo_slug(repo: &str) -> Result<()> {
     Ok(())
 }
 
+fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+    let trimmed = repo.trim();
+    let mut parts = trimmed.split('/');
+    let owner = parts.next().unwrap_or_default().to_owned();
+    let name = parts.next().unwrap_or_default().to_owned();
+    if owner.is_empty() || name.is_empty() {
+        return Err(RalphError::Validation(format!(
+            "invalid repo '{}': expected owner/repo",
+            repo
+        )));
+    }
+    Ok((owner, name))
+}
+
 fn resolve_repo_from_gh() -> Result<String> {
     let output = Command::new("gh")
         .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
@@ -181,4 +226,27 @@ fn resolve_repo_from_gh() -> Result<String> {
     let repo = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     validate_repo_slug(&repo)?;
     Ok(repo)
+}
+
+fn resolve_git_root(workspace: &Workspace) -> Result<std::path::PathBuf> {
+    // The workspace root is typically inside .ralph/ under the repo root.
+    // Walk up to find the git root.
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&workspace.root)
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to find git root: {err}")))?;
+
+    if !output.status.success() {
+        // Fallback: workspace root parent
+        return Ok(workspace
+            .root
+            .parent()
+            .unwrap_or(&workspace.root)
+            .to_path_buf());
+    }
+
+    Ok(std::path::PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }

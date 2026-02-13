@@ -1,9 +1,13 @@
+pub mod github;
+pub mod process;
+pub mod runtime;
+pub mod worktree;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -11,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::RalphError;
 use crate::util::time::now_iso8601;
 use crate::Result;
+
+use self::process as daemon_process;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -227,42 +233,15 @@ fn write_tasks_to_file(file: &mut File, tasks: &[DaemonTask]) -> Result<()> {
     Ok(())
 }
 
-fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>, task_id: &str) {
-    let Some(target) = KillTarget::from_task(child_pid, child_pgid) else {
-        return;
-    };
-
-    if !target.exists() {
+fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>, _task_id: &str) {
+    // Prefer killing by process group; fall back to single PID.
+    if let Some(pgid) = child_pgid.filter(|v| *v > 0) {
+        daemon_process::terminate_process_group(pgid, Duration::from_secs(10));
         return;
     }
-
-    if let Err(err) = target.signal("TERM") {
-        eprintln!(
-            "warning: failed to send SIGTERM for task {} ({}): {}",
-            task_id,
-            target.describe(),
-            err
-        );
-        if !target.exists() {
-            return;
-        }
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if !target.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    if let Err(err) = target.signal("KILL") {
-        eprintln!(
-            "warning: failed to send SIGKILL for task {} ({}): {}",
-            task_id,
-            target.describe(),
-            err
-        );
+    if let Some(pid) = child_pid.filter(|v| *v > 0) {
+        // No PGID available — treat the single PID as a one-member "group".
+        daemon_process::terminate_process_group(pid, Duration::from_secs(10));
     }
 }
 
@@ -303,64 +282,6 @@ fn update_abort_labels_best_effort(task: &DaemonTask) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum KillTarget {
-    Process(u32),
-    Group(u32),
-}
-
-impl KillTarget {
-    fn from_task(child_pid: Option<u32>, child_pgid: Option<u32>) -> Option<Self> {
-        if let Some(pgid) = child_pgid.filter(|value| *value > 0) {
-            return Some(Self::Group(pgid));
-        }
-        child_pid.filter(|value| *value > 0).map(Self::Process)
-    }
-
-    fn exists(self) -> bool {
-        let arg = self.signal_target_arg();
-        Command::new("kill")
-            .args(["-0", "--", &arg])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    fn signal(self, signal: &str) -> Result<()> {
-        let arg = self.signal_target_arg();
-        let status = Command::new("kill")
-            .args([&format!("-{signal}"), "--", &arg])
-            .status()
-            .map_err(|err| RalphError::Orchestration(format!("failed to execute kill: {err}")))?;
-
-        if status.success() {
-            return Ok(());
-        }
-
-        if !self.exists() {
-            return Ok(());
-        }
-
-        Err(RalphError::Orchestration(format!(
-            "kill command failed for {}",
-            self.describe()
-        )))
-    }
-
-    fn signal_target_arg(self) -> String {
-        match self {
-            Self::Process(pid) => pid.to_string(),
-            Self::Group(pgid) => format!("-{pgid}"),
-        }
-    }
-
-    fn describe(self) -> String {
-        match self {
-            Self::Process(pid) => format!("pid {pid}"),
-            Self::Group(pgid) => format!("pgid {pgid}"),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

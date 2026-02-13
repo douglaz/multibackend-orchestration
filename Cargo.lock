@@ -515,6 +515,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs2",
+ "libc",
  "regex",
  "serde",
  "serde_json",

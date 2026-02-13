@@ -444,6 +444,160 @@ fi
     .to_owned()
 }
 
+/// Mock `gh` script for daemon runtime tests. Handles:
+/// - `gh issue list ...` — returns configurable JSON issues
+/// - `gh issue edit ...` — no-op success
+/// - `gh issue view ...` — returns empty comments
+/// - `gh issue comment ...` — no-op success
+/// - `gh pr list ...` — returns empty
+/// - `gh pr create ...` — returns a fake PR URL
+/// - `gh repo view ...` — returns the configured owner/repo
+///
+/// Set `MOCK_GH_ISSUES` env var to a JSON array of issues for poll responses.
+/// Set `MOCK_GH_OVERFLOW` to "true" to return exactly 100 issues.
+pub fn daemon_mock_gh_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for daemon runtime tests.
+# Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
+# Env: MOCK_GH_OVERFLOW - if "true", return 100 identical issues
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ "$MOCK_GH_OVERFLOW" = "true" ]; then
+          # Generate exactly 100 issues
+          printf '['
+          i=1
+          while [ $i -le 100 ]; do
+            if [ $i -gt 1 ]; then printf ','; fi
+            printf '{"number":%d,"title":"issue %d","labels":[]}' $i $i
+            i=$((i + 1))
+          done
+          printf ']'
+          exit 0
+        fi
+        if [ -n "$MOCK_GH_ISSUES" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        # Claiming / label update — always succeed
+        exit 0
+        ;;
+      view)
+        # Return empty comments body
+        printf ''
+        exit 0
+        ;;
+      comment)
+        # Post comment — always succeed
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        # No existing PRs — return empty (simulates -q ".[0].url" with no results)
+        printf ''
+        exit 0
+        ;;
+      create)
+        printf 'https://github.com/mock/repo/pull/1\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script for daemon tests that simulates `ralph auto` execution.
+/// It simply exits successfully immediately.
+pub fn daemon_mock_ralph_script() -> String {
+    r###"#!/bin/sh
+# Mock ralph for daemon child process tests.
+# When called as `ralph auto <idea>`, just succeed immediately.
+case "$1" in
+  auto)
+    exit 0
+    ;;
+  *)
+    # Pass through other commands to real ralph
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script that creates a commit in the worktree before exiting,
+/// so `has_diff` detects divergence from the base branch.
+pub fn daemon_mock_ralph_with_commit_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  auto)
+    # Create a file and commit it so the branch diverges from base
+    echo "mock change" > ralph_daemon_change.txt
+    git add ralph_daemon_change.txt
+    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script that exits with non-zero for testing failure paths.
+pub fn daemon_mock_ralph_fail_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  auto)
+    exit 1
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
 pub fn always_reject_review_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail

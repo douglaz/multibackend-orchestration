@@ -1,0 +1,135 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::error::RalphError;
+use crate::Result;
+
+/// Return the base directory for daemon worktrees.
+pub fn worktrees_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("daemon").join("worktrees")
+}
+
+/// Return the worktree path for a specific task.
+pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    worktrees_dir(workspace_root).join(task_id)
+}
+
+/// Create a git worktree for the given task.
+///
+/// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
+/// `.ralph/daemon/worktrees/<task_id>/`.
+pub fn create_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+) -> Result<PathBuf> {
+    let wt_path = task_worktree_path(workspace_root, task_id);
+
+    if wt_path.exists() {
+        return Ok(wt_path);
+    }
+
+    if let Some(parent) = wt_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let branch_name = format!("ralph/daemon/{task_id}");
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &branch_name,
+            &wt_path.to_string_lossy(),
+            "HEAD",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to create worktree for {task_id}: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git worktree add failed for {task_id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(wt_path)
+}
+
+/// Remove a worktree for a task. Best-effort: logs warning on failure.
+pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
+    let wt_path = task_worktree_path(workspace_root, task_id);
+    if !wt_path.exists() {
+        return;
+    }
+
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &wt_path.to_string_lossy(),
+        ])
+        .current_dir(repo_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            eprintln!(
+                "warning: failed to remove worktree for {task_id}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            // Fallback: try to remove the directory directly
+            let _ = fs::remove_dir_all(&wt_path);
+        }
+        Err(err) => {
+            eprintln!("warning: failed to run git worktree remove for {task_id}: {err}");
+            let _ = fs::remove_dir_all(&wt_path);
+        }
+    }
+
+    // Prune stale worktree entries
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+}
+
+/// Reconcile orphaned and stale worktrees at startup.
+///
+/// Scans `.ralph/daemon/worktrees/` and removes directories that are either:
+/// - Not associated with any known task ID (orphaned), or
+/// - Associated with a task in a terminal state (stale).
+///
+/// `active_task_ids` should contain only IDs of non-terminal tasks that will
+/// be re-adopted by the daemon.
+pub fn reconcile_worktrees(
+    repo_root: &Path,
+    workspace_root: &Path,
+    active_task_ids: &[String],
+) {
+    let wt_dir = worktrees_dir(workspace_root);
+    let entries = match fs::read_dir(&wt_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !active_task_ids.contains(&name) {
+            eprintln!("reconcile: removing stale/orphaned worktree {name}");
+            remove_worktree(repo_root, workspace_root, &name);
+        }
+    }
+
+    // Also prune git's internal worktree list
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+}
