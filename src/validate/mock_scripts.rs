@@ -300,6 +300,150 @@ fi
     .to_owned()
 }
 
+/// Mock script whose prompt reviewer response includes nested `##` headings
+/// inside the `## Refined Prompt` section, exercising the extract-to-EOF parser
+/// semantics. All other roles respond identically to `standard_mock_script()`.
+pub fn nested_heading_prompt_review_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Acceptance criteria could be more specific
+- Missing error-handling requirements
+
+## Refined Prompt
+## Overview
+Build a widget system that manages lifecycle events.
+
+## Architecture
+The system uses an event-driven model with pluggable handlers.
+
+### Component Registry
+Each component registers via a unique key.
+
+## Acceptance Criteria
+- [ ] Widget lifecycle events fire in order
+- [ ] Handlers can be registered and removed dynamically
+- [ ] Error boundaries prevent cascading failures
+
+## Technical Notes
+Use the observer pattern for event dispatch.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- mock check: passed
+
+## Verification Summary
+All acceptance criteria verified by mock QA.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 pub fn always_reject_review_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail

@@ -7,7 +7,9 @@ use crate::validate::assertions::{
     parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::{auto_mock_script, standard_mock_script};
+use crate::validate::mock_scripts::{
+    auto_mock_script, nested_heading_prompt_review_script, standard_mock_script,
+};
 use serde_json::json;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -43,6 +45,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prompt_review::stable_mock_with_modeled_backend",
             func: stable_mock_with_modeled_backend,
+        },
+        ConformanceTest {
+            name: "prompt_review::nested_refined_prompt_headings",
+            func: nested_refined_prompt_headings,
         },
     ]
 }
@@ -333,6 +339,113 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
         assert!(
             state["loops"].as_array().map_or(false, |l| !l.is_empty()),
             "at least one loop should have been completed"
+        );
+    })
+}
+
+/// AC14 conformance: verify that a reviewer response with nested `##` headings
+/// inside `## Refined Prompt` is fully preserved through the runtime rewrite
+/// pipeline (not truncated at the first nested heading).
+fn nested_refined_prompt_headings(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-nested-headings";
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "nested-heading-mock.sh",
+                &nested_heading_prompt_review_script(),
+            )
+            .expect("failed to write nested heading mock script");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            project_id,
+            "Nested Heading Test",
+            "Original prompt for nested heading test",
+        )
+        .expect("create_project failed");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let project_dir = h.project_dir(project_id);
+
+        // prompt-original.md should exist as a backup of the original prompt.
+        let backup_path = project_dir.join("prompt-original.md");
+        assert_file_exists(&backup_path);
+        let backup = fs::read_to_string(&backup_path).expect("read backup");
+        assert!(
+            backup.contains("Original prompt for nested heading test"),
+            "backup should contain original prompt"
+        );
+
+        // prompt.md should contain the full nested refined content.
+        let prompt_path = project_dir.join("prompt.md");
+        let prompt = fs::read_to_string(&prompt_path).expect("read rewritten prompt");
+
+        // Verify the nested headings are all present — not truncated at the
+        // first `##` inside the refined prompt body.
+        assert!(
+            prompt.contains("## Overview"),
+            "rewritten prompt should contain ## Overview, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("## Architecture"),
+            "rewritten prompt should contain ## Architecture, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("### Component Registry"),
+            "rewritten prompt should contain ### Component Registry, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("## Acceptance Criteria"),
+            "rewritten prompt should contain ## Acceptance Criteria, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("## Technical Notes"),
+            "rewritten prompt should contain ## Technical Notes (last section), got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Use the observer pattern for event dispatch."),
+            "rewritten prompt should contain final line of the refined prompt, got: {prompt}"
+        );
+
+        // prompt-review.md artifact should exist with project-scoped frontmatter.
+        let review_artifact = project_dir.join("prompt-review.md");
+        assert_file_exists(&review_artifact);
+        let fm = parse_yaml_frontmatter(&review_artifact);
+        assert_eq!(
+            fm["artifact"].as_str(),
+            Some("prompt-review"),
+            "artifact field should be prompt-review"
+        );
+        assert_eq!(
+            fm["project"].as_str(),
+            Some(project_id),
+            "project field should match"
+        );
+        assert!(
+            fm["role"].as_str().is_some(),
+            "role field should be present"
+        );
+        // Project-scoped artifact must not include loop-scoped fields.
+        assert!(
+            fm.get("loop").is_none()
+                || fm["loop"].is_null()
+                || fm["loop"].as_str() == Some(""),
+            "project-scoped artifact must not include loop field"
+        );
+        assert!(
+            fm.get("iteration").is_none() || fm["iteration"].is_null(),
+            "project-scoped artifact must not include iteration field"
+        );
+
+        // State should show prompt_review_completed.
+        let state = h.load_state(project_id).expect("load state");
+        assert_eq!(
+            state["prompt_review_completed"],
+            json!(true),
+            "prompt_review_completed should be true"
         );
     })
 }
