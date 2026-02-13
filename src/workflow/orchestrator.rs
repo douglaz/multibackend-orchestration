@@ -2623,6 +2623,28 @@ where
 {
     let first_output =
         execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
+
+    // If output is empty/near-empty, retry with the same backend before going to the
+    // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
+    // overloaded API), not a formatting problem. Sending empty output to the reformatter
+    // causes it to fabricate a structurally valid but semantically wrong response.
+    let first_output = if first_output.trim().len() < 20 {
+        warn!(
+            role = role,
+            output_len = first_output.len(),
+            "backend returned empty/near-empty output, retrying with same backend"
+        );
+        let retry_output =
+            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
+        if retry_output.trim().len() > first_output.trim().len() {
+            retry_output
+        } else {
+            first_output
+        }
+    } else {
+        first_output
+    };
+
     match parse_fn(&first_output) {
         Ok(parsed) => Ok(parsed),
         Err(parse_error_1) => {
