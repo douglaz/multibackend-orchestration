@@ -57,6 +57,30 @@ impl RalphHarness {
         Ok(output)
     }
 
+    pub fn ralph_with_stdin<I, S>(&self, args: I, input: &str) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = Command::new(&self.ralph_bin)
+            .args(args)
+            .current_dir(&self.repo_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
+        Ok(output)
+    }
+
     pub fn ralph_env<I, S>(&self, args: I, env_vars: &[(&str, &str)]) -> Result<Output>
     where
         I: IntoIterator<Item = S>,

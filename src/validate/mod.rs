@@ -13,6 +13,7 @@ pub mod runner;
 
 mod tests_commands;
 mod tests_init;
+mod tests_mcp;
 mod tests_project;
 mod tests_qa;
 mod tests_run;
@@ -76,6 +77,7 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
 fn register_tests() -> Vec<ConformanceTest> {
     let mut tests = Vec::new();
     tests.extend(tests_init::tests());
+    tests.extend(tests_mcp::tests());
     tests.extend(tests_project::tests());
     tests.extend(tests_run::tests());
     tests.extend(tests_qa::tests());
