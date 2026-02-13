@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -11,6 +12,8 @@ use crate::Result;
 pub struct ProjectState {
     pub project_id: String,
     pub project_name: String,
+    #[serde(default = "default_created_at")]
+    pub created_at: DateTime<Utc>,
     #[serde(default = "default_prompt_file")]
     pub prompt_file: String,
     #[serde(default)]
@@ -162,6 +165,10 @@ fn default_prompt_file() -> String {
     "prompt.md".to_owned()
 }
 
+pub(crate) fn default_created_at() -> DateTime<Utc> {
+    DateTime::<Utc>::MIN_UTC
+}
+
 impl ProjectState {
     pub fn new(
         project_id: &str,
@@ -172,6 +179,7 @@ impl ProjectState {
         Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
+            created_at: Utc::now(),
             prompt_file: "prompt.md".to_owned(),
             prompt_hash: prompt_hash.to_owned(),
             prompt_hash_at_loop_start: prompt_hash.to_owned(),
@@ -195,7 +203,10 @@ impl ProjectState {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let raw = serde_json::to_string_pretty(self)?;
-        fs::write(path, raw)?;
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+        temp.write_all(raw.as_bytes())?;
+        temp.persist(path).map_err(|err| err.error)?;
         Ok(())
     }
 
@@ -446,7 +457,10 @@ impl CompletionLoopArtifacts {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectState;
+    use chrono::{DateTime, Utc};
+    use tempfile::tempdir;
+
+    use super::{default_created_at, ProjectState};
 
     #[test]
     fn new_state_defaults_prompt_review_completed_to_false() {
@@ -465,5 +479,43 @@ mod tests {
 
         let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
         assert!(!parsed.prompt_review_completed);
+    }
+
+    #[test]
+    fn new_state_sets_created_at() {
+        let before = Utc::now();
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        let after = Utc::now();
+        assert!(state.created_at >= before);
+        assert!(state.created_at <= after);
+    }
+
+    #[test]
+    fn legacy_state_without_created_at_deserializes_to_sentinel() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        let mut value = serde_json::to_value(&state).expect("serialize state");
+        value
+            .as_object_mut()
+            .expect("state should serialize as object")
+            .remove("created_at");
+
+        let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
+        assert_eq!(parsed.created_at, DateTime::<Utc>::MIN_UTC);
+        assert_eq!(parsed.created_at, default_created_at());
+    }
+
+    #[test]
+    fn save_is_atomic_and_roundtrips() {
+        let temp = tempdir().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+
+        state.save(&state_path).expect("save state");
+        assert!(state_path.exists());
+
+        let loaded = ProjectState::load(&state_path).expect("load state");
+        assert_eq!(loaded.project_id, state.project_id);
+        assert_eq!(loaded.project_name, state.project_name);
+        assert_eq!(loaded.created_at, state.created_at);
     }
 }

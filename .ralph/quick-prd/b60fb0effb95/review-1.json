@@ -1,0 +1,37 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Feasibility: metadata derivation",
+      "feedback": "The spec says all `ProjectRef` metadata is derivable from `state.json`, but `ProjectState` does not currently store project-level `created_at` (and does not provide an exact replacement for `completed_at`). If `project show --json` / MCP `project_show` schema compatibility matters, this needs an explicit plan (state schema extension + migration, or API contract change)."
+    },
+    {
+      "area": "Completeness: missed code paths",
+      "feedback": "Index/active usage is not fully covered. Additional required migrations include `src/cli/config.rs`, `src/mcp/handlers.rs` (`status`, `history`, `config_show`), and `src/workflow/orchestrator.rs` parent-consistency logic around index metadata. Current spec call-site list is incomplete."
+    },
+    {
+      "area": "Acceptance criteria coverage",
+      "feedback": "Acceptance criteria do not mention `config` behavior (CLI and MCP) under the new active-project mechanism, even though these commands currently depend on active/index resolution. Add explicit criteria for default scope resolution and project existence checks without `index.json`."
+    },
+    {
+      "area": "Active-project semantics",
+      "feedback": "Behavior is underspecified for key edge cases: whether `run --project` updates active project, what happens when active ID is stale/missing after branch/worktree changes, and how invalid/corrupt local active files are handled. Also specify that `project use` must validate project existence before writing local state."
+    },
+    {
+      "area": "Concurrency/read consistency",
+      "feedback": "The spec assumes scan reads are safe without locks, but `state.json` writes are non-atomic (`fs::write`), so readers can observe partial JSON during writes. Either make state persistence atomic (temp + rename) or require per-project tolerant scanning (skip-and-warn) so one transient parse failure does not break `project list`/MCP list."
+    },
+    {
+      "area": "Determinism and scan rules",
+      "feedback": "Directory scan ordering is unspecified and `read_dir` order is nondeterministic. Define stable sort order (e.g., by project ID) and explicit handling for non-directory entries, missing `state.json`, and malformed states to avoid flaky output."
+    },
+    {
+      "area": "Testing strategy completeness",
+      "feedback": "Given repo policy, this feature needs validate conformance coverage, not just unit/integration tests. The spec should explicitly include updates to `src/validate/harness.rs` and validate modules (`tests_init`, `tests_project`, `tests_commands`, `tests_mcp`) plus a multi-worktree concurrency conformance test. Listing only `tests/init_command.rs` and `tests/git.rs` is insufficient."
+    },
+    {
+      "area": "Migration/UX",
+      "feedback": "If existing `index.json` is ignored, users lose prior active-project selection immediately. Decide and document migration behavior (e.g., one-time seed from `index.active_project`) or explicitly accept reset with clear user-facing guidance."
+    }
+  ]
+}

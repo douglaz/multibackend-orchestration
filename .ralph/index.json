@@ -1,7 +1,7 @@
 {
   "workspace_version": "1.0",
   "created_at": "2026-02-10T04:26:57.968786709Z",
-  "active_project": "multi-qa-gate-2",
+  "active_project": "parallel-worktrees",
   "projects": [
     {
       "id": "tmux-backend",
@@ -228,6 +228,17 @@
       "name": "Multiple QAs for acceptance gate. Today we only call one QA ",
       "status": "in_progress",
       "created_at": "2026-02-13T15:12:07.982037040Z",
+      "completed_at": null,
+      "total_feature_loops": 0,
+      "total_completion_attempts": 0,
+      "last_loop_number": 1,
+      "parent_project": null
+    },
+    {
+      "id": "parallel-worktrees",
+      "name": "Today index.json is for the whole repository. If multiple pr",
+      "status": "in_progress",
+      "created_at": "2026-02-13T16:12:44.506610759Z",
       "completed_at": null,
       "total_feature_loops": 0,
       "total_completion_attempts": 0,

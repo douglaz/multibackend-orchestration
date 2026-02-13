@@ -1,0 +1,17 @@
+{
+  "idea": "Today index.json is for the whole repository. If multiple projects are being implemented in different checkouts/worktrees they will conflict. We should make projects independent and able to be implemented in parallel without git conflicts. We should remove any concept of 'active project' because this is state related to one checkout, not the repository. Each project should have its own independent state that doesn't require updating a shared index file. Project listing can be derived by scanning the projects directory. The active project concept should be replaced by something local to the worktree or removed entirely.",
+  "idea_hash": "b60fb0effb95",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-13T16:01:00Z",
+  "completed_at": "2026-02-13T16:12:44Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 174.042680698,
+  "review_times_secs": [
+    271.647141388
+  ],
+  "revision_times_secs": [
+    258.548271524
+  ]
+}

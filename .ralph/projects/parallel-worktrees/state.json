@@ -1,0 +1,47 @@
+{
+  "project_id": "parallel-worktrees",
+  "project_name": "Today index.json is for the whole repository. If multiple pr",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "fd29e1692e9fce085050a2c85fb7c95b40ce86bd0b4d05417ba75b18c770557a",
+  "prompt_hash_at_loop_start": "fd29e1692e9fce085050a2c85fb7c95b40ce86bd0b4d05417ba75b18c770557a",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "core-infrastructure-projectsummary-atomic-save",
+      "feature_name": "Core Infrastructure — ProjectSummary, Atomic Save, and Worktree-Local Active Project",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-core-infrastructure-projectsummary-atomic-save/20260213161420-spec.md",
+        "impl_notes": "loops/001-core-infrastructure-projectsummary-atomic-save/20260213161919-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-core-infrastructure-projectsummary-atomic-save/20260213162354-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-core-infrastructure-projectsummary-atomic-save/20260213162238-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T16:14:20.817029502Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
