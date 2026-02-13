@@ -1611,6 +1611,24 @@ impl Orchestrator {
             }
 
             if state.status == ProjectStatus::Completed {
+                // Commit completion artifacts (acceptance QA results, state, etc.)
+                if effective.workflow.auto_commit && !options.skip_commit {
+                    if let Some(repo_root) = self.workspace.root.parent() {
+                        if is_git_repo(repo_root) {
+                            let msg = format!(
+                                "chore({}): add completion artifacts",
+                                state.project_id
+                            );
+                            let _ = commit_feature_loop(
+                                repo_root,
+                                &msg,
+                                None,
+                                effective.global.git.sign_commits,
+                            );
+                        }
+                    }
+                }
+
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
                         "project completed".to_owned()
