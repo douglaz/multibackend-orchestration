@@ -44,11 +44,12 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpServer<R, W> {
                 continue;
             }
 
-            if method == "notifications/initialized" {
-                continue;
-            }
             if method.starts_with("notifications/") {
-                continue;
+                if message.id.is_none() {
+                    continue;
+                }
+                // notifications/* with an id is an invalid request — fall through
+                // to the match arm's `_` branch, which returns -32601.
             }
 
             match method {
@@ -238,6 +239,46 @@ mod tests {
 
         assert_eq!(responses[3]["id"], 4);
         assert_eq!(responses[3]["error"]["code"], -32601);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_with_id_returns_method_not_found() -> Result<()> {
+        let (mut request_client, request_server) = tokio::io::duplex(16 * 1024);
+        let (response_server, mut response_client) = tokio::io::duplex(16 * 1024);
+
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"notifications/custom\"}\n",
+        );
+
+        request_client.write_all(input.as_bytes()).await?;
+        request_client.shutdown().await?;
+
+        let transport = StdioTransport::new(BufReader::new(request_server), response_server);
+        let mut server = McpServer::new(transport);
+        server.run().await?;
+        drop(server);
+
+        let mut raw_output = String::new();
+        response_client.read_to_string(&mut raw_output).await?;
+
+        let responses: Vec<Value> = raw_output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("response line should be valid JSON"))
+            .collect();
+
+        // initialize response + error for notifications/custom with id
+        assert_eq!(responses.len(), 2);
+
+        assert_eq!(responses[0]["id"], 1);
+        assert!(responses[0]["result"].is_object());
+
+        assert_eq!(responses[1]["id"], 99);
+        assert_eq!(responses[1]["error"]["code"], -32601);
+        assert_eq!(responses[1]["error"]["message"], "Method not found");
 
         Ok(())
     }
