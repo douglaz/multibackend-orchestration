@@ -23,8 +23,9 @@ use crate::git::commit::{
 };
 use crate::git::{is_git_repo, run_git};
 use crate::project::artifacts::{
-    artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact, ArtifactKind,
-    ArtifactWriteInput,
+    artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
+    write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+    ProjectScopedArtifactWriteInput,
 };
 use crate::project::lifecycle::{load_project_state, save_project_state};
 use crate::project::load_project_config_if_exists;
@@ -34,15 +35,16 @@ use crate::project::state::{
 };
 use crate::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
-    default_qa_template, default_reviewer_template, render_template_with_fallback,
+    default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+    render_template_with_fallback,
 };
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::util::slug::slugify_feature_name;
 use crate::workflow::parser::{
-    parse_completer_output, parse_implementer_output, parse_planner_output, parse_qa_output,
-    parse_reviewer_output, CompleterDecision, ImplementerDecision, PlannerDecision, QaDecision,
-    ReviewerDecision,
+    parse_completer_output, parse_implementer_output, parse_planner_output,
+    parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output, CompleterDecision,
+    ImplementerDecision, PlannerDecision, QaDecision, ReviewerDecision,
 };
 use crate::workspace::index::ProjectLifecycleStatus;
 use crate::workspace::Workspace;
@@ -86,6 +88,7 @@ pub struct RunOptions {
     pub tmux: Option<bool>,
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
+    pub skip_prompt_review: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +210,112 @@ impl Orchestrator {
         }
 
         if options.dry_run {
-            return dry_run_summary(&state, &effective, &registry, &role_overrides);
+            return dry_run_summary(
+                &state,
+                &effective,
+                &registry,
+                &role_overrides,
+                &options,
+            );
+        }
+
+        // --- Prompt review pre-loop step ---
+
+        // Migration guard: existing projects that already started looping should
+        // not unexpectedly run prompt review on resume.
+        if !state.prompt_review_completed
+            && (!state.loops.is_empty() || !state.completion_attempts.is_empty())
+        {
+            info!("migration guard: setting prompt_review_completed for existing project");
+            state.prompt_review_completed = true;
+            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+        }
+
+        // Skip-flag handling: mark completed immediately so future resumes also skip.
+        if options.skip_prompt_review && !state.prompt_review_completed {
+            info!("--skip-prompt-review: marking prompt review as completed");
+            state.prompt_review_completed = true;
+            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+        }
+
+        // Execute prompt review if all gates pass.
+        if !state.prompt_review_completed
+            && effective.workflow.prompt_review_enabled
+            && !options.skip_prompt_review
+            && state.loops.is_empty()
+            && state.completion_attempts.is_empty()
+        {
+            info!("running prompt review...");
+
+            let prompt_path = project_dir.join(&state.prompt_file);
+            let prompt_content = fs::read_to_string(&prompt_path)?;
+
+            let prompt_reviewer_prompt = build_prompt_reviewer_prompt(
+                &effective,
+                &prompt_content,
+            )?;
+
+            let pr_backend_spec = &effective.workflow.prompt_review_backend;
+            let pr_backend = registry.get_or_create_for_spec(pr_backend_spec)?;
+
+            registry
+                .set_tmux_context(TmuxExecutionContext {
+                    loop_number: None,
+                    role: Some("prompt_reviewer".to_owned()),
+                })
+                .await;
+
+            info!(
+                backend = pr_backend.name(),
+                "invoking prompt reviewer..."
+            );
+            let decision = execute_with_parse_retries(
+                pr_backend,
+                &registry,
+                "prompt_reviewer",
+                "prompt_review",
+                &prompt_reviewer_prompt,
+                parse_prompt_reviewer_output,
+                &expected_format_template_for("prompt_reviewer", None),
+            )
+            .await?;
+
+            // Validate that prompt-original.md does not already exist.
+            let backup_path = project_dir.join("prompt-original.md");
+            if backup_path.exists() {
+                return Err(RalphError::Validation(
+                    "prompt-original.md already exists in project directory; \
+                     remove or rename it before running prompt review"
+                        .to_owned(),
+                ));
+            }
+
+            // Write backup of original prompt.
+            fs::write(&backup_path, &prompt_content)?;
+
+            // Overwrite prompt file with refined prompt.
+            fs::write(&prompt_path, &decision.refined_prompt)?;
+
+            // Write prompt-review.md artifact.
+            write_project_scoped_artifact(
+                &project_dir,
+                ProjectScopedArtifactWriteInput {
+                    artifact: "prompt-review",
+                    file_name: "prompt-review.md",
+                    project_id: &state.project_id,
+                    backend: pr_backend_spec,
+                    role: "prompt_reviewer",
+                    body: &decision.body,
+                },
+            )?;
+
+            // Update prompt hashes.
+            let new_hash = sha256_hex(&decision.refined_prompt);
+            state.prompt_hash = new_hash.clone();
+            state.prompt_hash_at_loop_start = new_hash;
+            state.prompt_review_completed = true;
+            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+            info!("prompt review completed; prompt file updated");
         }
 
         let feature_target = options.loops.unwrap_or(1);
@@ -1516,10 +1624,24 @@ fn dry_run_summary(
     effective: &EffectiveConfig,
     registry: &BackendRegistry,
     role_overrides: &RoleOverrides,
+    options: &RunOptions,
 ) -> Result<OrchestrationResult> {
+    let prompt_review_status = if state.prompt_review_completed {
+        "prompt_review: completed".to_owned()
+    } else if !effective.workflow.prompt_review_enabled {
+        "prompt_review: disabled".to_owned()
+    } else if options.skip_prompt_review {
+        "prompt_review: will be skipped (--skip-prompt-review)".to_owned()
+    } else {
+        format!(
+            "prompt_review: pending (backend: {})",
+            effective.workflow.prompt_review_backend
+        )
+    };
+
     if state.has_in_progress_loop() {
         let summary = format!(
-            "dry-run: would resume loop {} at phase={} iteration={}",
+            "{prompt_review_status}\ndry-run: would resume loop {} at phase={} iteration={}",
             state.current_loop,
             phase_label(&state.current_phase),
             state.phase_iteration
@@ -1538,12 +1660,12 @@ fn dry_run_summary(
     )?;
     let summary = if effective.workflow.qa_enabled {
         format!(
-            "dry-run: would start loop {next_loop} with planner={}, implementer={}, qa={}, reviewer={}",
+            "{prompt_review_status}\ndry-run: would start loop {next_loop} with planner={}, implementer={}, qa={}, reviewer={}",
             backends.planner, backends.implementer, backends.qa, backends.reviewer
         )
     } else {
         format!(
-            "dry-run: would start loop {next_loop} with planner={}, implementer={}, reviewer={}",
+            "{prompt_review_status}\ndry-run: would start loop {next_loop} with planner={}, implementer={}, reviewer={}",
             backends.planner, backends.implementer, backends.reviewer
         )
     };
@@ -1694,6 +1816,21 @@ fn collect_previous_specs(state: &ProjectState, project_dir: &Path) -> Result<St
     }
 
     Ok(parts.join("\n\n"))
+}
+
+fn build_prompt_reviewer_prompt(
+    effective: &EffectiveConfig,
+    prompt_content: &str,
+) -> Result<String> {
+    let mut vars = BTreeMap::new();
+    vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+
+    let rendered = render_template_with_fallback(
+        &effective.templates.prompt_reviewer,
+        &vars,
+        default_prompt_reviewer_template(),
+    )?;
+    Ok(rendered)
 }
 
 fn build_planner_prompt(
@@ -2384,6 +2521,11 @@ OR\n\
 # QA: FAIL\n\
 ## Failures\n\
 ## Suggested Fixes"
+            .to_owned(),
+        "prompt_reviewer" => "\
+# Prompt Review\n\
+## Issues Found\n\
+## Refined Prompt"
             .to_owned(),
         _ => "valid markdown with required H1".to_owned(),
     }

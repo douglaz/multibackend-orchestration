@@ -237,6 +237,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Verification Summary
 All acceptance criteria verified.
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -267,6 +277,7 @@ fn run_options(project_id: &str) -> RunOptions {
         tmux: None,
         on_prompt_change: None,
         skip_commit: false,
+        skip_prompt_review: false,
     }
 }
 
@@ -606,6 +617,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Verification Summary
 All acceptance criteria verified.
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "claude: unrecognized prompt" >&2
   exit 1
@@ -720,6 +741,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 
 ## Verification Summary
 All acceptance criteria verified.
+EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
 EOF
 else
   echo "codex: unrecognized prompt" >&2
@@ -1061,6 +1092,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Verification Summary
 All acceptance criteria verified.
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -1300,6 +1341,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Verification Summary
 All acceptance criteria verified.
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "claude: unrecognized prompt" >&2
   exit 1
@@ -1413,6 +1464,16 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 
 ## Verification Summary
 All acceptance criteria verified.
+EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
 EOF
 else
   echo "codex: unrecognized prompt" >&2
@@ -1654,6 +1715,16 @@ Implementation satisfies the specification.
 ## Commit Message
 feat: demo feature with QA
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -1761,6 +1832,16 @@ Implementation satisfies the specification.
 ## Commit Message
 feat: demo feature after QA retry
 EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -1841,6 +1922,16 @@ elif [[ "$prompt" == *"You are a QA engineer validating"* ]]; then
 
 ## Suggested Fixes
 1. Fix remaining test failures
+EOF
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
 EOF
 else
   echo "unrecognized prompt" >&2
@@ -2022,6 +2113,16 @@ EOF
 1. Include master prompt, completed-loop summary, base diff, and global-acceptance instruction.
 EOF
   fi
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -2101,6 +2202,16 @@ EOF
 Project-level acceptance now passes after feedback.
 EOF
   fi
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1

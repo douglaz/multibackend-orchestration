@@ -5,7 +5,7 @@
   "prompt_hash": "d84cb5b714fe02ec19380805c6f17dbabc570983ba66f3117e842312af0b6e00",
   "prompt_hash_at_loop_start": "d84cb5b714fe02ec19380805c6f17dbabc570983ba66f3117e842312af0b6e00",
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -15,7 +15,7 @@
       "slug": "prompt-review-foundation-state-config-parser-and",
       "feature_name": "Prompt Review Foundation — State, Config, Parser, and Template",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -37,8 +37,55 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "ede876399acd2e1e7ccd4e1cd53d4d2bd8772a3a",
       "started_at": "2026-02-13T04:35:43.300709639Z",
+      "completed_at": "2026-02-13T04:45:03.326411281Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "prompt-review-runtime-integration-and-conformance",
+      "feature_name": "Prompt Review Runtime Integration and Conformance Validation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-xhigh)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-prompt-review-runtime-integration-and-conformance/20260213044656-spec.md",
+        "impl_notes": "loops/002-prompt-review-runtime-integration-and-conformance/20260213045601-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-prompt-review-runtime-integration-and-conformance/20260213050239-review-001-feedback.md",
+            "response": "loops/002-prompt-review-runtime-integration-and-conformance/20260213050621-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-prompt-review-runtime-integration-and-conformance/20260213051028-review-002-feedback.md",
+            "response": "loops/002-prompt-review-runtime-integration-and-conformance/20260213051156-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/002-prompt-review-runtime-integration-and-conformance/20260213051437-review-003-feedback.md",
+            "response": "loops/002-prompt-review-runtime-integration-and-conformance/20260213051627-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/002-prompt-review-runtime-integration-and-conformance/20260213051834-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-prompt-review-runtime-integration-and-conformance/20260213045859-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T04:46:56.581601577Z",
       "completed_at": null
     }
   ],

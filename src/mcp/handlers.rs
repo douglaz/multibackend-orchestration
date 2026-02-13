@@ -199,6 +199,7 @@ async fn handle_run(args: Value) -> Result<Value, String> {
             completer_backend: get_str(&args, "completer_backend"),
             on_prompt_change,
             skip_commit: get_bool(&args, "skip_commit").unwrap_or(false),
+            skip_prompt_review: get_bool(&args, "skip_prompt_review").unwrap_or(false),
             tmux: None, // tmux is not available via MCP
         })
         .await

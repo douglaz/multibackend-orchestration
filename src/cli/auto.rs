@@ -39,6 +39,8 @@ pub struct AutoArgs {
     pub completer_backend: Option<String>,
     #[arg(long)]
     pub skip_commit: bool,
+    #[arg(long)]
+    pub skip_prompt_review: bool,
     #[arg(
         long,
         num_args = 0..=1,
@@ -111,6 +113,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         qa_backend,
         completer_backend,
         skip_commit,
+        skip_prompt_review,
         tmux,
         no_tmux,
         dry_run,
@@ -252,6 +255,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
             tmux: tmux.or(no_tmux),
             on_prompt_change: None,
             skip_commit,
+            skip_prompt_review,
         })
         .await?;
     println!("{}", run_result.summary);

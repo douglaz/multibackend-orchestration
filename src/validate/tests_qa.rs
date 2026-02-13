@@ -480,6 +480,16 @@ EOF
 1. Implement another mock feature.
 EOF
   fi
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
 __QA_BRANCH__
 else
@@ -805,6 +815,16 @@ EOF
 All acceptance criteria from the spec have been verified.
 EOF
   fi
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1

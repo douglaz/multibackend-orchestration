@@ -63,6 +63,16 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 elif echo "$INPUT" | grep -q "You are a QA engineer"; then
   cat <<'EOF'
 # QA: PASS
@@ -163,6 +173,16 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
 elif echo "$INPUT" | grep -q "You are a QA engineer"; then
   cat <<'EOF'
 # QA: PASS

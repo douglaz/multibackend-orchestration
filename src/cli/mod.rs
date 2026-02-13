@@ -129,6 +129,8 @@ pub struct RunArgs {
     pub on_prompt_change: Option<PromptChangeAction>,
     #[arg(long)]
     pub skip_commit: bool,
+    #[arg(long)]
+    pub skip_prompt_review: bool,
     #[arg(
         long,
         num_args = 0..=1,
@@ -483,6 +485,26 @@ mod tests {
 
         assert_eq!(args.idea, "test");
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_run_with_skip_prompt_review() {
+        let cli = Cli::parse_from(["ralph", "run", "--skip-prompt-review"]);
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+
+        assert!(args.skip_prompt_review);
+    }
+
+    #[test]
+    fn parses_auto_with_skip_prompt_review() {
+        let cli = Cli::parse_from(["ralph", "auto", "--idea", "test", "--skip-prompt-review"]);
+        let Commands::Auto(args) = cli.command else {
+            panic!("expected auto command");
+        };
+
+        assert!(args.skip_prompt_review);
     }
 
     #[test]
