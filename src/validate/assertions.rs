@@ -270,6 +270,28 @@ pub fn git_tag_commit(repo_root: &Path, tag: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Assert that there are no uncommitted `.ralph/` files in the repo.
+/// This ensures completion artifacts are auto-committed.
+pub fn assert_no_uncommitted_ralph_files(repo_root: &Path) {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", ".ralph/"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git status should execute");
+    assert!(
+        output.status.success(),
+        "git status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = String::from_utf8_lossy(&output.stdout);
+    let uncommitted: Vec<&str> = status.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        uncommitted.is_empty(),
+        "expected no uncommitted .ralph/ files after completion, found:\n{}",
+        uncommitted.join("\n")
+    );
+}
+
 /// Assert that the given JSON value is a top-level array, returning a reference
 /// to the array. Panics with a descriptive message if the value is not an array.
 pub fn assert_json_array(value: &Value) -> &Vec<Value> {

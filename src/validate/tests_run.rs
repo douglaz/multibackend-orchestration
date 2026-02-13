@@ -7,7 +7,7 @@ use std::process::Command;
 use crate::validate::assertions::{
     assert_artifact_timestamp_naming, assert_exit_code, assert_file_exists, assert_git_tag_exists,
     assert_git_tag_not_exists, assert_json_array_len, assert_json_field, assert_no_loop_artifacts,
-    parse_yaml_frontmatter,
+    assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{always_reject_review_script, standard_mock_script};
@@ -74,6 +74,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "run::template_fallback_when_file_missing",
             func: template_fallback_when_file_missing,
+        },
+        ConformanceTest {
+            name: "run::completion_artifacts_committed",
+            func: completion_artifacts_committed,
         },
     ]
 }
@@ -290,6 +294,8 @@ fn completion_flow(h: &RalphHarness) -> TestResult {
 
         let state = h.load_state(project_id).expect("load_state failed");
         assert_json_field(&state, "status", &json!("completed"));
+
+        assert_no_uncommitted_ralph_files(&h.repo_root);
     })
 }
 
@@ -500,6 +506,46 @@ fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
             loops[0]["status"],
             json!("completed"),
             "expected loop status to be completed"
+        );
+    })
+}
+
+fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-completion-commit";
+        setup_with_standard_mock(h, project_id);
+
+        let head_before = git_head(&h.repo_root);
+
+        let output = h
+            .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run with RALPH_COMPLETE should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("completed"));
+
+        // HEAD should have advanced (completion commit created)
+        let head_after = git_head(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "HEAD should advance after completion commit"
+        );
+
+        // No uncommitted .ralph/ files should remain
+        assert_no_uncommitted_ralph_files(&h.repo_root);
+
+        // The completion commit message should reference completion artifacts
+        let log_output = Command::new("git")
+            .args(["log", "-1", "--format=%s"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git log should execute");
+        let commit_msg = String::from_utf8_lossy(&log_output.stdout);
+        assert!(
+            commit_msg.contains("completion"),
+            "completion commit message should contain 'completion', got: {}",
+            commit_msg.trim()
         );
     })
 }

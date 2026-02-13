@@ -447,6 +447,21 @@ async fn executes_completion_flow_until_complete() {
             .expect("completion verdict artifact should exist"),
         "completer-verdict.md",
     );
+
+    // Completion artifacts should be auto-committed
+    let repo_root = workspace_root.parent().expect("repo root");
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain", ".ralph/"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git status should execute");
+    let uncommitted = String::from_utf8_lossy(&status_output.stdout);
+    let uncommitted_lines: Vec<&str> = uncommitted.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        uncommitted_lines.is_empty(),
+        "expected no uncommitted .ralph/ files after completion, found:\n{}",
+        uncommitted_lines.join("\n")
+    );
 }
 
 #[tokio::test]
@@ -2584,6 +2599,21 @@ async fn acceptance_gate_pass_keeps_completed() {
         acceptance_qa_count.trim(),
         "2",
         "acceptance QA should run once per required backend family on COMPLETE"
+    );
+
+    // Completion artifacts should be auto-committed
+    let repo_root = workspace_root.parent().expect("repo root");
+    let status_output = Command::new("git")
+        .args(["status", "--porcelain", ".ralph/"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git status should execute");
+    let uncommitted = String::from_utf8_lossy(&status_output.stdout);
+    let uncommitted_lines: Vec<&str> = uncommitted.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        uncommitted_lines.is_empty(),
+        "expected no uncommitted .ralph/ files after completion, found:\n{}",
+        uncommitted_lines.join("\n")
     );
 }
 
