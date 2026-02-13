@@ -27,8 +27,8 @@ fn test_init_creates_workspace_structure() {
         "ralph.toml should exist"
     );
     assert!(
-        workspace_root.join("index.json").exists(),
-        "index.json should exist"
+        !workspace_root.join("index.json").exists(),
+        "index.json should NOT be created"
     );
 
     // Verify workspace root is correct
@@ -77,16 +77,17 @@ fn test_init_generates_valid_config() {
 }
 
 #[test]
-fn test_init_generates_valid_index() {
+fn test_init_does_not_create_index_json() {
     let temp = TempDir::new().expect("temp dir");
     let workspace_root = temp.path().join(".ralph");
 
-    let workspace = Workspace::init(&workspace_root).expect("init should succeed");
+    Workspace::init(&workspace_root).expect("init should succeed");
 
-    // Verify index contents
-    assert_eq!(workspace.index.workspace_version, "1.0");
-    assert!(workspace.index.active_project.is_none());
-    assert!(workspace.index.projects.is_empty());
+    // index.json should NOT be created
+    assert!(
+        !workspace_root.join("index.json").exists(),
+        "index.json should not exist after init"
+    );
 }
 
 #[test]
@@ -98,7 +99,7 @@ fn test_init_with_custom_directory_relative() {
 
     assert!(custom_dir.exists(), "custom directory should exist");
     assert!(custom_dir.join("ralph.toml").exists());
-    assert!(custom_dir.join("index.json").exists());
+    assert!(!custom_dir.join("index.json").exists());
     assert!(custom_dir.join("projects").exists());
     assert!(custom_dir.join("templates").exists());
     assert_eq!(workspace.root, custom_dir);
@@ -146,8 +147,6 @@ fn test_init_does_not_partially_overwrite_on_failure() {
     let _original_workspace = Workspace::init(&workspace_root).expect("first init should succeed");
     let original_config_content =
         fs::read_to_string(workspace_root.join("ralph.toml")).expect("read original config");
-    let original_index_content =
-        fs::read_to_string(workspace_root.join("index.json")).expect("read original index");
 
     // Attempt second init (should fail)
     let _ = Workspace::init(&workspace_root);
@@ -155,16 +154,10 @@ fn test_init_does_not_partially_overwrite_on_failure() {
     // Verify original files are unchanged
     let current_config_content = fs::read_to_string(workspace_root.join("ralph.toml"))
         .expect("read config after failed reinit");
-    let current_index_content = fs::read_to_string(workspace_root.join("index.json"))
-        .expect("read index after failed reinit");
 
     assert_eq!(
         original_config_content, current_config_content,
         "config should be unchanged after failed reinit"
-    );
-    assert_eq!(
-        original_index_content, current_index_content,
-        "index should be unchanged after failed reinit"
     );
 }
 
@@ -176,12 +169,11 @@ fn test_init_workspace_can_be_loaded_after_creation() {
     // Create workspace
     Workspace::init(&workspace_root).expect("init should succeed");
 
-    // Load it back
+    // Load it back (no index.json required)
     let loaded = Workspace::load(workspace_root.clone()).expect("load should succeed");
 
     assert_eq!(loaded.root, workspace_root);
     assert_eq!(loaded.config.workspace.version, "1.0");
-    assert!(loaded.index.projects.is_empty());
 }
 
 #[test]
@@ -282,7 +274,7 @@ fn test_init_allows_empty_existing_directory() {
     let _workspace = Workspace::init(&workspace_root).expect("init on empty dir should succeed");
 
     assert!(workspace_root.join("ralph.toml").exists());
-    assert!(workspace_root.join("index.json").exists());
+    assert!(!workspace_root.join("index.json").exists());
 }
 
 #[test]
@@ -314,8 +306,8 @@ fn test_init_cli_with_absolute_path() {
         "ralph.toml should exist at absolute path"
     );
     assert!(
-        absolute_path.join("index.json").exists(),
-        "index.json should exist at absolute path"
+        !absolute_path.join("index.json").exists(),
+        "index.json should NOT exist at absolute path"
     );
     assert!(
         absolute_path.join("projects").exists(),
@@ -373,8 +365,8 @@ fn test_init_cli_with_relative_path() {
         "ralph.toml should exist at relative path"
     );
     assert!(
-        resolved_path.join("index.json").exists(),
-        "index.json should exist at relative path"
+        !resolved_path.join("index.json").exists(),
+        "index.json should NOT exist at relative path"
     );
     assert!(
         resolved_path.join("projects").exists(),

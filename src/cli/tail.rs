@@ -120,15 +120,7 @@ pub async fn execute(args: TailArgs) -> Result<()> {
     }
 
     let workspace = Workspace::discover()?;
-    let project_id = if let Some(project) = args.project {
-        project
-    } else {
-        workspace
-            .index
-            .active_project
-            .clone()
-            .ok_or(RalphError::ActiveProjectNotSet)?
-    };
+    let project_id = workspace.resolve_project_id(args.project.as_deref())?;
 
     let project_dir = workspace.project_dir(&project_id);
     if !project_dir.exists() {

@@ -65,15 +65,15 @@ fn require_str(args: &Value, key: &str) -> Result<String, String> {
 }
 
 /// Resolve a project ID from arguments or fall back to the active project.
+/// If the active-project file points to a nonexistent project (stale),
+/// returns an error with a user-facing hint.
 fn resolve_project_id(args: &Value, workspace: &Workspace) -> Result<String, String> {
     if let Some(id) = get_str(args, "project") {
         return Ok(id);
     }
     workspace
-        .index
-        .active_project
-        .clone()
-        .ok_or_else(|| "no project specified and no active project is set".to_owned())
+        .resolve_project_id(None)
+        .map_err(|err| err.to_string())
 }
 
 /// Map a `crate::Result` error into a tool-domain error string.
@@ -107,10 +107,10 @@ async fn handle_project_new(args: Value) -> Result<Value, String> {
         validate_backend_spec_name(&backend).map_err(map_err)?;
     }
 
-    let mut workspace = Workspace::discover().map_err(map_err)?;
+    let workspace = Workspace::discover().map_err(map_err)?;
 
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: id.clone(),
             name: name.clone(),
@@ -129,10 +129,10 @@ async fn handle_project_new(args: Value) -> Result<Value, String> {
 
 async fn handle_project_list(_args: Value) -> Result<Value, String> {
     let workspace = Workspace::discover().map_err(map_err)?;
+    let active_id = workspace.active_project_id();
+    let summaries = workspace.list_projects().map_err(map_err)?;
 
-    let projects: Vec<Value> = workspace
-        .index
-        .projects
+    let projects: Vec<Value> = summaries
         .iter()
         .map(|p| {
             json!({
@@ -141,7 +141,7 @@ async fn handle_project_list(_args: Value) -> Result<Value, String> {
                 "status": p.status,
                 "total_feature_loops": p.total_feature_loops,
                 "last_loop_number": p.last_loop_number,
-                "active": workspace.index.active_project.as_deref() == Some(&p.id),
+                "active": active_id.as_deref() == Some(p.id.as_str()),
             })
         })
         .collect();
@@ -155,15 +155,24 @@ async fn handle_project_show(args: Value) -> Result<Value, String> {
     let workspace = Workspace::discover().map_err(map_err)?;
     let project_id = resolve_project_id(&args, &workspace)?;
 
-    let project_meta = workspace
-        .index
-        .get_project(&project_id)
-        .ok_or_else(|| format!("project not found: {project_id}"))?;
+    let summary = workspace
+        .load_project_summary(&project_id)
+        .map_err(map_err)?;
     let project_dir = workspace.project_dir(&project_id);
     let state = load_project_state(&project_dir).map_err(map_err)?;
 
     Ok(CallToolResult::success_json(json!({
-        "project": project_meta,
+        "project": {
+            "id": summary.id,
+            "name": summary.name,
+            "status": summary.status,
+            "created_at": summary.created_at.to_rfc3339(),
+            "completed_at": summary.completed_at.map(|t| t.to_rfc3339()),
+            "total_feature_loops": summary.total_feature_loops,
+            "total_completion_attempts": summary.total_completion_attempts,
+            "last_loop_number": summary.last_loop_number,
+            "parent_project": summary.parent_project,
+        },
         "state": state,
     })))
 }
@@ -215,10 +224,9 @@ async fn handle_status(args: Value) -> Result<Value, String> {
     let workspace = Workspace::discover().map_err(map_err)?;
     let project_id = resolve_project_id(&args, &workspace)?;
 
-    let _project_ref = workspace
-        .index
-        .get_project(&project_id)
-        .ok_or_else(|| format!("project not found: {project_id}"))?;
+    if !workspace.project_exists(&project_id) {
+        return Err(format!("project not found: {project_id}"));
+    }
     let project_dir = workspace.project_dir(&project_id);
     let state = load_project_state(&project_dir).map_err(map_err)?;
 
@@ -269,10 +277,9 @@ async fn handle_history(args: Value) -> Result<Value, String> {
     let workspace = Workspace::discover().map_err(map_err)?;
     let project_id = resolve_project_id(&args, &workspace)?;
 
-    let _project_ref = workspace
-        .index
-        .get_project(&project_id)
-        .ok_or_else(|| format!("project not found: {project_id}"))?;
+    if !workspace.project_exists(&project_id) {
+        return Err(format!("project not found: {project_id}"));
+    }
     let project_dir = workspace.project_dir(&project_id);
     let state = load_project_state(&project_dir).map_err(map_err)?;
 
@@ -395,15 +402,29 @@ async fn handle_config_show(args: Value) -> Result<Value, String> {
 
     // Try to resolve project scope
     let project_id = if let Some(id) = project_arg {
+        if !workspace.project_exists(&id) {
+            return Err(format!("project not found: {id}"));
+        }
         Some(id)
     } else {
-        workspace.index.active_project.clone()
+        match workspace.active_project_id() {
+            Some(id) if workspace.project_exists(&id) => Some(id),
+            Some(stale_id) => {
+                // Stale active project — fall back to global with a note
+                return Ok(CallToolResult::success_json(json!({
+                    "scope": "global",
+                    "config": serde_json::to_value(&workspace.config).map_err(|e| e.to_string())?,
+                    "warning": format!(
+                        "active project '{}' no longer exists; showing global config. Run `ralph project use <id>` to set a new active project.",
+                        stale_id
+                    ),
+                })));
+            }
+            None => None,
+        }
     };
 
     if let Some(project_id) = project_id {
-        if workspace.index.get_project(&project_id).is_none() {
-            return Err(format!("project not found: {project_id}"));
-        }
 
         let project_dir = workspace.project_dir(&project_id);
         let project_config = load_project_config_if_exists(&project_dir).map_err(map_err)?;

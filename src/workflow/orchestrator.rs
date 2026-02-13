@@ -46,7 +46,6 @@ use crate::workflow::parser::{
     parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output, CompleterDecision,
     ImplementerDecision, PlannerDecision, QaDecision, ReviewerDecision,
 };
-use crate::workspace::index::ProjectLifecycleStatus;
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -121,15 +120,9 @@ impl Orchestrator {
         validate_termination_controls(&options)?;
 
         let explicit_project = options.project.is_some();
-        let project_id = if let Some(id) = options.project.as_ref() {
-            id.clone()
-        } else {
+        let project_id =
             self.workspace
-                .index
-                .active_project
-                .clone()
-                .ok_or(RalphError::ActiveProjectNotSet)?
-        };
+                .resolve_project_id(options.project.as_deref())?;
 
         let project_dir = self.workspace.project_dir(&project_id);
         if !project_dir.exists() {
@@ -138,8 +131,7 @@ impl Orchestrator {
 
         // When --project is explicitly specified, update the active project
         if explicit_project {
-            self.workspace.index.set_active_project(&project_id)?;
-            self.workspace.save_index()?;
+            self.workspace.set_active_project_id(&project_id)?;
         }
 
         let _lock = ProjectLock::acquire(&project_dir, &project_id)?;
@@ -222,14 +214,14 @@ impl Orchestrator {
         {
             info!("migration guard: setting prompt_review_completed for existing project");
             state.prompt_review_completed = true;
-            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+            persist_state(&project_dir, &state)?;
         }
 
         // Skip-flag handling: mark completed immediately so future resumes also skip.
         if options.skip_prompt_review && !state.prompt_review_completed {
             info!("--skip-prompt-review: marking prompt review as completed");
             state.prompt_review_completed = true;
-            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+            persist_state(&project_dir, &state)?;
         }
 
         // Execute prompt review if all gates pass.
@@ -307,7 +299,7 @@ impl Orchestrator {
             state.prompt_hash = new_hash.clone();
             state.prompt_hash_at_loop_start = new_hash;
             state.prompt_review_completed = true;
-            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+            persist_state(&project_dir, &state)?;
             info!("prompt review completed; prompt file updated");
         }
 
@@ -831,12 +823,7 @@ impl Orchestrator {
                             "QA iteration limit exceeded, rolling back loop"
                         );
                         rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
-                        persist_state_and_index(
-                            &mut self.workspace,
-                            &project_id,
-                            &project_dir,
-                            &state,
-                        )?;
+                        persist_state(&project_dir, &state)?;
                         if options.until_complete {
                             logs.push(format!(
                                 "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1596,7 +1583,7 @@ impl Orchestrator {
                     "review iteration limit exceeded, rolling back loop"
                 );
                 rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
-                persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+                persist_state(&project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
                         "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1609,7 +1596,7 @@ impl Orchestrator {
                 });
             }
 
-            persist_state_and_index(&mut self.workspace, &project_id, &project_dir, &state)?;
+            persist_state(&project_dir, &state)?;
 
             // Handle --until-review stop
             if let Some(ln) = until_review_stop {
@@ -1791,11 +1778,11 @@ fn preload_role_model_backends(registry: &mut BackendRegistry) -> Result<()> {
 }
 
 fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState) -> Result<()> {
-    if let Some(index_entry) = workspace.index.get_project(&state.project_id) {
-        if index_entry.parent_project != state.parent_project {
+    if let Some(ref parent_id) = state.parent_project {
+        if !workspace.project_exists(parent_id) {
             eprintln!(
-                "warning: parent_project mismatch for {}: index={:?} state={:?}",
-                state.project_id, index_entry.parent_project, state.parent_project
+                "warning: parent project '{}' referenced by '{}' does not exist",
+                parent_id, state.project_id
             );
         }
     }
@@ -2401,42 +2388,11 @@ fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<Stri
     Ok(content)
 }
 
-fn persist_state_and_index(
-    workspace: &mut Workspace,
-    project_id: &str,
+fn persist_state(
     project_dir: &Path,
     state: &ProjectState,
 ) -> Result<()> {
-    save_project_state(project_dir, state)?;
-
-    if let Some(project) = workspace.index.get_project_mut(project_id) {
-        project.last_loop_number = state.last_loop_number();
-        project.total_feature_loops = state
-            .loops
-            .iter()
-            .filter(|loop_state| loop_state.status == LoopStatus::Completed)
-            .count() as u32;
-        project.total_completion_attempts = state
-            .completion_attempts
-            .iter()
-            .filter(|attempt| attempt.status == LoopStatus::Completed)
-            .count() as u32;
-
-        project.status = match state.status {
-            ProjectStatus::Pending => ProjectLifecycleStatus::Pending,
-            ProjectStatus::InProgress => ProjectLifecycleStatus::InProgress,
-            ProjectStatus::Completed => ProjectLifecycleStatus::Completed,
-        };
-
-        project.completed_at = if state.status == ProjectStatus::Completed {
-            Some(Utc::now())
-        } else {
-            None
-        };
-    }
-
-    workspace.save_index()?;
-    Ok(())
+    save_project_state(project_dir, state)
 }
 
 fn phase_label(phase: &Phase) -> &'static str {

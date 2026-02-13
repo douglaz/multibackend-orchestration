@@ -1,7 +1,8 @@
 use super::*;
 
 use crate::validate::assertions::{
-    assert_file_exists, assert_git_branch_exists, assert_json_field, assert_stdout_contains,
+    assert_file_exists, assert_git_branch_exists, assert_json_field, assert_stderr_contains,
+    assert_stdout_contains,
 };
 use crate::validate::harness::RalphHarness;
 use serde_json::json;
@@ -17,8 +18,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: new_copies_prompt,
         },
         ConformanceTest {
-            name: "project::new_updates_index",
-            func: new_updates_index,
+            name: "project::new_activates_project",
+            func: new_activates_project,
         },
         ConformanceTest {
             name: "project::new_creates_branch",
@@ -43,6 +44,22 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "project::show_json",
             func: show_json,
+        },
+        ConformanceTest {
+            name: "project::no_index_json_after_create",
+            func: no_index_json_after_create,
+        },
+        ConformanceTest {
+            name: "project::migration_from_legacy_index",
+            func: migration_from_legacy_index,
+        },
+        ConformanceTest {
+            name: "project::stale_active_project",
+            func: stale_active_project,
+        },
+        ConformanceTest {
+            name: "project::corrupt_active_project",
+            func: corrupt_active_project,
         },
     ]
 }
@@ -92,24 +109,28 @@ fn new_copies_prompt(h: &RalphHarness) -> TestResult {
     }
 }
 
-fn new_updates_index(h: &RalphHarness) -> TestResult {
+fn new_activates_project(h: &RalphHarness) -> TestResult {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         h.init_workspace().expect("init failed");
-        h.create_project("idx-test", "Index Test", "prompt")
+        h.create_project("act-test", "Active Test", "prompt")
             .expect("create_project failed");
 
-        let index = h.load_index().expect("load_index failed");
+        // First project should be auto-activated via worktree-local storage
+        let active = h
+            .load_active_project()
+            .expect("load_active_project failed");
+        assert_eq!(
+            active.as_deref(),
+            Some("act-test"),
+            "first project should be auto-activated"
+        );
 
-        // active_project should be set (first project becomes active)
-        assert_json_field(&index, "active_project", &json!("idx-test"));
-
-        // projects array should contain the new project
-        let projects = index["projects"]
-            .as_array()
-            .expect("projects should be an array");
-        assert_eq!(projects.len(), 1, "expected exactly 1 project entry");
-        assert_json_field(&projects[0], "id", &json!("idx-test"));
-        assert_json_field(&projects[0], "name", &json!("Index Test"));
+        // state.json should contain created_at
+        let state = h.load_state("act-test").expect("load_state failed");
+        assert!(
+            state.get("created_at").is_some(),
+            "state.json should contain created_at"
+        );
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -186,15 +207,27 @@ fn use_switches_active(h: &RalphHarness) -> TestResult {
             .expect("create second project failed");
 
         // After creating two projects, the first should be active
-        let index = h.load_index().expect("load_index failed");
-        assert_json_field(&index, "active_project", &json!("proj-a"));
+        let active = h
+            .load_active_project()
+            .expect("load_active_project failed");
+        assert_eq!(
+            active.as_deref(),
+            Some("proj-a"),
+            "first project should be active"
+        );
 
         // Switch to proj-b
         h.ralph_ok(["project", "use", "proj-b"])
             .expect("ralph project use failed");
 
-        let index = h.load_index().expect("load_index after use failed");
-        assert_json_field(&index, "active_project", &json!("proj-b"));
+        let active = h
+            .load_active_project()
+            .expect("load_active_project after use failed");
+        assert_eq!(
+            active.as_deref(),
+            Some("proj-b"),
+            "active project should be proj-b after use"
+        );
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -239,6 +272,128 @@ fn show_json(h: &RalphHarness) -> TestResult {
         assert_json_field(&parsed, "state.current_loop", &json!(0));
         assert_json_field(&parsed, "state.current_phase", &json!("planning"));
         assert_json_field(&parsed, "state.status", &json!("pending"));
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn no_index_json_after_create(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("no-idx", "No Index", "prompt")
+            .expect("create_project failed");
+
+        // index.json should not exist after init + project creation
+        h.assert_no_index_json();
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+/// Test one-time migration from legacy `index.json` active_project.
+fn migration_from_legacy_index(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("mig-test", "Migration Test", "prompt")
+            .expect("create_project failed");
+
+        // Remove the worktree-local active-project file to simulate
+        // a pre-migration state.
+        let active_path = h.repo_root.join(".git").join("ralph-active-project");
+        if active_path.exists() {
+            std::fs::remove_file(&active_path).expect("remove active-project file");
+        }
+
+        // Write a legacy index.json with active_project pointing at mig-test
+        let index_path = h.repo_root.join(".ralph").join("index.json");
+        let legacy_index = json!({
+            "workspace_version": "1.0",
+            "active_project": "mig-test",
+            "projects": []
+        });
+        std::fs::write(&index_path, serde_json::to_string_pretty(&legacy_index).unwrap())
+            .expect("write legacy index.json");
+
+        // Now run any command that triggers Workspace::load (e.g., project list)
+        let output = h.ralph(["project", "list"]).expect("ralph project list");
+        assert_stderr_contains(&output, "migrated active project");
+
+        // The worktree-local active-project file should now be set
+        let active = h
+            .load_active_project()
+            .expect("load_active_project failed");
+        assert_eq!(
+            active.as_deref(),
+            Some("mig-test"),
+            "migration should seed active project from index.json"
+        );
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+/// Test that a stale active-project (pointing to a deleted project) produces
+/// a descriptive error with a hint to run `ralph project use <id>`.
+fn stale_active_project(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("stale-test", "Stale Test", "prompt")
+            .expect("create_project failed");
+
+        // Delete the project directory to make the active project stale
+        let project_dir = h
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join("stale-test");
+        std::fs::remove_dir_all(&project_dir).expect("remove project dir");
+
+        // Running status without --project should fail with a hint
+        let output = h.ralph(["status"]).expect("ralph status");
+        assert!(
+            !output.status.success(),
+            "ralph status should fail with stale active project"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no longer exists") || stderr.contains("ralph project use"),
+            "error should mention that the active project no longer exists and hint at `ralph project use`; got: {}",
+            stderr
+        );
+    })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+/// Test that a corrupt active-project file (invalid characters) is treated
+/// as no active project.
+fn corrupt_active_project(h: &RalphHarness) -> TestResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.init_workspace().expect("init failed");
+
+        // Write invalid content to the active-project file
+        let active_path = h.repo_root.join(".git").join("ralph-active-project");
+        std::fs::write(&active_path, "invalid project id!@#\n")
+            .expect("write corrupt active-project");
+
+        // Running status should fail with ActiveProjectNotSet, not a crash
+        let output = h.ralph(["status"]).expect("ralph status");
+        assert!(
+            !output.status.success(),
+            "ralph status should fail with corrupt active project"
+        );
+
+        // Should be treated as "no active project" (exit code 2)
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "corrupt active project should result in exit code 2"
+        );
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),

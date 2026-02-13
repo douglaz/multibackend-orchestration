@@ -137,9 +137,8 @@ fn create_test_workspace() -> (TempDir, std::path::PathBuf) {
     fs::write(&prompt_path, "# Test Prompt\nBuild a test feature.").expect("write prompt");
 
     use ralph::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-    let mut ws = workspace;
     create_project(
-        &mut ws,
+        &workspace,
         CreateProjectOptions {
             id: "test-project".to_owned(),
             name: "Test Project".to_owned(),

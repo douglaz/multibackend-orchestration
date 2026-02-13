@@ -30,15 +30,54 @@ impl Workspace {
 
     pub fn load(root: PathBuf) -> Result<Self> {
         let config_path = root.join("ralph.toml");
-        let index_path = root.join("index.json");
         let config = GlobalConfig::load(&config_path)?;
-        let index = WorkspaceIndex::load(&index_path)?;
 
-        Ok(Self {
+        let index_path = root.join("index.json");
+        let index = if index_path.is_file() {
+            WorkspaceIndex::load(&index_path).unwrap_or_else(|_| {
+                WorkspaceIndex::new(&config.workspace.version, now_utc())
+            })
+        } else {
+            WorkspaceIndex::new(&config.workspace.version, now_utc())
+        };
+
+        let ws = Self {
             root,
             config,
             index,
-        })
+        };
+
+        // One-time migration: seed worktree-local active project from legacy
+        // index.json if the local file doesn't exist yet.
+        ws.migrate_active_project_from_index();
+
+        Ok(ws)
+    }
+
+    /// If the worktree-local active-project file is absent and legacy
+    /// `index.json` contains an `active_project` for an existing project,
+    /// copy it to local storage. Errors are silently ignored.
+    fn migrate_active_project_from_index(&self) {
+        // Only migrate if no local active project file exists yet.
+        if self.active_project_id().is_some() {
+            return;
+        }
+        // Check if the local file itself exists (even if empty/invalid).
+        let local_path = active::active_project_file_path(&self.root);
+        if local_path.exists() {
+            return;
+        }
+
+        if let Some(ref legacy_id) = self.index.active_project {
+            if self.project_exists(legacy_id) {
+                if active::write_active_project(&self.root, legacy_id).is_ok() {
+                    eprintln!(
+                        "migrated active project '{}' from index.json to worktree-local storage",
+                        legacy_id
+                    );
+                }
+            }
+        }
     }
 
     pub fn init(root: &Path) -> Result<Self> {
@@ -59,7 +98,6 @@ impl Workspace {
         config.save(&root.join("ralph.toml"))?;
 
         let index = WorkspaceIndex::new(&config.workspace.version, now_utc());
-        index.save(&root.join("index.json"))?;
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -139,6 +177,25 @@ impl Workspace {
 
     pub fn active_project_id(&self) -> Option<String> {
         active::read_active_project(&self.root)
+    }
+
+    /// Resolve the project ID from an explicit flag or the active-project file.
+    /// If the active-project file points to a nonexistent project (stale),
+    /// returns `ActiveProjectNotSet` with a user-facing hint.
+    pub fn resolve_project_id(&self, explicit: Option<&str>) -> Result<String> {
+        if let Some(id) = explicit {
+            return Ok(id.to_owned());
+        }
+        let id = self
+            .active_project_id()
+            .ok_or(RalphError::ActiveProjectNotSet)?;
+        if !self.project_exists(&id) {
+            return Err(RalphError::Validation(format!(
+                "active project '{}' no longer exists; run `ralph project use <id>` to set a new active project",
+                id
+            )));
+        }
+        Ok(id)
     }
 
     pub fn set_active_project_id(&self, id: &str) -> Result<()> {

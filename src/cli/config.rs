@@ -77,15 +77,22 @@ fn resolve_scope(
         return Ok(ConfigScope::Project(project_id.to_owned()));
     }
 
-    if let Some(active) = workspace.index.active_project.clone() {
-        return Ok(ConfigScope::Project(active));
+    if let Some(active) = workspace.active_project_id() {
+        if workspace.project_exists(&active) {
+            return Ok(ConfigScope::Project(active));
+        }
+        eprintln!(
+            "warning: active project '{}' no longer exists; falling back to global scope. \
+             Run `ralph project use <id>` to set a new active project.",
+            active
+        );
     }
 
     Ok(ConfigScope::Global)
 }
 
 fn ensure_project_exists(workspace: &Workspace, project_id: &str) -> Result<()> {
-    if workspace.index.get_project(project_id).is_none() {
+    if !workspace.project_exists(project_id) {
         return Err(RalphError::ProjectNotFound(project_id.to_owned()));
     }
     Ok(())

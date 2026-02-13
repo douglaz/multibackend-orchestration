@@ -12,16 +12,8 @@ use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
 pub fn execute(args: RollbackArgs) -> Result<()> {
-    let mut workspace = Workspace::discover()?;
-    let project_id = if let Some(project) = args.project {
-        project
-    } else {
-        workspace
-            .index
-            .active_project
-            .clone()
-            .ok_or(RalphError::ActiveProjectNotSet)?
-    };
+    let workspace = Workspace::discover()?;
+    let project_id = workspace.resolve_project_id(args.project.as_deref())?;
 
     let project_dir = workspace.project_dir(&project_id);
     let _lock = ProjectLock::acquire(&project_dir, &project_id)?;
@@ -145,33 +137,6 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     }
 
     save_project_state(&project_dir, &state)?;
-
-    if let Some(project) = workspace.index.get_project_mut(&project_id) {
-        project.last_loop_number = args.loop_number;
-        project.total_feature_loops = state
-            .loops
-            .iter()
-            .filter(|l| l.status == LoopStatus::Completed)
-            .count() as u32;
-        project.total_completion_attempts = state
-            .completion_attempts
-            .iter()
-            .filter(|l| l.status == LoopStatus::Completed)
-            .count() as u32;
-        project.status = match state.status {
-            ProjectStatus::Pending => crate::workspace::index::ProjectLifecycleStatus::Pending,
-            ProjectStatus::InProgress => {
-                crate::workspace::index::ProjectLifecycleStatus::InProgress
-            }
-            ProjectStatus::Completed => crate::workspace::index::ProjectLifecycleStatus::Completed,
-        };
-        project.completed_at = if state.status == ProjectStatus::Completed {
-            Some(chrono::Utc::now())
-        } else {
-            None
-        };
-    }
-    workspace.save_index()?;
 
     if let Some(reference) = hard_ref {
         println!(

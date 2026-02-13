@@ -5,20 +5,11 @@ use crate::{error::RalphError, Result};
 
 pub fn execute(args: HistoryArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
-    let project_id = if let Some(project) = args.project {
-        project
-    } else {
-        workspace
-            .index
-            .active_project
-            .clone()
-            .ok_or(RalphError::ActiveProjectNotSet)?
-    };
+    let project_id = workspace.resolve_project_id(args.project.as_deref())?;
 
-    let project_ref = workspace
-        .index
-        .get_project(&project_id)
-        .ok_or_else(|| RalphError::ProjectNotFound(project_id.clone()))?;
+    if !workspace.project_exists(&project_id) {
+        return Err(RalphError::ProjectNotFound(project_id));
+    }
     let state = load_project_state(&workspace.project_dir(&project_id))?;
 
     if args.json {
@@ -36,10 +27,10 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("PROJECT: {} ({})", project_ref.id, project_ref.name);
+    println!("PROJECT: {} ({})", state.project_id, state.project_name);
     println!(
         "PARENT: {}",
-        project_ref.parent_project.as_deref().unwrap_or("none")
+        state.parent_project.as_deref().unwrap_or("none")
     );
     println!(
         "PROMPT: {} (sha256: {})",

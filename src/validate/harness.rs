@@ -128,6 +128,35 @@ impl RalphHarness {
         load_json(&self.repo_root.join(".ralph").join("index.json"))
     }
 
+    /// Read the worktree-local active-project file (`.git/ralph-active-project`).
+    /// Returns `Ok(None)` if the file is absent, empty, or whitespace-only.
+    pub fn load_active_project(&self) -> Result<Option<String>> {
+        let git_dir = self.repo_root.join(".git");
+        let path = git_dir.join("ralph-active-project");
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                let trimmed = content.trim().to_owned();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Assert that `.ralph/index.json` does NOT exist.
+    pub fn assert_no_index_json(&self) {
+        let path = self.repo_root.join(".ralph").join("index.json");
+        assert!(
+            !path.exists(),
+            "index.json should not exist at {}",
+            path.display()
+        );
+    }
+
     pub fn init_workspace(&self) -> Result<()> {
         self.ralph_ok(["init"])?;
         Ok(())

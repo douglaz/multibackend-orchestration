@@ -1,11 +1,9 @@
 use super::*;
 
 use crate::validate::assertions::{
-    assert_dir_exists, assert_file_exists, assert_file_not_empty, assert_json_array_len,
-    assert_json_field, assert_toml_field, load_toml,
+    assert_dir_exists, assert_file_exists, assert_file_not_empty, assert_toml_field, load_toml,
 };
 use crate::validate::harness::RalphHarness;
-use serde_json::json;
 use toml::Value as TomlValue;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -23,8 +21,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: default_config,
         },
         ConformanceTest {
-            name: "init::default_index",
-            func: default_index,
+            name: "init::no_index_json",
+            func: no_index_json,
         },
         ConformanceTest {
             name: "init::rejects_nonempty_dir",
@@ -40,7 +38,6 @@ fn creates_workspace_structure(h: &RalphHarness) -> TestResult {
         let ralph_dir = h.repo_root.join(".ralph");
         assert_dir_exists(&ralph_dir);
         assert_file_exists(&ralph_dir.join("ralph.toml"));
-        assert_file_exists(&ralph_dir.join("index.json"));
         assert_dir_exists(&ralph_dir.join("projects"));
         assert_dir_exists(&ralph_dir.join("templates"));
     })) {
@@ -128,14 +125,10 @@ fn default_config(h: &RalphHarness) -> TestResult {
     }
 }
 
-fn default_index(h: &RalphHarness) -> TestResult {
+fn no_index_json(h: &RalphHarness) -> TestResult {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         h.init_workspace().expect("ralph init should succeed");
-
-        let index = h.load_index().expect("failed to load index.json");
-
-        assert_json_field(&index, "workspace_version", &json!("1.0"));
-        assert_json_array_len(&index, "projects", 0);
+        h.assert_no_index_json();
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),

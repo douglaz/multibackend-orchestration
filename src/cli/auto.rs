@@ -126,7 +126,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         ));
     }
 
-    let mut workspace = Workspace::discover()?;
+    let workspace = Workspace::discover()?;
 
     let writer_spec = if spec_writer.trim().is_empty() {
         workspace.config.workspace.default_backend.clone()
@@ -219,7 +219,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
     println!("Creating project...");
     let spec_path = quick_prd_result.spec_path.clone();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: project_name,

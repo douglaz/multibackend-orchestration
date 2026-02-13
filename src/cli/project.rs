@@ -11,7 +11,7 @@ use crate::{error::RalphError, Result};
 pub fn execute(args: ProjectArgs) -> Result<()> {
     match args.command {
         ProjectCommand::New(new_args) => {
-            let mut workspace = Workspace::discover()?;
+            let workspace = Workspace::discover()?;
 
             let source = match (new_args.prompt, new_args.from) {
                 (Some(prompt), None) => PromptSource::File(prompt),
@@ -28,7 +28,7 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             }
 
             create_project(
-                &mut workspace,
+                &workspace,
                 CreateProjectOptions {
                     id: new_args.id,
                     name: new_args.name,
@@ -41,18 +41,16 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
         }
         ProjectCommand::List => {
             let workspace = Workspace::discover()?;
+            let active_id = workspace.active_project_id();
+            let projects = workspace.list_projects()?;
             println!("PROJECTS IN WORKSPACE");
             println!();
             println!(
                 "{:<14} {:<24} {:<12} {:<10} {:<10} ACTIVE",
                 "ID", "NAME", "STATUS", "FEATURES", "LAST_LOOP"
             );
-            for project in &workspace.index.projects {
-                let active = workspace
-                    .index
-                    .active_project
-                    .as_deref()
-                    .is_some_and(|id| id == project.id);
+            for project in &projects {
+                let active = active_id.as_deref() == Some(project.id.as_str());
                 println!(
                     "{:<14} {:<24} {:<12} {:<10} {:<10} {}",
                     project.id,
@@ -66,9 +64,8 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             Ok(())
         }
         ProjectCommand::Use(use_args) => {
-            let mut workspace = Workspace::discover()?;
-            workspace.index.set_active_project(&use_args.project_id)?;
-            workspace.save_index()?;
+            let workspace = Workspace::discover()?;
+            workspace.set_active_project_id(&use_args.project_id)?;
 
             if workspace.config.git.auto_branch {
                 if let Some(repo_root) = workspace.root.parent() {
@@ -88,37 +85,41 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
         }
         ProjectCommand::Show(show_args) => {
             let workspace = Workspace::discover()?;
-            let project_id = if let Some(id) = show_args.project_id {
-                id
-            } else {
-                workspace
-                    .index
-                    .active_project
-                    .clone()
-                    .ok_or(RalphError::ActiveProjectNotSet)?
-            };
-            let project_meta = workspace
-                .index
-                .get_project(&project_id)
-                .ok_or_else(|| RalphError::ProjectNotFound(project_id.clone()))?;
+            let project_id = workspace.resolve_project_id(show_args.project_id.as_deref())?;
+
+            if !workspace.project_exists(&project_id) {
+                return Err(RalphError::ProjectNotFound(project_id));
+            }
+
+            let summary = workspace.load_project_summary(&project_id)?;
             let project_dir = workspace.project_dir(&project_id);
             let state = load_project_state(&project_dir)?;
 
             if show_args.json {
                 let value = serde_json::json!({
-                    "project": project_meta,
+                    "project": {
+                        "id": summary.id,
+                        "name": summary.name,
+                        "status": project_status_label(&summary.status),
+                        "created_at": summary.created_at.to_rfc3339(),
+                        "completed_at": summary.completed_at.map(|t| t.to_rfc3339()),
+                        "total_feature_loops": summary.total_feature_loops,
+                        "total_completion_attempts": summary.total_completion_attempts,
+                        "last_loop_number": summary.last_loop_number,
+                        "parent_project": summary.parent_project,
+                    },
                     "state": state,
                 });
                 println!("{}", serde_json::to_string_pretty(&value)?);
                 return Ok(());
             }
 
-            println!("ID: {}", project_meta.id);
-            println!("Name: {}", project_meta.name);
-            println!("Status: {}", project_status_label(&project_meta.status));
+            println!("ID: {}", summary.id);
+            println!("Name: {}", summary.name);
+            println!("Status: {}", project_status_label(&summary.status));
             println!(
                 "Parent: {}",
-                project_meta.parent_project.as_deref().unwrap_or("none")
+                summary.parent_project.as_deref().unwrap_or("none")
             );
             println!("Prompt Hash: {}", state.prompt_hash);
             println!(
@@ -155,11 +156,11 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
     }
 }
 
-fn project_status_label(status: &crate::workspace::index::ProjectLifecycleStatus) -> &'static str {
+fn project_status_label(status: &crate::project::state::ProjectStatus) -> &'static str {
     match status {
-        crate::workspace::index::ProjectLifecycleStatus::Pending => "pending",
-        crate::workspace::index::ProjectLifecycleStatus::InProgress => "in_progress",
-        crate::workspace::index::ProjectLifecycleStatus::Completed => "completed",
+        crate::project::state::ProjectStatus::Pending => "pending",
+        crate::project::state::ProjectStatus::InProgress => "in_progress",
+        crate::project::state::ProjectStatus::Completed => "completed",
     }
 }
 

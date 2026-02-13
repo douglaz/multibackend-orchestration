@@ -2,15 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::Utc;
-
 use crate::config::ProjectConfig;
 use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
 use crate::git::is_git_repo;
 use crate::project::state::ProjectState;
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
-use crate::workspace::index::{ProjectLifecycleStatus, ProjectRef};
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -26,11 +23,11 @@ pub struct CreateProjectOptions {
     pub starting_backend: Option<String>,
 }
 
-pub fn create_project(workspace: &mut Workspace, options: CreateProjectOptions) -> Result<()> {
+pub fn create_project(workspace: &Workspace, options: CreateProjectOptions) -> Result<()> {
     let id = options.id;
     let name = options.name;
 
-    if workspace.index.get_project(&id).is_some() {
+    if workspace.project_exists(&id) {
         return Err(RalphError::Validation(format!(
             "project '{id}' already exists"
         )));
@@ -77,24 +74,11 @@ pub fn create_project(workspace: &mut Workspace, options: CreateProjectOptions) 
 
     maybe_create_project_branch(workspace, &id, parent_project.as_deref())?;
 
-    let now = Utc::now();
-    workspace.index.add_project(ProjectRef {
-        id: id.clone(),
-        name,
-        status: ProjectLifecycleStatus::Pending,
-        created_at: now,
-        completed_at: None,
-        total_feature_loops: 0,
-        total_completion_attempts: 0,
-        last_loop_number: 0,
-        parent_project,
-    })?;
-
-    if workspace.index.active_project.is_none() {
-        workspace.index.active_project = Some(id);
+    // Auto-activate if no local active project is set.
+    if workspace.active_project_id().is_none() {
+        workspace.set_active_project_id(&id)?;
     }
 
-    workspace.save_index()?;
     Ok(())
 }
 
