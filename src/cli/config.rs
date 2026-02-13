@@ -372,6 +372,14 @@ fn set_global_value(
         }
         "backends.claude.args" => config.backends.claude.args = parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = parse_string_list(raw_value)?,
+        _ if key.starts_with("backends.claude.models.") => {
+            let role = key.trim_start_matches("backends.claude.models.");
+            set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.codex.models.") => {
+            let role = key.trim_start_matches("backends.codex.models.");
+            set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
+        }
         _ if key.starts_with("backends.claude.env.") => {
             let env_key = key.trim_start_matches("backends.claude.env.");
             config
@@ -543,6 +551,32 @@ fn parse_optional_string(raw: &str) -> Option<String> {
     } else {
         Some(raw.to_owned())
     }
+}
+
+fn set_backend_model(
+    models: &mut crate::config::global::BackendRoleModels,
+    role: &str,
+    raw_value: &str,
+) -> Result<()> {
+    let value = if raw_value == "null" {
+        None
+    } else {
+        Some(raw_value.to_owned())
+    };
+    match role {
+        "planner" => models.planner = value,
+        "implementer" => models.implementer = value,
+        "reviewer" => models.reviewer = value,
+        "qa" => models.qa = value,
+        "completer" => models.completer = value,
+        "reformatter" => models.reformatter = value,
+        _ => {
+            return Err(RalphError::Validation(format!(
+                "unknown backend model role: {role}"
+            )))
+        }
+    }
+    Ok(())
 }
 
 fn parse_string_list(raw: &str) -> Result<Vec<String>> {

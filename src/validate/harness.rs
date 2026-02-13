@@ -163,6 +163,38 @@ impl RalphHarness {
         Ok(())
     }
 
+    /// Interpreter-stable mock backend setup that avoids reliance on
+    /// `/usr/bin/env` (absent in Nix sandboxes). Creates a thin `/bin/sh`
+    /// wrapper that execs `bash <script>`, ignoring any extra CLI args
+    /// (e.g. `--model opus`) that the backend registry may inject. The
+    /// wrapper is set as the backend command with empty args so stale
+    /// defaults (e.g. codex `exec -`) don't interfere.
+    pub fn setup_mock_backends_stable<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+        let script = script.as_ref().to_string_lossy().into_owned();
+        // Write a POSIX shell wrapper that calls bash with the real script.
+        // The wrapper ignores all positional args (model flags, etc.) because
+        // it does not pass "$@" through to bash.
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{script}\"\n");
+        let wrapper = self.write_mock_script("mock-wrapper.sh", &wrapper_content)?;
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        for backend in &["claude", "codex"] {
+            self.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.command"),
+                wrapper_str.clone(),
+            ])?;
+            self.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.args"),
+                "[]".to_owned(),
+            ])?;
+        }
+        Ok(())
+    }
+
     pub fn setup_separate_mock_backends<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         claude_script: P,

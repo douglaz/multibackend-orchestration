@@ -123,6 +123,183 @@ fi
     .to_owned()
 }
 
+/// Auto-capable mock script that handles quick-PRD writer/reviewer prompts in
+/// addition to the standard orchestration prompts, enabling `ralph auto`
+/// conformance tests.
+pub fn auto_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+# --- Quick-PRD prompts ---
+if echo "$INPUT" | grep -q "You are a senior software engineer writing a focused engineering specification."; then
+  cat <<'EOF'
+## Summary
+Auto-generated mock feature spec.
+
+## Acceptance Criteria
+- [ ] Mock file is created
+
+## Technical Approach
+Create a mock file.
+
+## Files & Modules
+- `mock_file.txt`
+
+## Testing Strategy
+Manual verification.
+
+## Out of Scope
+Nothing.
+EOF
+elif echo "$INPUT" | grep -q "You are a senior engineer reviewing an engineering specification"; then
+  cat <<'EOF'
+```json
+{"approved": true, "issues": []}
+```
+EOF
+elif echo "$INPUT" | grep -q "You are a senior software engineer revising an engineering specification"; then
+  cat <<'EOF'
+## Summary
+Revised mock spec.
+
+## Acceptance Criteria
+- [ ] Mock file is created
+
+## Technical Approach
+Create a mock file.
+
+## Files & Modules
+- `mock_file.txt`
+
+## Testing Strategy
+Manual verification.
+
+## Out of Scope
+Nothing.
+EOF
+# --- Standard orchestration prompts ---
+elif echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: ok
+- cargo test: 10 passed, 0 failed
+
+## Verification Summary
+All acceptance criteria from the spec have been verified.
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 pub fn always_reject_review_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail

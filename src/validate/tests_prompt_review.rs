@@ -7,7 +7,7 @@ use crate::validate::assertions::{
     parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::standard_mock_script;
+use crate::validate::mock_scripts::{auto_mock_script, standard_mock_script};
 use serde_json::json;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -39,6 +39,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prompt_review::existing_project_migration",
             func: existing_project_migration,
+        },
+        ConformanceTest {
+            name: "prompt_review::stable_mock_with_modeled_backend",
+            func: stable_mock_with_modeled_backend,
         },
     ]
 }
@@ -150,8 +154,8 @@ fn auto_skip_flag_bypasses(h: &RalphHarness) -> TestResult {
         let script = h
             .write_mock_script("auto-mock.sh", &auto_mock_script())
             .expect("failed to write auto mock script");
-        h.setup_mock_backends(&script)
-            .expect("setup_mock_backends failed");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
 
         let output = h
             .ralph_env(
@@ -171,182 +175,6 @@ fn auto_skip_flag_bypasses(h: &RalphHarness) -> TestResult {
         assert_path_not_exists(&project_dir.join("prompt-review.md"));
         assert_path_not_exists(&project_dir.join("prompt-original.md"));
     })
-}
-
-/// Mock script that handles quick-prd writer/reviewer prompts in addition to
-/// the standard orchestration prompts, enabling `ralph auto` conformance tests.
-fn auto_mock_script() -> String {
-    r###"#!/usr/bin/env bash
-set -euo pipefail
-
-INPUT="$(cat)"
-
-# --- Quick-PRD prompts ---
-if grep -q "You are a senior software engineer writing a focused engineering specification." <<<"$INPUT"; then
-  cat <<'EOF'
-## Summary
-Auto-generated mock feature spec.
-
-## Acceptance Criteria
-- [ ] Mock file is created
-
-## Technical Approach
-Create a mock file.
-
-## Files & Modules
-- `mock_file.txt`
-
-## Testing Strategy
-Manual verification.
-
-## Out of Scope
-Nothing.
-EOF
-elif grep -q "You are a senior engineer reviewing an engineering specification" <<<"$INPUT"; then
-  cat <<'EOF'
-```json
-{"approved": true, "issues": []}
-```
-EOF
-elif grep -q "You are a senior software engineer revising an engineering specification" <<<"$INPUT"; then
-  cat <<'EOF'
-## Summary
-Revised mock spec.
-
-## Acceptance Criteria
-- [ ] Mock file is created
-
-## Technical Approach
-Create a mock file.
-
-## Files & Modules
-- `mock_file.txt`
-
-## Testing Strategy
-Manual verification.
-
-## Out of Scope
-Nothing.
-EOF
-# --- Standard orchestration prompts ---
-elif grep -q "You are a software architect planning features for a project." <<<"$INPUT"; then
-  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
-    cat <<'EOF'
-# Project Completion Request
-
-## Rationale
-All required behavior is complete.
-
-## Summary of Work
-- Prior loops implemented and reviewed successfully.
-
-## Remaining Items
-- None
-EOF
-  else
-    cat <<'EOF'
-# Feature: Demo Feature
-
-## Description
-Mock feature used by validate tests.
-
-## Acceptance Criteria
-- [ ] Mock implementation file is created
-
-## Files to Modify/Create
-- `mock_file.txt` - file created by the mock implementer
-
-## Dependencies
-- Requires: none
-- Blocks: none
-EOF
-  fi
-elif grep -q "You are a software developer implementing a feature specification." <<<"$INPUT"; then
-  if grep -q "## Review Feedback" <<<"$INPUT" && ! grep -q "(none)" <<<"$INPUT"; then
-    cat <<'EOF'
-# Implementation Response (Iteration 1)
-
-## Changes Made
-1. Addressed reviewer feedback in the mock implementation.
-
-## Could Not Address
-- None
-EOF
-  else
-    cat <<'EOF'
-# Implementation Notes
-
-## Decisions Made
-- Created a mock implementation artifact.
-
-## Spec Deviations
-- None
-
-## Testing
-- Mock script execution only
-EOF
-  fi
-  echo "implemented" > mock_file.txt
-  git add mock_file.txt
-elif grep -q "You are a prompt reviewer" <<<"$INPUT"; then
-  cat <<'EOF'
-# Prompt Review
-
-## Issues Found
-- Mock issue for testing
-
-## Refined Prompt
-This is the refined prompt from the mock reviewer.
-EOF
-elif grep -q "You are a code reviewer ensuring implementations match specifications." <<<"$INPUT"; then
-  cat <<'EOF'
-# Review: APPROVED
-
-## Acceptance Criteria Checklist
-- [x] Mock implementation file is created
-
-## Notes
-Looks good.
-
-## Commit Message
-feat: apply mock implementation
-EOF
-elif grep -q "You are a QA engineer validating" <<<"$INPUT"; then
-  cat <<'EOF'
-# QA: PASS
-
-## Tests Run
-- cargo check: ok
-- cargo test: 10 passed, 0 failed
-
-## Verification Summary
-All acceptance criteria from the spec have been verified.
-EOF
-elif grep -q "You are a project completion validator." <<<"$INPUT"; then
-  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
-    cat <<'EOF'
-# Verdict: COMPLETE
-
-The project satisfies all requirements:
-- Mock requirement: satisfied
-EOF
-  else
-    cat <<'EOF'
-# Verdict: CONTINUE
-
-## Missing Requirements
-1. Additional feature remains.
-
-## Recommended Next Features
-1. Implement another mock feature.
-EOF
-  fi
-else
-  echo "unrecognized prompt" >&2
-  exit 1
-fi
-"###
-    .to_owned()
 }
 
 fn resume_skips_completed(h: &RalphHarness) -> TestResult {
@@ -471,6 +299,40 @@ fn existing_project_migration(h: &RalphHarness) -> TestResult {
             state_after["prompt_review_completed"],
             json!(true),
             "migration should set prompt_review_completed to true"
+        );
+    })
+}
+
+/// Regression test: verify that `setup_mock_backends_stable` works correctly
+/// when role backends resolve to modeled specs like `claude(opus)`, which
+/// inject `--model` flags. Previously this would produce
+/// `bash --model opus script.sh` and fail.
+fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script("stable-model-mock.sh", &standard_mock_script())
+            .expect("failed to write mock script");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            "pr-stable-model",
+            "Stable Model Test",
+            "Stable model test prompt",
+        )
+        .expect("create_project failed");
+
+        // Run a full loop — this invokes backends with modeled specs
+        // (e.g. claude(opus) for planner) which inject --model flags.
+        // The stable mock setup must handle this without breaking.
+        h.ralph_ok(["run", "--skip-prompt-review", "--loops", "1"])
+            .expect("ralph run with stable mock and modeled backends should succeed");
+
+        // Verify the loop completed successfully.
+        let state = h.load_state("pr-stable-model").expect("load state");
+        assert!(
+            state["loops"].as_array().map_or(false, |l| !l.is_empty()),
+            "at least one loop should have been completed"
         );
     })
 }
