@@ -1,0 +1,29 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Technical feasibility",
+      "feedback": "The spec’s `tokio::runtime::Runtime::new().block_on(...)` approach is unsafe in this codebase: `daemon::execute` runs inside `#[tokio::main]` (`cli::run` is async), so starting/blocking a nested runtime can panic. The refinement call should be integrated with the existing async runtime (or daemon made async) instead of creating a one-shot runtime in sync code."
+    },
+    {
+      "area": "Runtime contract correctness",
+      "feedback": "The spec does not address that `spawn_ralph_auto` currently invokes `ralph auto <idea>` positionally, while `auto` requires `--idea`. Without explicitly fixing this, refined text may not be consumed by the real binary. Acceptance criteria should include `spawn_ralph_auto` passing `--idea` and a test that asserts the exact argv."
+    },
+    {
+      "area": "Requirements alignment / config clarity",
+      "feedback": "There is a mismatch between requested config semantics (`[daemon]` + `daemon_refiner` role via `resolve_backend_for_role`) and the proposed approach (`workspace.daemon_refinement_*` + no new role). This needs a clear decision and explicit schema/UX update, otherwise implementation may diverge from the feature requirement."
+    },
+    {
+      "area": "Dispatch resilience edge cases",
+      "feedback": "Comment posting is described as part of the critical path but failure behavior is underspecified. `post_idempotent_comment` can return errors (e.g., marker lookup failure); if propagated, dispatch can stall. The spec should require best-effort comment posting (warn + continue) and define behavior when first attempt posts raw fallback but later retries produce a refined prompt (marker idempotency currently prevents correction)."
+    },
+    {
+      "area": "Restart/backward-compat behavior",
+      "feedback": "Using `raw_idea: Option<String>` is good, but the spec allows legacy pending tasks to fall back to `Implement task {task_id}`. That violates the stated raw title+body fallback intent. For `raw_idea == None`, dispatch should fetch issue title/body on demand before spawn/refinement."
+    },
+    {
+      "area": "Testing coverage gaps",
+      "feedback": "Test plan misses key conformance checks: (1) strict ordering `claim -> refine -> refined-prompt comment -> spawn`, (2) dispatch continues when comment API calls fail, (3) retry scenario where refinement fails first then succeeds (comment/idea consistency), and (4) end-to-end assertion that spawned `ralph auto` receives the exact refined string via `--idea`."
+    }
+  ]
+}

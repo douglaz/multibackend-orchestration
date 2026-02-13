@@ -108,6 +108,9 @@ fn execute_start(args: DaemonStartArgs) -> Result<()> {
         single_iteration: args.single_iteration,
         ralph_bin,
         repo_root,
+        refinement_enabled: daemon_cfg.refinement_enabled,
+        refinement_backend: daemon_cfg.refinement_backend,
+        global_config: workspace.config.clone(),
     };
 
     crate::daemon::runtime::run(&store, &runtime_config)
@@ -171,7 +174,10 @@ fn effective_daemon_config(workspace: &Workspace) -> Result<crate::config::Effec
         None => None,
     };
 
-    Ok(resolve_daemon_config(&workspace.config, project_config.as_ref()))
+    Ok(resolve_daemon_config(
+        &workspace.config,
+        project_config.as_ref(),
+    ))
 }
 
 fn validate_repo_slug(repo: &str) -> Result<()> {
@@ -207,7 +213,14 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
 
 fn resolve_repo_from_gh() -> Result<String> {
     let output = Command::new("gh")
-        .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ])
         .output()
         .map_err(|err| {
             RalphError::Validation(format!(

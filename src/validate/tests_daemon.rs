@@ -77,6 +77,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: runtime_single_iteration_mode,
         },
         ConformanceTest {
+            name: "daemon::runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag",
+            func: runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_adopt_pending_fetch_failure_uses_metadata_fallback",
+            func: runtime_adopt_pending_fetch_failure_uses_metadata_fallback,
+        },
+        ConformanceTest {
             name: "daemon::runtime_abort_during_dispatch_preserves_terminal",
             func: runtime_abort_during_dispatch_preserves_terminal,
         },
@@ -159,7 +167,13 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
         let default_start = h
             .ralph_env(
-                ["daemon", "start", "--repo", "acme/default", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/default",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
@@ -183,6 +197,16 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             .ralph_ok(["config", "get", "workspace.daemon_labels"])
             .expect("config get workspace.daemon_labels should succeed");
         assert_eq!(labels_default.trim(), "[\n  \"ralph:ready\"\n]");
+
+        let refinement_enabled_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_refinement_enabled"])
+            .expect("config get workspace.daemon_refinement_enabled should succeed");
+        assert_eq!(refinement_enabled_default.trim(), "true");
+
+        let refinement_backend_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_refinement_backend"])
+            .expect("config get workspace.daemon_refinement_backend should succeed");
+        assert_eq!(refinement_backend_default.trim(), "claude(sonnet)");
 
         h.create_project(
             "daemon-config",
@@ -227,9 +251,40 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.repo failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.refinement_enabled",
+            "false",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.refinement_enabled failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.refinement_backend",
+            "codex(gpt-5.3-codex-medium)",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.refinement_backend failed");
 
         h.ralph_ok(["project", "use", "daemon-config"])
             .expect("project use should succeed");
+
+        let refinement_enabled_project = h
+            .ralph_ok(["config", "get", "daemon.refinement_enabled"])
+            .expect("config get daemon.refinement_enabled should succeed");
+        assert_eq!(refinement_enabled_project.trim(), "false");
+
+        let refinement_backend_project = h
+            .ralph_ok(["config", "get", "daemon.refinement_backend"])
+            .expect("config get daemon.refinement_backend should succeed");
+        assert_eq!(
+            refinement_backend_project.trim(),
+            "codex(gpt-5.3-codex-medium)"
+        );
 
         let merged_start = h
             .ralph_env(
@@ -252,7 +307,13 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
 fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let no_workspace = h
-            .ralph(["daemon", "start", "--repo", "acme/widgets", "--single-iteration"])
+            .ralph([
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ])
             .expect("daemon start should execute");
         assert_exit_code(&no_workspace, 2);
 
@@ -262,7 +323,10 @@ fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
             .expect("write mock gh should succeed");
 
         let with_workspace = h
-            .ralph_env(["daemon", "start", "--single-iteration"], &[("PATH", &gh_path)])
+            .ralph_env(
+                ["daemon", "start", "--single-iteration"],
+                &[("PATH", &gh_path)],
+            )
             .expect("daemon start should execute");
         assert_exit_code(&with_workspace, 0);
         assert_stdout_contains(&with_workspace, "daemon start validated for repo octo/demo");
@@ -282,7 +346,15 @@ fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
         write_tasks(
             h,
             vec![
-                task_json("acme-widgets-41", "pending", 41, "acme", "widgets", None, None),
+                task_json(
+                    "acme-widgets-41",
+                    "pending",
+                    41,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                ),
                 task_json(
                     "acme-widgets-42",
                     "in_progress",
@@ -344,7 +416,15 @@ fn abort_by_bare_number_ambiguous_error(h: &RalphHarness) -> TestResult {
         write_tasks(
             h,
             vec![
-                task_json("acme-widgets-7", "pending", 7, "acme", "widgets", None, None),
+                task_json(
+                    "acme-widgets-7",
+                    "pending",
+                    7,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                ),
                 task_json("other-api-7", "pending", 7, "other", "api", None, None),
             ],
         )
@@ -486,6 +566,7 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
         .expect("write_tasks failed");
 
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
         // Run daemon with --single-iteration to trigger reconciliation then exit.
         // Reconciliation resets in_progress -> pending before any adoption.
@@ -500,7 +581,7 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path)],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -517,7 +598,10 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
         assert_eq!(tasks.len(), 3, "should still have 3 tasks");
 
         // The completed task should remain completed
-        let completed = tasks.iter().find(|t| t["task_id"] == "acme-widgets-30").unwrap();
+        let completed = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-30")
+            .unwrap();
         assert_eq!(completed["state"], json!("completed"));
 
         // The formerly in_progress tasks should have been reconciled.
@@ -599,6 +683,7 @@ exit 1
 "#;
 
         let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
         // Use max_concurrent=1 to limit claiming. The overflow warning should
         // still be emitted based on the poll result count.
@@ -613,7 +698,7 @@ exit 1
                     "--max-concurrent",
                     "1",
                 ],
-                &[("PATH", &gh_path)],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -692,11 +777,7 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
         );
 
         // Worktrees base directory must exist
-        let wt_base = h
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees");
+        let wt_base = h.repo_root.join(".ralph").join("daemon").join("worktrees");
         assert!(
             wt_base.exists(),
             "worktrees base directory must exist after dispatch"
@@ -704,7 +785,10 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
 
         // Task should have reached a terminal state after drain
         let tasks = load_tasks(h).expect("load_tasks failed");
-        let task = tasks.iter().find(|t| t["task_id"] == "acme-widgets-50").unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-50")
+            .unwrap();
         let state = task["state"].as_str().unwrap();
         assert!(
             ["completed", "failed"].contains(&state),
@@ -775,7 +859,10 @@ fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
         // Since single-iteration drains children, the task should have
         // reached a terminal state with cleared PID/PGID.
         let tasks = load_tasks(h).expect("load_tasks failed");
-        let task = tasks.iter().find(|t| t["task_id"] == "acme-widgets-60").unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-60")
+            .unwrap();
         let state = task["state"].as_str().unwrap();
 
         assert!(
@@ -861,6 +948,7 @@ exit 1
         );
 
         let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
         // Pre-populate a pending task that will be dispatched, complete,
         // and trigger a comment.
@@ -888,7 +976,7 @@ exit 1
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path)],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("first daemon run should execute");
         assert_exit_code(&output, 0);
@@ -898,8 +986,7 @@ exit 1
 
         // Verify comments contain the expected marker pattern
         if comment_log.exists() {
-            let log_content = fs::read_to_string(&comment_log)
-                .expect("read comment log");
+            let log_content = fs::read_to_string(&comment_log).expect("read comment log");
             assert!(
                 log_content.contains("<!-- ralph:task:acme-widgets-70:"),
                 "comment should contain ralph marker, got:\n{log_content}"
@@ -918,7 +1005,7 @@ exit 1
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path)],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("second daemon run should execute");
         assert_exit_code(&output2, 0);
@@ -997,8 +1084,7 @@ exit 1
 
         let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
         // Use mock ralph that creates a commit (so has_diff returns true)
-        let ralph_path = write_daemon_mock_ralph_with_commit(h)
-            .expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
 
         // Pre-populate a PENDING task — the daemon will dispatch it, the
         // mock ralph will commit a change, the child exits 0, triggering
@@ -1044,7 +1130,10 @@ exit 1
 
         // Task should be completed
         let tasks = load_tasks(h).expect("load_tasks failed");
-        let task = tasks.iter().find(|t| t["task_id"] == "acme-widgets-80").unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-80")
+            .unwrap();
         assert_eq!(
             task["state"],
             json!("completed"),
@@ -1126,8 +1215,7 @@ exit 1
 
         let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
         // Use mock ralph that creates a commit (so has_diff returns true → PR flow)
-        let ralph_path = write_daemon_mock_ralph_with_commit(h)
-            .expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
 
         // Pre-populate a PENDING task — daemon dispatches it, mock ralph
         // commits, child exits 0, complete_task → handle_pr_flow → pr create fails
@@ -1172,7 +1260,10 @@ exit 1
 
         // Task should be completed despite PR failure
         let tasks = load_tasks(h).expect("load_tasks failed");
-        let task = tasks.iter().find(|t| t["task_id"] == "acme-widgets-90").unwrap();
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-90")
+            .unwrap();
         assert_eq!(
             task["state"],
             json!("completed"),
@@ -1212,6 +1303,7 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
 
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
         // Pre-populate a pending task that should be dispatched and drained
         write_tasks(
@@ -1237,7 +1329,7 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path)],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -1253,6 +1345,242 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
                 task["task_id"]
             );
         }
+    })
+}
+
+/// Test restart/adoption behavior for legacy pending tasks with missing
+/// `raw_idea`, including exact `ralph auto --idea <idea>` argv semantics.
+///
+/// Verifies:
+/// - adopt_pending_tasks hydrates raw_idea via `gh issue view --json title,body`
+/// - hydrated value is persisted to tasks.json
+/// - spawned child receives argv `auto --idea <hydrated_idea>`
+fn runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Seed a legacy pending task with no raw_idea field.
+        write_tasks(
+            h,
+            vec![task_json(
+                "acme-widgets-130",
+                "pending",
+                130,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        found=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            found=1
+          fi
+        done
+        if [ "$found" -eq 1 ]; then
+          printf '{"title":"Hydrated title","body":"Hydrated body"}'
+        else
+          printf ''
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#;
+        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+
+        let args_log = h.temp_dir.path().join("daemon_args.log");
+        let idea_log = h.temp_dir.path().join("daemon_idea.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+echo "$1" > "{args_log_str}"
+echo "$2" >> "{args_log_str}"
+printf '%s' "$3" > "{idea_log_str}"
+
+expected="Hydrated title
+
+Hydrated body"
+[ "$1" = "auto" ] || exit 11
+[ "$2" = "--idea" ] || exit 12
+[ "$3" = "$expected" ] || exit 13
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-130")
+            .expect("task should exist");
+        assert_eq!(
+            task["raw_idea"],
+            json!("Hydrated title\n\nHydrated body"),
+            "raw_idea should be hydrated and persisted"
+        );
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.contains("auto\n--idea"),
+            "expected auto/--idea args, got:\n{args}"
+        );
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(idea, "Hydrated title\n\nHydrated body");
+    })
+}
+
+/// Test restart/adoption behavior when `gh issue view --json title,body`
+/// returns malformed output for a legacy pending task with missing `raw_idea`.
+///
+/// Verifies:
+/// - daemon does not skip dispatch when hydration fetch fails
+/// - metadata fallback raw_idea is persisted
+/// - spawned child receives argv `auto --idea <fallback_idea>`
+fn runtime_adopt_pending_fetch_failure_uses_metadata_fallback(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![task_json(
+                "acme-widgets-131",
+                "pending",
+                131,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        found=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            found=1
+          fi
+        done
+        if [ "$found" -eq 1 ]; then
+          # Malformed/empty response for hydration fetch
+          printf ''
+        else
+          printf ''
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#;
+        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+
+        let fallback_idea = "Issue #131 (acme/widgets)\n\nIssue body unavailable from GitHub; using daemon task metadata.";
+        let args_log = h.temp_dir.path().join("daemon_args_fallback.log");
+        let idea_log = h.temp_dir.path().join("daemon_idea_fallback.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+echo "$1" > "{args_log_str}"
+echo "$2" >> "{args_log_str}"
+printf '%s' "$3" > "{idea_log_str}"
+
+expected="Issue #131 (acme/widgets)
+
+Issue body unavailable from GitHub; using daemon task metadata."
+[ "$1" = "auto" ] || exit 21
+[ "$2" = "--idea" ] || exit 22
+[ "$3" = "$expected" ] || exit 23
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("using metadata fallback"),
+            "expected metadata fallback warning, stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-131")
+            .expect("task should exist");
+        assert_eq!(task["raw_idea"], json!(fallback_idea));
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.contains("auto\n--idea"),
+            "expected auto/--idea args, got:\n{args}"
+        );
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert_eq!(idea, fallback_idea);
     })
 }
 
@@ -1501,8 +1829,7 @@ exit 1
 
         // The no-diff marker comment should have been posted
         if comment_log.exists() {
-            let log_content =
-                fs::read_to_string(&comment_log).expect("read comment log");
+            let log_content = fs::read_to_string(&comment_log).expect("read comment log");
             assert!(
                 log_content.contains("<!-- ralph:task:acme-widgets-120:no-diff -->"),
                 "expected no-diff marker comment, got:\n{log_content}"

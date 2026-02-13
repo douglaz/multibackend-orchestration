@@ -1,0 +1,54 @@
+{
+  "project_id": "daemon-prompt-refinement",
+  "project_name": "Add a prompt refinement step to the daemon issue lifecycle. ",
+  "created_at": "2026-02-13T22:15:04.450295539Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "3e6fd955ff3c9cb02b53592a9184ce574614a6087484061a192d2507b97073a5",
+  "prompt_hash_at_loop_start": "3e6fd955ff3c9cb02b53592a9184ce574614a6087484061a192d2507b97073a5",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "data-layer-configuration-and-argv-foundation",
+      "feature_name": "Data Layer, Configuration, and Argv Foundation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-data-layer-configuration-and-argv-foundation/20260213222048-spec.md",
+        "impl_notes": "loops/001-data-layer-configuration-and-argv-foundation/20260213222530-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-data-layer-configuration-and-argv-foundation/20260213224841-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/001-data-layer-configuration-and-argv-foundation/20260213223245-qa-001-fail.md",
+            "implementer_response": "loops/001-data-layer-configuration-and-argv-foundation/20260213224201-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/001-data-layer-configuration-and-argv-foundation/20260213224639-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T22:20:48.658823474Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

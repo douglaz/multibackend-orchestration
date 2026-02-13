@@ -1,0 +1,17 @@
+{
+  "idea": "Add a prompt refinement step to the daemon issue lifecycle. When the daemon picks up a new issue with matching labels, before starting the ralph auto subprocess, it should:\n\n1. **Refine the issue text using an LLM**: Take the raw issue title+body and send it through a backend (claude sonnet by default, configurable via ralph.toml under [daemon] as 'refinement_backend') to rewrite it into a well-structured ralph auto --idea prompt. The LLM should clean up the text, clarify requirements, add acceptance criteria, and structure it properly for ralph auto consumption. This uses the existing backend infrastructure (BackendRegistry, resolve_backend_for_role) with a new 'daemon_refiner' role.\n\n2. **Post the refined prompt as a comment**: After refinement, post the refined prompt text as a comment on the GitHub issue (using gh issue comment) with a machine-readable marker (<!-- ralph:task:<task-id>:refined-prompt -->). This gives visibility into what ralph will actually work on.\n\n3. **Use the refined prompt for ralph auto**: Pass the refined prompt (not the raw issue text) as the --idea argument to the ralph auto subprocess.\n\n4. **Timing**: This refinement+comment step should happen immediately when the issue is claimed, BEFORE the ralph auto subprocess is spawned. The issue should be in 'ralph:in-progress' state during refinement.\n\n5. **Configuration**: Add daemon_refinement_enabled (bool, default true) and daemon_refinement_backend (string, default 'sonnet') to the daemon config in ralph.toml. When refinement is disabled, use the raw issue title+body as before.\n\nThe refinement step should be implemented in src/daemon/github.rs or a new src/daemon/refine.rs module. It should handle errors gracefully — if refinement fails, fall back to using the raw issue text and log a warning.",
+  "idea_hash": "2bbc52366707",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-13T22:04:22Z",
+  "completed_at": "2026-02-13T22:15:04Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 186.630519799,
+  "review_times_secs": [
+    238.743700634
+  ],
+  "revision_times_secs": [
+    216.281529213
+  ]
+}

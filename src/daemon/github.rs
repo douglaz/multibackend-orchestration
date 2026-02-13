@@ -11,11 +11,12 @@ pub struct GhIssue {
     pub number: u32,
     pub title: String,
     pub labels: Vec<String>,
+    pub body: Option<String>,
 }
 
 /// Poll open issues matching all supplied labels.
 ///
-/// Uses `gh issue list --repo <owner/repo> --limit 100 --json number,title,labels`
+/// Uses `gh issue list --repo <owner/repo> --limit 100 --json number,title,labels,body`
 /// with repeated `--label` arguments (AND semantics).
 ///
 /// Returns `(issues, overflow)` where overflow is true when exactly 100 issues
@@ -32,7 +33,7 @@ pub fn poll_issues(owner: &str, repo: &str, labels: &[String]) -> Result<(Vec<Gh
         "--state".into(),
         "open".into(),
         "--json".into(),
-        "number,title,labels".into(),
+        "number,title,labels,body".into(),
     ];
 
     for label in labels {
@@ -58,29 +59,63 @@ pub fn poll_issues(owner: &str, repo: &str, labels: &[String]) -> Result<(Vec<Gh
         return Ok((Vec::new(), false));
     }
 
-    let items: Vec<RawGhIssue> = serde_json::from_str(raw_trimmed).map_err(|err| {
-        RalphError::Orchestration(format!("failed to parse gh issue list output: {err}"))
-    })?;
+    let items = parse_issue_list(raw_trimmed)?;
 
     let overflow = items.len() == 100;
 
     let issues = items
         .into_iter()
         .map(|item| {
-            let labels = item
-                .labels
-                .into_iter()
-                .map(|label| label.name)
-                .collect();
+            let labels = item.labels.into_iter().map(|label| label.name).collect();
             GhIssue {
                 number: item.number,
                 title: item.title,
                 labels,
+                body: item.body,
             }
         })
         .collect();
 
     Ok((issues, overflow))
+}
+
+/// Fetch an issue's title/body for restart recovery of legacy daemon tasks.
+pub fn fetch_issue_body(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<(String, Option<String>)> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "title,body",
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to run gh issue view for title/body: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue view (title/body) failed for {}#{}: {}",
+            full_repo,
+            issue_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw_trimmed = raw.trim();
+    let parsed: RawIssueBody = serde_json::from_str(raw_trimmed).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh issue view output: {err}"))
+    })?;
+    Ok((parsed.title, parsed.body))
 }
 
 /// Filter out issues that already have any `ralph:*` label.
@@ -188,7 +223,10 @@ pub fn post_idempotent_comment(
         ])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!("failed to post comment on {}#{}: {err}", full_repo, issue_number))
+            RalphError::Orchestration(format!(
+                "failed to post comment on {}#{}: {err}",
+                full_repo, issue_number
+            ))
         })?;
 
     if !output.status.success() {
@@ -209,21 +247,10 @@ pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--repo",
-            &full_repo,
-            "--head",
-            branch,
-            "--json",
-            "url",
-            "-q",
-            ".[0].url",
+            "pr", "list", "--repo", &full_repo, "--head", branch, "--json", "url", "-q", ".[0].url",
         ])
         .output()
-        .map_err(|err| {
-            RalphError::Orchestration(format!("failed to check existing PRs: {err}"))
-        })?;
+        .map_err(|err| RalphError::Orchestration(format!("failed to check existing PRs: {err}")))?;
 
     if !output.status.success() {
         return Ok(None);
@@ -238,31 +265,15 @@ pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<
 }
 
 /// Create a pull request. Returns the PR URL on success, or an error.
-pub fn create_pr(
-    owner: &str,
-    repo: &str,
-    branch: &str,
-    title: &str,
-    body: &str,
-) -> Result<String> {
+pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
-            "pr",
-            "create",
-            "--repo",
-            &full_repo,
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body",
+            "pr", "create", "--repo", &full_repo, "--head", branch, "--title", title, "--body",
             body,
         ])
         .output()
-        .map_err(|err| {
-            RalphError::Orchestration(format!("failed to create PR: {err}"))
-        })?;
+        .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
     if !output.status.success() {
         return Err(RalphError::Orchestration(format!(
@@ -388,9 +399,64 @@ struct RawGhIssue {
     number: u32,
     title: String,
     labels: Vec<RawLabel>,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RawLabel {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct RawIssueBody {
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+fn parse_issue_list(raw: &str) -> Result<Vec<RawGhIssue>> {
+    serde_json::from_str(raw).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh issue list output: {err}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_issue_list, GhIssue};
+
+    #[test]
+    fn gh_issue_deserialization_supports_body_present() {
+        let raw = r#"[{"number":1,"title":"one","labels":[],"body":"details"}]"#;
+        let items = parse_issue_list(raw).expect("should deserialize");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].body.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn gh_issue_deserialization_supports_body_null() {
+        let raw = r#"[{"number":1,"title":"one","labels":[],"body":null}]"#;
+        let items = parse_issue_list(raw).expect("should deserialize");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].body.is_none());
+    }
+
+    #[test]
+    fn gh_issue_deserialization_supports_body_absent() {
+        let raw = r#"[{"number":1,"title":"one","labels":[]}]"#;
+        let items = parse_issue_list(raw).expect("should deserialize");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].body.is_none());
+    }
+
+    #[test]
+    fn gh_issue_struct_includes_body_field() {
+        let issue = GhIssue {
+            number: 1,
+            title: "title".to_owned(),
+            labels: Vec::new(),
+            body: Some("body".to_owned()),
+        };
+        assert_eq!(issue.body.as_deref(), Some("body"));
+    }
 }

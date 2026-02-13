@@ -55,6 +55,8 @@ pub struct ProjectDaemonOverrides {
     pub max_concurrent: Option<u32>,
     pub labels: Option<Vec<String>>,
     pub repo: Option<String>,
+    pub refinement_enabled: Option<bool>,
+    pub refinement_backend: Option<String>,
 }
 
 impl ProjectConfig {

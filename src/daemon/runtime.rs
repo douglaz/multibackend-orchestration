@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::config::GlobalConfig;
 use crate::daemon::github;
 use crate::daemon::process;
 use crate::daemon::worktree;
@@ -24,6 +25,12 @@ pub struct DaemonRuntimeConfig {
     pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
     pub repo_root: PathBuf,
+    /// Prompt refinement feature toggle (plumbed for upcoming loops).
+    pub refinement_enabled: bool,
+    /// Backend spec used for prompt refinement (plumbed for upcoming loops).
+    pub refinement_backend: String,
+    /// Global config snapshot for runtime backend operations.
+    pub global_config: GlobalConfig,
 }
 
 /// Active child process handle tracked by the runtime.
@@ -107,7 +114,13 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .collect();
     worktree::reconcile_worktrees(
         &config.repo_root,
-        &store.path().parent().unwrap().parent().unwrap().to_path_buf(),
+        &store
+            .path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf(),
         &active_ids,
     );
     Ok(())
@@ -120,20 +133,30 @@ fn adopt_pending_tasks(
     children: &mut HashMap<String, ActiveChild>,
 ) -> Result<()> {
     let tasks = store.load()?;
-    let pending: Vec<&DaemonTask> = tasks
+    let pending: Vec<DaemonTask> = tasks
         .iter()
+        .cloned()
         .filter(|t| t.state == TaskState::Pending)
         .collect();
 
-    for task in pending {
+    for mut task in pending {
         if children.len() as u32 >= config.max_concurrent {
             break;
         }
-        if let Err(err) = dispatch_task(store, config, children, task) {
-            eprintln!(
-                "warning: failed to re-adopt task {}: {err}",
-                task.task_id
-            );
+        if task.raw_idea.is_none() {
+            match fetch_and_persist_raw_idea(store, &task) {
+                Ok(raw_idea) => task.raw_idea = Some(raw_idea),
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to hydrate raw idea for pending task {}: {err}",
+                        task.task_id
+                    );
+                    continue;
+                }
+            }
+        }
+        if let Err(err) = dispatch_task(store, config, children, &task) {
+            eprintln!("warning: failed to re-adopt task {}: {err}", task.task_id);
         }
     }
 
@@ -150,9 +173,7 @@ fn poll_and_claim(
     let (issues, overflow) = github::poll_issues(&config.owner, &config.repo, &config.labels)?;
 
     if overflow {
-        eprintln!(
-            "warning: gh issue list returned exactly 100 issues; results may be truncated"
-        );
+        eprintln!("warning: gh issue list returned exactly 100 issues; results may be truncated");
     }
 
     let claimable = github::filter_claimable(issues);
@@ -175,10 +196,7 @@ fn poll_and_claim(
 
         // Claim on GitHub
         if let Err(err) = github::claim_issue(&config.owner, &config.repo, issue.number) {
-            eprintln!(
-                "warning: failed to claim issue #{}: {err}",
-                issue.number
-            );
+            eprintln!("warning: failed to claim issue #{}: {err}", issue.number);
             continue;
         }
 
@@ -190,6 +208,11 @@ fn poll_and_claim(
             issue_number: issue.number,
             owner: config.owner.clone(),
             repo: config.repo.clone(),
+            raw_idea: Some(format!(
+                "{}\n\n{}",
+                issue.title,
+                issue.body.unwrap_or_default()
+            )),
             child_pid: None,
             child_pgid: None,
             branch: Some(format!("ralph/daemon/{task_id}")),
@@ -208,10 +231,7 @@ fn poll_and_claim(
 
         // Dispatch
         if let Err(err) = dispatch_task(store, config, children, &task) {
-            eprintln!(
-                "warning: failed to dispatch task {}: {err}",
-                task_id
-            );
+            eprintln!("warning: failed to dispatch task {}: {err}", task_id);
         }
 
         claimed += 1;
@@ -240,14 +260,14 @@ fn dispatch_task(
         .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
 
     // Create worktree
-    let wt_path = worktree::create_worktree(
-        &config.repo_root,
-        workspace_root,
-        &task.task_id,
-    )?;
+    let wt_path = worktree::create_worktree(&config.repo_root, workspace_root, &task.task_id)?;
 
-    // Compose the idea (issue title would come from polling, use task_id as fallback)
-    let idea = format!("Implement task {}", task.task_id);
+    // Use raw issue content for the child idea. Legacy tasks are hydrated
+    // from GitHub if `raw_idea` is missing.
+    let idea = match &task.raw_idea {
+        Some(idea) => idea.clone(),
+        None => fetch_and_persist_raw_idea(store, task)?,
+    };
 
     // Spawn child process
     let spawned = process::spawn_ralph_auto(&config.ralph_bin, &wt_path, &idea)?;
@@ -302,6 +322,38 @@ fn dispatch_task(
     eprintln!("dispatched task {} (pid={})", task.task_id, spawned.pid);
 
     Ok(())
+}
+
+fn fetch_and_persist_raw_idea(store: &TaskStore, task: &DaemonTask) -> Result<String> {
+    let raw_idea = match github::fetch_issue_body(&task.owner, &task.repo, task.issue_number) {
+        Ok((title, body)) => compose_raw_idea(&title, body.as_deref()),
+        Err(err) => {
+            eprintln!(
+                "warning: failed to fetch issue title/body for task {}: {err}; using metadata fallback",
+                task.task_id
+            );
+            metadata_fallback_raw_idea(task)
+        }
+    };
+    let raw_idea_for_store = raw_idea.clone();
+    store.update_task(&task.task_id, |t| {
+        t.raw_idea = Some(raw_idea_for_store.clone());
+        Ok(())
+    })?;
+    Ok(raw_idea)
+}
+
+fn compose_raw_idea(title: &str, body: Option<&str>) -> String {
+    format!("{title}\n\n{}", body.unwrap_or_default())
+}
+
+fn metadata_fallback_raw_idea(task: &DaemonTask) -> String {
+    let title = format!(
+        "Issue #{} ({}/{})",
+        task.issue_number, task.owner, task.repo
+    );
+    let body = "Issue body unavailable from GitHub; using daemon task metadata.";
+    compose_raw_idea(&title, Some(body))
 }
 
 /// Collect finished children and transition them to terminal states.
@@ -396,9 +448,7 @@ fn complete_task(
         let task = tasks
             .iter_mut()
             .find(|t| t.task_id == task_id_owned)
-            .ok_or_else(|| {
-                RalphError::Validation(format!("task not found: {task_id_owned}"))
-            })?;
+            .ok_or_else(|| RalphError::Validation(format!("task not found: {task_id_owned}")))?;
 
         if task.state.is_terminal() {
             // Already terminal (e.g. aborted externally) — preserve that
@@ -443,9 +493,7 @@ fn complete_task(
 
     // Post completion comment (idempotent)
     let phase = terminal_state.as_str();
-    let comment_body = format!(
-        "Task `{task_id}` finished with status: **{phase}**."
-    );
+    let comment_body = format!("Task `{task_id}` finished with status: **{phase}**.");
     if let Err(err) = github::post_idempotent_comment(
         &task.owner,
         &task.repo,

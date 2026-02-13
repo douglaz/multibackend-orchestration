@@ -447,7 +447,8 @@ fi
 /// Mock `gh` script for daemon runtime tests. Handles:
 /// - `gh issue list ...` — returns configurable JSON issues
 /// - `gh issue edit ...` — no-op success
-/// - `gh issue view ...` — returns empty comments
+/// - `gh issue view --json title,body ...` — returns title/body JSON
+/// - `gh issue view ... -q .comments[].body` — returns empty comments
 /// - `gh issue comment ...` — no-op success
 /// - `gh pr list ...` — returns empty
 /// - `gh pr create ...` — returns a fake PR URL
@@ -489,7 +490,20 @@ case "$1" in
         exit 0
         ;;
       view)
-        # Return empty comments body
+        # Title/body fetch used by pending-task hydration.
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+
+        # Existing comments query path (`-q .comments[].body`): empty output.
         printf ''
         exit 0
         ;;

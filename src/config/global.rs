@@ -34,6 +34,10 @@ pub struct WorkspaceConfig {
     pub daemon_labels: Vec<String>,
     #[serde(default)]
     pub daemon_repo: Option<String>,
+    #[serde(default = "default_daemon_refinement_enabled")]
+    pub daemon_refinement_enabled: bool,
+    #[serde(default = "default_daemon_refinement_backend")]
+    pub daemon_refinement_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +186,8 @@ impl Default for GlobalConfig {
                 daemon_max_concurrent: default_daemon_max_concurrent(),
                 daemon_labels: default_daemon_labels(),
                 daemon_repo: None,
+                daemon_refinement_enabled: default_daemon_refinement_enabled(),
+                daemon_refinement_backend: default_daemon_refinement_backend(),
             },
             backends: BackendConfigs {
                 claude: BackendConfig {
@@ -279,6 +285,14 @@ fn default_daemon_labels() -> Vec<String> {
     vec!["ralph:ready".to_owned()]
 }
 
+fn default_daemon_refinement_enabled() -> bool {
+    true
+}
+
+fn default_daemon_refinement_backend() -> String {
+    "claude(sonnet)".to_owned()
+}
+
 fn default_qa_enabled() -> bool {
     true
 }
@@ -348,8 +362,13 @@ mod tests {
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
         assert_eq!(config.workspace.daemon_max_concurrent, 1);
-        assert_eq!(config.workspace.daemon_labels, vec!["ralph:ready".to_owned()]);
+        assert_eq!(
+            config.workspace.daemon_labels,
+            vec!["ralph:ready".to_owned()]
+        );
         assert!(config.workspace.daemon_repo.is_none());
+        assert!(config.workspace.daemon_refinement_enabled);
+        assert_eq!(config.workspace.daemon_refinement_backend, "claude(sonnet)");
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.prompt_review_enabled);
@@ -426,8 +445,13 @@ base_branch = "master"
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
         assert_eq!(config.workspace.daemon_max_concurrent, 1);
-        assert_eq!(config.workspace.daemon_labels, vec!["ralph:ready".to_owned()]);
+        assert_eq!(
+            config.workspace.daemon_labels,
+            vec!["ralph:ready".to_owned()]
+        );
         assert!(config.workspace.daemon_repo.is_none());
+        assert!(config.workspace.daemon_refinement_enabled);
+        assert_eq!(config.workspace.daemon_refinement_backend, "claude(sonnet)");
         assert!(config.backends.claude.models.planner.is_none());
         assert!(config.backends.claude.models.implementer.is_none());
         assert!(config.backends.claude.models.reviewer.is_none());
@@ -468,6 +492,8 @@ daemon_poll_seconds = 30
 daemon_max_concurrent = 2
 daemon_labels = ["ralph:ready", "triage"]
 daemon_repo = "acme/widgets"
+daemon_refinement_enabled = false
+daemon_refinement_backend = "codex(gpt-5.3-codex-medium)"
 
 [backends.claude]
 command = "claude"
@@ -507,7 +533,15 @@ base_branch = "master"
             config.workspace.daemon_labels,
             vec!["ralph:ready".to_owned(), "triage".to_owned()]
         );
-        assert_eq!(config.workspace.daemon_repo.as_deref(), Some("acme/widgets"));
+        assert_eq!(
+            config.workspace.daemon_repo.as_deref(),
+            Some("acme/widgets")
+        );
+        assert!(!config.workspace.daemon_refinement_enabled);
+        assert_eq!(
+            config.workspace.daemon_refinement_backend,
+            "codex(gpt-5.3-codex-medium)"
+        );
     }
 
     #[test]

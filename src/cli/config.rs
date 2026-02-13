@@ -145,6 +145,8 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "max_concurrent": effective.daemon.max_concurrent,
                     "labels": effective.daemon.labels,
                     "repo": effective.daemon.repo,
+                    "refinement_enabled": effective.daemon.refinement_enabled,
+                    "refinement_backend": effective.daemon.refinement_backend,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -212,6 +214,8 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "max_concurrent": effective.daemon.max_concurrent,
                     "labels": effective.daemon.labels,
                     "repo": effective.daemon.repo,
+                    "refinement_enabled": effective.daemon.refinement_enabled,
+                    "refinement_backend": effective.daemon.refinement_backend,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -339,6 +343,13 @@ fn set_global_value(
         }
         "workspace.daemon_repo" => {
             config.workspace.daemon_repo = parse_optional_string(raw_value);
+        }
+        "workspace.daemon_refinement_enabled" => {
+            config.workspace.daemon_refinement_enabled = parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_refinement_backend" => {
+            ensure_backend(raw_value)?;
+            config.workspace.daemon_refinement_backend = raw_value.to_owned();
         }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
@@ -499,6 +510,12 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
             config.daemon.labels = parse_optional_string_list(raw_value)?;
         }
         "daemon.repo" => config.daemon.repo = parse_optional_string(raw_value),
+        "daemon.refinement_enabled" => {
+            config.daemon.refinement_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "daemon.refinement_backend" => {
+            config.daemon.refinement_backend = parse_optional_backend(raw_value)?;
+        }
         _ => {
             return Err(RalphError::Validation(format!(
                 "unsupported project config key: {key}"

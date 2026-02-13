@@ -57,6 +57,8 @@ pub struct DaemonTask {
     pub issue_number: u32,
     pub owner: String,
     pub repo: String,
+    #[serde(default)]
+    pub raw_idea: Option<String>,
     pub child_pid: Option<u32>,
     pub child_pgid: Option<u32>,
     pub branch: Option<String>,
@@ -233,7 +235,11 @@ fn write_tasks_to_file(file: &mut File, tasks: &[DaemonTask]) -> Result<()> {
     Ok(())
 }
 
-fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>, _task_id: &str) {
+fn terminate_process_group_if_present(
+    child_pid: Option<u32>,
+    child_pgid: Option<u32>,
+    _task_id: &str,
+) {
     // Prefer killing by process group; fall back to single PID.
     if let Some(pgid) = child_pgid.filter(|v| *v > 0) {
         daemon_process::terminate_process_group(pgid, Duration::from_secs(10));
@@ -282,7 +288,6 @@ fn update_abort_labels_best_effort(task: &DaemonTask) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{resolve_task_index, DaemonTask, TaskState};
@@ -294,6 +299,7 @@ mod tests {
             issue_number,
             owner: "acme".to_owned(),
             repo: "widgets".to_owned(),
+            raw_idea: None,
             child_pid: None,
             child_pgid: None,
             branch: None,
@@ -322,5 +328,38 @@ mod tests {
         let tasks = vec![task("acme-widgets-7", 7), task("other-api-7", 7)];
         let err = resolve_task_index(&tasks, "7").expect_err("should be ambiguous");
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn daemon_task_deserializes_without_raw_idea_for_backwards_compatibility() {
+        let raw = r#"{
+            "task_id":"acme-widgets-1",
+            "state":"pending",
+            "issue_number":1,
+            "owner":"acme",
+            "repo":"widgets",
+            "child_pid":null,
+            "child_pgid":null,
+            "branch":null,
+            "pr_url":null,
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        }"#;
+
+        let task: DaemonTask = serde_json::from_str(raw).expect("legacy task json should parse");
+        assert!(task.raw_idea.is_none());
+    }
+
+    #[test]
+    fn daemon_task_round_trips_with_raw_idea() {
+        let mut original = task("acme-widgets-2", 2);
+        original.raw_idea = Some("Issue title\n\nIssue body".to_owned());
+
+        let raw = serde_json::to_string(&original).expect("serialize task");
+        let decoded: DaemonTask = serde_json::from_str(&raw).expect("deserialize task");
+        assert_eq!(
+            decoded.raw_idea.as_deref(),
+            Some("Issue title\n\nIssue body")
+        );
     }
 }

@@ -55,6 +55,8 @@ pub struct EffectiveDaemonConfig {
     pub max_concurrent: u32,
     pub labels: Vec<String>,
     pub repo: Option<String>,
+    pub refinement_enabled: bool,
+    pub refinement_backend: String,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +235,12 @@ pub fn resolve_daemon_config(
         repo: daemon_overrides
             .and_then(|cfg| cfg.repo.clone())
             .or_else(|| global.workspace.daemon_repo.clone()),
+        refinement_enabled: daemon_overrides
+            .and_then(|cfg| cfg.refinement_enabled)
+            .unwrap_or(global.workspace.daemon_refinement_enabled),
+        refinement_backend: daemon_overrides
+            .and_then(|cfg| cfg.refinement_backend.clone())
+            .unwrap_or_else(|| global.workspace.daemon_refinement_backend.clone()),
     }
 }
 
@@ -469,6 +477,8 @@ mod tests {
         global.workspace.daemon_max_concurrent = 1;
         global.workspace.daemon_labels = vec!["ralph:ready".to_owned()];
         global.workspace.daemon_repo = Some("acme/global".to_owned());
+        global.workspace.daemon_refinement_enabled = true;
+        global.workspace.daemon_refinement_backend = "claude(sonnet)".to_owned();
 
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
@@ -476,6 +486,8 @@ mod tests {
                 max_concurrent: Some(3),
                 labels: Some(vec!["l1".to_owned(), "l2".to_owned()]),
                 repo: Some("acme/project".to_owned()),
+                refinement_enabled: Some(false),
+                refinement_backend: Some("codex(gpt-5.3-codex-medium)".to_owned()),
             },
             ..ProjectConfig::default()
         };
@@ -485,11 +497,15 @@ mod tests {
         assert_eq!(effective.max_concurrent, 3);
         assert_eq!(effective.labels, vec!["l1".to_owned(), "l2".to_owned()]);
         assert_eq!(effective.repo.as_deref(), Some("acme/project"));
+        assert!(!effective.refinement_enabled);
+        assert_eq!(effective.refinement_backend, "codex(gpt-5.3-codex-medium)");
 
         let no_project = resolve_daemon_config(&global, None);
         assert_eq!(no_project.poll_seconds, 60);
         assert_eq!(no_project.max_concurrent, 1);
         assert_eq!(no_project.labels, vec!["ralph:ready".to_owned()]);
         assert_eq!(no_project.repo.as_deref(), Some("acme/global"));
+        assert!(no_project.refinement_enabled);
+        assert_eq!(no_project.refinement_backend, "claude(sonnet)");
     }
 }

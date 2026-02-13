@@ -24,12 +24,7 @@ pub fn spawn_ralph_auto(
     worktree_path: &Path,
     idea: &str,
 ) -> Result<SpawnedChild> {
-    let mut cmd = Command::new(ralph_bin);
-    cmd.args(["auto", idea])
-        .current_dir(worktree_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea);
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
@@ -55,6 +50,16 @@ pub fn spawn_ralph_auto(
     let pgid = pid;
 
     Ok(SpawnedChild { pid, pgid, child })
+}
+
+fn build_ralph_auto_command(ralph_bin: &Path, worktree_path: &Path, idea: &str) -> Command {
+    let mut cmd = Command::new(ralph_bin);
+    cmd.args(["auto", "--idea", idea])
+        .current_dir(worktree_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    cmd
 }
 
 /// Check if a process with the given PID exists.
@@ -101,5 +106,31 @@ pub fn terminate_process_group(pgid: u32, timeout: Duration) {
     // SAFETY: sending SIGKILL to a known process group.
     unsafe {
         libc::kill(neg_pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::build_ralph_auto_command;
+
+    #[test]
+    fn spawn_command_uses_long_idea_flag() {
+        let cmd = build_ralph_auto_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "implement feature",
+        );
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("auto"),
+                OsStr::new("--idea"),
+                OsStr::new("implement feature"),
+            ]
+        );
     }
 }
