@@ -961,7 +961,7 @@ async fn two_loop_happy_path_with_separate_backends() {
     assert_eq!(state.loops[1].backends.implementer, "claude(opus)");
     assert_eq!(
         state.loops[1].backends.reviewer,
-        "codex(gpt-5.3-codex-xhigh)"
+        "codex(gpt-5.3-codex-high)"
     );
 
     // --- 3. Feature names ---

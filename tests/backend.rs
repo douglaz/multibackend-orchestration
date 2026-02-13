@@ -155,7 +155,7 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     );
     assert_eq!(
         registry.resolve_backend_for_role("codex", "reviewer"),
-        "codex(gpt-5.3-codex-xhigh)"
+        "codex(gpt-5.3-codex-high)"
     );
     assert_eq!(
         registry.resolve_backend_for_role("claude", "completer"),
@@ -172,6 +172,14 @@ fn resolve_backend_for_role_injects_model_when_configured() {
     assert_eq!(
         registry.resolve_backend_for_role("codex", "qa"),
         "codex(gpt-5.3-codex-high)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("claude", "acceptance_qa"),
+        "claude(opus)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "acceptance_qa"),
+        "codex(gpt-5.3-codex-xhigh)"
     );
 }
 
@@ -261,7 +269,7 @@ fn test_assign_feature_backends() {
         .unwrap();
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
     assert_eq!(backends.qa, "claude(opus)");
 }
 
@@ -322,7 +330,7 @@ fn test_assign_feature_backends_with_model_spec_start() {
         .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
 }
 
 #[test]
@@ -365,7 +373,7 @@ fn test_assign_feature_backends_with_partial_role_overrides() {
         .expect("mixed feature backends should resolve");
     assert_eq!(backends.planner, "claude(opus)");
     assert_eq!(backends.implementer, "claude(opus)");
-    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.reviewer, "codex(gpt-5.3-codex-high)");
 }
 
 #[test]
@@ -507,7 +515,7 @@ fn test_backend_alternation_sequence() {
             2,
             "codex(gpt-5.3-codex-xhigh)",
             "claude(opus)",
-            "codex(gpt-5.3-codex-xhigh)",
+            "codex(gpt-5.3-codex-high)",
         ),
         (
             3,
@@ -519,7 +527,7 @@ fn test_backend_alternation_sequence() {
             4,
             "codex(gpt-5.3-codex-xhigh)",
             "claude(opus)",
-            "codex(gpt-5.3-codex-xhigh)",
+            "codex(gpt-5.3-codex-high)",
         ),
         (
             5,

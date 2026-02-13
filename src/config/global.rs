@@ -53,6 +53,7 @@ pub struct BackendRoleModels {
     pub reviewer: Option<String>,
     pub qa: Option<String>,
     pub completer: Option<String>,
+    pub acceptance_qa: Option<String>,
     pub reformatter: Option<String>,
 }
 
@@ -64,6 +65,7 @@ impl BackendRoleModels {
             "reviewer" => self.reviewer.as_deref(),
             "qa" => self.qa.as_deref(),
             "completer" => self.completer.as_deref(),
+            "acceptance_qa" => self.acceptance_qa.as_deref(),
             "reformatter" => self.reformatter.as_deref(),
             _ => None,
         }
@@ -85,6 +87,9 @@ impl BackendRoleModels {
         }
         if self.completer.is_none() {
             self.completer.clone_from(&defaults.completer);
+        }
+        if self.acceptance_qa.is_none() {
+            self.acceptance_qa.clone_from(&defaults.acceptance_qa);
         }
         if self.reformatter.is_none() {
             self.reformatter.clone_from(&defaults.reformatter);
@@ -184,6 +189,7 @@ impl Default for GlobalConfig {
                         reviewer: Some("opus".to_owned()),
                         qa: Some("opus".to_owned()),
                         completer: Some("opus".to_owned()),
+                        acceptance_qa: Some("opus".to_owned()),
                         reformatter: Some("sonnet".to_owned()),
                     },
                 },
@@ -199,9 +205,10 @@ impl Default for GlobalConfig {
                     models: BackendRoleModels {
                         planner: Some("gpt-5.3-codex-xhigh".to_owned()),
                         implementer: Some("gpt-5.3-codex-high".to_owned()),
-                        reviewer: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        reviewer: Some("gpt-5.3-codex-high".to_owned()),
                         qa: Some("gpt-5.3-codex-high".to_owned()),
                         completer: Some("gpt-5.3-codex-xhigh".to_owned()),
+                        acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
                         reformatter: Some("gpt-5.3-codex-medium".to_owned()),
                     },
                 },
@@ -524,6 +531,7 @@ implementer = "opus"
 reviewer = "opus"
 qa = "opus"
 completer = "opus"
+acceptance_qa = "opus"
 reformatter = "sonnet"
 
 [backends.codex]
@@ -533,9 +541,10 @@ timeout_seconds = 600
 [backends.codex.models]
 planner = "gpt-5.3-codex-xhigh"
 implementer = "gpt-5.3-codex-high"
-reviewer = "gpt-5.3-codex-xhigh"
+reviewer = "gpt-5.3-codex-high"
 qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
+acceptance_qa = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
 
 [workflow]
@@ -577,6 +586,10 @@ base_branch = "master"
             Some("opus")
         );
         assert_eq!(
+            config.backends.claude.models.acceptance_qa.as_deref(),
+            Some("opus")
+        );
+        assert_eq!(
             config.backends.claude.models.reformatter.as_deref(),
             Some("sonnet")
         );
@@ -590,7 +603,7 @@ base_branch = "master"
         );
         assert_eq!(
             config.backends.codex.models.reviewer.as_deref(),
-            Some("gpt-5.3-codex-xhigh")
+            Some("gpt-5.3-codex-high")
         );
         assert_eq!(
             config.backends.codex.models.qa.as_deref(),
@@ -598,6 +611,10 @@ base_branch = "master"
         );
         assert_eq!(
             config.backends.codex.models.completer.as_deref(),
+            Some("gpt-5.3-codex-xhigh")
+        );
+        assert_eq!(
+            config.backends.codex.models.acceptance_qa.as_deref(),
             Some("gpt-5.3-codex-xhigh")
         );
         assert_eq!(
@@ -614,6 +631,7 @@ base_branch = "master"
             reviewer: Some("reviewer-model".to_owned()),
             qa: Some("qa-model".to_owned()),
             completer: Some("completer-model".to_owned()),
+            acceptance_qa: Some("acceptance-qa-model".to_owned()),
             reformatter: Some("reformatter-model".to_owned()),
         };
 
@@ -622,6 +640,7 @@ base_branch = "master"
         assert_eq!(models.for_role("reviewer"), Some("reviewer-model"));
         assert_eq!(models.for_role("qa"), Some("qa-model"));
         assert_eq!(models.for_role("completer"), Some("completer-model"));
+        assert_eq!(models.for_role("acceptance_qa"), Some("acceptance-qa-model"));
         assert_eq!(models.for_role("reformatter"), Some("reformatter-model"));
         assert_eq!(models.for_role("unknown-role"), None);
     }
@@ -634,6 +653,7 @@ base_branch = "master"
             reviewer: None,
             qa: None,
             completer: Some("custom-completer".to_owned()),
+            acceptance_qa: None,
             reformatter: None,
         };
         let defaults = BackendRoleModels {
@@ -642,6 +662,7 @@ base_branch = "master"
             reviewer: Some("default-reviewer".to_owned()),
             qa: Some("default-qa".to_owned()),
             completer: Some("default-completer".to_owned()),
+            acceptance_qa: Some("default-acceptance-qa".to_owned()),
             reformatter: Some("default-reformatter".to_owned()),
         };
         models.fill_from(&defaults);
@@ -650,6 +671,7 @@ base_branch = "master"
         assert_eq!(models.reviewer.as_deref(), Some("default-reviewer"));
         assert_eq!(models.qa.as_deref(), Some("default-qa"));
         assert_eq!(models.completer.as_deref(), Some("custom-completer"));
+        assert_eq!(models.acceptance_qa.as_deref(), Some("default-acceptance-qa"));
         assert_eq!(models.reformatter.as_deref(), Some("default-reformatter"));
     }
 

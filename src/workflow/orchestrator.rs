@@ -1355,7 +1355,7 @@ impl Orchestrator {
                             if effective.workflow.qa_enabled {
                                 let acceptance_backends = ["claude", "codex"]
                                     .iter()
-                                    .map(|family| registry.resolve_backend_for_role(family, "qa"))
+                                    .map(|family| registry.resolve_backend_for_role(family, "acceptance_qa"))
                                     .collect::<Vec<_>>();
                                 let state_snapshot_json =
                                     serde_json::to_string_pretty(&state).unwrap_or_default();
@@ -2834,6 +2834,7 @@ mod tests {
             reviewer: Some("claude-reviewer".to_owned()),
             qa: Some("claude-qa".to_owned()),
             completer: Some("claude-completer".to_owned()),
+            acceptance_qa: Some("claude-acceptance-qa".to_owned()),
             reformatter: Some("claude-reformatter".to_owned()),
         };
         config.backends.codex.models = BackendRoleModels {
@@ -2842,6 +2843,7 @@ mod tests {
             reviewer: Some("codex-reviewer".to_owned()),
             qa: Some("codex-qa".to_owned()),
             completer: Some("codex-completer".to_owned()),
+            acceptance_qa: Some("codex-acceptance-qa".to_owned()),
             reformatter: Some("codex-reformatter".to_owned()),
         };
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
