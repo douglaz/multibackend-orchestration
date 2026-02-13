@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 
 use crate::project::state::{LoopStatus, ProjectState, ProjectStatus};
@@ -15,7 +18,7 @@ pub struct ProjectSummary {
     pub parent_project: Option<String>,
 }
 
-pub fn summarize_project(id: &str, state: &ProjectState) -> ProjectSummary {
+pub fn summarize_project(id: &str, state: &ProjectState, state_path: &Path) -> ProjectSummary {
     let created_at = if state.created_at == DateTime::<Utc>::MIN_UTC {
         state
             .loops
@@ -28,7 +31,13 @@ pub fn summarize_project(id: &str, state: &ProjectState) -> ProjectSummary {
                     .map(|attempt| attempt.started_at),
             )
             .min()
-            .unwrap_or(state.created_at)
+            .or_else(|| {
+                fs::metadata(state_path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(DateTime::<Utc>::from)
+            })
+            .unwrap_or_else(Utc::now)
     } else {
         state.created_at
     };
@@ -72,7 +81,10 @@ pub fn summarize_project(id: &str, state: &ProjectState) -> ProjectSummary {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use chrono::{DateTime, Utc};
+    use tempfile::tempdir;
 
     use super::summarize_project;
     use crate::project::state::{
@@ -88,6 +100,10 @@ mod tests {
 
     #[test]
     fn summarizes_project_from_state() {
+        let temp = tempdir().expect("tempdir");
+        let state_path = temp.path().join("state.json");
+        fs::write(&state_path, "{}").expect("write placeholder state");
+
         let mut state = ProjectState::new(
             "state-id",
             "Demo Project",
@@ -167,7 +183,7 @@ mod tests {
             completed_at: Some(parse_utc("2026-01-03T12:00:00Z")),
         });
 
-        let summary = summarize_project("dir-id", &state);
+        let summary = summarize_project("dir-id", &state, &state_path);
 
         assert_eq!(summary.id, "dir-id");
         assert_eq!(summary.name, "Demo Project");
@@ -185,9 +201,53 @@ mod tests {
 
     #[test]
     fn completed_at_is_none_for_non_completed_projects() {
+        let temp = tempdir().expect("tempdir");
+        let state_path = temp.path().join("state.json");
+        fs::write(&state_path, "{}").expect("write placeholder state");
+
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
         state.status = ProjectStatus::InProgress;
-        let summary = summarize_project("demo", &state);
+        let summary = summarize_project("demo", &state, &state_path);
         assert!(summary.completed_at.is_none());
+    }
+
+    #[test]
+    fn legacy_state_without_created_at_falls_back_to_state_file_mtime() {
+        let temp = tempdir().expect("tempdir");
+        let state_path = temp.path().join("state.json");
+        fs::write(&state_path, "{}").expect("write placeholder state");
+        let expected_created_at = DateTime::<Utc>::from(
+            fs::metadata(&state_path)
+                .expect("state metadata")
+                .modified()
+                .expect("state mtime"),
+        );
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.created_at = DateTime::<Utc>::MIN_UTC;
+        state.loops.clear();
+        state.completion_attempts.clear();
+
+        let summary = summarize_project("demo", &state, &state_path);
+        assert_eq!(summary.created_at, expected_created_at);
+        assert_ne!(summary.created_at, DateTime::<Utc>::MIN_UTC);
+    }
+
+    #[test]
+    fn legacy_state_uses_now_when_state_file_metadata_is_unavailable() {
+        let temp = tempdir().expect("tempdir");
+        let missing_state_path = temp.path().join("missing").join("state.json");
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.created_at = DateTime::<Utc>::MIN_UTC;
+        state.loops.clear();
+        state.completion_attempts.clear();
+
+        let before = Utc::now();
+        let summary = summarize_project("demo", &state, &missing_state_path);
+        let after = Utc::now();
+
+        assert!(summary.created_at >= before);
+        assert!(summary.created_at <= after);
+        assert_ne!(summary.created_at, DateTime::<Utc>::MIN_UTC);
     }
 }

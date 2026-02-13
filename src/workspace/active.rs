@@ -41,6 +41,10 @@ pub fn read_active_project(workspace_root: &Path) -> Option<String> {
     let id = raw.trim();
 
     if id.is_empty() {
+        eprintln!(
+            "warning: ignoring empty active project file at {}",
+            path.display()
+        );
         return None;
     }
 
@@ -147,6 +151,44 @@ mod tests {
         assert_eq!(read_active_project(&workspace_root), None);
 
         fs::write(&path, "   \t\n").expect("write whitespace file");
+        assert_eq!(read_active_project(&workspace_root), None);
+    }
+
+    #[test]
+    fn empty_or_whitespace_active_project_file_emits_warning() {
+        let output = Command::new(std::env::current_exe().expect("current test binary"))
+            .args([
+                "--ignored",
+                "--nocapture",
+                "subprocess_helper_emits_empty_active_project_warning",
+            ])
+            .output()
+            .expect("run helper test");
+
+        assert!(
+            output.status.success(),
+            "helper test failed.\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("warning: ignoring empty active project file"),
+            "expected empty active-project warning in stderr, got:\n{}",
+            stderr
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn subprocess_helper_emits_empty_active_project_warning() {
+        let temp = tempdir().expect("tempdir");
+        let workspace_root = temp.path().join(".ralph");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+
+        let path = active_project_file_path(&workspace_root);
+        fs::write(&path, "  \n").expect("write whitespace file");
         assert_eq!(read_active_project(&workspace_root), None);
     }
 

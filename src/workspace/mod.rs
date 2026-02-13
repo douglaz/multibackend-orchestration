@@ -148,7 +148,7 @@ impl Workspace {
             };
 
             let project_id = entry.file_name().to_string_lossy().to_string();
-            projects.push(summarize_project(&project_id, &state));
+            projects.push(summarize_project(&project_id, &state, &state_path));
         }
 
         projects.sort_by(|left, right| left.id.cmp(&right.id));
@@ -166,7 +166,7 @@ impl Workspace {
 
         let state_path = self.project_dir(id).join("state.json");
         let state = ProjectState::load(&state_path)?;
-        Ok(summarize_project(id, &state))
+        Ok(summarize_project(id, &state, &state_path))
     }
 
     pub fn active_project_id(&self) -> Option<String> {
