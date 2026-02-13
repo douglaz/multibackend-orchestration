@@ -1,0 +1,46 @@
+{
+  "project_id": "mcp-server",
+  "project_name": "Add an MCP (Model Context Protocol) server to ralph that exp",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "b6e5739a9825e138dd1ed9f2d4d24bd0dd915b8e8a62c21d3cff37cf848c7aec",
+  "prompt_hash_at_loop_start": "b6e5739a9825e138dd1ed9f2d4d24bd0dd915b8e8a62c21d3cff37cf848c7aec",
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "mcp-protocol-types-transport-and-server-core",
+      "feature_name": "MCP Protocol Types, Transport, and Server Core",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-mcp-protocol-types-transport-and-server-core/20260213012545-spec.md",
+        "impl_notes": "loops/001-mcp-protocol-types-transport-and-server-core/20260213013243-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-mcp-protocol-types-transport-and-server-core/20260213013706-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-mcp-protocol-types-transport-and-server-core/20260213013606-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-13T01:25:45.735300800Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
