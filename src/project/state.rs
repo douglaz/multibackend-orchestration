@@ -11,8 +11,11 @@ use crate::Result;
 pub struct ProjectState {
     pub project_id: String,
     pub project_name: String,
+    #[serde(default = "default_prompt_file")]
     pub prompt_file: String,
+    #[serde(default)]
     pub prompt_hash: String,
+    #[serde(default)]
     pub prompt_hash_at_loop_start: String,
     #[serde(default)]
     pub prompt_review_completed: bool,
@@ -153,6 +156,10 @@ pub enum CompletionVerdict {
 pub enum LoopType {
     Feature,
     Completion,
+}
+
+fn default_prompt_file() -> String {
+    "prompt.md".to_owned()
 }
 
 impl ProjectState {

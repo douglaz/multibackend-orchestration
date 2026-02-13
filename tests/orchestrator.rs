@@ -4,7 +4,9 @@ use ralph::error::RalphError;
 use ralph::project::lifecycle::{
     create_project, load_project_state, save_project_state, CreateProjectOptions, PromptSource,
 };
-use ralph::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
+use ralph::project::state::{
+    AcceptanceQaResult, CompletionVerdict, LoopStatus, Phase, ProjectStatus,
+};
 use ralph::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
     default_qa_template, default_reviewer_template,
@@ -288,6 +290,49 @@ fn assert_timestamped_artifact(rel_path: &str, suffix: &str) {
     assert!(
         re.is_match(rel_path),
         "artifact path should be timestamp-prefixed: {rel_path}"
+    );
+}
+
+fn assert_timestamped_acceptance_artifact(rel_path: &str, base: &str) {
+    let base = regex::escape(base);
+    let pattern = format!(r"^loops/\d{{3}}-[a-z0-9-]+/\d{{14}}-{base}(?:-[a-z0-9-]+)?\.md$");
+    let re = Regex::new(&pattern).expect("valid regex");
+    assert!(
+        re.is_match(rel_path),
+        "acceptance artifact path should be timestamp-prefixed: {rel_path}"
+    );
+}
+
+fn assert_acceptance_results_cover_both_families(results: &[AcceptanceQaResult]) {
+    assert_eq!(
+        results.len(),
+        2,
+        "expected exactly two acceptance results, got {}",
+        results.len()
+    );
+    assert_ne!(
+        results[0].backend, results[1].backend,
+        "acceptance backend entries must be distinct"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.backend.starts_with("claude")),
+        "expected one acceptance result from claude backend family, got {:?}",
+        results
+            .iter()
+            .map(|result| &result.backend)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.backend.starts_with("codex")),
+        "expected one acceptance result from codex backend family, got {:?}",
+        results
+            .iter()
+            .map(|result| &result.backend)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2520,26 +2565,25 @@ async fn acceptance_gate_pass_keeps_completed() {
 
     let attempt = &state.completion_attempts[0];
     assert_eq!(attempt.verdict, Some(CompletionVerdict::Complete));
-    assert_eq!(attempt.artifacts.acceptance_results.len(), 1);
+    assert_acceptance_results_cover_both_families(&attempt.artifacts.acceptance_results);
     assert!(
-        attempt.artifacts.acceptance_results[0].passed,
-        "acceptance result should be PASS"
+        attempt
+            .artifacts
+            .acceptance_results
+            .iter()
+            .all(|result| result.passed),
+        "all acceptance results should be PASS"
     );
-    assert_eq!(
-        attempt.artifacts.acceptance_results[0].backend,
-        attempt.backends.completer
-    );
-    assert_timestamped_artifact(
-        &attempt.artifacts.acceptance_results[0].artifact,
-        "acceptance-pass.md",
-    );
+    for result in &attempt.artifacts.acceptance_results {
+        assert_timestamped_acceptance_artifact(&result.artifact, "acceptance-pass");
+    }
 
     let acceptance_qa_count = fs::read_to_string(counter_dir.join("acceptance_qa_count"))
         .expect("acceptance QA counter should exist");
     assert_eq!(
         acceptance_qa_count.trim(),
-        "1",
-        "acceptance QA should run exactly once on COMPLETE"
+        "2",
+        "acceptance QA should run once per required backend family on COMPLETE"
     );
 }
 
@@ -2569,26 +2613,36 @@ async fn acceptance_gate_fail_overrides_complete_to_continue() {
         Some(CompletionVerdict::Continue),
         "acceptance failure should force CONTINUE even when completer said COMPLETE"
     );
-    assert_eq!(first_attempt.artifacts.acceptance_results.len(), 1);
-    assert!(
-        !first_attempt.artifacts.acceptance_results[0].passed,
-        "first attempt acceptance result should be FAIL"
-    );
+    assert_acceptance_results_cover_both_families(&first_attempt.artifacts.acceptance_results);
+    let first_fail_count = first_attempt
+        .artifacts
+        .acceptance_results
+        .iter()
+        .filter(|result| !result.passed)
+        .count();
     assert_eq!(
-        first_attempt.artifacts.acceptance_results[0].backend,
-        first_attempt.backends.completer
+        first_fail_count, 1,
+        "first attempt should include one failing acceptance backend"
     );
-    assert_timestamped_artifact(
-        &first_attempt.artifacts.acceptance_results[0].artifact,
-        "acceptance-fail.md",
-    );
+    for result in &first_attempt.artifacts.acceptance_results {
+        let expected_base = if result.passed {
+            "acceptance-pass"
+        } else {
+            "acceptance-fail"
+        };
+        assert_timestamped_acceptance_artifact(&result.artifact, expected_base);
+    }
 
     let second_attempt = &state.completion_attempts[1];
     assert_eq!(second_attempt.verdict, Some(CompletionVerdict::Complete));
-    assert_eq!(second_attempt.artifacts.acceptance_results.len(), 1);
+    assert_acceptance_results_cover_both_families(&second_attempt.artifacts.acceptance_results);
     assert!(
-        second_attempt.artifacts.acceptance_results[0].passed,
-        "second attempt acceptance result should be PASS"
+        second_attempt
+            .artifacts
+            .acceptance_results
+            .iter()
+            .all(|result| result.passed),
+        "second attempt acceptance results should all be PASS"
     );
     assert_eq!(state.status, ProjectStatus::Completed);
 
@@ -2596,8 +2650,8 @@ async fn acceptance_gate_fail_overrides_complete_to_continue() {
         .expect("acceptance QA counter should exist");
     assert_eq!(
         acceptance_qa_count.trim(),
-        "2",
-        "acceptance QA should run twice (fail then pass)"
+        "4",
+        "acceptance QA should run once per backend family for each completion attempt"
     );
 }
 

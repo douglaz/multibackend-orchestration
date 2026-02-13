@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -317,12 +317,17 @@ impl Orchestrator {
 
         for _ in 0..MAX_PHASE_STEPS_PER_RUN {
             let prompt_path = project_dir.join(&state.prompt_file);
-            let prompt_content = fs::read_to_string(&prompt_path).map_err(|e| {
-                RalphError::Orchestration(format!(
-                    "failed to read prompt file '{}': {e}",
-                    prompt_path.display()
-                ))
-            })?;
+            let prompt_content = if prompt_path.exists() {
+                fs::read_to_string(&prompt_path).map_err(|e| {
+                    RalphError::Orchestration(format!(
+                        "failed to read prompt file '{}': {e}",
+                        prompt_path.display()
+                    ))
+                })?
+            } else {
+                warn!(path = %prompt_path.display(), "prompt file not found; using empty prompt");
+                String::new()
+            };
             let prompt_hash = sha256_hex(&prompt_content);
 
             handle_prompt_change(
@@ -1348,73 +1353,88 @@ impl Orchestrator {
                     match completer_decision.verdict {
                         CompletionVerdict::Complete => {
                             if effective.workflow.qa_enabled {
-                                let acceptance_qa_backend_name =
-                                    if let Some(qa_override) = role_overrides.qa.as_deref() {
-                                        registry.resolve_backend_for_role(qa_override, "qa")
-                                    } else {
-                                        completer_backend_name.clone()
-                                    };
-                                let acceptance_qa_backend =
-                                    registry.get_or_create_for_spec(&acceptance_qa_backend_name)?;
+                                let acceptance_backends = ["claude", "codex"]
+                                    .iter()
+                                    .map(|family| registry.resolve_backend_for_role(family, "qa"))
+                                    .collect::<Vec<_>>();
+                                let state_snapshot_json =
+                                    serde_json::to_string_pretty(&state).unwrap_or_default();
                                 let completed_feature_summary =
                                     collect_completed_feature_loop_summary(&state)?;
                                 let git_diff_against_base = current_git_diff_against_base(
                                     &self.workspace.root,
                                     &effective.global.git.base_branch,
                                 )?;
-                                let acceptance_prompt = build_acceptance_prompt(
-                                    &state,
-                                    &prompt_content,
-                                    acceptance_qa_backend.name(),
-                                    &planner_backend_name,
-                                    &completed_feature_summary,
-                                    &git_diff_against_base,
-                                );
-
-                                registry
-                                    .set_tmux_context(TmuxExecutionContext {
-                                        loop_number: Some(loop_number),
-                                        role: Some("qa".to_owned()),
-                                    })
-                                    .await;
-
                                 info!(
                                     loop = loop_number,
-                                    backend = acceptance_qa_backend.name(),
-                                    "invoking acceptance QA..."
+                                    backends = ?acceptance_backends,
+                                    "running acceptance QA across required backend families"
                                 );
-                                let acceptance_decision = execute_with_parse_retries(
-                                    acceptance_qa_backend,
-                                    &registry,
-                                    "qa",
-                                    "completing",
-                                    &acceptance_prompt,
-                                    parse_qa_output,
-                                    &expected_format_template_for("qa", None),
-                                )
-                                .await?;
-                                debug!(loop = loop_number, "acceptance QA responded");
 
-                                match acceptance_decision {
-                                    QaDecision::Pass { body } => {
-                                        let acceptance_pass_path = write_artifact(
-                                            &project_dir,
-                                            ArtifactWriteInput {
-                                                project_id: &state.project_id,
-                                                loop_number,
-                                                loop_slug: "completion",
-                                                backend: &acceptance_qa_backend_name,
-                                                role: "qa",
-                                                kind: ArtifactKind::AcceptancePass,
-                                                body: &body,
-                                            },
-                                        )?;
-                                        let acceptance_pass_rel = artifact_relative_path(
-                                            &project_dir,
-                                            &acceptance_pass_path,
-                                        );
+                                for acceptance_qa_backend_name in &acceptance_backends {
+                                    let acceptance_qa_backend = registry
+                                        .get_or_create_for_spec(acceptance_qa_backend_name)?;
+                                    let acceptance_prompt = build_acceptance_prompt(
+                                        &state_snapshot_json,
+                                        &prompt_content,
+                                        acceptance_qa_backend.name(),
+                                        &planner_backend_name,
+                                        &completed_feature_summary,
+                                        &git_diff_against_base,
+                                    );
 
-                                        {
+                                    registry
+                                        .set_tmux_context(TmuxExecutionContext {
+                                            loop_number: Some(loop_number),
+                                            role: Some("qa".to_owned()),
+                                        })
+                                        .await;
+
+                                    info!(
+                                        loop = loop_number,
+                                        backend = acceptance_qa_backend.name(),
+                                        "invoking acceptance QA..."
+                                    );
+                                    let acceptance_decision = execute_with_parse_retries(
+                                        acceptance_qa_backend,
+                                        &registry,
+                                        "qa",
+                                        "completing",
+                                        &acceptance_prompt,
+                                        parse_qa_output,
+                                        &expected_format_template_for("qa", None),
+                                    )
+                                    .await?;
+                                    debug!(
+                                        loop = loop_number,
+                                        backend = acceptance_qa_backend_name,
+                                        "acceptance QA responded"
+                                    );
+
+                                    match acceptance_decision {
+                                        QaDecision::Pass { body } => {
+                                            let acceptance_pass_path = write_artifact(
+                                                &project_dir,
+                                                ArtifactWriteInput {
+                                                    project_id: &state.project_id,
+                                                    loop_number,
+                                                    loop_slug: "completion",
+                                                    backend: acceptance_qa_backend_name,
+                                                    role: "qa",
+                                                    kind: ArtifactKind::AcceptancePass,
+                                                    body: &body,
+                                                },
+                                            )?;
+                                            let acceptance_pass_path =
+                                                write_acceptance_backend_artifact(
+                                                    &acceptance_pass_path,
+                                                    acceptance_qa_backend_name,
+                                                )?;
+                                            let acceptance_pass_rel = artifact_relative_path(
+                                                &project_dir,
+                                                &acceptance_pass_path,
+                                            );
+
                                             let completion = state
                                                 .current_completion_attempt_mut()
                                                 .ok_or_else(|| {
@@ -1430,34 +1450,35 @@ impl Orchestrator {
                                                     artifact: acceptance_pass_rel,
                                                 },
                                             );
+                                            info!(
+                                                loop = loop_number,
+                                                backend = acceptance_qa_backend_name,
+                                                "acceptance QA: PASS"
+                                            );
                                         }
+                                        QaDecision::Fail { body } => {
+                                            let acceptance_fail_path = write_artifact(
+                                                &project_dir,
+                                                ArtifactWriteInput {
+                                                    project_id: &state.project_id,
+                                                    loop_number,
+                                                    loop_slug: "completion",
+                                                    backend: acceptance_qa_backend_name,
+                                                    role: "qa",
+                                                    kind: ArtifactKind::AcceptanceFail,
+                                                    body: &body,
+                                                },
+                                            )?;
+                                            let acceptance_fail_path =
+                                                write_acceptance_backend_artifact(
+                                                    &acceptance_fail_path,
+                                                    acceptance_qa_backend_name,
+                                                )?;
+                                            let acceptance_fail_rel = artifact_relative_path(
+                                                &project_dir,
+                                                &acceptance_fail_path,
+                                            );
 
-                                        state.status = ProjectStatus::Completed;
-                                        state.current_phase = Phase::Completing;
-                                        state.phase_iteration = 1;
-                                        logs.push(format!(
-                                            "loop {loop_number}: completer returned COMPLETE and acceptance QA passed; project finished"
-                                        ));
-                                    }
-                                    QaDecision::Fail { body } => {
-                                        let acceptance_fail_path = write_artifact(
-                                            &project_dir,
-                                            ArtifactWriteInput {
-                                                project_id: &state.project_id,
-                                                loop_number,
-                                                loop_slug: "completion",
-                                                backend: &acceptance_qa_backend_name,
-                                                role: "qa",
-                                                kind: ArtifactKind::AcceptanceFail,
-                                                body: &body,
-                                            },
-                                        )?;
-                                        let acceptance_fail_rel = artifact_relative_path(
-                                            &project_dir,
-                                            &acceptance_fail_path,
-                                        );
-
-                                        {
                                             let completion = state
                                                 .current_completion_attempt_mut()
                                                 .ok_or_else(|| {
@@ -1473,16 +1494,78 @@ impl Orchestrator {
                                                     artifact: acceptance_fail_rel,
                                                 },
                                             );
-                                            completion.verdict = Some(CompletionVerdict::Continue);
+                                            info!(
+                                                loop = loop_number,
+                                                backend = acceptance_qa_backend_name,
+                                                "acceptance QA: FAIL"
+                                            );
                                         }
-
-                                        state.status = ProjectStatus::InProgress;
-                                        state.current_phase = Phase::Planning;
-                                        state.phase_iteration = 1;
-                                        logs.push(format!(
-                                            "loop {loop_number}: acceptance QA failed; forcing CONTINUE and returning to planning"
-                                        ));
                                     }
+                                }
+
+                                let (all_passed, passed_backends, failed_backends) = {
+                                    let completion = state
+                                        .current_completion_attempt_mut()
+                                        .ok_or_else(|| {
+                                            RalphError::Orchestration(
+                                                "failed to reload completion attempt for acceptance gate aggregation"
+                                                    .to_owned(),
+                                            )
+                                        })?;
+                                    let required_backends = acceptance_backends
+                                        .iter()
+                                        .map(String::as_str)
+                                        .collect::<Vec<_>>();
+                                    let all_passed = completion
+                                        .artifacts
+                                        .acceptance_all_required_passed(&required_backends);
+                                    let passed_backends = completion
+                                        .artifacts
+                                        .acceptance_results
+                                        .iter()
+                                        .filter(|result| result.passed)
+                                        .map(|result| result.backend.clone())
+                                        .collect::<Vec<_>>();
+                                    let failed_backends = completion
+                                        .artifacts
+                                        .acceptance_results
+                                        .iter()
+                                        .filter(|result| !result.passed)
+                                        .map(|result| result.backend.clone())
+                                        .collect::<Vec<_>>();
+                                    if !all_passed {
+                                        completion.verdict = Some(CompletionVerdict::Continue);
+                                    }
+                                    (all_passed, passed_backends, failed_backends)
+                                };
+
+                                if all_passed {
+                                    info!(
+                                        loop = loop_number,
+                                        passed_backends = ?passed_backends,
+                                        "acceptance QA aggregate: PASS"
+                                    );
+                                    state.status = ProjectStatus::Completed;
+                                    state.current_phase = Phase::Completing;
+                                    state.phase_iteration = 1;
+                                    logs.push(format!(
+                                        "loop {loop_number}: acceptance QA passed on [{}]; project finished",
+                                        passed_backends.join(", ")
+                                    ));
+                                } else {
+                                    info!(
+                                        loop = loop_number,
+                                        passed_backends = ?passed_backends,
+                                        failed_backends = ?failed_backends,
+                                        "acceptance QA aggregate: FAIL"
+                                    );
+                                    state.status = ProjectStatus::InProgress;
+                                    state.current_phase = Phase::Planning;
+                                    state.phase_iteration = 1;
+                                    logs.push(format!(
+                                        "loop {loop_number}: acceptance QA failed on [{}]; forcing CONTINUE and returning to planning",
+                                        failed_backends.join(", ")
+                                    ));
                                 }
                             } else {
                                 state.status = ProjectStatus::Completed;
@@ -2013,14 +2096,13 @@ fn build_completer_prompt(
 }
 
 fn build_acceptance_prompt(
-    state: &ProjectState,
+    state_json: &str,
     prompt_content: &str,
     backend: &str,
     opposite_backend: &str,
     completed_feature_summary: &str,
     git_diff_against_base: &str,
 ) -> String {
-    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
     format!(
         "You are a QA engineer validating overall project acceptance.
 
@@ -2074,6 +2156,28 @@ OR
 - Planner Backend: {opposite_backend}
 "
     )
+}
+
+fn write_acceptance_backend_artifact(artifact_path: &Path, backend: &str) -> Result<PathBuf> {
+    let file_name = artifact_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            RalphError::Orchestration(format!(
+                "invalid acceptance artifact path: {}",
+                artifact_path.display()
+            ))
+        })?;
+
+    let backend_slug = slugify_feature_name(backend);
+    let rewritten_name = match file_name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-{backend_slug}.{ext}"),
+        None => format!("{file_name}-{backend_slug}"),
+    };
+    let rewritten_path = artifact_path.with_file_name(rewritten_name);
+
+    fs::rename(artifact_path, &rewritten_path)?;
+    Ok(rewritten_path)
 }
 
 fn base_vars(
@@ -2173,15 +2277,15 @@ fn latest_completion_feedback_context(
         return Ok(None);
     };
 
-    let Some(acceptance_fail_rel) = completion
+    let failed_acceptance_results = completion
         .artifacts
         .acceptance_results
         .iter()
-        .find(|result| !result.passed)
-        .map(|result| result.artifact.as_str())
-    else {
+        .filter(|result| !result.passed)
+        .collect::<Vec<_>>();
+    if failed_acceptance_results.is_empty() {
         return Ok(None);
-    };
+    }
 
     let completer_verdict_content = completion
         .artifacts
@@ -2190,11 +2294,21 @@ fn latest_completion_feedback_context(
         .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
         .transpose()?
         .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
-    let acceptance_fail_content = read_project_relative_file(project_dir, acceptance_fail_rel)?;
 
-    Ok(Some(format!(
-        "### Completer Verdict Artifact\n\n{completer_verdict_content}\n\n### Acceptance QA Failure Artifact\n\n{acceptance_fail_content}"
-    )))
+    let mut sections = vec![format!(
+        "### Completer Verdict Artifact\n\n{completer_verdict_content}"
+    )];
+    for (idx, result) in failed_acceptance_results.iter().enumerate() {
+        let acceptance_fail_content = read_project_relative_file(project_dir, &result.artifact)?;
+        sections.push(format!(
+            "### Acceptance QA Failure Artifact {} (backend: {})\n\n{}",
+            idx + 1,
+            result.backend,
+            acceptance_fail_content
+        ));
+    }
+
+    Ok(Some(sections.join("\n\n")))
 }
 
 #[allow(clippy::too_many_arguments)]

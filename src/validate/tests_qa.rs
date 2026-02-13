@@ -1,5 +1,6 @@
 use super::*;
 
+use std::fs;
 use std::path::Path;
 
 use crate::validate::assertions::{
@@ -8,7 +9,7 @@ use crate::validate::assertions::{
     assert_stderr_contains,
 };
 use crate::validate::harness::RalphHarness;
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -39,6 +40,26 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "qa::acceptance_gate_fail_forces_continue",
             func: acceptance_gate_fail_forces_continue,
+        },
+        ConformanceTest {
+            name: "qa::acceptance_gate_multi_backend_one_fails",
+            func: acceptance_gate_multi_backend_one_fails,
+        },
+        ConformanceTest {
+            name: "qa::acceptance_gate_multi_backend_independent",
+            func: acceptance_gate_multi_backend_independent,
+        },
+        ConformanceTest {
+            name: "qa::acceptance_gate_qa_backend_override_no_duplicate",
+            func: acceptance_gate_qa_backend_override_no_duplicate,
+        },
+        ConformanceTest {
+            name: "qa::acceptance_gate_qa_backend_override_opposite_family",
+            func: acceptance_gate_qa_backend_override_opposite_family,
+        },
+        ConformanceTest {
+            name: "qa::acceptance_gate_all_feedback_on_failure",
+            func: acceptance_gate_all_feedback_on_failure,
         },
         ConformanceTest {
             name: "qa::history_verbose_shows_qa",
@@ -529,28 +550,25 @@ fn acceptance_gate_pass(h: &RalphHarness) -> TestResult {
         let acceptance_results = first_attempt["artifacts"]["acceptance_results"]
             .as_array()
             .expect("acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(acceptance_results);
+        let passed_count = acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(true))
+            .count();
         assert_eq!(
-            acceptance_results.len(),
-            1,
-            "expected first completion attempt to have exactly one acceptance result"
-        );
-        assert_eq!(
-            acceptance_results[0]["passed"],
-            json!(true),
-            "expected first completion attempt to have acceptance_results[0].passed == true"
-        );
-        assert!(
-            acceptance_results[0]["backend"].as_str().is_some(),
-            "acceptance backend should be present"
+            passed_count, 2,
+            "expected both acceptance QA backends to pass"
         );
 
-        let acceptance_result_rel = acceptance_results[0]["artifact"]
-            .as_str()
-            .expect("acceptance artifact path should exist");
         let project_dir = h.project_dir(project_id);
-        let acceptance_path = project_dir.join(acceptance_result_rel);
-        assert_file_exists(&acceptance_path);
-        assert_file_contains(&acceptance_path, "# QA: PASS");
+        for result in acceptance_results {
+            let acceptance_result_rel = result["artifact"]
+                .as_str()
+                .expect("acceptance artifact path should exist");
+            let acceptance_path = project_dir.join(acceptance_result_rel);
+            assert_file_exists(&acceptance_path);
+            assert_file_contains(&acceptance_path, "# QA: PASS");
+        }
     })
 }
 
@@ -581,28 +599,41 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
             attempts.len()
         );
 
-        // First completion attempt: acceptance_results[0].passed == false
+        // First completion attempt should include both backend families and mixed pass/fail.
         let first_attempt = &attempts[0];
         let first_acceptance_results = first_attempt["artifacts"]["acceptance_results"]
             .as_array()
             .expect("first attempt acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(first_acceptance_results);
+        let first_pass_count = first_acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(true))
+            .count();
+        let first_fail_count = first_acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(false))
+            .count();
         assert_eq!(
-            first_acceptance_results.len(),
-            1,
-            "expected first completion attempt to have exactly one acceptance result"
+            first_pass_count, 1,
+            "expected first completion attempt to have one acceptance pass"
         );
         assert_eq!(
-            first_acceptance_results[0]["passed"],
-            json!(false),
-            "expected first completion attempt to have acceptance_results[0].passed == false"
+            first_fail_count, 1,
+            "expected first completion attempt to have one acceptance failure"
         );
-        let first_acceptance_rel = first_acceptance_results[0]["artifact"]
-            .as_str()
-            .expect("first acceptance artifact should exist");
         let project_dir = h.project_dir(project_id);
-        let first_acceptance_path = project_dir.join(first_acceptance_rel);
-        assert_file_exists(&first_acceptance_path);
-        assert_file_contains(&first_acceptance_path, "# QA: FAIL");
+        for result in first_acceptance_results {
+            let first_acceptance_rel = result["artifact"]
+                .as_str()
+                .expect("first acceptance artifact should exist");
+            let first_acceptance_path = project_dir.join(first_acceptance_rel);
+            assert_file_exists(&first_acceptance_path);
+            if result["passed"] == json!(true) {
+                assert_file_contains(&first_acceptance_path, "# QA: PASS");
+            } else {
+                assert_file_contains(&first_acceptance_path, "# QA: FAIL");
+            }
+        }
 
         // First attempt verdict should be overridden to continue
         assert_eq!(
@@ -619,20 +650,313 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
             loops.len()
         );
 
-        // Last completion attempt: acceptance_results[0].passed == true
+        // Last completion attempt should include both backends and both passing.
         let last_attempt = &attempts[attempts.len() - 1];
         let last_acceptance_results = last_attempt["artifacts"]["acceptance_results"]
             .as_array()
             .expect("last attempt acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(last_acceptance_results);
+        let last_pass_count = last_acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(true))
+            .count();
         assert_eq!(
-            last_acceptance_results.len(),
-            1,
-            "expected final completion attempt to have exactly one acceptance result"
+            last_pass_count, 2,
+            "expected final completion attempt to have two passing acceptance results"
+        );
+    })
+}
+
+fn acceptance_gate_multi_backend_one_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-accept-one-fails";
+        let codex_fail_counter = h.temp_dir.path().join("acceptance-codex-fail-counter.txt");
+        let script = acceptance_one_backend_fail_then_pass_mock_script(&codex_fail_counter);
+        setup_with_mock_script(h, project_id, "qa-accept-one-fails.sh", &script);
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        let output = h
+            .ralph_env(["run", "--until-complete"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run --until-complete should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("completed"));
+
+        let attempts = state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert!(
+            attempts.len() >= 2,
+            "expected at least 2 completion attempts, got {}",
+            attempts.len()
+        );
+
+        let first_attempt = &attempts[0];
+        assert_eq!(
+            first_attempt["verdict"],
+            json!("continue"),
+            "expected first completion attempt verdict to be forced to continue"
+        );
+        let first_acceptance_results = first_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("first attempt acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(first_acceptance_results);
+        assert_eq!(
+            acceptance_result_for_family(first_acceptance_results, "claude")["passed"],
+            json!(true),
+            "expected claude acceptance QA to pass on first completion attempt"
         );
         assert_eq!(
-            last_acceptance_results[0]["passed"],
+            acceptance_result_for_family(first_acceptance_results, "codex")["passed"],
+            json!(false),
+            "expected codex acceptance QA to fail on first completion attempt"
+        );
+    })
+}
+
+fn acceptance_gate_multi_backend_independent(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-accept-independent";
+        let planner_counter = h.temp_dir.path().join("planner-counter-independent.txt");
+        let qa_invocations = h.temp_dir.path().join("acceptance-invocations.log");
+        let script = acceptance_independent_mock_script(&planner_counter, &qa_invocations);
+        setup_with_mock_script(h, project_id, "qa-accept-independent.sh", &script);
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("in_progress"));
+
+        let attempts = state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "expected exactly one completion attempt for independence test"
+        );
+
+        let first_attempt = &attempts[0];
+        assert_eq!(
+            first_attempt["verdict"],
+            json!("continue"),
+            "expected completion verdict to be forced to continue after acceptance failure"
+        );
+        let acceptance_results = first_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(acceptance_results);
+        assert_eq!(
+            acceptance_result_for_family(acceptance_results, "claude")["passed"],
+            json!(false),
+            "expected claude acceptance QA to fail"
+        );
+        assert_eq!(
+            acceptance_result_for_family(acceptance_results, "codex")["passed"],
             json!(true),
-            "expected final completion attempt to have acceptance_results[0].passed == true"
+            "expected codex acceptance QA to pass"
+        );
+
+        let invocation_log = fs::read_to_string(&qa_invocations)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", qa_invocations.display()));
+        let invocations = invocation_log
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            invocations.len(),
+            2,
+            "expected exactly two acceptance QA invocations, got {:?}",
+            invocations
+        );
+        assert!(
+            invocations.iter().any(|entry| entry.starts_with("claude")),
+            "expected acceptance QA invocation for claude backend, got {:?}",
+            invocations
+        );
+        assert!(
+            invocations.iter().any(|entry| entry.starts_with("codex")),
+            "expected acceptance QA invocation for codex backend, got {:?}",
+            invocations
+        );
+    })
+}
+
+fn acceptance_gate_qa_backend_override_no_duplicate(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-accept-override-same-family";
+        setup_with_mock_script(
+            h,
+            project_id,
+            "qa-accept-override-same-family.sh",
+            &qa_pass_mock_script(),
+        );
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.completer_backend", "codex"])
+            .expect("config set workflow.completer_backend failed");
+        h.ralph_ok(["config", "set", "workflow.qa_backend", "codex"])
+            .expect("config set workflow.qa_backend failed");
+
+        let output = h
+            .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run with RALPH_COMPLETE should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("completed"));
+        let attempts = state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "expected exactly one completion attempt for override test"
+        );
+
+        let acceptance_results = attempts[0]["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(acceptance_results);
+        let pass_count = acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(true))
+            .count();
+        assert_eq!(
+            pass_count, 2,
+            "expected both acceptance QA backends to pass"
+        );
+    })
+}
+
+fn acceptance_gate_qa_backend_override_opposite_family(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-accept-override-opposite-family";
+        setup_with_mock_script(
+            h,
+            project_id,
+            "qa-accept-override-opposite-family.sh",
+            &qa_pass_mock_script(),
+        );
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.completer_backend", "codex"])
+            .expect("config set workflow.completer_backend failed");
+        h.ralph_ok(["config", "set", "workflow.qa_backend", "claude"])
+            .expect("config set workflow.qa_backend failed");
+
+        let output = h
+            .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run with RALPH_COMPLETE should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("completed"));
+        let attempts = state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "expected exactly one completion attempt for override test"
+        );
+
+        let acceptance_results = attempts[0]["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(acceptance_results);
+        let pass_count = acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(true))
+            .count();
+        assert_eq!(
+            pass_count, 2,
+            "expected both acceptance QA backends to pass"
+        );
+    })
+}
+
+fn acceptance_gate_all_feedback_on_failure(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-accept-all-feedback";
+        let planner_counter = h.temp_dir.path().join("planner-counter-all-feedback.txt");
+        let planner_prompt_dir = h.temp_dir.path().join("planner-prompts");
+        let script =
+            acceptance_all_fail_feedback_mock_script(&planner_counter, &planner_prompt_dir);
+        setup_with_mock_script(h, project_id, "qa-accept-all-feedback.sh", &script);
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should execute");
+        assert_exit_code(&output, 0);
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("in_progress"));
+
+        let attempts = state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "expected exactly one completion attempt for all-feedback test"
+        );
+        let first_attempt = &attempts[0];
+        assert_eq!(
+            first_attempt["verdict"],
+            json!("continue"),
+            "expected completion verdict to be forced to continue after acceptance failures"
+        );
+        let acceptance_results = first_attempt["artifacts"]["acceptance_results"]
+            .as_array()
+            .expect("acceptance_results should be an array");
+        assert_acceptance_results_cover_both_families(acceptance_results);
+        let fail_count = acceptance_results
+            .iter()
+            .filter(|result| result["passed"] == json!(false))
+            .count();
+        assert_eq!(
+            fail_count, 2,
+            "expected both acceptance QA backends to fail"
+        );
+
+        let second_planner_prompt = planner_prompt_dir.join("planner-2.md");
+        assert_file_exists(&second_planner_prompt);
+        let second_planner_prompt_content = fs::read_to_string(&second_planner_prompt)
+            .unwrap_or_else(|err| {
+                panic!("failed to read {}: {err}", second_planner_prompt.display())
+            });
+        assert!(
+            second_planner_prompt_content.contains("Claude acceptance blocker."),
+            "expected planner feedback to include claude failure artifact, got:\n{}",
+            second_planner_prompt_content
+        );
+        assert!(
+            second_planner_prompt_content.contains("Codex acceptance blocker."),
+            "expected planner feedback to include codex failure artifact, got:\n{}",
+            second_planner_prompt_content
+        );
+        assert!(
+            second_planner_prompt_content.contains("Acceptance QA Failure Artifact 1 (backend:")
+                && second_planner_prompt_content
+                    .contains("Acceptance QA Failure Artifact 2 (backend:"),
+            "expected planner feedback to include numbered acceptance failure sections, got:\n{}",
+            second_planner_prompt_content
+        );
+        assert!(
+            second_planner_prompt_content.contains("backend: claude")
+                && second_planner_prompt_content.contains("backend: codex"),
+            "expected planner feedback to identify both failing backend families, got:\n{}",
+            second_planner_prompt_content
         );
     })
 }
@@ -860,6 +1184,449 @@ fi
 "###,
         planner_counter = planner_counter.to_string_lossy(),
         acceptance_counter = acceptance_counter.to_string_lossy(),
+    )
+}
+
+fn assert_acceptance_results_cover_both_families(results: &[Value]) {
+    assert_eq!(
+        results.len(),
+        2,
+        "expected exactly 2 acceptance QA results, got {}",
+        results.len()
+    );
+
+    let backends = results
+        .iter()
+        .map(|result| {
+            result["backend"]
+                .as_str()
+                .unwrap_or_else(|| panic!("acceptance result backend should be a string: {result}"))
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    assert_ne!(
+        backends[0], backends[1],
+        "expected distinct acceptance QA backends, got {:?}",
+        backends
+    );
+    assert!(
+        backends.iter().any(|backend| backend.starts_with("claude")),
+        "expected one acceptance QA backend from claude family, got {:?}",
+        backends
+    );
+    assert!(
+        backends.iter().any(|backend| backend.starts_with("codex")),
+        "expected one acceptance QA backend from codex family, got {:?}",
+        backends
+    );
+}
+
+fn acceptance_result_for_family<'a>(results: &'a [Value], family: &str) -> &'a Value {
+    results
+        .iter()
+        .find(|result| {
+            result["backend"]
+                .as_str()
+                .map(|backend| backend.starts_with(family))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing acceptance QA result for backend family '{family}'"))
+}
+
+fn acceptance_one_backend_fail_then_pass_mock_script(codex_fail_counter: &Path) -> String {
+    let qa_branch = format!(
+        r#"if echo "$INPUT" | grep -q "overall project acceptance"; then
+  if echo "$INPUT" | grep -q "QA Backend: claude"; then
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- acceptance check (claude): passed
+
+## Verification Summary
+Claude acceptance check passed.
+EOF
+  elif echo "$INPUT" | grep -q "QA Backend: codex"; then
+    CCOUNT="$(cat "{codex_fail_counter}" 2>/dev/null || echo 0)"
+    CCOUNT=$((CCOUNT + 1))
+    echo "$CCOUNT" > "{codex_fail_counter}"
+    if [ "$CCOUNT" -le 1 ]; then
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Codex acceptance gate intentionally fails on first attempt.
+
+## Suggested Fixes
+1. Retry after planner feedback.
+EOF
+    else
+      cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- acceptance check (codex): passed
+
+## Verification Summary
+Codex acceptance check passed.
+EOF
+    fi
+  else
+    cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Unknown QA backend in acceptance prompt.
+
+## Suggested Fixes
+1. Ensure QA Backend context is present.
+EOF
+  fi
+else
+  cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: ok
+
+## Verification Summary
+Feature QA passed.
+EOF
+fi"#,
+        codex_fail_counter = codex_fail_counter.to_string_lossy(),
+    );
+
+    mock_script_with_qa_branch(&qa_branch)
+}
+
+fn acceptance_independent_mock_script(planner_counter: &Path, qa_invocations: &Path) -> String {
+    format!(
+        r###"#!/bin/sh
+set -eu
+
+INPUT="$(cat)"
+PLANNER_COUNTER="{planner_counter}"
+QA_INVOCATIONS="{qa_invocations}"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  PCOUNT="$(cat "$PLANNER_COUNTER" 2>/dev/null || echo 0)"
+  PCOUNT=$((PCOUNT + 1))
+  echo "$PCOUNT" > "$PLANNER_COUNTER"
+  if [ "$PCOUNT" -eq 1 ]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+Validation of acceptance gate behavior.
+
+## Summary of Work
+- Initial behavior complete.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Post-Acceptance Followup
+
+## Description
+Feature returned after forced continue.
+
+## Acceptance Criteria
+- [ ] Followup file is created
+
+## Files to Modify/Create
+- `followup_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a followup implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > followup_file.txt
+  git add followup_file.txt
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Followup file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: add followup artifact
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Completion criteria satisfied.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
+  if echo "$INPUT" | grep -q "overall project acceptance"; then
+    if ! echo "$INPUT" | grep -q '"acceptance_results": \[\]'; then
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Prompt contamination detected from prior acceptance results.
+
+## Suggested Fixes
+1. Snapshot state before acceptance QA loop.
+EOF
+      exit 0
+    fi
+    if echo "$INPUT" | grep -q "QA Backend: claude"; then
+      echo "claude" >> "$QA_INVOCATIONS"
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Claude acceptance gate intentionally fails.
+
+## Suggested Fixes
+1. Retry planning after continuation.
+EOF
+    elif echo "$INPUT" | grep -q "QA Backend: codex"; then
+      echo "codex" >> "$QA_INVOCATIONS"
+      cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- acceptance check (codex): passed
+
+## Verification Summary
+Codex acceptance check passed independently.
+EOF
+    else
+      echo "unknown" >> "$QA_INVOCATIONS"
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Unknown acceptance backend.
+
+## Suggested Fixes
+1. Ensure QA Backend context is present.
+EOF
+    fi
+  else
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: ok
+
+## Verification Summary
+Feature QA passed.
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###,
+        planner_counter = planner_counter.to_string_lossy(),
+        qa_invocations = qa_invocations.to_string_lossy(),
+    )
+}
+
+fn acceptance_all_fail_feedback_mock_script(
+    planner_counter: &Path,
+    planner_prompt_dir: &Path,
+) -> String {
+    format!(
+        r###"#!/bin/sh
+set -eu
+
+INPUT="$(cat)"
+PLANNER_COUNTER="{planner_counter}"
+PLANNER_PROMPT_DIR="{planner_prompt_dir}"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  PCOUNT="$(cat "$PLANNER_COUNTER" 2>/dev/null || echo 0)"
+  PCOUNT=$((PCOUNT + 1))
+  echo "$PCOUNT" > "$PLANNER_COUNTER"
+  mkdir -p "$PLANNER_PROMPT_DIR"
+  echo "$INPUT" > "$PLANNER_PROMPT_DIR/planner-$PCOUNT.md"
+  if [ "$PCOUNT" -eq 1 ]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+Acceptance feedback aggregation test.
+
+## Summary of Work
+- Initial implementation complete.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Recovery Feature
+
+## Description
+Feature added after acceptance QA failures.
+
+## Acceptance Criteria
+- [ ] Recovery file is created
+
+## Files to Modify/Create
+- `feedback_recovery.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a recovery implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > feedback_recovery.txt
+  git add feedback_recovery.txt
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Recovery file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: add recovery artifact
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Completion criteria satisfied.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
+  if echo "$INPUT" | grep -q "overall project acceptance"; then
+    if echo "$INPUT" | grep -q "QA Backend: claude"; then
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Claude acceptance blocker.
+
+## Suggested Fixes
+1. Fix claude-related blocker.
+EOF
+    elif echo "$INPUT" | grep -q "QA Backend: codex"; then
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Codex acceptance blocker.
+
+## Suggested Fixes
+1. Fix codex-related blocker.
+EOF
+    else
+      cat <<'EOF'
+# QA: FAIL
+
+## Failures
+1. Unknown acceptance backend.
+
+## Suggested Fixes
+1. Ensure QA Backend context is present.
+EOF
+    fi
+  else
+    cat <<'EOF'
+# QA: PASS
+
+## Tests Run
+- cargo check: ok
+
+## Verification Summary
+Feature QA passed.
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###,
+        planner_counter = planner_counter.to_string_lossy(),
+        planner_prompt_dir = planner_prompt_dir.to_string_lossy(),
     )
 }
 

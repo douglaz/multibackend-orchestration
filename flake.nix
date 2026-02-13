@@ -85,6 +85,7 @@
                 clippy
                 rust-analyzer
                 git
+                jq
               ];
 
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
