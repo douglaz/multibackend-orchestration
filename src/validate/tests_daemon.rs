@@ -136,6 +136,27 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_child_output_captured_in_log",
             func: runtime_child_output_captured_in_log,
         },
+        // --- Refined Title PR/Comment Tests ---
+        ConformanceTest {
+            name: "daemon::refinement_title_in_pr",
+            func: refinement_title_in_pr,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_disabled_pr_uses_original_title",
+            func: refinement_disabled_pr_uses_original_title,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_failure_pr_uses_original_title",
+            func: refinement_failure_pr_uses_original_title,
+        },
+        ConformanceTest {
+            name: "daemon::legacy_task_without_raw_idea_pr_uses_fallback",
+            func: legacy_task_without_raw_idea_pr_uses_fallback,
+        },
+        ConformanceTest {
+            name: "daemon::refined_prompt_comment_includes_title",
+            func: refined_prompt_comment_includes_title,
+        },
     ]
 }
 
@@ -3167,6 +3188,579 @@ esac
         assert!(
             stderr.contains("acme-widgets-300.log"),
             "daemon stderr should mention the log file path, got:\n{stderr}"
+        );
+    })
+}
+
+// =============================================================================
+// Refined Title PR/Comment Tests
+// =============================================================================
+
+/// Verify that when refinement succeeds and produces a structured title, the
+/// PR is created with that refined title.
+fn refinement_title_in_pr(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set up a mock refinement backend that outputs a structured title + body.
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_title.sh",
+                r#"#!/bin/sh
+cat > /dev/null
+printf 'TITLE: Improve login flow robustness\n---\nRefined: implement the feature with proper error handling and tests.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let pr_title_log = h.temp_dir.path().join("pr_title_refined.txt");
+        let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
+
+        // Custom gh mock that captures the --title argument from pr create
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create)
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --title) echo "$2" > "{pr_title_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        printf 'https://github.com/acme/widgets/pull/300\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-300",
+            "pending",
+            300,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Fix the login bug\n\nUsers cannot log in with SSO.");
+        task["branch"] = json!("ralph/daemon/acme-widgets-300");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // PR title should be the refined title
+        assert!(
+            pr_title_log.exists(),
+            "gh pr create should have been called"
+        );
+        let title = fs::read_to_string(&pr_title_log)
+            .expect("read pr title log")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            title, "Improve login flow robustness",
+            "PR title should be the refined title"
+        );
+
+        // refined_title should be persisted in the task store
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-300")
+            .unwrap();
+        assert_eq!(
+            task["refined_title"],
+            json!("Improve login flow robustness"),
+            "refined_title should be persisted in task store"
+        );
+    })
+}
+
+/// Verify that when refinement is disabled, the PR title falls back to the
+/// original title extracted from raw_idea.
+fn refinement_disabled_pr_uses_original_title(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable refinement
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
+        let pr_title_log = h.temp_dir.path().join("pr_title_disabled.txt");
+        let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create)
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --title) echo "$2" > "{pr_title_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        printf 'https://github.com/acme/widgets/pull/301\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-301",
+            "pending",
+            301,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Original issue title\n\nBody of the issue.");
+        task["branch"] = json!("ralph/daemon/acme-widgets-301");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        assert!(
+            pr_title_log.exists(),
+            "gh pr create should have been called"
+        );
+        let title = fs::read_to_string(&pr_title_log)
+            .expect("read pr title log")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            title, "Original issue title",
+            "PR title should fall back to original title from raw_idea"
+        );
+
+        // refined_title should not be set
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-301")
+            .unwrap();
+        assert!(
+            task.get("refined_title").is_none()
+                || task["refined_title"].is_null(),
+            "refined_title should not be set when refinement is disabled"
+        );
+    })
+}
+
+/// Verify that when refinement fails, the PR title falls back to the
+/// original title extracted from raw_idea.
+fn refinement_failure_pr_uses_original_title(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set up a failing refinement backend
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_fail_pr.sh",
+                "#!/bin/sh\necho 'backend error' >&2\nexit 1\n",
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let pr_title_log = h.temp_dir.path().join("pr_title_failure.txt");
+        let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create)
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --title) echo "$2" > "{pr_title_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        printf 'https://github.com/acme/widgets/pull/302\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-302",
+            "pending",
+            302,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Failure fallback title\n\nBody of the issue.");
+        task["branch"] = json!("ralph/daemon/acme-widgets-302");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("refinement failed"),
+            "expected refinement failure warning, stderr:\n{stderr}"
+        );
+
+        assert!(
+            pr_title_log.exists(),
+            "gh pr create should have been called"
+        );
+        let title = fs::read_to_string(&pr_title_log)
+            .expect("read pr title log")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            title, "Failure fallback title",
+            "PR title should fall back to original title from raw_idea on refinement failure"
+        );
+    })
+}
+
+/// Verify that when a legacy task has no raw_idea, the PR title falls back
+/// to the `ralph: {task_id}` format.
+fn legacy_task_without_raw_idea_pr_uses_fallback(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable refinement so it doesn't interfere
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("set refinement_enabled failed");
+
+        let pr_title_log = h.temp_dir.path().join("pr_title_legacy.txt");
+        let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
+
+        // gh mock: issue view returns title/body for hydration
+        // but the raw_idea composed from hydration will have a title.
+        // To test the fallback, we make issue view return an empty title.
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"","body":""}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create)
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --title) echo "$2" > "{pr_title_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        printf 'https://github.com/acme/widgets/pull/303\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        // Task without raw_idea; the hydration from issue view will produce
+        // an empty title ("\n\n") so extract_original_title returns None,
+        // triggering the ralph: {task_id} fallback.
+        let task = task_json(
+            "acme-widgets-303",
+            "pending",
+            303,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        // Note: no raw_idea field set — will be hydrated from mock gh
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        assert!(
+            pr_title_log.exists(),
+            "gh pr create should have been called"
+        );
+        let title = fs::read_to_string(&pr_title_log)
+            .expect("read pr title log")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            title, "ralph: acme-widgets-303",
+            "PR title should fall back to ralph: {{task_id}} when no raw_idea title"
+        );
+    })
+}
+
+/// Verify that the refined-prompt comment includes a bold title header when
+/// the refinement produces a structured title.
+fn refined_prompt_comment_includes_title(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set up a mock refinement backend that outputs a structured title + body.
+        let refine_script = h
+            .write_mock_script(
+                "mock_refine_comment_title.sh",
+                r#"#!/bin/sh
+cat > /dev/null
+printf 'TITLE: Bold comment title test\n---\nRefined body for comment test with enough characters.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let comment_log = h.temp_dir.path().join("comment_title_test.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        // Custom gh mock that captures comment body
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment)
+        shift; shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{comment_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-304",
+            "pending",
+            304,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Comment title test\n\nBody of the issue.");
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // Check that the comment body includes the bold title
+        assert!(
+            comment_log.exists(),
+            "comment should have been posted"
+        );
+        let log = fs::read_to_string(&comment_log).expect("read comment log");
+        assert!(
+            log.contains("**Bold comment title test**"),
+            "comment body should include bold refined title, got:\n{log}"
+        );
+        assert!(
+            log.contains("Refined body for comment test with enough characters."),
+            "comment body should include refined body, got:\n{log}"
         );
     })
 }
