@@ -67,7 +67,10 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
     if let Ok(content) = std::fs::read_to_string(log_file) {
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(50);
-        eprintln!("--- last output from {task_id} ({}) ---", log_file.display());
+        eprintln!(
+            "--- last output from {task_id} ({}) ---",
+            log_file.display()
+        );
         for line in &lines[start..] {
             eprintln!("  {line}");
         }
@@ -156,6 +159,16 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .filter(|t| !t.state.is_terminal())
         .map(|t| t.task_id.clone())
         .collect();
+    let task_branches: HashMap<String, String> = tasks
+        .iter()
+        .map(|task| {
+            let branch = task
+                .branch
+                .clone()
+                .unwrap_or_else(|| worktree::daemon_branch_name(&task.task_id));
+            (task.task_id.clone(), branch)
+        })
+        .collect();
     let workspace_root = store
         .path()
         .parent()
@@ -165,7 +178,8 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         &config.repo_root,
         workspace_root,
         &active_ids,
-    );
+        &task_branches,
+    )?;
     Ok(())
 }
 
@@ -354,8 +368,7 @@ async fn dispatch_task(
         None => {
             let store_clone = store.clone();
             let task_clone = task.clone();
-            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone))
-                .await?
+            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone)).await?
         }
     };
 
@@ -472,10 +485,13 @@ async fn dispatch_task(
         }
         let repo_root = config.repo_root.clone();
         let tid = task.task_id.clone();
+        let branch = task
+            .branch
+            .clone()
+            .unwrap_or_else(|| worktree::daemon_branch_name(&task.task_id));
         // Best-effort worktree cleanup
         if let Err(err) = spawn_blocking_op(move || {
-            worktree::remove_worktree(&repo_root, &workspace_root, &tid);
-            Ok(())
+            worktree::remove_worktree(&repo_root, &workspace_root, &tid, &branch)
         })
         .await
         {
@@ -676,7 +692,7 @@ async fn complete_task(
         Ok(Some(t)) => t,
         Ok(None) => {
             // Was already terminal — still cleanup worktree
-            cleanup_worktree(store, config, task_id).await;
+            cleanup_worktree(store, config, task_id, None).await;
             return;
         }
         Err(err) => {
@@ -733,8 +749,7 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             let wt = wt_path.clone();
-            if let Ok(actual_branch) =
-                spawn_blocking_op(move || github::current_branch(&wt)).await
+            if let Ok(actual_branch) = spawn_blocking_op(move || github::current_branch(&wt)).await
             {
                 if task.branch.as_deref() != Some(&actual_branch) {
                     eprintln!(
@@ -774,7 +789,7 @@ async fn complete_task(
     }
 
     // Cleanup worktree (best-effort)
-    cleanup_worktree(store, config, task_id).await;
+    cleanup_worktree(store, config, task_id, task.branch.clone()).await;
 
     let log_path = task_log_path(store, task_id);
     eprintln!(
@@ -784,7 +799,12 @@ async fn complete_task(
 }
 
 /// Remove the worktree for a task (best-effort).
-async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_id: &str) {
+async fn cleanup_worktree(
+    store: &TaskStore,
+    config: &DaemonRuntimeConfig,
+    task_id: &str,
+    branch: Option<String>,
+) {
     let workspace_root = store
         .path()
         .parent()
@@ -794,9 +814,9 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
 
     let repo_root = config.repo_root.clone();
     let tid = task_id.to_owned();
+    let branch_name = branch.unwrap_or_else(|| worktree::daemon_branch_name(task_id));
     if let Err(err) = spawn_blocking_op(move || {
-        worktree::remove_worktree(&repo_root, &workspace_root, &tid);
-        Ok(())
+        worktree::remove_worktree(&repo_root, &workspace_root, &tid, &branch_name)
     })
     .await
     {
@@ -826,10 +846,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return;
             }
         }
@@ -846,14 +863,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             task.task_id
         );
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                "no-diff",
-                &body,
-            )
+            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
         })
         .await
         {

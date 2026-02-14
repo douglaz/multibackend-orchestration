@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,6 +14,11 @@ pub fn worktrees_dir(workspace_root: &Path) -> PathBuf {
 /// Return the worktree path for a specific task.
 pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
     worktrees_dir(workspace_root).join(task_id)
+}
+
+/// Return the daemon branch name for a task.
+pub fn daemon_branch_name(task_id: &str) -> String {
+    format!("ralph/daemon/{task_id}")
 }
 
 /// Create a git worktree for the given task.
@@ -30,7 +36,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         fs::create_dir_all(parent)?;
     }
 
-    let branch_name = format!("ralph/daemon/{task_id}");
+    let branch_name = daemon_branch_name(task_id);
     let output = Command::new("git")
         .args([
             "worktree",
@@ -56,39 +62,91 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     Ok(wt_path)
 }
 
-/// Remove a worktree for a task. Best-effort: logs warning on failure.
-pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
+/// Remove a task worktree and its local branch.
+///
+/// Cleanup order:
+/// 1) If worktree path exists: `git worktree remove --force <path>`
+/// 2) Always: `git worktree prune`
+/// 3) Always: `git show-ref --verify refs/heads/<branch>`
+/// 4) If branch exists: `git branch -D <branch>`
+pub fn remove_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+    branch: &str,
+) -> Result<()> {
     let wt_path = task_worktree_path(workspace_root, task_id);
-    if !wt_path.exists() {
-        return;
-    }
+    let wt_path_string = wt_path.to_string_lossy().into_owned();
+    if wt_path.exists() {
+        let output = Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path_string])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to run `git worktree remove --force {}` for task {task_id}: {err}",
+                    wt_path.display()
+                ))
+            })?;
 
-    let output = Command::new("git")
-        .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
-        .current_dir(repo_root)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => {
-            eprintln!(
-                "warning: failed to remove worktree for {task_id}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            // Fallback: try to remove the directory directly
-            let _ = fs::remove_dir_all(&wt_path);
-        }
-        Err(err) => {
-            eprintln!("warning: failed to run git worktree remove for {task_id}: {err}");
-            let _ = fs::remove_dir_all(&wt_path);
+        if !output.status.success() {
+            return Err(RalphError::Orchestration(format!(
+                "`git worktree remove --force {}` failed for task {task_id}: {}",
+                wt_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
     }
 
-    // Prune stale worktree entries
-    let _ = Command::new("git")
+    let prune_output = Command::new("git")
         .args(["worktree", "prune"])
         .current_dir(repo_root)
-        .output();
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run `git worktree prune` while cleaning task {task_id}: {err}"
+            ))
+        })?;
+    if !prune_output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "`git worktree prune` failed while cleaning task {task_id}: {}",
+            String::from_utf8_lossy(&prune_output.stderr).trim()
+        )));
+    }
+
+    let branch_ref = format!("refs/heads/{branch}");
+    let show_ref_output = Command::new("git")
+        .args(["show-ref", "--verify", &branch_ref])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run `git show-ref --verify {branch_ref}` while cleaning task {task_id}: {err}"
+            ))
+        })?;
+
+    // `show-ref --verify` exits non-zero when branch doesn't exist.
+    if !show_ref_output.status.success() {
+        return Ok(());
+    }
+
+    let delete_output = Command::new("git")
+        .args(["branch", "-D", branch])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run `git branch -D {branch}` while cleaning task {task_id}: {err}"
+            ))
+        })?;
+    if !delete_output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "`git branch -D {branch}` failed while cleaning task {task_id}: {}",
+            String::from_utf8_lossy(&delete_output.stderr).trim()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Reconcile orphaned and stale worktrees at startup.
@@ -99,24 +157,57 @@ pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
 ///
 /// `active_task_ids` should contain only IDs of non-terminal tasks that will
 /// be re-adopted by the daemon.
-pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_ids: &[String]) {
+///
+/// `task_branches` maps task IDs to their branch names.
+pub fn reconcile_worktrees(
+    repo_root: &Path,
+    workspace_root: &Path,
+    active_task_ids: &[String],
+    task_branches: &std::collections::HashMap<String, String>,
+) -> Result<()> {
     let wt_dir = worktrees_dir(workspace_root);
+    let mut on_disk_task_ids = std::collections::HashSet::new();
+
     let entries = match fs::read_dir(&wt_dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(RalphError::Orchestration(format!(
+                "failed to read daemon worktrees directory {}: {err}",
+                wt_dir.display()
+            )));
+        }
     };
 
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !active_task_ids.contains(&name) {
-            eprintln!("reconcile: removing stale/orphaned worktree {name}");
-            remove_worktree(repo_root, workspace_root, &name);
+    if let Some(entries) = entries {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            on_disk_task_ids.insert(name.clone());
+
+            if !active_task_ids.contains(&name) {
+                let branch = task_branches
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| daemon_branch_name(&name));
+                eprintln!("reconcile: removing stale/orphaned worktree {name}");
+                remove_worktree(repo_root, workspace_root, &name, &branch)?;
+            }
         }
     }
 
-    // Also prune git's internal worktree list
-    let _ = Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(repo_root)
-        .output();
+    // If an active task has no worktree directory, clean any stale local
+    // daemon branch before redispatch.
+    for task_id in active_task_ids {
+        if on_disk_task_ids.contains(task_id) {
+            continue;
+        }
+
+        let branch = task_branches
+            .get(task_id)
+            .cloned()
+            .unwrap_or_else(|| daemon_branch_name(task_id));
+        remove_worktree(repo_root, workspace_root, task_id, &branch)?;
+    }
+
+    Ok(())
 }

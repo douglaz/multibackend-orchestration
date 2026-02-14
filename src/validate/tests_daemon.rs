@@ -1,7 +1,8 @@
 use super::*;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 
 use crate::validate::assertions::{assert_exit_code, assert_stdout_contains};
 use crate::validate::harness::RalphHarness;
@@ -47,6 +48,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "daemon::runtime_reconciliation_on_startup",
             func: runtime_reconciliation_on_startup,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_restart_in_progress_with_stale_branch",
+            func: runtime_restart_in_progress_with_stale_branch,
         },
         ConformanceTest {
             name: "daemon::runtime_polling_filter_overflow",
@@ -574,28 +579,39 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
+        let branch_10 = "ralph/daemon/acme-widgets-10";
+        let branch_20 = "ralph/daemon/acme-widgets-20";
+
         // Pre-populate tasks with in_progress state and fake PID/PGID
         write_tasks(
             h,
             vec![
-                task_json(
-                    "acme-widgets-10",
-                    "in_progress",
-                    10,
-                    "acme",
-                    "widgets",
-                    Some(12345),
-                    Some(12345),
-                ),
-                task_json(
-                    "acme-widgets-20",
-                    "in_progress",
-                    20,
-                    "acme",
-                    "widgets",
-                    Some(67890),
-                    Some(67890),
-                ),
+                {
+                    let mut task = task_json(
+                        "acme-widgets-10",
+                        "in_progress",
+                        10,
+                        "acme",
+                        "widgets",
+                        Some(12345),
+                        Some(12345),
+                    );
+                    task["branch"] = json!(branch_10);
+                    task
+                },
+                {
+                    let mut task = task_json(
+                        "acme-widgets-20",
+                        "in_progress",
+                        20,
+                        "acme",
+                        "widgets",
+                        Some(67890),
+                        Some(67890),
+                    );
+                    task["branch"] = json!(branch_20);
+                    task
+                },
                 task_json(
                     "acme-widgets-30",
                     "completed",
@@ -609,13 +625,21 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
+        create_local_branch(&h.repo_root, branch_10);
+        create_local_branch(&h.repo_root, branch_20);
+        assert!(
+            git_show_ref_verify_status(&h.repo_root, branch_10).success(),
+            "precondition failed: expected {branch_10} to exist before startup reconciliation"
+        );
+        assert!(
+            git_show_ref_verify_status(&h.repo_root, branch_20).success(),
+            "precondition failed: expected {branch_20} to exist before startup reconciliation"
+        );
+
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
         let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
-        // Run daemon with --single-iteration to trigger reconciliation then exit.
-        // Reconciliation resets in_progress -> pending before any adoption.
-        // Re-adoption may fail (worktree creation in test env) but that's fine;
-        // we verify reconciliation happened via stderr and task state.
+        // Run daemon with --single-iteration to trigger reconciliation.
         let output = h
             .ralph_env(
                 [
@@ -624,6 +648,8 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
                     "--repo",
                     "acme/widgets",
                     "--single-iteration",
+                    "--max-concurrent",
+                    "2",
                 ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
@@ -648,29 +674,100 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
             .unwrap();
         assert_eq!(completed["state"], json!("completed"));
 
-        // The formerly in_progress tasks should have been reconciled.
-        // They may still be pending (if re-adoption failed) or may have
-        // been dispatched and drained (completed/failed). Either way, the
-        // stale PID/PGID (12345, 67890) should have been cleared.
-        for tid in &["acme-widgets-10", "acme-widgets-20"] {
+        // Redispatch must happen for both reconciled tasks.
+        assert!(
+            stderr.contains("dispatched task acme-widgets-10"),
+            "expected dispatch signal for acme-widgets-10, stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("dispatched task acme-widgets-20"),
+            "expected dispatch signal for acme-widgets-20, stderr:\n{stderr}"
+        );
+
+        // Reconciled tasks should reach a terminal state and the local daemon
+        // branch should be gone.
+        for (tid, branch) in [
+            ("acme-widgets-10", branch_10),
+            ("acme-widgets-20", branch_20),
+        ] {
             let task = tasks.iter().find(|t| t["task_id"] == *tid).unwrap();
             let state = task["state"].as_str().unwrap();
-            // Must not still have the original stale PIDs
-            let pid_val = task["child_pid"].as_u64().unwrap_or(0);
             assert!(
-                pid_val != 12345 && pid_val != 67890,
-                "task {} should have stale PID cleared, got: {}",
-                tid,
-                pid_val
-            );
-            // Must be in a valid post-reconciliation state
-            assert!(
-                ["pending", "in_progress", "completed", "failed"].contains(&state),
-                "task {} should be in valid state after reconciliation, got: {}",
+                ["completed", "failed"].contains(&state),
+                "task {} should be terminal after single-iteration drain, got: {}",
                 tid,
                 state
             );
+            assert!(
+                !git_show_ref_verify_status(&h.repo_root, branch).success(),
+                "expected branch {branch} to be removed after reconciliation + dispatch for {tid}"
+            );
         }
+    })
+}
+
+fn runtime_restart_in_progress_with_stale_branch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-210";
+        let branch = format!("ralph/daemon/{task_id}");
+
+        let mut task = task_json(
+            task_id,
+            "in_progress",
+            210,
+            "acme",
+            "widgets",
+            Some(42424),
+            Some(42424),
+        );
+        task["branch"] = json!(branch.clone());
+        write_tasks(h, vec![task]).expect("write_tasks failed");
+
+        create_local_branch(&h.repo_root, &branch);
+        assert!(
+            git_show_ref_verify_status(&h.repo_root, &branch).success(),
+            "precondition failed: expected branch {branch} to exist before daemon startup"
+        );
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-210"),
+            "expected redispatch success signal for {task_id}, stderr:\n{stderr}"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        let state = task["state"].as_str().unwrap_or("");
+        assert!(
+            ["completed", "failed"].contains(&state),
+            "task should reach a terminal state after restart reconciliation, got: {state}"
+        );
+        assert!(
+            !git_show_ref_verify_status(&h.repo_root, &branch).success(),
+            "expected branch {branch} to be removed after restart reconciliation"
+        );
     })
 }
 
@@ -2852,8 +2949,7 @@ exit 1
         );
 
         let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path =
-            write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
 
         // Pre-populate task with the original daemon branch
         write_tasks(
@@ -2924,10 +3020,7 @@ exit 1
         );
 
         // PR creation was called with the new branch as --head
-        assert!(
-            gh_head_log.exists(),
-            "gh pr create should have been called"
-        );
+        assert!(gh_head_log.exists(), "gh pr create should have been called");
         let head_arg = fs::read_to_string(&gh_head_log)
             .expect("read gh_head_log")
             .trim()
@@ -3219,6 +3312,28 @@ fn task_json(
     })
 }
 
+fn create_local_branch(repo_root: &Path, branch: &str) {
+    let output = Command::new("git")
+        .args(["branch", branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git branch should execute");
+    assert!(
+        output.status.success(),
+        "failed to create branch {branch}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_show_ref_verify_status(repo_root: &Path, branch: &str) -> ExitStatus {
+    let branch_ref = format!("refs/heads/{branch}");
+    Command::new("git")
+        .args(["show-ref", "--verify", &branch_ref])
+        .current_dir(repo_root)
+        .status()
+        .expect("git show-ref --verify should execute")
+}
+
 fn write_mock_gh(h: &RalphHarness, body: &str) -> crate::Result<String> {
     let script = h.write_mock_script("gh", body)?;
     let base = script
@@ -3252,7 +3367,10 @@ fn write_daemon_mock_ralph_with_commit(h: &RalphHarness) -> crate::Result<String
 
 /// Write the mock ralph that switches branch and creates a commit (for branch resolution tests).
 fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result<String> {
-    write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_with_branch_switch_script())
+    write_mock_ralph(
+        h,
+        &mock_scripts::daemon_mock_ralph_with_branch_switch_script(),
+    )
 }
 
 fn read_count_file(path: &std::path::Path) -> u32 {

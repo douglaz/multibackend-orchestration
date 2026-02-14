@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\nThe daemon fails to re-dispatch tasks after restart when the task's branch still exists from a previous failed run. `create_worktree()` unconditionally uses `git worktree add -b <branch>` which errors when the branch already exists, causing the task to immediately fail again.\n\n## Requirements\n\n**Primary fix:**\n- Modify `src/daemon/worktree.rs:create_worktree()` to handle existing branches\n- Before creating worktree, check if branch `ralph/daemon/<task_id>` already exists\n- If branch exists: reuse it with `git worktree add <path> <existing-branch>` (no `-b` flag)\n- If branch does not exist: create it with `git worktree add -b <branch> <path>`\n\n**Additional cleanup (recommended):**\n- When `remove_worktree()` removes a worktree directory, also delete the associated branch\n- Consider adding branch cleanup to `reconcile_worktrees()` for orphaned task branches\n\n## Constraints\n- Must work across daemon restarts\n- Should not break existing behavior for new tasks (first-time dispatch)\n- Branch detection must be reliable (use `git branch --list` or equivalent)\n\n## Acceptance Criteria\n- [ ] `create_worktree()` checks if branch exists before attempting creation\n- [ ] Existing branches are reused without error\n- [ ] New branches are created as before when they don't exist\n- [ ] Tasks can be reset to `pending` and successfully retried after daemon restart\n- [ ] No manual `git branch -D` cleanup required\n- [ ] (Optional) `remove_worktree()` deletes the branch when removing the worktree\n- [ ] Test case: verify retry flow with existing stale branch",
+  "idea_hash": "1440db534d9a",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-14T19:59:22Z",
+  "completed_at": "2026-02-14T20:13:38Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 565.297092087,
+  "review_times_secs": [
+    153.158021031
+  ],
+  "revision_times_secs": [
+    137.595265378
+  ]
+}

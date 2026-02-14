@@ -1,0 +1,29 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Branch cleanup ordering",
+      "feedback": "The spec deletes `ralph/daemon/<task_id>` before `git worktree prune`. If `git worktree remove` falls back to direct directory deletion, Git still considers the branch checked out and `git branch -D` fails. Delete should happen after prune (or retry after prune)."
+    },
+    {
+      "area": "Missing-path cleanup edge case",
+      "feedback": "`remove_worktree()` currently returns early when the worktree path does not exist. With the proposed approach, stale branches in this state would not be deleted. To meet \"no manual git branch -D\", branch deletion should be attempted even if the directory is already gone."
+    },
+    {
+      "area": "Branch detection/listing reliability",
+      "feedback": "Using `git branch --list` for machine parsing is brittle (human-formatted output with markers/spaces). Prefer plumbing commands: `git show-ref --verify refs/heads/<branch>` for existence and `git for-each-ref --format=%(refname:short) refs/heads/ralph/daemon` for sweeping."
+    },
+    {
+      "area": "Scope/criteria consistency",
+      "feedback": "The doc labels cleanup as recommended/optional, but acceptance criteria 5 and 6 make it mandatory. Scope should be explicitly one or the other."
+    },
+    {
+      "area": "Retry test completeness",
+      "feedback": "The proposed retry test seeds a `pending` task, but the real restart path is `in_progress -> pending` reconciliation plus redispatch. Add an end-to-end restart test that starts from `in_progress` with a stale branch and validates successful redispatch."
+    },
+    {
+      "area": "Test assertion stability",
+      "feedback": "Asserting the per-task worktree directory exists after `--single-iteration` is unstable because runtime cleanup removes worktrees on terminal state. Assert dispatch success/state transition (and branch behavior) instead."
+    }
+  ]
+}
