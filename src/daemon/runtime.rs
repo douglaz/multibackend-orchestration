@@ -379,7 +379,8 @@ async fn dispatch_task(
     };
 
     // Persist refined_title best-effort (do not abort dispatch on failure).
-    if refined_title.is_some() {
+    // Always write (even None) to clear any stale title from a previous attempt.
+    {
         let store_clone = store.clone();
         let tid = task.task_id.clone();
         let title_clone = refined_title.clone();
