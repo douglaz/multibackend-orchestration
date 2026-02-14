@@ -555,7 +555,7 @@ async fn drain_all_children(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<String, ActiveChild>,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
         collect_children(store, config, children).await;
