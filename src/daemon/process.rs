@@ -60,6 +60,49 @@ pub async fn spawn_ralph_auto(
     Ok(SpawnedChild { pid, pgid, child })
 }
 
+/// Spawn `ralph run --project <id>` in a new session/process group.
+///
+/// Child stdout and stderr are redirected to `log_file` so output is preserved
+/// after worktree cleanup.
+pub async fn spawn_ralph_run(
+    ralph_bin: &Path,
+    worktree_path: &Path,
+    project_id: &str,
+    log_file: &Path,
+) -> Result<SpawnedChild> {
+    let mut cmd = build_ralph_run_command(ralph_bin, worktree_path, project_id, log_file)?;
+
+    // SAFETY: setsid() is async-signal-safe and is the standard way to
+    // create a new session/process group in the child before exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn().map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to spawn ralph run --project {} in {}: {err}",
+            project_id,
+            worktree_path.display()
+        ))
+    })?;
+
+    let pid = child.id().ok_or_else(|| {
+        RalphError::Orchestration(format!(
+            "spawned ralph run --project {} without PID in {}",
+            project_id,
+            worktree_path.display()
+        ))
+    })?;
+    let pgid = pid;
+
+    Ok(SpawnedChild { pid, pgid, child })
+}
+
 fn build_ralph_auto_command(
     ralph_bin: &Path,
     worktree_path: &Path,
@@ -78,6 +121,31 @@ fn build_ralph_auto_command(
 
     let mut cmd = Command::new(ralph_bin);
     cmd.args(["auto", "--idea", idea])
+        .current_dir(worktree_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::from(file_clone));
+    Ok(cmd)
+}
+
+fn build_ralph_run_command(
+    ralph_bin: &Path,
+    worktree_path: &Path,
+    project_id: &str,
+    log_file: &Path,
+) -> Result<Command> {
+    let file = std::fs::File::create(log_file).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to create log file {}: {err}",
+            log_file.display()
+        ))
+    })?;
+    let file_clone = file.try_clone().map_err(|err| {
+        RalphError::Orchestration(format!("failed to clone log file handle: {err}"))
+    })?;
+
+    let mut cmd = Command::new(ralph_bin);
+    cmd.args(["run", "--project", project_id])
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(file))
@@ -149,7 +217,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use super::build_ralph_auto_command;
+    use super::{build_ralph_auto_command, build_ralph_run_command};
 
     #[test]
     fn spawn_command_uses_long_idea_flag() {
@@ -168,6 +236,27 @@ mod tests {
                 OsStr::new("auto"),
                 OsStr::new("--idea"),
                 OsStr::new("implement feature"),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_run_command_uses_project_flag() {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let cmd = build_ralph_run_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "retry-project",
+            tmp.path(),
+        )
+        .expect("build command");
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("run"),
+                OsStr::new("--project"),
+                OsStr::new("retry-project"),
             ]
         );
     }

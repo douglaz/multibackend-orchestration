@@ -1,0 +1,17 @@
+{
+  "idea": "# Task: Preserve worktree and branch on daemon task failure\n\n## Summary\nModify the daemon to preserve worktrees and branches when tasks fail, enabling resumption from the point of failure instead of starting over. Currently, failed tasks have their worktrees deleted, losing all project state, loop artifacts, and uncommitted work.\n\n## Requirements\n\n1. **Conditional cleanup based on task status**\n   - Only cleanup worktree for `Completed` status (PR created, work on remote)\n   - Optionally cleanup for `Aborted` status\n   - **Never** cleanup worktree for `Failed` status\n   - Modify `complete_task()` in `src/daemon/mod.rs` to implement this logic\n\n2. **Graceful handling of existing worktrees**\n   - Update `create_worktree()` to handle pre-existing worktree+branch combinations\n   - Should detect and reuse existing worktrees rather than failing\n   - Related to issue #10\n\n3. **Project ID persistence for resumability**\n   - Persist the inner project ID in `tasks.json` task records\n   - Modify `dispatch_task()` to:\n     - Use `--project <id>` flag when resuming a failed task\n     - Use `--idea` flag only for new tasks\n   - Ensure project ID is captured during initial task execution\n\n4. **State preservation**\n   - Failed tasks must retain:\n     - Worktree directory (`.ralph/daemon/worktrees/<branch-name>/`)\n     - Git branch with all commits\n     - Project state (`.ralph/projects/<id>/state.json`)\n     - Loop artifacts (`.ralph/projects/<id>/loops/`)\n     - Any uncommitted changes\n\n## Acceptance Criteria\n\n- [ ] `complete_task()` skips `cleanup_worktree()` when status is `Failed`\n- [ ] `complete_task()` calls `cleanup_worktree()` when status is `Completed`\n- [ ] `create_worktree()` handles pre-existing worktree/branch without errors\n- [ ] `tasks.json` schema includes `project_id` field for each task\n- [ ] `dispatch_task()` uses `--project <id>` when retrying a failed task\n- [ ] `dispatch_task()` uses `--idea` for new tasks\n- [ ] Failed task worktrees remain on disk at `.ralph/daemon/worktrees/<branch>/`\n- [ ] Retrying a failed task resumes from the last completed loop iteration\n- [ ] Test: task fails at loop 3, retry continues from loop 3 (not loop 1)",
+  "idea_hash": "03eb8a23de47",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-14T22:18:57Z",
+  "completed_at": "2026-02-14T22:28:28Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 179.47739325,
+  "review_times_secs": [
+    198.029625623
+  ],
+  "revision_times_secs": [
+    193.731672033
+  ]
+}

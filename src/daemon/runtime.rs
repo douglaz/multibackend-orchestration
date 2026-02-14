@@ -22,7 +22,7 @@ pub struct DaemonRuntimeConfig {
     pub labels: Vec<String>,
     /// When true, the daemon runs exactly one iteration and exits.
     pub single_iteration: bool,
-    /// Path to the ralph binary for spawning `ralph auto` children.
+    /// Path to the ralph binary for spawning daemon child commands.
     pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
     pub repo_root: PathBuf,
@@ -52,6 +52,14 @@ where
         .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
 }
 
+/// Terminal cleanup policy:
+/// - completed: cleanup worktree
+/// - aborted: cleanup worktree
+/// - failed: preserve worktree for retry
+fn should_cleanup_worktree(state: &TaskState) -> bool {
+    matches!(state, TaskState::Completed | TaskState::Aborted)
+}
+
 /// Return the log file path for a task.
 fn task_log_path(store: &TaskStore, task_id: &str) -> PathBuf {
     store
@@ -67,7 +75,10 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
     if let Ok(content) = std::fs::read_to_string(log_file) {
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(50);
-        eprintln!("--- last output from {task_id} ({}) ---", log_file.display());
+        eprintln!(
+            "--- last output from {task_id} ({}) ---",
+            log_file.display()
+        );
         for line in &lines[start..] {
             eprintln!("  {line}");
         }
@@ -147,13 +158,14 @@ fn reconcile_tasks(store: &TaskStore) -> Result<()> {
 
 /// Reconcile orphaned/stale worktrees at startup.
 ///
-/// Only non-terminal task IDs are considered "active" — worktrees for
-/// terminal tasks (completed, failed, aborted) are cleaned up.
+/// Only tasks whose state should *not* be cleaned are considered "active".
+/// This preserves failed-task worktrees for retry while still cleaning up
+/// completed/aborted worktrees.
 fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
     let tasks = store.load()?;
     let active_ids: Vec<String> = tasks
         .iter()
-        .filter(|t| !t.state.is_terminal())
+        .filter(|t| !should_cleanup_worktree(&t.state))
         .map(|t| t.task_id.clone())
         .collect();
     let workspace_root = store
@@ -161,11 +173,7 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .parent()
         .and_then(|p| p.parent())
         .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
-    worktree::reconcile_worktrees(
-        &config.repo_root,
-        workspace_root,
-        &active_ids,
-    );
+    worktree::reconcile_worktrees(&config.repo_root, workspace_root, &active_ids);
     Ok(())
 }
 
@@ -284,6 +292,7 @@ async fn poll_and_claim(
                 issue.title,
                 issue.body.unwrap_or_default()
             )),
+            project_id: None,
             child_pid: None,
             child_pgid: None,
             branch: Some(format!("ralph/daemon/{task_id}")),
@@ -354,8 +363,7 @@ async fn dispatch_task(
         None => {
             let store_clone = store.clone();
             let task_clone = task.clone();
-            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone))
-                .await?
+            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone)).await?
         }
     };
 
@@ -409,12 +417,28 @@ async fn dispatch_task(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Spawn child process
+    // Spawn child process. Resume dispatch is driven only by persisted
+    // task.project_id; discovered workspace context is intentionally ignored.
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
+        match task.project_id.as_deref() {
+            Some(project_id) => {
+                eprintln!(
+                    "dispatch: task {} has project_id={project_id}; using ralph run --project",
+                    task.task_id
+                );
+                process::spawn_ralph_run(&ralph_bin, &wt, project_id, &log_path).await?
+            }
+            None => {
+                eprintln!(
+                    "dispatch: task {} has no project_id; using ralph auto --idea (fresh dispatch)",
+                    task.task_id
+                );
+                process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
+            }
+        }
     };
 
     // CAS-style update: only transition to in_progress if task is not
@@ -455,8 +479,8 @@ async fn dispatch_task(
     };
 
     if !activated {
-        // Task was already terminal — kill the just-spawned child and
-        // clean up the worktree.
+        // Task was already terminal — kill the just-spawned child and then
+        // apply terminal-state cleanup policy from persisted state.
         let mut child = spawned.child;
         if let Err(err) = child.kill().await {
             eprintln!(
@@ -470,19 +494,43 @@ async fn dispatch_task(
                 task.task_id, pid
             );
         }
-        let repo_root = config.repo_root.clone();
-        let tid = task.task_id.clone();
-        // Best-effort worktree cleanup
-        if let Err(err) = spawn_blocking_op(move || {
-            worktree::remove_worktree(&repo_root, &workspace_root, &tid);
-            Ok(())
-        })
-        .await
-        {
-            eprintln!(
-                "warning: failed to cleanup worktree for terminal-race task {}: {err}",
-                task.task_id
-            );
+
+        let persisted_state = {
+            let store = store.clone();
+            let tid = task.task_id.clone();
+            spawn_blocking_op(move || {
+                let tasks = store.load()?;
+                Ok(tasks
+                    .iter()
+                    .find(|t| t.task_id == tid)
+                    .map(|t| t.state.clone()))
+            })
+            .await
+        };
+
+        match persisted_state {
+            Ok(Some(state)) => {
+                cleanup_worktree_for_terminal_state(
+                    store,
+                    config,
+                    &task.task_id,
+                    &state,
+                    "dispatch-terminal-race",
+                )
+                .await;
+            }
+            Ok(None) => {
+                eprintln!(
+                    "warning: task {} missing from store after terminal-race; preserving worktree",
+                    task.task_id
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to re-read state for terminal-race task {}: {err}; preserving worktree",
+                    task.task_id
+                );
+            }
         }
         return Ok(());
     }
@@ -659,26 +707,33 @@ async fn complete_task(
                         "task {task_id_owned} child exited; already in terminal state: {}",
                         task.state
                     );
-                    return Ok(None);
+                    return Ok((None, Some(task.state.clone())));
                 }
 
                 task.state = ts;
                 task.child_pid = None;
                 task.child_pgid = None;
                 task.updated_at = now_iso8601();
-                Ok(Some(task.clone()))
+                Ok((Some(task.clone()), None))
             })
         })
         .await
     };
 
     let task = match updated {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            // Was already terminal — still cleanup worktree
-            cleanup_worktree(store, config, task_id).await;
+        Ok((Some(t), _)) => t,
+        Ok((None, Some(existing_state))) => {
+            cleanup_worktree_for_terminal_state(
+                store,
+                config,
+                task_id,
+                &existing_state,
+                "complete-task-already-terminal",
+            )
+            .await;
             return;
         }
+        Ok((None, None)) => return,
         Err(err) => {
             eprintln!("warning: failed to update task {task_id} to terminal state: {err}");
             return;
@@ -733,8 +788,7 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             let wt = wt_path.clone();
-            if let Ok(actual_branch) =
-                spawn_blocking_op(move || github::current_branch(&wt)).await
+            if let Ok(actual_branch) = spawn_blocking_op(move || github::current_branch(&wt)).await
             {
                 if task.branch.as_deref() != Some(&actual_branch) {
                     eprintln!(
@@ -773,14 +827,36 @@ async fn complete_task(
         }
     }
 
-    // Cleanup worktree (best-effort)
-    cleanup_worktree(store, config, task_id).await;
+    cleanup_worktree_for_terminal_state(
+        store,
+        config,
+        task_id,
+        &terminal_state,
+        "complete-task-terminal",
+    )
+    .await;
 
     let log_path = task_log_path(store, task_id);
     eprintln!(
         "task {task_id} completed with state: {terminal_state} (log: {})",
         log_path.display()
     );
+}
+
+async fn cleanup_worktree_for_terminal_state(
+    store: &TaskStore,
+    config: &DaemonRuntimeConfig,
+    task_id: &str,
+    state: &TaskState,
+    context: &str,
+) {
+    if should_cleanup_worktree(state) {
+        eprintln!("{context}: cleaning worktree for {task_id} (state={state})");
+        cleanup_worktree(store, config, task_id).await;
+        return;
+    }
+
+    eprintln!("{context}: preserving worktree for {task_id} (state={state})");
 }
 
 /// Remove the worktree for a task (best-effort).
@@ -826,10 +902,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return;
             }
         }
@@ -846,14 +919,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             task.task_id
         );
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                "no-diff",
-                &body,
-            )
+            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
         })
         .await
         {

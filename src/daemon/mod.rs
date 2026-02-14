@@ -60,6 +60,8 @@ pub struct DaemonTask {
     pub repo: String,
     #[serde(default)]
     pub raw_idea: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub child_pid: Option<u32>,
     pub child_pgid: Option<u32>,
     pub branch: Option<String>,
@@ -301,6 +303,7 @@ mod tests {
             owner: "acme".to_owned(),
             repo: "widgets".to_owned(),
             raw_idea: None,
+            project_id: None,
             child_pid: None,
             child_pgid: None,
             branch: None,
@@ -349,12 +352,14 @@ mod tests {
 
         let task: DaemonTask = serde_json::from_str(raw).expect("legacy task json should parse");
         assert!(task.raw_idea.is_none());
+        assert!(task.project_id.is_none());
     }
 
     #[test]
     fn daemon_task_round_trips_with_raw_idea() {
         let mut original = task("acme-widgets-2", 2);
         original.raw_idea = Some("Issue title\n\nIssue body".to_owned());
+        original.project_id = Some("widgets-retry".to_owned());
 
         let raw = serde_json::to_string(&original).expect("serialize task");
         let decoded: DaemonTask = serde_json::from_str(&raw).expect("deserialize task");
@@ -362,5 +367,6 @@ mod tests {
             decoded.raw_idea.as_deref(),
             Some("Issue title\n\nIssue body")
         );
+        assert_eq!(decoded.project_id.as_deref(), Some("widgets-retry"));
     }
 }
