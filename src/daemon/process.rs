@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use nix::errno::Errno;
+use nix::sys::signal::{kill, killpg, Signal};
+use nix::unistd::Pid;
 use tokio::process::Command;
 
 use crate::error::RalphError;
@@ -87,38 +90,62 @@ fn build_ralph_auto_command(
 
 /// Check if a process with the given PID exists.
 pub fn pid_exists(pid: u32) -> bool {
-    // Use kill(pid, 0) to probe without sending a signal.
-    // SAFETY: kill with signal 0 just checks for process existence.
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    if pid <= 1 {
+        return false;
+    }
+
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return false;
+    };
+
+    match kill(Pid::from_raw(raw_pid), None) {
+        Ok(_) => true,
+        Err(Errno::EPERM) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => false,
+    }
 }
 
 /// Terminate a process group gracefully (SIGTERM), escalating to SIGKILL
 /// after the given timeout.
 pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
-    if pgid == 0 {
+    if pgid <= 1 {
         return;
     }
 
-    let neg_pgid = -(pgid as i32);
+    let Ok(raw_pgid) = i32::try_from(pgid) else {
+        return;
+    };
+    let pgid = Pid::from_raw(raw_pgid);
+    let neg_pgid = Pid::from_raw(-raw_pgid);
 
     // Check if the group exists
-    // SAFETY: kill with signal 0 just checks for process existence.
-    let exists = unsafe { libc::kill(neg_pgid, 0) == 0 };
+    let exists = match kill(neg_pgid, None) {
+        Ok(_) => true,
+        Err(Errno::EPERM) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => false,
+    };
     if !exists {
         return;
     }
 
     // Send SIGTERM to the process group
-    // SAFETY: sending SIGTERM to a known process group.
-    unsafe {
-        libc::kill(neg_pgid, libc::SIGTERM);
+    if let Err(err) = killpg(pgid, Signal::SIGTERM) {
+        if err == Errno::ESRCH {
+            return;
+        }
     }
 
     // Wait for processes to exit
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        // SAFETY: kill with signal 0 checks existence.
-        let still_exists = unsafe { libc::kill(neg_pgid, 0) == 0 };
+        let still_exists = match kill(neg_pgid, None) {
+            Ok(_) => true,
+            Err(Errno::EPERM) => true,
+            Err(Errno::ESRCH) => false,
+            Err(_) => false,
+        };
         if !still_exists {
             return;
         }
@@ -126,9 +153,10 @@ pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
     }
 
     // Escalate to SIGKILL
-    // SAFETY: sending SIGKILL to a known process group.
-    unsafe {
-        libc::kill(neg_pgid, libc::SIGKILL);
+    if let Err(err) = killpg(pgid, Signal::SIGKILL) {
+        if err == Errno::ESRCH {
+            return;
+        }
     }
 }
 
@@ -148,8 +176,12 @@ pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
 mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
 
     use super::build_ralph_auto_command;
+    #[cfg(unix)]
+    use super::{pid_exists, terminate_process_group_blocking};
 
     #[test]
     fn spawn_command_uses_long_idea_flag() {
@@ -170,5 +202,80 @@ mod tests {
                 OsStr::new("implement feature"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_exists_self() {
+        assert!(pid_exists(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_exists_bogus() {
+        assert!(!pid_exists(u32::MAX - 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_exists_rejects_low_pids() {
+        assert!(!pid_exists(0));
+        assert!(!pid_exists(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_process_group_noop_for_low_pgid() {
+        terminate_process_group_blocking(0, Duration::from_millis(50));
+        terminate_process_group_blocking(1, Duration::from_millis(50));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_process_group_dead_pgid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn child");
+        let non_group_id = child.id();
+
+        terminate_process_group_blocking(non_group_id, Duration::from_millis(50));
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "child should still be running"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_terminate_spawned_process_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn process-group leader");
+        let pgid = child.id();
+
+        terminate_process_group_blocking(pgid, Duration::from_secs(2));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("timed out waiting for child to exit");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 }
