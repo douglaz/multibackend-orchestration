@@ -36,6 +36,8 @@ pub struct DaemonStartArgs {
     /// Used by conformance tests for deterministic behavior.
     #[arg(long)]
     pub single_iteration: bool,
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Args)]
@@ -108,6 +110,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         max_concurrent,
         labels,
         single_iteration: args.single_iteration,
+        verbose: args.verbose,
         ralph_bin,
         repo_root,
         refinement_enabled: daemon_cfg.refinement_enabled,

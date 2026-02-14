@@ -1,0 +1,48 @@
+{
+  "project_id": "add-verbose-logging-flag-to-daemon-start",
+  "project_name": "# Add Verbose Logging Flag to Daemon Start Command\n\nAdd a `-",
+  "created_at": "2026-02-14T14:04:29.769935994Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "53af1e542152737f3f4f11536228aa4643a1fecc743d9b9e61c6f1052f73bbe7",
+  "prompt_hash_at_loop_start": "53af1e542152737f3f4f11536228aa4643a1fecc743d9b9e61c6f1052f73bbe7",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "add-verbose-flag-to-daemon-start",
+      "feature_name": "Add --verbose Flag to Daemon Start",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-add-verbose-flag-to-daemon-start/20260214140656-spec.md",
+        "impl_notes": "loops/001-add-verbose-flag-to-daemon-start/20260214141243-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-add-verbose-flag-to-daemon-start/20260214142148-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-add-verbose-flag-to-daemon-start/20260214142116-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T14:06:56.369171898Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

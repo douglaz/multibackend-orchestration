@@ -16,6 +16,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: cli_parse_start_status_abort,
         },
         ConformanceTest {
+            name: "daemon::verbose_flag_accepted_by_start",
+            func: verbose_flag_accepted_by_start,
+        },
+        ConformanceTest {
+            name: "daemon::verbose_flag_rejected_by_status_and_abort",
+            func: verbose_flag_rejected_by_status_and_abort,
+        },
+        ConformanceTest {
+            name: "daemon::verbose_output_present_when_enabled",
+            func: verbose_output_present_when_enabled,
+        },
+        ConformanceTest {
+            name: "daemon::verbose_output_absent_when_disabled",
+            func: verbose_output_absent_when_disabled,
+        },
+        ConformanceTest {
             name: "daemon::config_merge_and_defaults",
             func: config_merge_and_defaults,
         },
@@ -199,6 +215,125 @@ fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
             combined_output(&abort).contains("no task found for issue number 123"),
             "expected missing task message, got:\n{}",
             combined_output(&abort)
+        );
+    })
+}
+
+fn verbose_flag_accepted_by_start(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--verbose",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
+                &[("PATH", &gh_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+    })
+}
+
+fn verbose_flag_rejected_by_status_and_abort(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let status = h
+            .ralph(["daemon", "status", "--verbose"])
+            .expect("daemon status should execute");
+        let status_code = status.status.code().unwrap_or(-1);
+        assert_ne!(
+            status_code,
+            0,
+            "daemon status --verbose should fail, got stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert_invalid_verbose_flag_error(&String::from_utf8_lossy(&status.stderr));
+
+        let abort = h
+            .ralph(["daemon", "abort", "--verbose", "dummy-id"])
+            .expect("daemon abort should execute");
+        let abort_code = abort.status.code().unwrap_or(-1);
+        assert_ne!(
+            abort_code,
+            0,
+            "daemon abort --verbose should fail, got stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&abort.stdout),
+            String::from_utf8_lossy(&abort.stderr)
+        );
+        assert_invalid_verbose_flag_error(&String::from_utf8_lossy(&abort.stderr));
+    })
+}
+
+fn verbose_output_present_when_enabled(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--verbose",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
+                &[("PATH", &gh_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let verbose_lines: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("verbose:"))
+            .collect();
+        assert!(
+            !verbose_lines.is_empty(),
+            "expected at least one verbose: line in stderr, got:\n{stderr}"
+        );
+        assert!(
+            verbose_lines.iter().any(|line| {
+                line.contains("poll-cycle")
+                    && line.contains("iteration=")
+                    && line.contains("active_children=")
+                    && line.contains("available_slots=")
+                    && line.contains("planned_sleep_seconds=")
+            }),
+            "expected a poll-cycle verbose line with all required fields, got:\n{stderr}"
+        );
+    })
+}
+
+fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let output = h
+            .ralph_env(
+                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
+                &[("PATH", &gh_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let verbose_count = stderr
+            .lines()
+            .filter(|line| line.starts_with("verbose:"))
+            .count();
+        assert_eq!(
+            verbose_count, 0,
+            "expected zero verbose: lines when flag is disabled, got:\n{stderr}"
         );
     })
 }
@@ -3253,6 +3388,21 @@ fn write_daemon_mock_ralph_with_commit(h: &RalphHarness) -> crate::Result<String
 /// Write the mock ralph that switches branch and creates a commit (for branch resolution tests).
 fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result<String> {
     write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_with_branch_switch_script())
+}
+
+fn assert_invalid_verbose_flag_error(stderr: &str) {
+    let lowered = stderr.to_lowercase();
+    assert!(
+        stderr.contains("--verbose"),
+        "expected clap error to reference --verbose, got:\n{stderr}"
+    );
+    assert!(
+        lowered.contains("unexpected")
+            || lowered.contains("unrecognized")
+            || lowered.contains("unknown")
+            || lowered.contains("found argument"),
+        "expected clap invalid-flag wording in stderr, got:\n{stderr}"
+    );
 }
 
 fn read_count_file(path: &std::path::Path) -> u32 {
