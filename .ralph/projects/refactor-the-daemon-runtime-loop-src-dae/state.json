@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "1ac3248369731bbb6403c1b3df35fcb4ca634dafd283ff949d3b291c555d8f2e",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "async-cli-propagation-and-spawn-blocking-helper",
       "feature_name": "Async CLI Propagation and spawn_blocking Helper",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -45,8 +45,45 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "a1826d71f98b28fda77ecce0fcf7af193f5e161b",
       "started_at": "2026-02-14T03:40:14.696337018Z",
+      "completed_at": "2026-02-14T03:55:01.366626131Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "async-runtime-loop-internals-and-async-prompt",
+      "feature_name": "Async Runtime Loop Internals and Async Prompt Refinement",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214035637-spec.md",
+        "impl_notes": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040149-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040726-review-001-feedback.md",
+            "response": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214041327-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214041742-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040612-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T03:56:37.776571088Z",
       "completed_at": null
     }
   ],

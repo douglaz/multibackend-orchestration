@@ -57,13 +57,8 @@ fn validate_output(output: &str) -> Result<String> {
 
 /// Refine raw issue text into a structured ralph auto prompt.
 ///
-/// The daemon's synchronous dispatch code runs inside the tokio runtime
-/// established by `#[tokio::main]`. We use `block_in_place` to tell the
-/// scheduler this thread will block, then `Handle::current().block_on()`
-/// to drive the async backend execution. This avoids creating a nested
-/// runtime (which would panic) while safely blocking within the existing
-/// multi-threaded runtime.
-pub fn refine_prompt(
+/// Awaits backend execution directly on the async runtime.
+pub async fn refine_prompt(
     raw_idea: &str,
     backend_spec: &str,
     global_config: &GlobalConfig,
@@ -71,9 +66,7 @@ pub fn refine_prompt(
     let backend = create_backend(backend_spec, global_config)?;
     let prompt = build_refinement_prompt(raw_idea);
 
-    let raw_output = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(backend.execute(&prompt))
-    })?;
+    let raw_output = backend.execute(&prompt).await?;
 
     validate_output(&raw_output)
 }
