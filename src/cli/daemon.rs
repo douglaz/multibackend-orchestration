@@ -56,6 +56,7 @@ pub async fn execute(args: DaemonArgs) -> Result<()> {
 }
 
 async fn execute_start(args: DaemonStartArgs) -> Result<()> {
+    preflight_check_gh()?;
     let workspace = Workspace::discover()?;
     let daemon_cfg = effective_daemon_config(&workspace)?;
 
@@ -214,6 +215,23 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
         )));
     }
     Ok((owner, name))
+}
+
+fn preflight_check_gh() -> Result<()> {
+    match Command::new("gh").arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(RalphError::Validation(
+                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+                 post comments, and create PRs. Install it from https://cli.github.com/ \
+                 or run inside `nix develop`."
+                    .to_owned(),
+            ))
+        }
+        Err(err) => Err(RalphError::Validation(format!(
+            "gh (GitHub CLI) check failed: {err}"
+        ))),
+    }
 }
 
 fn resolve_repo_from_gh() -> Result<String> {
