@@ -118,6 +118,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: runtime_activation_failed_task_preserved,
         },
         ConformanceTest {
+            name: "daemon::runtime_failed_worktree_preserved_and_reused_on_retry",
+            func: runtime_failed_worktree_preserved_and_reused_on_retry,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_aborted_task_worktree_cleaned",
+            func: runtime_aborted_task_worktree_cleaned,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_succeeded_task_worktree_cleaned",
+            func: runtime_succeeded_task_worktree_cleaned,
+        },
+        ConformanceTest {
             name: "daemon::runtime_fresh_dispatch_ignores_discovered_project",
             func: runtime_fresh_dispatch_ignores_discovered_project,
         },
@@ -2210,28 +2222,36 @@ esac
     })
 }
 
-/// Test that startup worktree reconciliation preserves failed tasks.
+/// Test the dispatch-time activation CAS race when persisted state flips to
+/// failed after child spawn but before CAS activation.
 ///
 /// Verifies:
-/// - Failed task IDs are treated as active during reconcile
-/// - Existing failed-task worktree directory is not removed on startup
+/// - Task starts in pending
+/// - Persisted task state is flipped to failed after spawn and before CAS check
+/// - Dispatch CAS-failure path is exercised (`already terminal (failed)`)
+/// - Failed-state policy preserves worktree
 fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-351";
+        let project_id = "retry-proj-351";
+        let issue_number = 351u32;
 
         write_tasks(
             h,
             vec![{
                 let mut t = task_json(
-                    "acme-widgets-351",
-                    "failed",
-                    351,
+                    task_id,
+                    "pending",
+                    issue_number,
                     "acme",
                     "widgets",
                     None,
                     None,
                 );
-                t["project_id"] = json!("retry-proj-351");
+                t["project_id"] = json!(project_id);
+                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
                 t
             }],
         )
@@ -2242,12 +2262,102 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
             .join(".ralph")
             .join("daemon")
             .join("worktrees")
-            .join("acme-widgets-351");
-        fs::create_dir_all(&wt_path).expect("create worktree path");
-        fs::write(wt_path.join("marker.txt"), "preserve").expect("write marker");
+            .join(task_id);
+        let tasks_path_str = tasks_path(h).to_string_lossy().into_owned();
+        let spawn_marker = h.temp_dir.path().join("cas_spawned.marker");
+        let spawn_marker_str = spawn_marker.to_string_lossy().into_owned();
+        let lock_ready = h.temp_dir.path().join("cas_lock_ready.marker");
+        let lock_ready_str = lock_ready.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        want_comments=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+          if [ "$arg" = "comments" ]; then want_comments=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"cas","body":"cas"}}'
+          exit 0
+        fi
+        if [ "$want_comments" = "1" ]; then
+          printf '[]'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        (
+          exec 9>"{tasks_path_str}"
+          flock -x 9
+          printf 'locked' > "{lock_ready_str}"
+          for i in $(seq 1 500); do
+            [ -f "{spawn_marker_str}" ] && break
+            sleep 0.01
+          done
+          cat > "{tasks_path_str}" <<'JSON'
+[
+  {{
+    "task_id": "{task_id}",
+    "state": "failed",
+    "issue_number": {issue_number},
+    "owner": "acme",
+    "repo": "widgets",
+    "raw_idea": "CAS activation race task\n\nForce persisted failed before CAS.",
+    "project_id": "{project_id}",
+    "child_pid": null,
+    "child_pgid": null,
+    "branch": null,
+    "pr_url": null,
+    "created_at": "2026-02-13T00:00:00Z",
+    "updated_at": "2026-02-14T00:00:00Z"
+  }}
+]
+JSON
+          flock -u 9
+        ) &
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        for i in $(seq 1 500); do
+          [ -f "{lock_ready_str}" ] && exit 0
+          sleep 0.01
+        done
+        echo "lock helper did not initialize" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+[ "$1" = "run" ] || exit 61
+[ "$2" = "--project" ] || exit 62
+[ "$3" = "{project_id}" ] || exit 63
+printf 'spawned' > "{spawn_marker_str}"
+sleep 30
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
         let output = h
             .ralph_env(
                 [
@@ -2262,13 +2372,285 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            wt_path.exists(),
-            "failed-task worktree must be preserved on startup reconcile"
+            stderr.contains("already terminal (failed)"),
+            "expected dispatch CAS-failure log for failed state, stderr:\n{stderr}"
         );
         assert!(
-            wt_path.join("marker.txt").exists(),
-            "failed-task marker should still exist"
+            stderr.contains("dispatch-terminal-race: preserving worktree for acme-widgets-351"),
+            "expected failed-state preserve log from terminal-race cleanup path, stderr:\n{stderr}"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("failed"));
+        assert_eq!(task["project_id"], json!(project_id));
+
+        assert!(
+            wt_path.exists(),
+            "failed-task worktree must be preserved on dispatch CAS-failure path"
+        );
+    })
+}
+
+/// Test retry dispatch for a previously failed task reuses the preserved
+/// worktree and routes through `ralph run --project`.
+///
+/// Verifies:
+/// - Task seeded as failed with preserved worktree and project_id
+/// - Task reset to pending to trigger retry dispatch
+/// - Existing worktree directory is reused (marker survives)
+/// - Retry dispatch uses `ralph run --project <id>`
+fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-360";
+        let project_id = "retry-proj-360";
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "failed", 360, "acme", "widgets", None, None);
+                t["project_id"] = json!(project_id);
+                t["raw_idea"] = json!("Retry task\n\nPreserved worktree should be reused.");
+                t
+            }],
+        )
+        .expect("write failed task failed");
+
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join(task_id);
+        fs::create_dir_all(&wt_path).expect("create preserved worktree");
+        let preserved_marker = wt_path.join("preserved-marker.txt");
+        fs::write(&preserved_marker, "from-initial-failure").expect("write preserved marker");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "pending", 360, "acme", "widgets", None, None);
+                t["project_id"] = json!(project_id);
+                t["raw_idea"] = json!("Retry task\n\nPreserved worktree should be reused.");
+                t
+            }],
+        )
+        .expect("write retry pending task failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let args_log = h.temp_dir.path().join("retry_dispatch_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let wt_path_str = wt_path.to_string_lossy().into_owned();
+        let preserved_marker_str = preserved_marker.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    printf '%s\n' "$3" >> "{args_log_str}"
+    [ "$2" = "--project" ] || exit 71
+    [ "$3" = "{project_id}" ] || exit 72
+    [ -f "{preserved_marker_str}" ] || exit 73
+    printf 'retry-reused' > "{wt_path_str}/retry-marker.txt"
+    exit 1
+    ;;
+  auto)
+    echo "unexpected auto dispatch" >&2
+    exit 74
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 75
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read retry args log");
+        assert_eq!(
+            args,
+            format!("run\n--project\n{project_id}\n"),
+            "retry dispatch should use run --project"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("failed"));
+        assert_eq!(task["project_id"], json!(project_id));
+
+        assert!(
+            wt_path.exists(),
+            "failed retry should preserve worktree at {}",
+            wt_path.display()
+        );
+        assert!(
+            preserved_marker.exists(),
+            "preserved worktree marker must survive retry dispatch"
+        );
+        assert!(
+            wt_path.join("retry-marker.txt").exists(),
+            "retry run should execute inside the reused worktree"
+        );
+    })
+}
+
+/// Test that an aborted terminal task has its worktree cleaned.
+///
+/// Verifies:
+/// - Task is transitioned to aborted terminal state
+/// - Existing task worktree is removed on daemon startup reconciliation
+fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-361";
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "pending", 361, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Abort cleanup task\n\nEnsure worktree is removed.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let abort_output = h
+            .ralph(["daemon", "abort", task_id])
+            .expect("daemon abort should execute");
+        assert_exit_code(&abort_output, 0);
+
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join(task_id);
+        fs::create_dir_all(&wt_path).expect("create aborted worktree");
+        fs::write(wt_path.join("marker.txt"), "cleanup-me").expect("write aborted marker");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("aborted"));
+
+        assert!(
+            !wt_path.exists(),
+            "aborted task worktree should be cleaned at {}",
+            wt_path.display()
+        );
+    })
+}
+
+/// Test that a succeeded/completed task has its worktree cleaned.
+///
+/// Verifies:
+/// - Successful child exit transitions task to completed
+/// - Completed-state cleanup removes task worktree
+fn runtime_succeeded_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-362";
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "pending", 362, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Success cleanup task\n\nEnsure worktree is removed.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_script = r#"#!/bin/sh
+case "$1" in
+  auto)
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 82
+    ;;
+esac
+"#;
+        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("completed"));
+
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join(task_id);
+        assert!(
+            !wt_path.exists(),
+            "completed task worktree should be cleaned at {}",
+            wt_path.display()
         );
     })
 }
