@@ -51,8 +51,8 @@ fn test_init_generates_valid_config() {
     // Verify backends section
     assert_eq!(workspace.config.backends.claude.command, "claude");
     assert_eq!(workspace.config.backends.codex.command, "codex");
-    assert_eq!(workspace.config.backends.claude.timeout_seconds, 600);
-    assert_eq!(workspace.config.backends.codex.timeout_seconds, 600);
+    assert_eq!(workspace.config.backends.claude.timeout_seconds, 7200);
+    assert_eq!(workspace.config.backends.codex.timeout_seconds, 7200);
 
     // Verify workflow section
     assert_eq!(workspace.config.workflow.max_review_iterations, 30);
