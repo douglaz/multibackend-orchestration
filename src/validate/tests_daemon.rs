@@ -131,6 +131,11 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_branch_unchanged_no_switch_log",
             func: runtime_branch_unchanged_no_switch_log,
         },
+        // --- Child Output Capture Tests ---
+        ConformanceTest {
+            name: "daemon::runtime_child_output_captured_in_log",
+            func: runtime_child_output_captured_in_log,
+        },
     ]
 }
 
@@ -3059,6 +3064,111 @@ exit 1
             task["pr_url"],
             json!("https://github.com/acme/widgets/pull/55"),
             "pr_url should be populated"
+        );
+    })
+}
+
+// =============================================================================
+// Child Output Capture Tests
+// =============================================================================
+
+/// Verify that child stdout/stderr is captured to a log file at
+/// `.ralph/daemon/logs/{task_id}.log`, surviving worktree cleanup.
+fn runtime_child_output_captured_in_log(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+
+        // Mock ralph that prints known output to stdout and stderr
+        let ralph_script = r#"#!/bin/sh
+case "$1" in
+  auto)
+    echo "STDOUT_MARKER_LINE"
+    echo "STDERR_MARKER_LINE" >&2
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"#;
+        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-300",
+                    "pending",
+                    300,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-300");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify log file exists
+        let log_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("logs")
+            .join("acme-widgets-300.log");
+        assert!(
+            log_path.exists(),
+            "log file should exist at {}",
+            log_path.display()
+        );
+
+        // Verify log contains child output
+        let log_content = fs::read_to_string(&log_path).expect("read log file");
+        assert!(
+            log_content.contains("STDOUT_MARKER_LINE"),
+            "log should contain stdout from child, got:\n{log_content}"
+        );
+        assert!(
+            log_content.contains("STDERR_MARKER_LINE"),
+            "log should contain stderr from child, got:\n{log_content}"
+        );
+
+        // Verify task completed
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-300")
+            .unwrap();
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "task should be completed"
+        );
+
+        // Verify daemon stderr mentions the log path
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("acme-widgets-300.log"),
+            "daemon stderr should mention the log file path, got:\n{stderr}"
         );
     })
 }

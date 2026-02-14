@@ -18,12 +18,16 @@ pub struct SpawnedChild {
 /// Uses an in-process `libc::setsid()` call via `CommandExt::pre_exec` so the
 /// child gets its own session and process group without depending on an
 /// external `setsid` binary being available on PATH.
+///
+/// Child stdout and stderr are redirected to `log_file` so output is preserved
+/// after worktree cleanup.
 pub async fn spawn_ralph_auto(
     ralph_bin: &Path,
     worktree_path: &Path,
     idea: &str,
+    log_file: &Path,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea);
+    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
@@ -56,14 +60,29 @@ pub async fn spawn_ralph_auto(
     Ok(SpawnedChild { pid, pgid, child })
 }
 
-fn build_ralph_auto_command(ralph_bin: &Path, worktree_path: &Path, idea: &str) -> Command {
+fn build_ralph_auto_command(
+    ralph_bin: &Path,
+    worktree_path: &Path,
+    idea: &str,
+    log_file: &Path,
+) -> Result<Command> {
+    let file = std::fs::File::create(log_file).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to create log file {}: {err}",
+            log_file.display()
+        ))
+    })?;
+    let file_clone = file.try_clone().map_err(|err| {
+        RalphError::Orchestration(format!("failed to clone log file handle: {err}"))
+    })?;
+
     let mut cmd = Command::new(ralph_bin);
     cmd.args(["auto", "--idea", idea])
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-    cmd
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::from(file_clone));
+    Ok(cmd)
 }
 
 /// Check if a process with the given PID exists.
@@ -134,11 +153,14 @@ mod tests {
 
     #[test]
     fn spawn_command_uses_long_idea_flag() {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
         let cmd = build_ralph_auto_command(
             Path::new("/tmp/ralph"),
             Path::new("/tmp/worktree"),
             "implement feature",
-        );
+            tmp.path(),
+        )
+        .expect("build command");
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
         assert_eq!(
             args,

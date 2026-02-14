@@ -39,6 +39,7 @@ struct ActiveChild {
     pid: u32,
     pgid: u32,
     child: tokio::process::Child,
+    log_file: PathBuf,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -49,6 +50,29 @@ where
     tokio::task::spawn_blocking(op)
         .await
         .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
+}
+
+/// Return the log file path for a task.
+fn task_log_path(store: &TaskStore, task_id: &str) -> PathBuf {
+    store
+        .path()
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("logs")
+        .join(format!("{task_id}.log"))
+}
+
+/// Print the last 50 lines of a task's log file to stderr for diagnostics.
+fn print_log_tail(task_id: &str, log_file: &Path) {
+    if let Ok(content) = std::fs::read_to_string(log_file) {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(50);
+        eprintln!("--- last output from {task_id} ({}) ---", log_file.display());
+        for line in &lines[start..] {
+            eprintln!("  {line}");
+        }
+        eprintln!("--- end ---");
+    }
 }
 
 /// Run the daemon loop: reconcile, then poll/claim/dispatch/collect.
@@ -379,12 +403,18 @@ async fn dispatch_task(
         }
     }
 
+    // Create log file for child output
+    let log_path = task_log_path(store, &task.task_id);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
     // Spawn child process
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone).await?
+        process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
     };
 
     // CAS-style update: only transition to in_progress if task is not
@@ -463,6 +493,7 @@ async fn dispatch_task(
             pid: spawned.pid,
             pgid: spawned.pgid,
             child: spawned.child,
+            log_file: log_path,
         },
     );
 
@@ -539,6 +570,11 @@ async fn collect_children(
     }
 
     for (task_id, terminal_state) in finished {
+        if terminal_state == TaskState::Failed {
+            if let Some(active) = children.get(&task_id) {
+                print_log_tail(&task_id, &active.log_file);
+            }
+        }
         children.remove(&task_id);
         // complete_task uses an atomic CAS — if the task was already moved
         // to a terminal state (e.g. aborted), it will preserve that state
@@ -740,7 +776,11 @@ async fn complete_task(
     // Cleanup worktree (best-effort)
     cleanup_worktree(store, config, task_id).await;
 
-    eprintln!("task {task_id} completed with state: {terminal_state}");
+    let log_path = task_log_path(store, task_id);
+    eprintln!(
+        "task {task_id} completed with state: {terminal_state} (log: {})",
+        log_path.display()
+    );
 }
 
 /// Remove the worktree for a task (best-effort).
