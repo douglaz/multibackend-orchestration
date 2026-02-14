@@ -480,7 +480,7 @@ fn default_daemon_poll_seconds() -> u64 {
 }
 
 fn default_daemon_max_concurrent() -> u32 {
-    1
+    5
 }
 
 fn default_daemon_labels() -> Vec<String> {
@@ -649,7 +649,7 @@ command = "claude-custom"
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
-        assert_eq!(config.workspace.daemon_max_concurrent, 1);
+        assert_eq!(config.workspace.daemon_max_concurrent, 5);
         assert_eq!(
             config.workspace.daemon_labels,
             vec!["ralph:ready".to_owned()]
@@ -732,7 +732,7 @@ base_branch = "master"
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
-        assert_eq!(config.workspace.daemon_max_concurrent, 1);
+        assert_eq!(config.workspace.daemon_max_concurrent, 5);
         assert_eq!(
             config.workspace.daemon_labels,
             vec!["ralph:ready".to_owned()]

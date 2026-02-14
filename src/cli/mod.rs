@@ -572,6 +572,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_daemon_start_with_max_concurrent_one() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "daemon",
+            "start",
+            "--repo",
+            "acme/widgets",
+            "--max-concurrent",
+            "1",
+        ]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Start(start_args) = args.command else {
+            panic!("expected daemon start command");
+        };
+
+        assert_eq!(start_args.max_concurrent, Some(1));
+    }
+
+    #[test]
     fn parses_daemon_abort_with_task_selector() {
         let cli = Cli::parse_from(["ralph", "daemon", "abort", "acme-widgets-42"]);
         let Commands::Daemon(args) = cli.command else {

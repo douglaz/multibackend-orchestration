@@ -224,7 +224,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
         assert_exit_code(&default_start, 0);
         assert_stdout_contains(
             &default_start,
-            "poll=60s, max_concurrent=1, labels=ralph:ready",
+            "poll=60s, max_concurrent=5, labels=ralph:ready",
         );
 
         let poll_default = h
@@ -235,7 +235,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
         let conc_default = h
             .ralph_ok(["config", "get", "workspace.daemon_max_concurrent"])
             .expect("config get workspace.daemon_max_concurrent should succeed");
-        assert_eq!(conc_default.trim(), "1");
+        assert_eq!(conc_default.trim(), "5");
 
         let labels_default = h
             .ralph_ok(["config", "get", "workspace.daemon_labels"])
