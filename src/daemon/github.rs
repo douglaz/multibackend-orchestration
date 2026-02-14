@@ -296,6 +296,30 @@ pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str)
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Read the current branch name from a worktree.
+///
+/// The orchestrator may switch the worktree to a project-specific branch
+/// (e.g. `ralph/{project_id}`) during `ralph auto`, so the branch may differ
+/// from the one the daemon originally created (`ralph/daemon/{task_id}`).
+pub fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to read current branch: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git rev-parse --abbrev-ref HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// Push the current branch to the remote from a worktree.
 pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
     let output = Command::new("git")

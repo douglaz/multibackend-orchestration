@@ -683,6 +683,41 @@ async fn complete_task(
 
     // PR flow (only on success)
     if terminal_state == TaskState::Completed {
+        // The orchestrator may have switched the worktree to a different
+        // branch (e.g. ralph/{project_id}) from the one the daemon created
+        // (ralph/daemon/{task_id}). Resolve the actual branch so push and
+        // PR creation target the right ref.
+        let mut task = task.clone();
+        let workspace_root = store
+            .path()
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
+        if wt_path.exists() {
+            let wt = wt_path.clone();
+            if let Ok(actual_branch) =
+                spawn_blocking_op(move || github::current_branch(&wt)).await
+            {
+                if task.branch.as_deref() != Some(&actual_branch) {
+                    eprintln!(
+                        "task {task_id}: worktree branch changed from {:?} to {actual_branch}",
+                        task.branch
+                    );
+                    task.branch = Some(actual_branch.clone());
+                    let store_clone = store.clone();
+                    let tid = task_id.to_owned();
+                    let _ = spawn_blocking_op(move || {
+                        store_clone.update_task(&tid, |t| {
+                            t.branch = Some(actual_branch.clone());
+                            Ok(())
+                        })
+                    })
+                    .await;
+                }
+            }
+        }
         handle_pr_flow(store, config, &task).await;
     }
 
