@@ -4588,13 +4588,15 @@ exit 1
 }
 
 /// When an existing PR is found but `pr edit` fails, verify that the daemon
-/// does NOT fall through to `pr create` (no duplicate PR).
+/// does NOT fall through to `pr create` (no duplicate PR) and that the
+/// PR-flow error is surfaced deterministically in stderr.
 ///
 /// Verifies:
 /// - `pr edit` is attempted and fails
 /// - `pr create` is NOT called (no fallthrough)
-/// - Warning about edit failure appears in stderr
-/// - Task still reaches completed state
+/// - Edit failure error is propagated and logged by complete_task
+/// - PR-flow error message appears in stderr (deterministic error reporting)
+/// - Task still reaches completed state (label updates and cleanup proceed)
 fn runtime_pr_edit_failure_no_duplicate_create(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
@@ -4698,13 +4700,19 @@ exit 1
             "pr create must NOT be called when pr edit fails (no duplicate creation)"
         );
 
-        // Warning about edit failure in stderr
+        // PR-flow error is propagated and surfaced by complete_task
         assert!(
-            stderr.contains("failed to edit PR"),
-            "expected edit failure warning in stderr, got:\n{stderr}"
+            stderr.contains("PR flow failed for"),
+            "expected deterministic PR-flow error in stderr from complete_task, got:\n{stderr}"
         );
 
-        // Task should still reach completed state
+        // The underlying edit failure details should also appear
+        assert!(
+            stderr.contains("failed to edit PR"),
+            "expected underlying edit failure details in stderr, got:\n{stderr}"
+        );
+
+        // Task should still reach completed state (label updates and cleanup proceed)
         let tasks = load_tasks(h).expect("load_tasks failed");
         let task = tasks
             .iter()

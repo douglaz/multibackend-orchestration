@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "49d477afd0b5c57eaa152eddb7e72db3d4e62ac81038c6e04c571a26725b75fc",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 4,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -48,7 +48,7 @@
       "slug": "deterministic-pr-editcreate-flow-with-body-file",
       "feature_name": "Deterministic PR Edit/Create Flow with Body-File Safety",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -76,10 +76,60 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "4ef43aa9151340ff292645be54236d08247df470",
       "started_at": "2026-02-14T21:10:40.791885303Z",
+      "completed_at": "2026-02-14T21:32:48.689876523Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "propagate-existing-pr-edit-failures-as-runtime",
+      "feature_name": "Propagate Existing-PR Edit Failures as Runtime Errors",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/004-propagate-existing-pr-edit-failures-as-runtime/20260214214030-spec.md",
+        "impl_notes": "loops/004-propagate-existing-pr-edit-failures-as-runtime/20260214214337-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/004-propagate-existing-pr-edit-failures-as-runtime/20260214214923-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/004-propagate-existing-pr-edit-failures-as-runtime/20260214214859-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T21:40:30.901331510Z",
       "completed_at": null
     }
   ],
-  "completion_attempts": []
+  "completion_attempts": [
+    {
+      "loop_number": 3,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/003-completion/20260214213453-termination-request.md",
+        "verdict": "loops/003-completion/20260214213831-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-14T21:34:53.701500051Z",
+      "completed_at": "2026-02-14T21:38:31.160950886Z"
+    }
+  ]
 }
