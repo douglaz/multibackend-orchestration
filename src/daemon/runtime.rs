@@ -22,6 +22,8 @@ pub struct DaemonRuntimeConfig {
     pub labels: Vec<String>,
     /// When true, the daemon runs exactly one iteration and exits.
     pub single_iteration: bool,
+    /// When true, emit runtime diagnostics to stderr.
+    pub verbose: bool,
     /// Path to the ralph binary for spawning `ralph auto` children.
     pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
@@ -80,7 +82,8 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
     // Phase 1: Startup reconciliation
     {
         let store = store.clone();
-        spawn_blocking_op(move || reconcile_tasks(&store)).await?;
+        let verbose = config.verbose;
+        spawn_blocking_op(move || reconcile_tasks(&store, verbose)).await?;
     }
     {
         let store = store.clone();
@@ -90,17 +93,30 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
 
     // Phase 2: Main loop
     let mut children: HashMap<String, ActiveChild> = HashMap::new();
+    let mut iteration: u64 = 0;
 
     // Re-adopt pending tasks from reconciliation
     adopt_pending_tasks(store, config, &mut children).await?;
 
     loop {
+        iteration = iteration.saturating_add(1);
+
         // Collect finished children
         collect_children(store, config, &mut children).await;
 
         // Poll for new issues
         let active_count = children.len() as u32;
         let slots = config.max_concurrent.saturating_sub(active_count);
+        if config.verbose {
+            let planned_sleep_seconds = if config.single_iteration {
+                0
+            } else {
+                config.poll_seconds
+            };
+            eprintln!(
+                "verbose: poll-cycle iteration={iteration} active_children={active_count} available_slots={slots} planned_sleep_seconds={planned_sleep_seconds}"
+            );
+        }
 
         if slots > 0 {
             if let Err(err) = poll_and_claim(store, config, &mut children, slots).await {
@@ -126,7 +142,7 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
 
 /// Reconcile task state on startup: move all `in_progress` tasks to `pending`
 /// and clear their PID/PGID.
-fn reconcile_tasks(store: &TaskStore) -> Result<()> {
+fn reconcile_tasks(store: &TaskStore, verbose: bool) -> Result<()> {
     store.with_exclusive_tasks(|tasks| {
         let mut reconciled = 0u32;
         for task in tasks.iter_mut() {
@@ -136,6 +152,12 @@ fn reconcile_tasks(store: &TaskStore) -> Result<()> {
                 task.child_pgid = None;
                 task.updated_at = now_iso8601();
                 reconciled += 1;
+                if verbose {
+                    eprintln!(
+                        "verbose: reconcile reset task_id={} in_progress->pending",
+                        task.task_id
+                    );
+                }
             }
         }
         if reconciled > 0 {
@@ -191,6 +213,12 @@ async fn adopt_pending_tasks(
     for mut task in pending {
         if children.len() as u32 >= config.max_concurrent {
             break;
+        }
+        if config.verbose {
+            eprintln!(
+                "verbose: adopt pending task_id={} action=re-adopt",
+                task.task_id
+            );
         }
         if task.raw_idea.is_none() {
             let store_clone = store.clone();
@@ -447,6 +475,7 @@ async fn dispatch_task(
     let task_id_owned = task.task_id.clone();
     let pid = spawned.pid;
     let pgid = spawned.pgid;
+    let verbose = config.verbose;
     let activated = {
         let store = store.clone();
         let task_id_owned = task_id_owned.clone();
@@ -466,6 +495,12 @@ async fn dispatch_task(
                         "dispatch: task {task_id_owned} already terminal ({}); killing just-spawned child (pid={pid})",
                         t.state
                     );
+                    if verbose {
+                        eprintln!(
+                            "verbose: dispatch abort-race task_id={task_id_owned} terminal_state={} spawned_pid={pid}",
+                            t.state
+                        );
+                    }
                     return Ok(false);
                 }
 
@@ -473,6 +508,11 @@ async fn dispatch_task(
                 t.child_pid = Some(pid);
                 t.child_pgid = Some(pgid);
                 t.updated_at = crate::util::time::now_iso8601();
+                if verbose {
+                    eprintln!(
+                        "verbose: dispatch transition task_id={task_id_owned} pending->in_progress pid={pid}"
+                    );
+                }
                 Ok(true)
             })
         })
@@ -587,10 +627,21 @@ async fn collect_children(
     children: &mut HashMap<String, ActiveChild>,
 ) {
     let mut finished = Vec::new();
+    let mut still_running = 0u32;
 
     for (task_id, active) in children.iter_mut() {
         match active.child.try_wait() {
             Ok(Some(status)) => {
+                if config.verbose {
+                    let exit_code = status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "signal".to_owned());
+                    eprintln!(
+                        "verbose: child terminal task_id={task_id} pid={} exit_status={} exit_code={exit_code}",
+                        active.pid, status
+                    );
+                }
                 let terminal_state = if status.success() {
                     TaskState::Completed
                 } else {
@@ -599,7 +650,7 @@ async fn collect_children(
                 finished.push((task_id.clone(), terminal_state));
             }
             Ok(None) => {
-                // Still running
+                still_running = still_running.saturating_add(1);
             }
             Err(err) => {
                 eprintln!(
@@ -609,6 +660,10 @@ async fn collect_children(
                 finished.push((task_id.clone(), TaskState::Failed));
             }
         }
+    }
+
+    if config.verbose && still_running > 0 {
+        eprintln!("verbose: child collection still_running={still_running}");
     }
 
     for (task_id, terminal_state) in finished {
@@ -679,6 +734,7 @@ async fn complete_task(
     // Atomic CAS: only transition if not already terminal.
     let task_id_owned = task_id.to_owned();
     let ts = terminal_state.clone();
+    let verbose = config.verbose;
     let updated = {
         let store = store.clone();
         let task_id_owned = task_id_owned.clone();
@@ -701,13 +757,26 @@ async fn complete_task(
                         "task {task_id_owned} child exited; already in terminal state: {}",
                         task.state
                     );
+                    if verbose {
+                        eprintln!(
+                            "verbose: complete preserve-terminal task_id={task_id_owned} state={}",
+                            task.state
+                        );
+                    }
                     return Ok(None);
                 }
 
-                task.state = ts;
+                let prior_state = task.state.clone();
+                task.state = ts.clone();
                 task.child_pid = None;
                 task.child_pgid = None;
                 task.updated_at = now_iso8601();
+                if verbose {
+                    eprintln!(
+                        "verbose: complete transition task_id={task_id_owned} {prior_state}->{}",
+                        task.state
+                    );
+                }
                 Ok(Some(task.clone()))
             })
         })

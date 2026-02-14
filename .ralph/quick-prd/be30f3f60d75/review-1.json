@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Testing strategy",
+      "feedback": "The test plan is not aligned with repo conventions: it references `tests/validate_cli.rs`, but this project’s required conformance tests live in `src/validate/` (typically extend `src/validate/tests_daemon.rs` and keep it registered in `src/validate/mod.rs`)."
+    },
+    {
+      "area": "Acceptance criteria completeness",
+      "feedback": "The criteria do not verify the scope constraint ('flag should only affect `daemon start`'). Add explicit checks that `ralph daemon status --verbose` and `ralph daemon abort --verbose` are rejected/unsupported."
+    },
+    {
+      "area": "Acceptance criteria consistency",
+      "feedback": "The criterion 'code changes are localized to daemon CLI and runtime modules' conflicts with project policy requiring validate coverage for new CLI behavior; test files will also need updates."
+    },
+    {
+      "area": "State-transition logging definition",
+      "feedback": "The spec asks for trigger-qualified transition logs including `abort-race`, but the instrumentation list does not clearly add an explicit verbose event for the dispatch CAS race path where the task is already terminal. It also mixes transition logging between `collect_children` and `complete_task` without a single authoritative old->new record."
+    },
+    {
+      "area": "Edge cases / log volume",
+      "feedback": "Logging every child `try_wait` result (including 'still running') from `collect_children` can become very noisy, especially during `--single-iteration` drain loops that poll every 50ms. The spec should define throttling/summarization rules to satisfy 'traceable without overwhelming output'."
+    }
+  ]
+}

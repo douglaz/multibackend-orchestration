@@ -1,0 +1,17 @@
+{
+  "idea": "# Add Verbose Logging Flag to Daemon Start Command\n\nAdd a `--verbose` flag to the `ralph daemon start` command to enable detailed logging output during daemon operation.\n\n## Requirements\n\n- Add `--verbose` flag to the `daemon start` CLI command\n- When enabled, log the following events:\n  - Each poll cycle iteration\n  - Each child process status check\n  - Each task state transition\n- Logging should be detailed enough to trace daemon behavior without overwhelming output\n- Default behavior (without flag) should remain unchanged\n\n## Constraints\n\n- Flag should only affect the `daemon start` subcommand\n- Must integrate with existing logging infrastructure\n- Should not introduce performance degradation when disabled\n- Log format should be consistent with existing daemon log patterns\n\n## Acceptance Criteria\n\n- [ ] `--verbose` flag is accepted by `ralph daemon start` command\n- [ ] Poll cycle iterations are logged when verbose mode is enabled\n- [ ] Child process status checks are logged when verbose mode is enabled\n- [ ] Task state transitions are logged when verbose mode is enabled\n- [ ] Daemon runs normally without the flag (existing behavior preserved)\n- [ ] No verbose logging occurs when flag is not set\n- [ ] Code changes are localized to daemon CLI and runtime modules",
+  "idea_hash": "be30f3f60d75",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-14T13:57:03Z",
+  "completed_at": "2026-02-14T14:04:29Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 146.088784181,
+  "review_times_secs": [
+    116.629100234
+  ],
+  "revision_times_secs": [
+    183.625166577
+  ]
+}
