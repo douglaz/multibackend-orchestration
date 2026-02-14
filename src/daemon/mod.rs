@@ -60,6 +60,8 @@ pub struct DaemonTask {
     pub repo: String,
     #[serde(default)]
     pub raw_idea: Option<String>,
+    #[serde(default)]
+    pub refined_title: Option<String>,
     pub child_pid: Option<u32>,
     pub child_pgid: Option<u32>,
     pub branch: Option<String>,
@@ -301,6 +303,7 @@ mod tests {
             owner: "acme".to_owned(),
             repo: "widgets".to_owned(),
             raw_idea: None,
+            refined_title: None,
             child_pid: None,
             child_pgid: None,
             branch: None,
@@ -361,6 +364,39 @@ mod tests {
         assert_eq!(
             decoded.raw_idea.as_deref(),
             Some("Issue title\n\nIssue body")
+        );
+    }
+
+    #[test]
+    fn daemon_task_deserializes_without_refined_title_for_backwards_compatibility() {
+        let raw = r#"{
+            "task_id":"acme-widgets-1",
+            "state":"pending",
+            "issue_number":1,
+            "owner":"acme",
+            "repo":"widgets",
+            "child_pid":null,
+            "child_pgid":null,
+            "branch":null,
+            "pr_url":null,
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        }"#;
+
+        let task: DaemonTask = serde_json::from_str(raw).expect("legacy task json should parse");
+        assert!(task.refined_title.is_none());
+    }
+
+    #[test]
+    fn daemon_task_round_trips_with_refined_title() {
+        let mut original = task("acme-widgets-3", 3);
+        original.refined_title = Some("Fix SSO login handling".to_owned());
+
+        let raw = serde_json::to_string(&original).expect("serialize task");
+        let decoded: DaemonTask = serde_json::from_str(&raw).expect("deserialize task");
+        assert_eq!(
+            decoded.refined_title.as_deref(),
+            Some("Fix SSO login handling")
         );
     }
 }

@@ -6,18 +6,30 @@ use crate::Result;
 const REFINEMENT_SYSTEM_PROMPT: &str = r#"You are a prompt refinement assistant. Rewrite the following GitHub issue into a
 clear, structured task description suitable for an autonomous coding agent.
 
+Output format (required):
+TITLE: <concise title, max 80 chars>
+---
+<refined task description>
+
 Include:
 - A concise summary of what needs to be done
 - Specific requirements and constraints
 - Acceptance criteria as a checklist
 
-Do NOT include meta-commentary. Output ONLY the refined task description.
+Do NOT include meta-commentary. Output ONLY the required format.
 
 --- ISSUE ---
 "#;
 
 /// Minimum length for refinement output to be considered valid.
 const MIN_OUTPUT_LENGTH: usize = 20;
+const MAX_TITLE_LENGTH: usize = 80;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefinedPrompt {
+    pub title: Option<String>,
+    pub body: String,
+}
 
 /// Build the refinement prompt by wrapping the raw idea with the system prompt.
 pub fn build_refinement_prompt(raw_idea: &str) -> String {
@@ -55,6 +67,47 @@ fn validate_output(output: &str) -> Result<String> {
     Ok(trimmed)
 }
 
+/// Parse backend output into optional structured title + body.
+fn parse_refined_output(output: &str) -> Result<RefinedPrompt> {
+    let lines: Vec<&str> = output.lines().collect();
+    let first_non_empty = lines.iter().position(|line| !line.trim().is_empty());
+
+    if let Some(first_idx) = first_non_empty {
+        let first_line = lines[first_idx];
+        if let Some(raw_title) = first_line.strip_prefix("TITLE:") {
+            if let Some(delim_rel_idx) = lines[first_idx + 1..]
+                .iter()
+                .position(|line| line.trim() == "---")
+            {
+                let title = raw_title.trim().to_owned();
+                if title.is_empty() {
+                    return Err(RalphError::Orchestration(
+                        "refinement title cannot be empty".into(),
+                    ));
+                }
+                if title.chars().count() > MAX_TITLE_LENGTH {
+                    return Err(RalphError::Orchestration(format!(
+                        "refinement title too long ({} chars, maximum {})",
+                        title.chars().count(),
+                        MAX_TITLE_LENGTH
+                    )));
+                }
+
+                let delim_idx = first_idx + 1 + delim_rel_idx;
+                let body_raw = lines[delim_idx + 1..].join("\n");
+                let body = validate_output(&body_raw)?;
+                return Ok(RefinedPrompt {
+                    title: Some(title),
+                    body,
+                });
+            }
+        }
+    }
+
+    let body = validate_output(output)?;
+    Ok(RefinedPrompt { title: None, body })
+}
+
 /// Refine raw issue text into a structured ralph auto prompt.
 ///
 /// Awaits backend execution directly on the async runtime.
@@ -62,13 +115,13 @@ pub async fn refine_prompt(
     raw_idea: &str,
     backend_spec: &str,
     global_config: &GlobalConfig,
-) -> Result<String> {
+) -> Result<RefinedPrompt> {
     let backend = create_backend(backend_spec, global_config)?;
     let prompt = build_refinement_prompt(raw_idea);
 
     let raw_output = backend.execute(&prompt).await?;
 
-    validate_output(&raw_output)
+    parse_refined_output(&raw_output)
 }
 
 #[cfg(test)]
@@ -87,6 +140,8 @@ mod tests {
     fn build_refinement_prompt_includes_system_instructions() {
         let prompt = build_refinement_prompt("some issue");
         assert!(prompt.contains("prompt refinement assistant"));
+        assert!(prompt.contains("TITLE: <concise title, max 80 chars>"));
+        assert!(prompt.contains("\n---\n"));
         assert!(prompt.contains("Acceptance criteria"));
         assert!(prompt.contains("--- ISSUE ---"));
     }
@@ -139,6 +194,53 @@ mod tests {
         // One less should fail
         let short = "a".repeat(MIN_OUTPUT_LENGTH - 1);
         assert!(validate_output(&short).is_err());
+    }
+
+    #[test]
+    fn parse_refined_output_structured_success() {
+        let input = "TITLE: Fix SSO login handling\n---\nImplement robust SSO login error handling and add regression coverage.";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(parsed.title, Some("Fix SSO login handling".to_owned()));
+        assert_eq!(
+            parsed.body,
+            "Implement robust SSO login error handling and add regression coverage."
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_missing_delimiter_falls_back() {
+        let input = "TITLE: This looks structured but has no delimiter line\nThis remains unstructured output content and should be preserved fully.";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(parsed.title, None);
+        assert_eq!(
+            parsed.body,
+            "TITLE: This looks structured but has no delimiter line\nThis remains unstructured output content and should be preserved fully."
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_rejects_empty_structured_title() {
+        let input =
+            "TITLE:   \n---\nThis is a valid length body that should not mask title validation.";
+        let err = parse_refined_output(input).unwrap_err();
+        assert!(err.to_string().contains("title cannot be empty"));
+    }
+
+    #[test]
+    fn parse_refined_output_rejects_overlong_title() {
+        let title = "a".repeat(MAX_TITLE_LENGTH + 1);
+        let input = format!(
+            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
+        );
+        let err = parse_refined_output(&input).unwrap_err();
+        assert!(err.to_string().contains("title too long"));
+    }
+
+    #[test]
+    fn parse_refined_output_enforces_body_validation_for_structured_output() {
+        let input = "TITLE: Valid title\n---\nshort";
+        let err = parse_refined_output(input).unwrap_err();
+        assert!(err.to_string().contains("too short"));
     }
 
     #[test]

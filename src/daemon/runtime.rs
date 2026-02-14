@@ -284,6 +284,7 @@ async fn poll_and_claim(
                 issue.title,
                 issue.body.unwrap_or_default()
             )),
+            refined_title: None,
             child_pid: None,
             child_pgid: None,
             branch: Some(format!("ralph/daemon/{task_id}")),
@@ -360,22 +361,43 @@ async fn dispatch_task(
     };
 
     // Refine the prompt if enabled, falling back to raw idea on failure.
-    let idea = if config.refinement_enabled {
+    let (idea, refined_title) = if config.refinement_enabled {
         match refine::refine_prompt(&raw_idea, &config.refinement_backend, &config.global_config)
             .await
         {
-            Ok(refined) => refined,
+            Ok(refined) => (refined.body, refined.title),
             Err(err) => {
                 eprintln!(
                     "warning: refinement failed for task {}, using raw idea: {err}",
                     task.task_id
                 );
-                raw_idea
+                (raw_idea, None)
             }
         }
     } else {
-        raw_idea
+        (raw_idea, None)
     };
+
+    // Persist refined_title best-effort (do not abort dispatch on failure).
+    // Always write (even None) to clear any stale title from a previous attempt.
+    {
+        let store_clone = store.clone();
+        let tid = task.task_id.clone();
+        let title_clone = refined_title.clone();
+        if let Err(err) = spawn_blocking_op(move || {
+            store_clone.update_task(&tid, |t| {
+                t.refined_title = title_clone.clone();
+                Ok(())
+            })
+        })
+        .await
+        {
+            eprintln!(
+                "warning: failed to persist refined_title for {}: {err}",
+                task.task_id
+            );
+        }
+    }
 
     // Post refined-prompt comment (best-effort, never aborts dispatch).
     {
@@ -383,7 +405,10 @@ async fn dispatch_task(
         let repo = task.repo.clone();
         let issue_number = task.issue_number;
         let tid = task.task_id.clone();
-        let idea_clone = idea.clone();
+        let comment_body = match &refined_title {
+            Some(title) => format!("**{title}**\n\n{idea}"),
+            None => idea.clone(),
+        };
         if let Err(err) = spawn_blocking_op(move || {
             github::post_idempotent_comment(
                 &owner,
@@ -391,7 +416,7 @@ async fn dispatch_task(
                 issue_number,
                 &tid,
                 "refined-prompt",
-                &idea_clone,
+                &comment_body,
             )
         })
         .await
@@ -523,6 +548,23 @@ fn fetch_and_persist_raw_idea(store: &TaskStore, task: &DaemonTask) -> Result<St
 
 fn compose_raw_idea(title: &str, body: Option<&str>) -> String {
     format!("{title}\n\n{}", body.unwrap_or_default())
+}
+
+/// Extract the original title from a raw idea string.
+///
+/// Takes the segment before the first `\n\n`, trims it, and returns `None` if
+/// empty; otherwise `Some(title)`.
+pub fn extract_original_title(raw_idea: &str) -> Option<String> {
+    let segment = match raw_idea.split_once("\n\n") {
+        Some((before, _)) => before,
+        None => raw_idea,
+    };
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 fn metadata_fallback_raw_idea(task: &DaemonTask) -> String {
@@ -914,8 +956,14 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         }
     }
 
-    // Create new PR
-    let title = format!("ralph: {}", task.task_id);
+    // Create new PR — title precedence: refined_title -> original title -> fallback
+    let title = task
+        .refined_title
+        .clone()
+        .or_else(|| {
+            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
+        })
+        .unwrap_or_else(|| format!("ralph: {}", task.task_id));
     let body = format!(
         "Automated PR for task `{}`.\n\nCloses #{}",
         task.task_id, task.issue_number
@@ -954,5 +1002,36 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_original_title;
+
+    #[test]
+    fn extract_original_title_with_body() {
+        assert_eq!(
+            extract_original_title("Fix bug\n\nDetails"),
+            Some("Fix bug".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_original_title_no_body() {
+        assert_eq!(
+            extract_original_title("Fix bug"),
+            Some("Fix bug".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_original_title_empty() {
+        assert_eq!(extract_original_title(""), None);
+    }
+
+    #[test]
+    fn extract_original_title_body_only() {
+        assert_eq!(extract_original_title("\n\nBody only"), None);
     }
 }
