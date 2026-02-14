@@ -1,0 +1,48 @@
+{
+  "project_id": "task-preserve-worktree-and-branch-on-dae",
+  "project_name": "# Task: Preserve worktree and branch on daemon task failure\n",
+  "created_at": "2026-02-14T22:28:28.663692339Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "f919df4ac023803a16d4ca68601c8f7b06a479f9d5f4dbf3fea77579d2211c2f",
+  "prompt_hash_at_loop_start": "f919df4ac023803a16d4ca68601c8f7b06a479f9d5f4dbf3fea77579d2211c2f",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "failed-task-worktree-preservation-and-dispatch",
+      "feature_name": "Failed-task worktree preservation and dispatch routing fixes",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-failed-task-worktree-preservation-and-dispatch/20260214223148-spec.md",
+        "impl_notes": "loops/001-failed-task-worktree-preservation-and-dispatch/20260214224127-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-failed-task-worktree-preservation-and-dispatch/20260214225207-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-failed-task-worktree-preservation-and-dispatch/20260214225141-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T22:31:48.859516195Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

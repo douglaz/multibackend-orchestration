@@ -110,6 +110,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: runtime_abort_during_dispatch_preserves_terminal,
         },
         ConformanceTest {
+            name: "daemon::runtime_task_fails_worktree_preserved",
+            func: runtime_task_fails_worktree_preserved,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_activation_failed_task_preserved",
+            func: runtime_activation_failed_task_preserved,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_fresh_dispatch_ignores_discovered_project",
+            func: runtime_fresh_dispatch_ignores_discovered_project,
+        },
+        ConformanceTest {
             name: "daemon::runtime_no_diff_pr_path",
             func: runtime_no_diff_pr_path,
         },
@@ -2108,6 +2120,244 @@ fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestRes
             task_after["child_pgid"].is_null(),
             "PGID should be null for aborted task, got: {}",
             task_after["child_pgid"]
+        );
+    })
+}
+
+/// Test that failed tasks preserve their worktree and keep `project_id` for retry.
+///
+/// Verifies:
+/// - Dispatch uses `ralph run --project <id>` when `task.project_id` is present
+/// - Child non-zero exit transitions task to failed
+/// - Failed terminal state preserves worktree
+/// - `project_id` remains persisted
+fn runtime_task_fails_worktree_preserved(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_script = r#"#!/bin/sh
+case "$1" in
+  run)
+    [ "$2" = "--project" ] || exit 41
+    [ "$3" = "retry-proj-350" ] || exit 42
+    exit 1
+    ;;
+  auto)
+    echo "unexpected fresh dispatch path" >&2
+    exit 43
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"#;
+        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-350",
+                    "pending",
+                    350,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["project_id"] = json!("retry-proj-350");
+                t["raw_idea"] = json!("Retry task\n\nPreserve worktree on failure.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-350")
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("failed"));
+        assert_eq!(task["project_id"], json!("retry-proj-350"));
+
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join("acme-widgets-350");
+        assert!(
+            wt_path.exists(),
+            "failed task worktree should be preserved at {}",
+            wt_path.display()
+        );
+    })
+}
+
+/// Test that startup worktree reconciliation preserves failed tasks.
+///
+/// Verifies:
+/// - Failed task IDs are treated as active during reconcile
+/// - Existing failed-task worktree directory is not removed on startup
+fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-351",
+                    "failed",
+                    351,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["project_id"] = json!("retry-proj-351");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join("acme-widgets-351");
+        fs::create_dir_all(&wt_path).expect("create worktree path");
+        fs::write(wt_path.join("marker.txt"), "preserve").expect("write marker");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        assert!(
+            wt_path.exists(),
+            "failed-task worktree must be preserved on startup reconcile"
+        );
+        assert!(
+            wt_path.join("marker.txt").exists(),
+            "failed-task marker should still exist"
+        );
+    })
+}
+
+/// Test that dispatch routing ignores discovered project context when
+/// `task.project_id` is absent.
+///
+/// Verifies:
+/// - Even with an active/discovered project in workspace metadata, fresh tasks
+///   (`project_id = null`) dispatch via `ralph auto --idea ...`
+/// - `ralph run --project ...` is not used for fresh tasks
+fn runtime_fresh_dispatch_ignores_discovered_project(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        h.create_project(
+            "discovered-proj",
+            "Discovered Project",
+            "Project used to simulate discovered context",
+        )
+        .expect("create_project failed");
+        h.ralph_ok(["project", "use", "discovered-proj"])
+            .expect("project use should succeed");
+        fs::write(
+            h.repo_root.join(".git").join("ralph-active-project"),
+            "discovered-proj\n",
+        )
+        .expect("write discovered project marker");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-352",
+                    "pending",
+                    352,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["raw_idea"] = json!("Fresh daemon task\n\nMust dispatch via auto.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let args_log = h.temp_dir.path().join("fresh_dispatch_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  auto)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    exit 0
+    ;;
+  run)
+    printf 'run\n' > "{args_log_str}"
+    exit 77
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("auto\n--idea\n"),
+            "fresh dispatch should use auto --idea, got:\n{args}"
         );
     })
 }
@@ -6177,6 +6427,7 @@ fn task_json(
         "issue_number": issue_number,
         "owner": owner,
         "repo": repo,
+        "project_id": null,
         "child_pid": child_pid,
         "child_pgid": child_pgid,
         "branch": null,
