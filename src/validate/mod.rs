@@ -11,6 +11,7 @@ pub mod harness;
 pub mod mock_scripts;
 pub mod runner;
 
+mod tests_auto_init;
 mod tests_commands;
 mod tests_daemon;
 mod tests_init;
@@ -85,6 +86,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_prompt_review::tests());
     tests.extend(tests_qa::tests());
     tests.extend(tests_commands::tests());
+    tests.extend(tests_auto_init::tests());
     tests.extend(tests_tail::tests());
     tests.extend(tests_daemon::tests());
     tests

@@ -1,5 +1,6 @@
 use clap::Args;
 
+use super::init;
 use super::parse_positive_u32;
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
@@ -99,6 +100,18 @@ fn slugify_idea(idea: &str) -> String {
     slug
 }
 
+fn ensure_workspace() -> Result<Workspace> {
+    match Workspace::discover() {
+        Ok(workspace) => Ok(workspace),
+        Err(RalphError::WorkspaceNotFound) => {
+            let workspace = init::create_workspace(&std::env::current_dir()?.join(".ralph"))?;
+            eprintln!("initialized workspace at .ralph");
+            Ok(workspace)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub async fn execute(args: AutoArgs) -> Result<()> {
     let AutoArgs {
         idea,
@@ -126,7 +139,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         ));
     }
 
-    let workspace = Workspace::discover()?;
+    let workspace = ensure_workspace()?;
 
     let writer_spec = if spec_writer.trim().is_empty() {
         workspace.config.workspace.default_backend.clone()
@@ -265,10 +278,38 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
-    use super::slugify_idea;
+    use clap::Parser;
+    use tempfile::tempdir;
+
+    use super::{ensure_workspace, slugify_idea};
     use crate::cli::{Cli, Commands};
+    use crate::config::GlobalConfig;
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("get current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
 
     #[test]
     fn test_slugify_idea_basic() {
@@ -372,5 +413,27 @@ mod tests {
     fn rejects_auto_with_empty_idea() {
         let result = Cli::try_parse_from(["ralph", "auto", "--idea", ""]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn ensure_workspace_creates_workspace_when_missing() {
+        let _cwd_guard = cwd_lock().lock().expect("cwd lock");
+        let temp = tempdir().expect("temp dir");
+        let _guard = CwdGuard::set(temp.path());
+
+        let workspace = ensure_workspace().expect("workspace should be created");
+        let workspace_root = temp.path().join(".ralph");
+
+        assert_eq!(workspace.root, workspace_root);
+        assert!(workspace_root.join("ralph.toml").exists());
+        assert!(workspace_root.join("projects").is_dir());
+        assert!(workspace_root.join("templates").is_dir());
+        assert!(workspace_root.join("templates/spec.md").exists());
+        assert!(workspace_root.join("templates/implementation.md").exists());
+        assert!(workspace_root.join("templates/review.md").exists());
+        assert!(workspace_root.join("templates/prompt_reviewer.md").exists());
+        assert!(workspace_root.join("templates/completion.md").exists());
+        assert!(workspace_root.join("templates/qa.md").exists());
+        assert_eq!(workspace.config, GlobalConfig::default());
     }
 }

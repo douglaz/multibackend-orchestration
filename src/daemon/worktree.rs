@@ -19,11 +19,7 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 ///
 /// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
 /// `.ralph/daemon/worktrees/<task_id>/`.
-pub fn create_worktree(
-    repo_root: &Path,
-    workspace_root: &Path,
-    task_id: &str,
-) -> Result<PathBuf> {
+pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
 
     if wt_path.exists() {
@@ -68,12 +64,7 @@ pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
     }
 
     let output = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &wt_path.to_string_lossy(),
-        ])
+        .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
         .current_dir(repo_root)
         .output();
 
@@ -108,11 +99,7 @@ pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
 ///
 /// `active_task_ids` should contain only IDs of non-terminal tasks that will
 /// be re-adopted by the daemon.
-pub fn reconcile_worktrees(
-    repo_root: &Path,
-    workspace_root: &Path,
-    active_task_ids: &[String],
-) {
+pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_ids: &[String]) {
     let wt_dir = worktrees_dir(workspace_root);
     let entries = match fs::read_dir(&wt_dir) {
         Ok(entries) => entries,

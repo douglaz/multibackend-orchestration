@@ -131,8 +131,7 @@ pub fn filter_claimable(issues: Vec<GhIssue>) -> Vec<GhIssue> {
         .into_iter()
         .filter(|issue| {
             !issue.labels.iter().any(|l| {
-                l.starts_with("ralph:")
-                    && !TRIGGER_LABELS.iter().any(|trigger| l == trigger)
+                l.starts_with("ralph:") && !TRIGGER_LABELS.iter().any(|trigger| l == trigger)
             })
         })
         .collect()

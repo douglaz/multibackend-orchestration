@@ -3,22 +3,31 @@ use std::fs;
 use std::path::Path;
 
 use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Result;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GlobalConfig {
+    #[serde(default)]
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
     pub backends: BackendConfigs,
+    #[serde(default)]
     pub workflow: WorkflowConfig,
+    #[serde(default)]
     pub templates: TemplateConfig,
+    #[serde(default)]
     pub git: GitConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct WorkspaceConfig {
+    #[serde(default = "default_workspace_version")]
     pub version: String,
+    #[serde(default = "default_workspace_default_backend")]
     pub default_backend: String,
     #[serde(default)]
     pub tmux: bool,
@@ -40,17 +49,29 @@ pub struct WorkspaceConfig {
     pub daemon_refinement_backend: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct BackendConfigs {
+    #[serde(
+        default = "default_claude_backend_config",
+        deserialize_with = "deserialize_claude_backend_config"
+    )]
     pub claude: BackendConfig,
+    #[serde(
+        default = "default_codex_backend_config",
+        deserialize_with = "deserialize_codex_backend_config"
+    )]
     pub codex: BackendConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct BackendConfig {
+    #[serde(default = "default_backend_command")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default = "default_backend_args")]
     pub args: Vec<String>,
+    #[serde(default = "default_backend_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -58,7 +79,8 @@ pub struct BackendConfig {
     pub models: BackendRoleModels,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
 pub struct BackendRoleModels {
     pub planner: Option<String>,
     pub implementer: Option<String>,
@@ -109,12 +131,18 @@ impl BackendRoleModels {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct WorkflowConfig {
+    #[serde(default = "default_max_review_iterations")]
     pub max_review_iterations: u32,
+    #[serde(default = "default_auto_commit")]
     pub auto_commit: bool,
+    #[serde(default = "default_commit_message_style")]
     pub commit_message_style: CommitMessageStyle,
+    #[serde(default = "default_commit_tag_format")]
     pub commit_tag_format: String,
+    #[serde(default = "default_prompt_change_action")]
     pub prompt_change_action: PromptChangeAction,
     #[serde(default = "default_prompt_review_enabled")]
     pub prompt_review_enabled: bool,
@@ -136,7 +164,7 @@ pub struct WorkflowConfig {
     pub max_qa_iterations: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommitMessageStyle {
     Conventional,
@@ -144,7 +172,7 @@ pub enum CommitMessageStyle {
     Minimal,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum PromptChangeAction {
@@ -153,116 +181,312 @@ pub enum PromptChangeAction {
     Abort,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TemplateConfig {
+    #[serde(default = "default_planner_template_path")]
     pub planner: String,
+    #[serde(default = "default_implementer_template_path")]
     pub implementer: String,
+    #[serde(default = "default_reviewer_template_path")]
     pub reviewer: String,
     #[serde(default = "default_prompt_reviewer_template_path")]
     pub prompt_reviewer: String,
+    #[serde(default = "default_completer_template_path")]
     pub completer: String,
     #[serde(default = "default_qa_template_path")]
     pub qa: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GitConfig {
+    #[serde(default = "default_git_auto_branch")]
     pub auto_branch: bool,
+    #[serde(default = "default_git_branch_format")]
     pub branch_format: String,
+    #[serde(default = "default_git_sign_commits")]
     pub sign_commits: bool,
+    #[serde(default = "default_git_base_branch")]
     pub base_branch: String,
 }
 
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            workspace: WorkspaceConfig {
-                version: "1.0".to_owned(),
-                default_backend: "claude".to_owned(),
-                tmux: false,
-                tmux_session: "ralph".to_owned(),
-                tmux_window_keep_seconds: 5,
-                daemon_poll_seconds: default_daemon_poll_seconds(),
-                daemon_max_concurrent: default_daemon_max_concurrent(),
-                daemon_labels: default_daemon_labels(),
-                daemon_repo: None,
-                daemon_refinement_enabled: default_daemon_refinement_enabled(),
-                daemon_refinement_backend: default_daemon_refinement_backend(),
-            },
-            backends: BackendConfigs {
-                claude: BackendConfig {
-                    command: "claude".to_owned(),
-                    args: vec![
-                        "-p".to_owned(),
-                        "--permission-mode".to_owned(),
-                        "acceptEdits".to_owned(),
-                        "--allowedTools".to_owned(),
-                        "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
-                    ],
-                    timeout_seconds: 7200,
-                    env: BTreeMap::new(),
-                    models: BackendRoleModels {
-                        planner: Some("opus".to_owned()),
-                        implementer: Some("opus".to_owned()),
-                        reviewer: Some("opus".to_owned()),
-                        qa: Some("opus".to_owned()),
-                        completer: Some("opus".to_owned()),
-                        acceptance_qa: Some("opus".to_owned()),
-                        reformatter: Some("sonnet".to_owned()),
-                    },
-                },
-                codex: BackendConfig {
-                    command: "codex".to_owned(),
-                    args: vec![
-                        "exec".to_owned(),
-                        "--dangerously-bypass-approvals-and-sandbox".to_owned(),
-                        "-".to_owned(),
-                    ],
-                    timeout_seconds: 7200,
-                    env: BTreeMap::new(),
-                    models: BackendRoleModels {
-                        planner: Some("gpt-5.3-codex-xhigh".to_owned()),
-                        implementer: Some("gpt-5.3-codex-high".to_owned()),
-                        reviewer: Some("gpt-5.3-codex-high".to_owned()),
-                        qa: Some("gpt-5.3-codex-high".to_owned()),
-                        completer: Some("gpt-5.3-codex-xhigh".to_owned()),
-                        acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
-                        reformatter: Some("gpt-5.3-codex-medium".to_owned()),
-                    },
-                },
-            },
-            workflow: WorkflowConfig {
-                max_review_iterations: 30,
-                auto_commit: true,
-                commit_message_style: CommitMessageStyle::Conventional,
-                commit_tag_format: "ralph/{project_id}/loop-{loop_number}".to_owned(),
-                prompt_change_action: PromptChangeAction::Abort,
-                prompt_review_enabled: default_prompt_review_enabled(),
-                prompt_review_backend: default_prompt_review_backend(),
-                planner_backend: None,
-                implementer_backend: None,
-                reviewer_backend: None,
-                qa_backend: None,
-                completer_backend: None,
-                qa_enabled: true,
-                max_qa_iterations: default_max_qa_iterations(),
-            },
-            templates: TemplateConfig {
-                planner: "templates/spec.md".to_owned(),
-                implementer: "templates/implementation.md".to_owned(),
-                reviewer: "templates/review.md".to_owned(),
-                prompt_reviewer: default_prompt_reviewer_template_path(),
-                completer: "templates/completion.md".to_owned(),
-                qa: default_qa_template_path(),
-            },
-            git: GitConfig {
-                auto_branch: true,
-                branch_format: "ralph/{project_id}".to_owned(),
-                sign_commits: false,
-                base_branch: "master".to_owned(),
-            },
+            workspace: WorkspaceConfig::default(),
+            backends: BackendConfigs::default(),
+            workflow: WorkflowConfig::default(),
+            templates: TemplateConfig::default(),
+            git: GitConfig::default(),
         }
     }
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            version: default_workspace_version(),
+            default_backend: default_workspace_default_backend(),
+            tmux: false,
+            tmux_session: default_tmux_session(),
+            tmux_window_keep_seconds: default_tmux_window_keep_seconds(),
+            daemon_poll_seconds: default_daemon_poll_seconds(),
+            daemon_max_concurrent: default_daemon_max_concurrent(),
+            daemon_labels: default_daemon_labels(),
+            daemon_repo: None,
+            daemon_refinement_enabled: default_daemon_refinement_enabled(),
+            daemon_refinement_backend: default_daemon_refinement_backend(),
+        }
+    }
+}
+
+impl Default for BackendConfigs {
+    fn default() -> Self {
+        Self {
+            claude: default_claude_backend_config(),
+            codex: default_codex_backend_config(),
+        }
+    }
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            command: default_backend_command(),
+            args: default_backend_args(),
+            timeout_seconds: default_backend_timeout_seconds(),
+            env: BTreeMap::new(),
+            models: BackendRoleModels::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct PartialBackendConfig {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    timeout_seconds: Option<u64>,
+    env: Option<BTreeMap<String, String>>,
+    models: Option<BackendRoleModels>,
+}
+
+impl PartialBackendConfig {
+    fn into_backend_config_with_defaults(self, mut defaults: BackendConfig) -> BackendConfig {
+        if let Some(command) = self.command {
+            defaults.command = command;
+        }
+        if let Some(args) = self.args {
+            defaults.args = args;
+        }
+        if let Some(timeout_seconds) = self.timeout_seconds {
+            defaults.timeout_seconds = timeout_seconds;
+        }
+        if let Some(env) = self.env {
+            defaults.env = env;
+        }
+        if let Some(mut models) = self.models {
+            models.fill_from(&defaults.models);
+            defaults.models = models;
+        }
+        defaults
+    }
+}
+
+fn deserialize_claude_backend_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BackendConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let partial = PartialBackendConfig::deserialize(deserializer)?;
+    Ok(partial.into_backend_config_with_defaults(default_claude_backend_config()))
+}
+
+fn deserialize_codex_backend_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BackendConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let partial = PartialBackendConfig::deserialize(deserializer)?;
+    Ok(partial.into_backend_config_with_defaults(default_codex_backend_config()))
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            max_review_iterations: default_max_review_iterations(),
+            auto_commit: default_auto_commit(),
+            commit_message_style: default_commit_message_style(),
+            commit_tag_format: default_commit_tag_format(),
+            prompt_change_action: default_prompt_change_action(),
+            prompt_review_enabled: default_prompt_review_enabled(),
+            prompt_review_backend: default_prompt_review_backend(),
+            planner_backend: None,
+            implementer_backend: None,
+            reviewer_backend: None,
+            qa_backend: None,
+            completer_backend: None,
+            qa_enabled: default_qa_enabled(),
+            max_qa_iterations: default_max_qa_iterations(),
+        }
+    }
+}
+
+impl Default for CommitMessageStyle {
+    fn default() -> Self {
+        Self::Conventional
+    }
+}
+
+impl Default for PromptChangeAction {
+    fn default() -> Self {
+        Self::Abort
+    }
+}
+
+impl Default for TemplateConfig {
+    fn default() -> Self {
+        Self {
+            planner: default_planner_template_path(),
+            implementer: default_implementer_template_path(),
+            reviewer: default_reviewer_template_path(),
+            prompt_reviewer: default_prompt_reviewer_template_path(),
+            completer: default_completer_template_path(),
+            qa: default_qa_template_path(),
+        }
+    }
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            auto_branch: default_git_auto_branch(),
+            branch_format: default_git_branch_format(),
+            sign_commits: default_git_sign_commits(),
+            base_branch: default_git_base_branch(),
+        }
+    }
+}
+
+fn default_workspace_version() -> String {
+    "1.0".to_owned()
+}
+
+fn default_workspace_default_backend() -> String {
+    "claude".to_owned()
+}
+
+fn default_backend_command() -> String {
+    "claude".to_owned()
+}
+
+fn default_backend_args() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_backend_timeout_seconds() -> u64 {
+    7200
+}
+
+fn default_claude_backend_config() -> BackendConfig {
+    BackendConfig {
+        command: "claude".to_owned(),
+        args: vec![
+            "-p".to_owned(),
+            "--permission-mode".to_owned(),
+            "acceptEdits".to_owned(),
+            "--allowedTools".to_owned(),
+            "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
+        ],
+        timeout_seconds: default_backend_timeout_seconds(),
+        env: BTreeMap::new(),
+        models: BackendRoleModels {
+            planner: Some("opus".to_owned()),
+            implementer: Some("opus".to_owned()),
+            reviewer: Some("opus".to_owned()),
+            qa: Some("opus".to_owned()),
+            completer: Some("opus".to_owned()),
+            acceptance_qa: Some("opus".to_owned()),
+            reformatter: Some("sonnet".to_owned()),
+        },
+    }
+}
+
+fn default_codex_backend_config() -> BackendConfig {
+    BackendConfig {
+        command: "codex".to_owned(),
+        args: vec![
+            "exec".to_owned(),
+            "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+            "-".to_owned(),
+        ],
+        timeout_seconds: default_backend_timeout_seconds(),
+        env: BTreeMap::new(),
+        models: BackendRoleModels {
+            planner: Some("gpt-5.3-codex-xhigh".to_owned()),
+            implementer: Some("gpt-5.3-codex-high".to_owned()),
+            reviewer: Some("gpt-5.3-codex-high".to_owned()),
+            qa: Some("gpt-5.3-codex-high".to_owned()),
+            completer: Some("gpt-5.3-codex-xhigh".to_owned()),
+            acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
+            reformatter: Some("gpt-5.3-codex-medium".to_owned()),
+        },
+    }
+}
+
+fn default_max_review_iterations() -> u32 {
+    30
+}
+
+fn default_auto_commit() -> bool {
+    true
+}
+
+fn default_commit_message_style() -> CommitMessageStyle {
+    CommitMessageStyle::default()
+}
+
+fn default_commit_tag_format() -> String {
+    "ralph/{project_id}/loop-{loop_number}".to_owned()
+}
+
+fn default_prompt_change_action() -> PromptChangeAction {
+    PromptChangeAction::default()
+}
+
+fn default_planner_template_path() -> String {
+    "templates/spec.md".to_owned()
+}
+
+fn default_implementer_template_path() -> String {
+    "templates/implementation.md".to_owned()
+}
+
+fn default_reviewer_template_path() -> String {
+    "templates/review.md".to_owned()
+}
+
+fn default_completer_template_path() -> String {
+    "templates/completion.md".to_owned()
+}
+
+fn default_git_auto_branch() -> bool {
+    true
+}
+
+fn default_git_branch_format() -> String {
+    "ralph/{project_id}".to_owned()
+}
+
+fn default_git_sign_commits() -> bool {
+    false
+}
+
+fn default_git_base_branch() -> String {
+    "master".to_owned()
 }
 
 fn default_tmux_session() -> String {
@@ -355,6 +579,92 @@ mod tests {
     use super::{BackendRoleModels, GlobalConfig};
 
     #[test]
+    fn empty_toml_deserializes_to_defaults() {
+        let config: GlobalConfig = toml::from_str("").expect("empty TOML should deserialize");
+        assert_eq!(config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn whitespace_toml_deserializes_to_defaults() {
+        let config: GlobalConfig =
+            toml::from_str("   \n  ").expect("whitespace-only TOML should deserialize");
+        assert_eq!(config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn partial_sections_default_correctly() {
+        let raw = r#"
+[workspace]
+default_backend = "codex"
+
+[workflow]
+auto_commit = false
+
+[templates]
+planner = "templates/custom-spec.md"
+
+[git]
+base_branch = "main"
+"#;
+
+        let defaults = GlobalConfig::default();
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+
+        assert_eq!(config.workspace.default_backend, "codex");
+        assert_eq!(config.workspace.version, defaults.workspace.version);
+        assert_eq!(
+            config.workspace.tmux_session,
+            defaults.workspace.tmux_session
+        );
+
+        assert_eq!(config.backends, defaults.backends);
+
+        assert!(!config.workflow.auto_commit);
+        assert_eq!(
+            config.workflow.max_review_iterations,
+            defaults.workflow.max_review_iterations
+        );
+        assert_eq!(
+            config.workflow.commit_message_style,
+            defaults.workflow.commit_message_style
+        );
+
+        assert_eq!(config.templates.planner, "templates/custom-spec.md");
+        assert_eq!(config.templates.implementer, defaults.templates.implementer);
+        assert_eq!(config.templates.qa, defaults.templates.qa);
+
+        assert_eq!(config.git.base_branch, "main");
+        assert_eq!(config.git.auto_branch, defaults.git.auto_branch);
+        assert_eq!(config.git.branch_format, defaults.git.branch_format);
+    }
+
+    #[test]
+    fn missing_single_backend_uses_backend_specific_default() {
+        let raw = r#"
+[backends.claude]
+command = "claude-custom"
+"#;
+
+        let defaults = GlobalConfig::default();
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+
+        assert_eq!(config.backends.claude.command, "claude-custom");
+        assert_eq!(
+            config.backends.claude.args,
+            defaults.backends.claude.args,
+            "present backend block should still receive backend-specific defaults for missing fields"
+        );
+        assert_eq!(
+            config.backends.claude.models, defaults.backends.claude.models,
+            "present backend block should inherit default role models"
+        );
+        assert_eq!(
+            config.backends.codex, defaults.backends.codex,
+            "missing codex block should deserialize to codex-specific defaults"
+        );
+    }
+
+    #[test]
     fn default_workspace_tmux_settings_match_expected_values() {
         let config = GlobalConfig::default();
         assert!(!config.workspace.tmux);
@@ -413,11 +723,11 @@ default_backend = "claude"
 
 [backends.claude]
 command = "claude"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex]
 command = "codex"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [workflow]
 max_review_iterations = 5
@@ -452,18 +762,12 @@ base_branch = "master"
         assert!(config.workspace.daemon_repo.is_none());
         assert!(config.workspace.daemon_refinement_enabled);
         assert_eq!(config.workspace.daemon_refinement_backend, "claude(sonnet)");
-        assert!(config.backends.claude.models.planner.is_none());
-        assert!(config.backends.claude.models.implementer.is_none());
-        assert!(config.backends.claude.models.reviewer.is_none());
-        assert!(config.backends.claude.models.qa.is_none());
-        assert!(config.backends.claude.models.completer.is_none());
-        assert!(config.backends.claude.models.reformatter.is_none());
-        assert!(config.backends.codex.models.planner.is_none());
-        assert!(config.backends.codex.models.implementer.is_none());
-        assert!(config.backends.codex.models.reviewer.is_none());
-        assert!(config.backends.codex.models.qa.is_none());
-        assert!(config.backends.codex.models.completer.is_none());
-        assert!(config.backends.codex.models.reformatter.is_none());
+        let defaults = GlobalConfig::default();
+        assert_eq!(
+            config.backends.claude.models,
+            defaults.backends.claude.models
+        );
+        assert_eq!(config.backends.codex.models, defaults.backends.codex.models);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.qa_backend.is_none());
@@ -497,11 +801,11 @@ daemon_refinement_backend = "codex(gpt-5.3-codex-medium)"
 
 [backends.claude]
 command = "claude"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex]
 command = "codex"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [workflow]
 max_review_iterations = 5
@@ -553,11 +857,11 @@ default_backend = "claude"
 
 [backends.claude]
 command = "claude"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex]
 command = "codex"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [workflow]
 max_review_iterations = 5
@@ -600,7 +904,7 @@ default_backend = "claude"
 
 [backends.claude]
 command = "claude"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.claude.models]
 planner = "opus"
@@ -613,7 +917,7 @@ reformatter = "sonnet"
 
 [backends.codex]
 command = "codex"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex.models]
 planner = "gpt-5.3-codex-xhigh"
@@ -770,11 +1074,11 @@ default_backend = "claude"
 
 [backends.claude]
 command = "claude"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex]
 command = "codex"
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [workflow]
 max_review_iterations = 5

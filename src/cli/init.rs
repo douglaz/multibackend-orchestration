@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs as unix_fs;
+use std::path::Path;
 
 use crate::cli::InitArgs;
 use crate::prompts::templates::{
@@ -9,10 +10,8 @@ use crate::prompts::templates::{
 use crate::workspace::Workspace;
 use crate::Result;
 
-/// Execute the `ralph init` command, creating a workspace with default configuration,
-/// index, and template files.
-pub fn execute(args: InitArgs) -> Result<()> {
-    let workspace = Workspace::init(&args.dir)?;
+pub(crate) fn create_workspace(root: &Path) -> Result<Workspace> {
+    let workspace = Workspace::init(root)?;
 
     let templates_dir = workspace.root.join("templates");
 
@@ -54,6 +53,75 @@ pub fn execute(args: InitArgs) -> Result<()> {
         }
     }
 
+    Ok(workspace)
+}
+
+/// Execute the `ralph init` command, creating a workspace with default configuration,
+/// index, and template files.
+pub fn execute(args: InitArgs) -> Result<()> {
+    let workspace = create_workspace(&args.dir)?;
+
     println!("initialized workspace at {}", workspace.root.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::create_workspace;
+    use crate::prompts::templates::{
+        default_completer_template, default_implementer_template, default_planner_template,
+        default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+    };
+
+    #[test]
+    fn create_workspace_writes_all_templates() {
+        let temp = tempdir().expect("temp dir");
+        let workspace_root = temp.path().join(".ralph");
+        let workspace = create_workspace(&workspace_root).expect("workspace should be created");
+
+        assert_eq!(workspace.root, workspace_root);
+        let templates_dir = workspace.root.join("templates");
+
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("spec.md")).expect("read spec template"),
+            default_planner_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("implementation.md"))
+                .expect("read implementation template"),
+            default_implementer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("review.md")).expect("read review template"),
+            default_reviewer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("prompt_reviewer.md"))
+                .expect("read prompt reviewer template"),
+            default_prompt_reviewer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("completion.md"))
+                .expect("read completion template"),
+            default_completer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("qa.md")).expect("read qa template"),
+            default_qa_template()
+        );
+
+        for legacy in &[
+            "planner.md",
+            "implementer.md",
+            "reviewer.md",
+            "completer.md",
+        ] {
+            assert!(
+                templates_dir.join(legacy).exists(),
+                "legacy template path should exist: {legacy}"
+            );
+        }
+    }
 }

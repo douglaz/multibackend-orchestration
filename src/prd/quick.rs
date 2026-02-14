@@ -634,7 +634,10 @@ mod tests {
         assert!(result.cache_dir.join("revision-1.md").exists());
         assert!(result.cache_dir.join("review-2.json").exists());
         assert!(result.cache_dir.join("SPEC.md").exists());
-        assert!(!working_dir.join("SPEC.md").exists(), "SPEC.md should not be in repo root");
+        assert!(
+            !working_dir.join("SPEC.md").exists(),
+            "SPEC.md should not be in repo root"
+        );
         assert!(result.cache_dir.join("meta.json").exists());
     }
 
@@ -673,7 +676,10 @@ mod tests {
         // Even though sections missing, pipeline proceeds best-effort
         assert_eq!(writer.call_count().await, 3);
         assert!(result.cache_dir.join("SPEC.md").exists());
-        assert!(!working_dir.join("SPEC.md").exists(), "SPEC.md should not be in repo root");
+        assert!(
+            !working_dir.join("SPEC.md").exists(),
+            "SPEC.md should not be in repo root"
+        );
         assert!(result.approved);
     }
 }
