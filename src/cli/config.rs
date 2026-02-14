@@ -147,6 +147,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "repo": effective.daemon.repo,
                     "refinement_enabled": effective.daemon.refinement_enabled,
                     "refinement_backend": effective.daemon.refinement_backend,
+                    "auto_rebase_enabled": effective.daemon.auto_rebase_enabled,
+                    "rebase_interval_seconds": effective.daemon.rebase_interval_seconds,
+                    "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
+                    "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -216,6 +220,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "repo": effective.daemon.repo,
                     "refinement_enabled": effective.daemon.refinement_enabled,
                     "refinement_backend": effective.daemon.refinement_backend,
+                    "auto_rebase_enabled": effective.daemon.auto_rebase_enabled,
+                    "rebase_interval_seconds": effective.daemon.rebase_interval_seconds,
+                    "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
+                    "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -350,6 +358,18 @@ fn set_global_value(
         "workspace.daemon_refinement_backend" => {
             ensure_backend(raw_value)?;
             config.workspace.daemon_refinement_backend = raw_value.to_owned();
+        }
+        "workspace.daemon_auto_rebase_enabled" => {
+            config.workspace.daemon_auto_rebase_enabled = parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_rebase_interval_seconds" => {
+            config.workspace.daemon_rebase_interval_seconds = parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_max_rebases_per_cycle" => {
+            config.workspace.daemon_max_rebases_per_cycle = parse_u32(raw_value, key)?;
+        }
+        "workspace.daemon_rebase_timeout_seconds" => {
+            config.workspace.daemon_rebase_timeout_seconds = parse_u64(raw_value, key)?;
         }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
@@ -515,6 +535,18 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "daemon.refinement_backend" => {
             config.daemon.refinement_backend = parse_optional_backend(raw_value)?;
+        }
+        "daemon.auto_rebase_enabled" => {
+            config.daemon.auto_rebase_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "daemon.rebase_interval_seconds" => {
+            config.daemon.rebase_interval_seconds = parse_optional_u64(raw_value, key)?;
+        }
+        "daemon.max_rebases_per_cycle" => {
+            config.daemon.max_rebases_per_cycle = parse_optional_u32(raw_value, key)?;
+        }
+        "daemon.rebase_timeout_seconds" => {
+            config.daemon.rebase_timeout_seconds = parse_optional_u64(raw_value, key)?;
         }
         _ => {
             return Err(RalphError::Validation(format!(

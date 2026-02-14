@@ -47,6 +47,14 @@ pub struct WorkspaceConfig {
     pub daemon_refinement_enabled: bool,
     #[serde(default = "default_daemon_refinement_backend")]
     pub daemon_refinement_backend: String,
+    #[serde(default = "default_daemon_auto_rebase_enabled")]
+    pub daemon_auto_rebase_enabled: bool,
+    #[serde(default = "default_daemon_rebase_interval_seconds")]
+    pub daemon_rebase_interval_seconds: u64,
+    #[serde(default = "default_daemon_max_rebases_per_cycle")]
+    pub daemon_max_rebases_per_cycle: u32,
+    #[serde(default = "default_daemon_rebase_timeout_seconds")]
+    pub daemon_rebase_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,6 +235,10 @@ impl Default for WorkspaceConfig {
             daemon_repo: None,
             daemon_refinement_enabled: default_daemon_refinement_enabled(),
             daemon_refinement_backend: default_daemon_refinement_backend(),
+            daemon_auto_rebase_enabled: default_daemon_auto_rebase_enabled(),
+            daemon_rebase_interval_seconds: default_daemon_rebase_interval_seconds(),
+            daemon_max_rebases_per_cycle: default_daemon_max_rebases_per_cycle(),
+            daemon_rebase_timeout_seconds: default_daemon_rebase_timeout_seconds(),
         }
     }
 }
@@ -495,6 +507,22 @@ fn default_daemon_refinement_backend() -> String {
     "claude(sonnet)".to_owned()
 }
 
+fn default_daemon_auto_rebase_enabled() -> bool {
+    true
+}
+
+fn default_daemon_rebase_interval_seconds() -> u64 {
+    1800
+}
+
+fn default_daemon_max_rebases_per_cycle() -> u32 {
+    3
+}
+
+fn default_daemon_rebase_timeout_seconds() -> u64 {
+    120
+}
+
 fn default_qa_enabled() -> bool {
     true
 }
@@ -657,6 +685,10 @@ command = "claude-custom"
         assert!(config.workspace.daemon_repo.is_none());
         assert!(config.workspace.daemon_refinement_enabled);
         assert_eq!(config.workspace.daemon_refinement_backend, "claude(sonnet)");
+        assert!(config.workspace.daemon_auto_rebase_enabled);
+        assert_eq!(config.workspace.daemon_rebase_interval_seconds, 1800);
+        assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 3);
+        assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 120);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert!(config.workflow.prompt_review_enabled);
@@ -740,6 +772,10 @@ base_branch = "master"
         assert!(config.workspace.daemon_repo.is_none());
         assert!(config.workspace.daemon_refinement_enabled);
         assert_eq!(config.workspace.daemon_refinement_backend, "claude(sonnet)");
+        assert!(config.workspace.daemon_auto_rebase_enabled);
+        assert_eq!(config.workspace.daemon_rebase_interval_seconds, 1800);
+        assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 3);
+        assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 120);
         let defaults = GlobalConfig::default();
         assert_eq!(
             config.backends.claude.models,
@@ -776,6 +812,10 @@ daemon_labels = ["ralph:ready", "triage"]
 daemon_repo = "acme/widgets"
 daemon_refinement_enabled = false
 daemon_refinement_backend = "codex(gpt-5.3-codex-medium)"
+daemon_auto_rebase_enabled = false
+daemon_rebase_interval_seconds = 900
+daemon_max_rebases_per_cycle = 5
+daemon_rebase_timeout_seconds = 240
 
 [backends.claude]
 command = "claude"
@@ -824,6 +864,10 @@ base_branch = "master"
             config.workspace.daemon_refinement_backend,
             "codex(gpt-5.3-codex-medium)"
         );
+        assert!(!config.workspace.daemon_auto_rebase_enabled);
+        assert_eq!(config.workspace.daemon_rebase_interval_seconds, 900);
+        assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 5);
+        assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 240);
     }
 
     #[test]

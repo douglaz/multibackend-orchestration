@@ -57,6 +57,10 @@ pub struct ProjectDaemonOverrides {
     pub repo: Option<String>,
     pub refinement_enabled: Option<bool>,
     pub refinement_backend: Option<String>,
+    pub auto_rebase_enabled: Option<bool>,
+    pub rebase_interval_seconds: Option<u64>,
+    pub max_rebases_per_cycle: Option<u32>,
+    pub rebase_timeout_seconds: Option<u64>,
 }
 
 impl ProjectConfig {

@@ -67,6 +67,10 @@ pub struct DaemonTask {
     pub child_pgid: Option<u32>,
     pub branch: Option<String>,
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub last_rebase_at: Option<String>,
+    #[serde(default)]
+    pub last_rebase_head_sha: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -309,6 +313,8 @@ mod tests {
             child_pgid: None,
             branch: None,
             pr_url: None,
+            last_rebase_at: None,
+            last_rebase_head_sha: None,
             created_at: "2026-01-01T00:00:00Z".to_owned(),
             updated_at: "2026-01-01T00:00:00Z".to_owned(),
         }
@@ -353,6 +359,8 @@ mod tests {
 
         let task: DaemonTask = serde_json::from_str(raw).expect("legacy task json should parse");
         assert!(task.raw_idea.is_none());
+        assert!(task.last_rebase_at.is_none());
+        assert!(task.last_rebase_head_sha.is_none());
     }
 
     #[test]
@@ -366,6 +374,8 @@ mod tests {
             decoded.raw_idea.as_deref(),
             Some("Issue title\n\nIssue body")
         );
+        assert_eq!(decoded.last_rebase_at, None);
+        assert_eq!(decoded.last_rebase_head_sha, None);
     }
 
     #[test]

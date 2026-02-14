@@ -127,6 +127,50 @@ pub fn clean_worktree(wt_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Create or reuse a rebase worktree and check out the requested branch.
+///
+/// Uses a dedicated worktree path `.ralph/daemon/worktrees/rebase-<task_id>/`.
+pub fn create_worktree_on_branch(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+    branch: &str,
+) -> Result<PathBuf> {
+    let wt_path = worktrees_dir(workspace_root).join(format!("rebase-{task_id}"));
+
+    if !wt_path.exists() {
+        if let Some(parent) = wt_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let output = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--force",
+                &wt_path.to_string_lossy(),
+                "HEAD",
+            ])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to create rebase worktree for {task_id}: {err}"
+                ))
+            })?;
+
+        if !output.status.success() {
+            return Err(RalphError::Orchestration(format!(
+                "git worktree add failed for rebase-{task_id}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+    }
+
+    checkout_branch_in_worktree(&wt_path, branch)?;
+    Ok(wt_path)
+}
+
 /// Remove a worktree for a task. Best-effort: logs warning on failure.
 pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
     let wt_path = task_worktree_path(workspace_root, task_id);
@@ -190,4 +234,44 @@ pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_
         .args(["worktree", "prune"])
         .current_dir(repo_root)
         .output();
+}
+
+fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result<()> {
+    let checkout = Command::new("git")
+        .args(["checkout", "--force", "--ignore-other-worktrees", branch])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to checkout {branch}: {err}")))?;
+
+    if checkout.status.success() {
+        return Ok(());
+    }
+
+    let remote_branch = format!("origin/{branch}");
+    let fallback = Command::new("git")
+        .args([
+            "checkout",
+            "--force",
+            "--ignore-other-worktrees",
+            "-B",
+            branch,
+            "--track",
+            &remote_branch,
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to checkout tracking branch {branch}: {err}"
+            ))
+        })?;
+
+    if !fallback.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git checkout failed for branch {branch}: {}",
+            String::from_utf8_lossy(&fallback.stderr).trim()
+        )));
+    }
+
+    Ok(())
 }

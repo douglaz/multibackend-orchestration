@@ -1,0 +1,41 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Conflict detection API",
+      "feedback": "Spec is internally inconsistent: Acceptance says `--json mergeable`, implementation says `--json mergeStateStatus,state,url`, and enum mapping uses `CONFLICTING/MERGEABLE` values that do not match `mergeStateStatus` values. Lock to one field set and exact mapping before implementation."
+    },
+    {
+      "area": "Rebase target branch source",
+      "feedback": "Rebase flow requires `target_branch`, but detection query does not fetch/store the PR base branch (for example `baseRefName`) and `DaemonTask` does not persist it. Without this, `git rebase origin/<target>` is under-specified and can rebase onto the wrong branch."
+    },
+    {
+      "area": "Branch/worktree feasibility",
+      "feedback": "Plan assumes `worktree::create_worktree()` can reuse arbitrary PR branches, but current helper always creates/opens `ralph/daemon/<task_id>`. Existing runtime already supports branch switching (`task.branch` may differ), so this design can rebase the wrong branch unless worktree APIs are generalized."
+    },
+    {
+      "area": "Requirement alignment",
+      "feedback": "Requirement says update PR status/comments; spec posts to the linked issue only. That does not guarantee PR-visible rebase activity. Define whether comments must be on PRs (`gh pr comment`) and whether issue comments are optional."
+    },
+    {
+      "area": "Failure retry and idempotency",
+      "feedback": "`rebase-failed:{timestamp}` markers contradict 'idempotent, no duplicate comments' and will generate a new failure comment each interval for persistent conflicts. Add dedupe/cooldown semantics (for example keyed by PR head SHA + error signature)."
+    },
+    {
+      "area": "Non-interference with active workflows",
+      "feedback": "Running sequential rebases inline in the main loop can delay `collect_children` and issue polling if rebases are slow. 'Concurrency slot accounting' is not actually enforcing isolation in this design. Add bounded per-cycle work, timeout, and scheduling policy."
+    },
+    {
+      "area": "Rate-limit handling",
+      "feedback": "Interval-based polling alone is not enough for many PRs. Spec lacks behavior for `gh` rate-limit responses (403/secondary limits), per-cycle request caps, and backoff/recovery, so the 'respect GitHub API rate limits' constraint is not fully met."
+    },
+    {
+      "area": "Testing completeness",
+      "feedback": "Project convention requires validate conformance tests for new daemon behavior (`src/validate/tests_daemon.rs`), but plan only lists unit/integration/manual tests. Missing must-have scenarios include branch-switched tasks, base-branch resolution, closed/merged PR skip, force-with-lease rejection, gh/rate-limit failures, and `ralph config get/set/show` plumbing for new keys."
+    },
+    {
+      "area": "State and observability clarity",
+      "feedback": "`last_rebase_at` is introduced but skip policy is undefined (how recent counts as 'recently rebased'), and `ralph daemon status` output changes are not specified. Define exact semantics and user-visible reporting."
+    }
+  ]
+}

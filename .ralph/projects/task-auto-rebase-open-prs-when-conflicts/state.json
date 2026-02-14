@@ -1,0 +1,48 @@
+{
+  "project_id": "task-auto-rebase-open-prs-when-conflicts",
+  "project_name": "# Task: Auto-rebase open PRs when conflicts are detected\n\n##",
+  "created_at": "2026-02-14T22:35:30.652492001Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "1bf98341f777312757863f1029e3379f4f62faa8c56077889f131e09c3ff8d8f",
+  "prompt_hash_at_loop_start": "1bf98341f777312757863f1029e3379f4f62faa8c56077889f131e09c3ff8d8f",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "state-schema-config-plumbing-and-pr-merge-query",
+      "feature_name": "State Schema, Config Plumbing, and PR Merge Query Infrastructure",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-state-schema-config-plumbing-and-pr-merge-query/20260214223921-spec.md",
+        "impl_notes": "loops/001-state-schema-config-plumbing-and-pr-merge-query/20260214224429-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-state-schema-config-plumbing-and-pr-merge-query/20260214225309-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-state-schema-config-plumbing-and-pr-merge-query/20260214225225-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T22:39:21.024227478Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

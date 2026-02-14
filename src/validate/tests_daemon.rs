@@ -472,6 +472,38 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             .expect("config get workspace.daemon_refinement_backend should succeed");
         assert_eq!(refinement_backend_default.trim(), "claude(sonnet)");
 
+        let auto_rebase_enabled_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_auto_rebase_enabled"])
+            .expect("config get workspace.daemon_auto_rebase_enabled should succeed");
+        assert_eq!(auto_rebase_enabled_default.trim(), "true");
+
+        let rebase_interval_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_rebase_interval_seconds"])
+            .expect("config get workspace.daemon_rebase_interval_seconds should succeed");
+        assert_eq!(rebase_interval_default.trim(), "1800");
+
+        let rebase_cap_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_max_rebases_per_cycle"])
+            .expect("config get workspace.daemon_max_rebases_per_cycle should succeed");
+        assert_eq!(rebase_cap_default.trim(), "3");
+
+        let rebase_timeout_default = h
+            .ralph_ok(["config", "get", "workspace.daemon_rebase_timeout_seconds"])
+            .expect("config get workspace.daemon_rebase_timeout_seconds should succeed");
+        assert_eq!(rebase_timeout_default.trim(), "120");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_auto_rebase_enabled",
+            "false",
+        ])
+        .expect("set workspace.daemon_auto_rebase_enabled failed");
+        let auto_rebase_enabled_updated = h
+            .ralph_ok(["config", "get", "workspace.daemon_auto_rebase_enabled"])
+            .expect("config get workspace.daemon_auto_rebase_enabled should succeed");
+        assert_eq!(auto_rebase_enabled_updated.trim(), "false");
+
         h.create_project(
             "daemon-config",
             "Daemon Config",
@@ -533,6 +565,42 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.refinement_backend failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.auto_rebase_enabled",
+            "false",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.auto_rebase_enabled failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.rebase_interval_seconds",
+            "900",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.rebase_interval_seconds failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.max_rebases_per_cycle",
+            "5",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.max_rebases_per_cycle failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "daemon.rebase_timeout_seconds",
+            "240",
+            "--project",
+            "daemon-config",
+        ])
+        .expect("set daemon.rebase_timeout_seconds failed");
 
         h.ralph_ok(["project", "use", "daemon-config"])
             .expect("project use should succeed");
@@ -549,6 +617,26 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             refinement_backend_project.trim(),
             "codex(gpt-5.3-codex-medium)"
         );
+
+        let auto_rebase_enabled_project = h
+            .ralph_ok(["config", "get", "daemon.auto_rebase_enabled"])
+            .expect("config get daemon.auto_rebase_enabled should succeed");
+        assert_eq!(auto_rebase_enabled_project.trim(), "false");
+
+        let rebase_interval_project = h
+            .ralph_ok(["config", "get", "daemon.rebase_interval_seconds"])
+            .expect("config get daemon.rebase_interval_seconds should succeed");
+        assert_eq!(rebase_interval_project.trim(), "900");
+
+        let rebase_cap_project = h
+            .ralph_ok(["config", "get", "daemon.max_rebases_per_cycle"])
+            .expect("config get daemon.max_rebases_per_cycle should succeed");
+        assert_eq!(rebase_cap_project.trim(), "5");
+
+        let rebase_timeout_project = h
+            .ralph_ok(["config", "get", "daemon.rebase_timeout_seconds"])
+            .expect("config get daemon.rebase_timeout_seconds should succeed");
+        assert_eq!(rebase_timeout_project.trim(), "240");
 
         let merged_start = h
             .ralph_env(
@@ -636,6 +724,7 @@ fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&populated, 0);
+        assert_stdout_contains(&populated, "LAST REBASE");
         assert_stdout_contains(&populated, "acme-widgets-41");
         assert_stdout_contains(&populated, "pending");
         assert_stdout_contains(&populated, "acme-widgets-42");

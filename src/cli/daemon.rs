@@ -134,12 +134,12 @@ fn execute_status() -> Result<()> {
 
     println!("DAEMON TASKS");
     println!(
-        "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8}",
-        "TASK ID", "STATE", "ISSUE", "REPO", "PID", "PGID"
+        "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8} {:<20}",
+        "TASK ID", "STATE", "ISSUE", "REPO", "PID", "PGID", "LAST REBASE"
     );
     for task in tasks {
         println!(
-            "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8}",
+            "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8} {:<20}",
             task.task_id,
             task.state,
             task.issue_number,
@@ -149,7 +149,8 @@ fn execute_status() -> Result<()> {
                 .unwrap_or_else(|| "-".to_owned()),
             task.child_pgid
                 .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_owned())
+                .unwrap_or_else(|| "-".to_owned()),
+            task.last_rebase_at.unwrap_or_else(|| "-".to_owned())
         );
     }
 

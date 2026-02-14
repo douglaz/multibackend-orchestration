@@ -318,6 +318,8 @@ async fn poll_and_claim(
             child_pgid: None,
             branch: Some(format!("ralph/daemon/{task_id}")),
             pr_url: None,
+            last_rebase_at: None,
+            last_rebase_head_sha: None,
             created_at: now.clone(),
             updated_at: now,
         };
