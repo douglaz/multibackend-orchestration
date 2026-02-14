@@ -5,7 +5,7 @@ tmux = false
 tmux_session = "ralph"
 tmux_window_keep_seconds = 5
 daemon_poll_seconds = 60
-daemon_max_concurrent = 1
+daemon_max_concurrent = 5
 daemon_labels = ["ralph:ready"]
 daemon_refinement_enabled = true
 daemon_refinement_backend = "claude(sonnet)"
@@ -19,7 +19,7 @@ args = [
     "--allowedTools",
     "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop",
 ]
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.claude.env]
 
@@ -39,7 +39,7 @@ args = [
     "--dangerously-bypass-approvals-and-sandbox",
     "-",
 ]
-timeout_seconds = 600
+timeout_seconds = 7200
 
 [backends.codex.env]
 
