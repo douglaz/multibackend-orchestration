@@ -61,6 +61,17 @@ pub fn assert_stdout_contains(output: &Output, needle: &str) {
     );
 }
 
+pub fn assert_stdout_eq(output: &Output, expected: &str) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        expected.trim(),
+        "expected stdout to equal '{}', got:\n{}",
+        expected.trim(),
+        stdout
+    );
+}
+
 pub fn assert_git_branch_exists(repo_root: &Path, branch: &str) {
     let branch_ref = format!("refs/heads/{branch}");
     let status = Command::new("git")

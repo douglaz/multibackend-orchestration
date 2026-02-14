@@ -23,6 +23,7 @@ use crate::Result;
 #[derive(Debug, Parser)]
 #[command(name = "ralph")]
 #[command(about = "AI backend orchestration tool")]
+#[command(version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

@@ -1,0 +1,17 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Testing coverage",
+      "feedback": "The spec is missing required validate conformance coverage. This repo requires every new CLI feature/command behavior to be covered under `src/validate/` and registered in `src/validate/mod.rs`; manual smoke tests plus an optional `tests/` integration test are not sufficient."
+    },
+    {
+      "area": "Edge cases",
+      "feedback": "Acceptance criteria should explicitly require that `ralph --version`/`-V` work without an initialized workspace or active project (global flag behavior, early Clap exit). This is important for CLI convention compliance and should be tested."
+    },
+    {
+      "area": "Acceptance/test precision",
+      "feedback": "Automated checks should cover both `--version` and `-V` with exit code 0 and assert equality/parity of output against package metadata (not just `contains`), to avoid false positives and fully satisfy the stated criteria."
+    }
+  ]
+}
