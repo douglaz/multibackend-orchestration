@@ -199,7 +199,7 @@ impl Default for GlobalConfig {
                         "--allowedTools".to_owned(),
                         "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
                     ],
-                    timeout_seconds: 600,
+                    timeout_seconds: 7200,
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
                         planner: Some("opus".to_owned()),
@@ -218,7 +218,7 @@ impl Default for GlobalConfig {
                         "--dangerously-bypass-approvals-and-sandbox".to_owned(),
                         "-".to_owned(),
                     ],
-                    timeout_seconds: 600,
+                    timeout_seconds: 7200,
                     env: BTreeMap::new(),
                     models: BackendRoleModels {
                         planner: Some("gpt-5.3-codex-xhigh".to_owned()),
