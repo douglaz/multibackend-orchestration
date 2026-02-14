@@ -14,6 +14,34 @@ pub struct GhIssue {
     pub body: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeStatus {
+    Conflicting,
+    Mergeable,
+    Unknown,
+}
+
+impl PrMergeStatus {
+    fn from_gh_mergeable(raw: &str) -> Result<Self> {
+        match raw {
+            "CONFLICTING" => Ok(Self::Conflicting),
+            "MERGEABLE" => Ok(Self::Mergeable),
+            "UNKNOWN" => Ok(Self::Unknown),
+            _ => Err(RalphError::Orchestration(format!(
+                "unexpected gh pr mergeable value: {raw}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrMergeInfo {
+    pub merge_status: PrMergeStatus,
+    pub state: String,
+    pub base_branch: String,
+    pub head_oid: String,
+}
+
 /// Poll open issues matching all supplied labels.
 ///
 /// Uses `gh issue list --repo <owner/repo> --limit 100 --json number,title,labels,body`
@@ -116,6 +144,35 @@ pub fn fetch_issue_body(
         RalphError::Orchestration(format!("failed to parse gh issue view output: {err}"))
     })?;
     Ok((parsed.title, parsed.body))
+}
+
+/// Query PR mergeability/status metadata needed by daemon rebase logic.
+pub fn query_pr_merge_info(owner: &str, repo: &str, pr_number: u32) -> Result<PrMergeInfo> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "mergeable,state,baseRefName,headRefOid",
+        ])
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to run gh pr view: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr view failed for {}#{}: {}",
+            full_repo,
+            pr_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_pr_merge_info(raw.trim())
 }
 
 /// Filter out issues that already have any `ralph:*` label.
@@ -247,6 +304,34 @@ pub fn post_idempotent_comment(
             issue_number,
             String::from_utf8_lossy(&output.stderr).trim()
         );
+    }
+
+    Ok(())
+}
+
+/// Post a comment on a pull request.
+pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "comment",
+            &pr_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            body,
+        ])
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to run gh pr comment: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr comment failed for {}#{}: {}",
+            full_repo,
+            pr_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
 
     Ok(())
@@ -469,15 +554,37 @@ struct RawIssueBody {
     body: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RawPrMergeInfo {
+    mergeable: String,
+    state: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+}
+
 fn parse_issue_list(raw: &str) -> Result<Vec<RawGhIssue>> {
     serde_json::from_str(raw).map_err(|err| {
         RalphError::Orchestration(format!("failed to parse gh issue list output: {err}"))
     })
 }
 
+fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
+    let parsed: RawPrMergeInfo = serde_json::from_str(raw).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh pr view output: {err}"))
+    })?;
+    Ok(PrMergeInfo {
+        merge_status: PrMergeStatus::from_gh_mergeable(&parsed.mergeable)?,
+        state: parsed.state,
+        base_branch: parsed.base_ref_name,
+        head_oid: parsed.head_ref_oid,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_issue_list, GhIssue};
+    use super::{parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -512,5 +619,44 @@ mod tests {
             body: Some("body".to_owned()),
         };
         assert_eq!(issue.body.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn pr_merge_info_parses_expected_fields() {
+        let raw = r#"{
+            "mergeable":"MERGEABLE",
+            "state":"OPEN",
+            "baseRefName":"main",
+            "headRefOid":"abc123"
+        }"#;
+        let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
+        assert_eq!(info.merge_status, PrMergeStatus::Mergeable);
+        assert_eq!(info.state, "OPEN");
+        assert_eq!(info.base_branch, "main");
+        assert_eq!(info.head_oid, "abc123");
+    }
+
+    #[test]
+    fn pr_merge_status_maps_conflicting() {
+        let raw = r#"{
+            "mergeable":"CONFLICTING",
+            "state":"OPEN",
+            "baseRefName":"main",
+            "headRefOid":"abc123"
+        }"#;
+        let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
+        assert_eq!(info.merge_status, PrMergeStatus::Conflicting);
+    }
+
+    #[test]
+    fn pr_merge_status_maps_unknown() {
+        let raw = r#"{
+            "mergeable":"UNKNOWN",
+            "state":"OPEN",
+            "baseRefName":"main",
+            "headRefOid":"abc123"
+        }"#;
+        let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
+        assert_eq!(info.merge_status, PrMergeStatus::Unknown);
     }
 }

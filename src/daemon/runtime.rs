@@ -67,7 +67,10 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
     if let Ok(content) = std::fs::read_to_string(log_file) {
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(50);
-        eprintln!("--- last output from {task_id} ({}) ---", log_file.display());
+        eprintln!(
+            "--- last output from {task_id} ({}) ---",
+            log_file.display()
+        );
         for line in &lines[start..] {
             eprintln!("  {line}");
         }
@@ -161,11 +164,7 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .parent()
         .and_then(|p| p.parent())
         .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
-    worktree::reconcile_worktrees(
-        &config.repo_root,
-        workspace_root,
-        &active_ids,
-    );
+    worktree::reconcile_worktrees(&config.repo_root, workspace_root, &active_ids);
     Ok(())
 }
 
@@ -288,6 +287,8 @@ async fn poll_and_claim(
             child_pgid: None,
             branch: Some(format!("ralph/daemon/{task_id}")),
             pr_url: None,
+            last_rebase_at: None,
+            last_rebase_head_sha: None,
             created_at: now.clone(),
             updated_at: now,
         };
@@ -354,8 +355,7 @@ async fn dispatch_task(
         None => {
             let store_clone = store.clone();
             let task_clone = task.clone();
-            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone))
-                .await?
+            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone)).await?
         }
     };
 
@@ -733,8 +733,7 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             let wt = wt_path.clone();
-            if let Ok(actual_branch) =
-                spawn_blocking_op(move || github::current_branch(&wt)).await
+            if let Ok(actual_branch) = spawn_blocking_op(move || github::current_branch(&wt)).await
             {
                 if task.branch.as_deref() != Some(&actual_branch) {
                     eprintln!(
@@ -826,10 +825,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return;
             }
         }
@@ -846,14 +842,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             task.task_id
         );
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                "no-diff",
-                &body,
-            )
+            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
         })
         .await
         {

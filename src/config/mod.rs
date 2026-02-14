@@ -57,6 +57,10 @@ pub struct EffectiveDaemonConfig {
     pub repo: Option<String>,
     pub refinement_enabled: bool,
     pub refinement_backend: String,
+    pub auto_rebase_enabled: bool,
+    pub rebase_interval_seconds: u64,
+    pub max_rebases_per_cycle: u32,
+    pub rebase_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +245,18 @@ pub fn resolve_daemon_config(
         refinement_backend: daemon_overrides
             .and_then(|cfg| cfg.refinement_backend.clone())
             .unwrap_or_else(|| global.workspace.daemon_refinement_backend.clone()),
+        auto_rebase_enabled: daemon_overrides
+            .and_then(|cfg| cfg.auto_rebase_enabled)
+            .unwrap_or(global.workspace.daemon_auto_rebase_enabled),
+        rebase_interval_seconds: daemon_overrides
+            .and_then(|cfg| cfg.rebase_interval_seconds)
+            .unwrap_or(global.workspace.daemon_rebase_interval_seconds),
+        max_rebases_per_cycle: daemon_overrides
+            .and_then(|cfg| cfg.max_rebases_per_cycle)
+            .unwrap_or(global.workspace.daemon_max_rebases_per_cycle),
+        rebase_timeout_seconds: daemon_overrides
+            .and_then(|cfg| cfg.rebase_timeout_seconds)
+            .unwrap_or(global.workspace.daemon_rebase_timeout_seconds),
     }
 }
 
@@ -479,6 +495,10 @@ mod tests {
         global.workspace.daemon_repo = Some("acme/global".to_owned());
         global.workspace.daemon_refinement_enabled = true;
         global.workspace.daemon_refinement_backend = "claude(sonnet)".to_owned();
+        global.workspace.daemon_auto_rebase_enabled = true;
+        global.workspace.daemon_rebase_interval_seconds = 1800;
+        global.workspace.daemon_max_rebases_per_cycle = 3;
+        global.workspace.daemon_rebase_timeout_seconds = 120;
 
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
@@ -488,6 +508,10 @@ mod tests {
                 repo: Some("acme/project".to_owned()),
                 refinement_enabled: Some(false),
                 refinement_backend: Some("codex(gpt-5.3-codex-medium)".to_owned()),
+                auto_rebase_enabled: Some(false),
+                rebase_interval_seconds: Some(900),
+                max_rebases_per_cycle: Some(5),
+                rebase_timeout_seconds: Some(240),
             },
             ..ProjectConfig::default()
         };
@@ -499,6 +523,10 @@ mod tests {
         assert_eq!(effective.repo.as_deref(), Some("acme/project"));
         assert!(!effective.refinement_enabled);
         assert_eq!(effective.refinement_backend, "codex(gpt-5.3-codex-medium)");
+        assert!(!effective.auto_rebase_enabled);
+        assert_eq!(effective.rebase_interval_seconds, 900);
+        assert_eq!(effective.max_rebases_per_cycle, 5);
+        assert_eq!(effective.rebase_timeout_seconds, 240);
 
         let no_project = resolve_daemon_config(&global, None);
         assert_eq!(no_project.poll_seconds, 60);
@@ -507,5 +535,9 @@ mod tests {
         assert_eq!(no_project.repo.as_deref(), Some("acme/global"));
         assert!(no_project.refinement_enabled);
         assert_eq!(no_project.refinement_backend, "claude(sonnet)");
+        assert!(no_project.auto_rebase_enabled);
+        assert_eq!(no_project.rebase_interval_seconds, 1800);
+        assert_eq!(no_project.max_rebases_per_cycle, 3);
+        assert_eq!(no_project.rebase_timeout_seconds, 120);
     }
 }
