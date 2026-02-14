@@ -233,10 +233,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -671,10 +674,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -796,10 +802,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -1146,10 +1155,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -1395,10 +1407,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -1519,10 +1534,13 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
 - mock check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified.
 EOF
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -1755,11 +1773,14 @@ elif [[ "$prompt" == *"You are a QA engineer validating"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary manually: passed
+
+## Automated Tests
 - cargo check: passed
 - cargo test: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria verified. Build and tests pass.
 EOF
 elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
@@ -1871,11 +1892,14 @@ EOF
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary manually: passed (after fix)
+
+## Automated Tests
 - cargo check: passed
 - cargo test: passed (after fix)
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria now verified after implementer fix.
 EOF
   fi
@@ -2156,10 +2180,13 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance verification: passed manually
+
+## Automated Tests
 - acceptance verification checklist: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 Overall project acceptance verified from master prompt, completed-loop summary, and base-branch diff.
 EOF
   else
@@ -2255,10 +2282,13 @@ EOF
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- final acceptance verification: passed manually
+
+## Automated Tests
 - final acceptance checklist: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 Project-level acceptance now passes after feedback.
 EOF
   fi

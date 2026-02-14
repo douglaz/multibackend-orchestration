@@ -337,21 +337,28 @@ fn qa_pass_mock_script() -> String {
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance manual check: passed
+
+## Automated Tests
 - acceptance check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All project-level acceptance criteria verified.
 EOF
 else
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary with test args: ok
+- verified CLI output matches spec
+
+## Automated Tests
 - cargo check: ok
 - cargo test: 10 passed, 0 failed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria from the spec have been verified.
 EOF
 fi"#,
@@ -378,10 +385,13 @@ else
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary: all features work
+
+## Automated Tests
 - cargo test: all passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All tests passing after fixes.
 EOF
 fi"#,
@@ -1148,10 +1158,13 @@ EOF
       cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance manual check: passed
+
+## Automated Tests
 - acceptance check: passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All project-level acceptance criteria verified.
 EOF
     fi
@@ -1159,11 +1172,15 @@ EOF
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary with test args: ok
+- verified CLI output matches spec
+
+## Automated Tests
 - cargo check: ok
 - cargo test: 10 passed, 0 failed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria from the spec have been verified.
 EOF
   fi
@@ -1241,10 +1258,13 @@ fn acceptance_one_backend_fail_then_pass_mock_script(codex_fail_counter: &Path) 
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance manual check (claude): passed
+
+## Automated Tests
 - acceptance check (claude): passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 Claude acceptance check passed.
 EOF
   elif echo "$INPUT" | grep -q "QA Backend: codex"; then
@@ -1265,10 +1285,13 @@ EOF
       cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance manual check (codex): passed
+
+## Automated Tests
 - acceptance check (codex): passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 Codex acceptance check passed.
 EOF
     fi
@@ -1287,10 +1310,13 @@ else
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary manually: ok
+
+## Automated Tests
 - cargo check: ok
 
-## Verification Summary
+## Acceptance Criteria Verification
 Feature QA passed.
 EOF
 fi"#,
@@ -1421,10 +1447,13 @@ EOF
       cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- acceptance manual check (codex): passed
+
+## Automated Tests
 - acceptance check (codex): passed
 
-## Verification Summary
+## Acceptance Criteria Verification
 Codex acceptance check passed independently.
 EOF
     else
@@ -1443,10 +1472,13 @@ EOF
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary manually: ok
+
+## Automated Tests
 - cargo check: ok
 
-## Verification Summary
+## Acceptance Criteria Verification
 Feature QA passed.
 EOF
   fi
@@ -1603,10 +1635,13 @@ EOF
     cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary manually: ok
+
+## Automated Tests
 - cargo check: ok
 
-## Verification Summary
+## Acceptance Criteria Verification
 Feature QA passed.
 EOF
   fi

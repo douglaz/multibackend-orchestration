@@ -77,10 +77,13 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
-- mock check: passed
+## Manual Testing
+- mock manual check: passed
 
-## Verification Summary
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
 elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
@@ -266,11 +269,15 @@ elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
+## Manual Testing
+- ran binary with test args: ok
+- verified CLI output matches spec
+
+## Automated Tests
 - cargo check: ok
 - cargo test: 10 passed, 0 failed
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria from the spec have been verified.
 EOF
 elif echo "$INPUT" | grep -q "You are a project completion validator."; then
@@ -398,10 +405,13 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
-- mock check: passed
+## Manual Testing
+- mock manual check: passed
 
-## Verification Summary
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
 elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
@@ -684,10 +694,13 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
   cat <<'EOF'
 # QA: PASS
 
-## Tests Run
-- mock check: passed
+## Manual Testing
+- mock manual check: passed
 
-## Verification Summary
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
 elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then

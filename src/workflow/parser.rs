@@ -217,8 +217,12 @@ pub fn parse_qa_output(raw: &str) -> Result<QaDecision> {
 
     match first_h1.trim() {
         "# QA: PASS" => {
-            validate_required_section(&body, "## Tests Run", "QA pass report")?;
-            validate_required_section(&body, "## Verification Summary", "QA pass report")?;
+            validate_required_section(&body, "## Manual Testing", "QA pass report")?;
+            validate_required_section(
+                &body,
+                "## Acceptance Criteria Verification",
+                "QA pass report",
+            )?;
             Ok(QaDecision::Pass { body })
         }
         "# QA: FAIL" => {
@@ -524,12 +528,12 @@ mod tests {
 
     #[test]
     fn parses_qa_pass() {
-        let text = "# QA: PASS\n\n## Tests Run\n- cargo test\n- cargo check\n\n## Verification Summary\nAll tests pass and build succeeds.";
+        let text = "# QA: PASS\n\n## Manual Testing\n- ran ralph init in temp dir\n- verified config created\n\n## Automated Tests\n- cargo test: passed\n\n## Acceptance Criteria Verification\n- [x] init creates config: verified manually";
         let parsed = parse_qa_output(text).expect("parse should succeed");
         match parsed {
             QaDecision::Pass { body } => {
-                assert!(body.contains("## Tests Run"));
-                assert!(body.contains("## Verification Summary"));
+                assert!(body.contains("## Manual Testing"));
+                assert!(body.contains("## Acceptance Criteria Verification"));
             }
             _ => panic!("expected QA pass"),
         }
@@ -562,15 +566,18 @@ mod tests {
 
     #[test]
     fn qa_pass_requires_all_sections() {
-        // Missing "## Verification Summary"
-        let text = "# QA: PASS\n\n## Tests Run\n- cargo test";
+        // Missing "## Acceptance Criteria Verification"
+        let text = "# QA: PASS\n\n## Manual Testing\n- ran the binary";
         let result = parse_qa_output(text);
         assert!(
             result.is_err(),
-            "QA pass without Verification Summary should fail"
+            "QA pass without Acceptance Criteria Verification should fail"
         );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Verification Summary"), "got: {err}");
+        assert!(
+            err.contains("Acceptance Criteria Verification"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -597,7 +604,7 @@ mod tests {
 
     #[test]
     fn qa_parser_strips_frontmatter() {
-        let text = "---\nartifact: qa\n---\n# QA: PASS\n\n## Tests Run\n- ok\n\n## Verification Summary\nAll good.";
+        let text = "---\nartifact: qa\n---\n# QA: PASS\n\n## Manual Testing\n- ran binary ok\n\n## Automated Tests\n- cargo test passed\n\n## Acceptance Criteria Verification\nAll good.";
         let parsed = parse_qa_output(text).expect("should strip frontmatter and parse");
         assert!(matches!(parsed, QaDecision::Pass { .. }));
     }

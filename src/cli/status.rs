@@ -242,7 +242,7 @@ fn extract_qa_summary_lines(
     };
     let body = strip_frontmatter(&raw);
     let section = if qa.passed {
-        "## Verification Summary"
+        "## Acceptance Criteria Verification"
     } else {
         "## Failures"
     };
@@ -313,14 +313,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_section_lines_returns_up_to_3_lines_from_verification_summary() {
+    fn extract_section_lines_returns_up_to_3_lines_from_acceptance_criteria_verification() {
         let body = "\
 # QA: PASS
 
-## Tests Run
-- cargo test: all 42 tests passed
+## Manual Testing
+- ran ralph init, verified config created
 
-## Verification Summary
+## Acceptance Criteria Verification
 All acceptance criteria satisfied.
 Build succeeds with no warnings.
 Integration tests cover the new endpoint.
@@ -329,7 +329,7 @@ Extra line that should be excluded.
 ## Notes
 Cleanup suggestions.
 ";
-        let lines = extract_section_lines(body, "## Verification Summary");
+        let lines = extract_section_lines(body, "## Acceptance Criteria Verification");
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "All acceptance criteria satisfied.");
         assert_eq!(lines[1], "Build succeeds with no warnings.");
@@ -359,10 +359,10 @@ Cleanup suggestions.
         let body = "\
 # QA: PASS
 
-## Tests Run
+## Manual Testing
 - all good
 ";
-        let lines = extract_section_lines(body, "## Verification Summary");
+        let lines = extract_section_lines(body, "## Acceptance Criteria Verification");
         assert!(lines.is_empty());
     }
 
@@ -390,11 +390,11 @@ loop: 1
 
 # QA: PASS
 
-## Verification Summary
+## Acceptance Criteria Verification
 Everything works.
 ";
         let body = strip_frontmatter(raw);
-        let lines = extract_section_lines(&body, "## Verification Summary");
+        let lines = extract_section_lines(&body, "## Acceptance Criteria Verification");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "Everything works.");
     }

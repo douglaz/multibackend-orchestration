@@ -2129,8 +2129,9 @@ CRITICAL FORMAT REQUIREMENTS:
 Required output format:
 
 # QA: PASS
-## Tests Run
-## Verification Summary
+## Manual Testing
+## Automated Tests
+## Acceptance Criteria Verification
 
 OR
 
@@ -2606,8 +2607,9 @@ OR\n\
             .to_owned(),
         "qa" => "\
 # QA: PASS\n\
-## Tests Run\n\
-## Verification Summary\n\
+## Manual Testing\n\
+## Automated Tests\n\
+## Acceptance Criteria Verification\n\
 \n\
 OR\n\
 \n\
@@ -2947,8 +2949,8 @@ mod tests {
             "qa template should contain FAIL heading; got: {qa}"
         );
         assert!(
-            qa.contains("## Tests Run"),
-            "qa template should contain Tests Run section; got: {qa}"
+            qa.contains("## Manual Testing"),
+            "qa template should contain Manual Testing section; got: {qa}"
         );
         assert!(
             qa.contains("## Failures"),
