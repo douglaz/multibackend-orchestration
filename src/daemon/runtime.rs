@@ -804,6 +804,101 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
     }
 }
 
+pub(crate) fn extract_project_ref(branch: &str) -> Option<String> {
+    let mut parts = branch.split('/');
+    let prefix = parts.next()?;
+    let project_id = parts.next()?;
+    if prefix == "ralph" && !project_id.is_empty() && parts.next().is_none() {
+        Some(project_id.to_owned())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn build_pr_title(raw: &str) -> String {
+    let sanitized = raw.replace(['\n', '\r'], " ");
+    let trimmed = sanitized.trim();
+    if trimmed.chars().count() > 80 {
+        let mut truncated: String = trimmed.chars().take(77).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+pub(crate) fn extract_issue_body(raw_idea: Option<&str>) -> Option<String> {
+    let raw = raw_idea?;
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let (_, body) = normalized.split_once("\n\n")?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+pub(crate) fn build_pr_body(
+    branch: &str,
+    diff_stat: Option<&str>,
+    issue_body: Option<&str>,
+    task_id: &str,
+    issue_number: u32,
+) -> String {
+    let mut body = format!("Automated PR for task `{task_id}`.\n\nCloses #{issue_number}\n\n");
+
+    body.push_str("## Diff Stat\n");
+    match diff_stat.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(stat) => {
+            let mut lines = stat.lines();
+            let first_hundred: Vec<&str> = lines.by_ref().take(100).collect();
+            body.push_str("```text\n");
+            body.push_str(&first_hundred.join("\n"));
+            if lines.next().is_some() {
+                if !first_hundred.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str("... (truncated)");
+            }
+            body.push_str("\n```\n");
+        }
+        None => {
+            body.push_str("Diff stat unavailable.\n");
+        }
+    }
+
+    body.push_str("\n## Issue Context\n");
+    match issue_body.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(context) => {
+            let capped: String = context.chars().take(4000).collect();
+            if capped.is_empty() {
+                body.push_str("Issue context unavailable.\n");
+            } else {
+                body.push_str(&capped);
+                body.push('\n');
+            }
+        }
+        None => {
+            body.push_str("Issue context unavailable (legacy task or missing issue body).\n");
+        }
+    }
+
+    body.push_str("\n---\n");
+    match extract_project_ref(branch) {
+        Some(project_ref) => {
+            body.push_str(&format!("Project Ref: `{project_ref}`\n"));
+        }
+        None => {
+            body.push_str(&format!(
+                "Project Ref: unavailable (could not extract from branch `{branch}`).\n"
+            ));
+        }
+    }
+
+    body
+}
+
 /// Handle the PR creation/reuse flow for a completed task.
 async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) {
     let workspace_root = store
@@ -954,5 +1049,69 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_pr_body, build_pr_title, extract_issue_body, extract_project_ref};
+
+    #[test]
+    fn build_pr_title_sanitizes_newlines() {
+        let title = build_pr_title("  Fix login\nflow\rissue  ");
+        assert_eq!(title, "Fix login flow issue");
+    }
+
+    #[test]
+    fn build_pr_title_truncates_long_title() {
+        let input = "a".repeat(120);
+        let title = build_pr_title(&input);
+        assert_eq!(title.chars().count(), 80);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn build_pr_body_no_context_legacy_task() {
+        let body = build_pr_body("feature/no-project-ref", None, None, "task-1", 42);
+        assert!(body.contains("Automated PR for task `task-1`."));
+        assert!(body.contains("Closes #42"));
+        assert!(body.contains("Diff stat unavailable."));
+        assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
+        assert!(
+            body.contains(
+                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+            )
+        );
+    }
+
+    #[test]
+    fn extract_project_ref_success() {
+        assert_eq!(
+            extract_project_ref("ralph/my-project"),
+            Some("my-project".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_project_ref_non_matching_branches() {
+        assert_eq!(extract_project_ref("main"), None);
+        assert_eq!(extract_project_ref("feature/foo"), None);
+        assert_eq!(extract_project_ref("ralph/"), None);
+    }
+
+    #[test]
+    fn extract_issue_body_reads_body_after_title_separator() {
+        let raw = Some("Issue title\n\nIssue body content");
+        assert_eq!(
+            extract_issue_body(raw),
+            Some("Issue body content".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_issue_body_handles_missing_or_empty_body() {
+        assert_eq!(extract_issue_body(None), None);
+        assert_eq!(extract_issue_body(Some("Title only")), None);
+        assert_eq!(extract_issue_body(Some("Title\n\n   ")), None);
     }
 }

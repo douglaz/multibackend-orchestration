@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\nUpdate the daemon's GitHub integration to generate pull requests with meaningful titles and descriptions instead of only showing the project ID.\n\n## Requirements\n- Generate descriptive PR titles that summarize the changes made\n- Include PR body with:\n  - What changes were made\n  - Why the changes were made (based on project context/PRD)\n  - Reference to the project that generated the PR\n- Maintain existing daemon PR creation workflow\n\n## Implementation Constraints\n- Code is in `src/daemon/github.rs` and `src/daemon/mod.rs`\n- Must work with existing project state structure (`.ralph/projects/<id>/state.json`)\n- Should utilize available project metadata (PRD, loop artifacts, etc.)\n\n## Acceptance Criteria\n- [ ] PR titles are descriptive and concise (max 80 chars)\n- [ ] PR bodies include summary of changes made\n- [ ] PR bodies include rationale/context from project\n- [ ] Project ID is still referenced (in body or metadata)\n- [ ] Changes work with existing daemon workflow\n- [ ] No regression in daemon PR creation functionality",
+  "idea_hash": "274a2fded4fc",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-14T20:50:36Z",
+  "completed_at": "2026-02-14T21:00:10Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 223.319268159,
+  "review_times_secs": [
+    142.181178257
+  ],
+  "revision_times_secs": [
+    208.40733836
+  ]
+}
