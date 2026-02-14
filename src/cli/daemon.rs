@@ -113,6 +113,10 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         refinement_enabled: daemon_cfg.refinement_enabled,
         refinement_backend: daemon_cfg.refinement_backend,
         global_config: workspace.config.clone(),
+        auto_rebase_enabled: daemon_cfg.auto_rebase_enabled,
+        rebase_interval_seconds: daemon_cfg.rebase_interval_seconds,
+        max_rebases_per_cycle: daemon_cfg.max_rebases_per_cycle,
+        rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
     };
 
     crate::daemon::runtime::run(&store, &runtime_config).await

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::GlobalConfig;
-use crate::daemon::github;
+use crate::daemon::github::{self, PrMergeStatus};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
@@ -32,6 +32,14 @@ pub struct DaemonRuntimeConfig {
     pub refinement_backend: String,
     /// Global config snapshot for runtime backend operations.
     pub global_config: GlobalConfig,
+    /// Whether auto-rebase is enabled for PR-backed tasks.
+    pub auto_rebase_enabled: bool,
+    /// Minimum interval (seconds) between rebase attempts for the same task.
+    pub rebase_interval_seconds: u64,
+    /// Maximum rebase attempts per daemon cycle.
+    pub max_rebases_per_cycle: u32,
+    /// Per-attempt timeout (seconds) for rebase operations.
+    pub rebase_timeout_seconds: u64,
 }
 
 /// Active child process handle tracked by the runtime.
@@ -100,6 +108,9 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
     loop {
         // Collect finished children
         collect_children(store, config, &mut children).await;
+
+        // Auto-rebase phase: rebase eligible PR-backed task branches
+        auto_rebase_phase(store, config).await;
 
         // Poll for new issues
         let active_count = children.len() as u32;
@@ -801,6 +812,367 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
     {
         eprintln!("warning: failed to cleanup worktree for {task_id}: {err}");
     }
+}
+
+// =============================================================================
+// Auto-Rebase Phase
+// =============================================================================
+
+/// Run the auto-rebase phase: rebase eligible PR-backed task branches onto
+/// their PR base branch.
+///
+/// Processes tasks in deterministic ascending `task_id` order, capped at
+/// `max_rebases_per_cycle`. Each rebase attempt is bounded by
+/// `rebase_timeout_seconds`.
+async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+    if !config.auto_rebase_enabled {
+        eprintln!("auto-rebase: skipped (disabled by config)");
+        return;
+    }
+
+    let tasks = {
+        let store = store.clone();
+        match spawn_blocking_op(move || store.load()).await {
+            Ok(tasks) => tasks,
+            Err(err) => {
+                eprintln!("auto-rebase: failed to load tasks: {err}");
+                return;
+            }
+        }
+    };
+
+    // Deterministic ascending task_id order
+    let mut all_tasks = tasks;
+    all_tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+
+    let mut rebase_count = 0u32;
+
+    for task in &all_tasks {
+        // Explicit skip reasons for missing PR URL / branch
+        if task.pr_url.is_none() {
+            eprintln!(
+                "auto-rebase: skip {} — no PR URL",
+                task.task_id
+            );
+            continue;
+        }
+        if task.branch.is_none() {
+            eprintln!(
+                "auto-rebase: skip {} — no task branch",
+                task.task_id
+            );
+            continue;
+        }
+        if rebase_count >= config.max_rebases_per_cycle {
+            eprintln!(
+                "auto-rebase: per-cycle cap reached ({}/{})",
+                rebase_count, config.max_rebases_per_cycle
+            );
+            break;
+        }
+
+        let pr_url = task.pr_url.as_deref().unwrap();
+        let pr_number = match github::extract_pr_number(pr_url) {
+            Some(n) => n,
+            None => {
+                eprintln!(
+                    "auto-rebase: skip {} — unparsable PR URL: {}",
+                    task.task_id, pr_url
+                );
+                continue;
+            }
+        };
+
+        let task_branch = task.branch.as_deref().unwrap();
+
+        // Check interval-based skip
+        if let Some(ref last) = task.last_rebase_at {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(last) {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(parsed)
+                    .num_seconds();
+                if elapsed < config.rebase_interval_seconds as i64 {
+                    eprintln!(
+                        "auto-rebase: skip {} — last rebased {}s ago (interval={}s)",
+                        task.task_id, elapsed, config.rebase_interval_seconds
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Query PR merge info — on failure, break the loop (rate limit safety)
+        let merge_info = {
+            let owner = task.owner.clone();
+            let repo = task.repo.clone();
+            match spawn_blocking_op(move || {
+                github::query_pr_merge_info(&owner, &repo, pr_number)
+            })
+            .await
+            {
+                Ok(info) => info,
+                Err(err) => {
+                    eprintln!(
+                        "auto-rebase: gh pr view failed for {} (PR #{}): {err} — stopping rebase processing for this cycle",
+                        task.task_id, pr_number
+                    );
+                    break;
+                }
+            }
+        };
+
+        // Skip non-open PRs
+        if merge_info.state != "OPEN" {
+            eprintln!(
+                "auto-rebase: skip {} — PR state is {} (not OPEN)",
+                task.task_id, merge_info.state
+            );
+            continue;
+        }
+
+        // Skip conflicting or unknown merge status
+        match merge_info.merge_status {
+            PrMergeStatus::Conflicting => {
+                eprintln!(
+                    "auto-rebase: skip {} — PR merge status is Conflicting",
+                    task.task_id
+                );
+                continue;
+            }
+            PrMergeStatus::Unknown => {
+                eprintln!(
+                    "auto-rebase: skip {} — PR merge status is Unknown",
+                    task.task_id
+                );
+                continue;
+            }
+            PrMergeStatus::Mergeable => {}
+        }
+
+        // Perform rebase
+        let rebase_target = format!("origin/{}", merge_info.base_branch);
+        let head_sha = merge_info.head_oid.clone();
+
+        eprintln!(
+            "auto-rebase: rebasing {} (branch={}, target={}, head={})",
+            task.task_id, task_branch, rebase_target, head_sha
+        );
+
+        let workspace_root = store
+            .path()
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+
+        // Create worktree on the task's branch
+        let wt_path = {
+            let repo_root = config.repo_root.clone();
+            let ws_root = workspace_root.clone();
+            let tid = task.task_id.clone();
+            let branch = task_branch.to_owned();
+            match spawn_blocking_op(move || {
+                worktree::create_worktree_on_branch(&repo_root, &ws_root, &tid, &branch)
+            })
+            .await
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!(
+                        "auto-rebase: failed to create worktree for {}: {err}",
+                        task.task_id
+                    );
+                    rebase_count += 1;
+                    continue;
+                }
+            }
+        };
+
+        // Fetch, rebase, push with timeout
+        let timeout = Duration::from_secs(config.rebase_timeout_seconds);
+        let rebase_result = {
+            let wt = wt_path.clone();
+            let target = rebase_target.clone();
+            let branch = task_branch.to_owned();
+            let timeout_dur = timeout;
+            spawn_blocking_op(move || execute_rebase(&wt, &target, &branch, timeout_dur)).await
+        };
+
+        // Clean up rebase worktree (best-effort)
+        {
+            let repo_root = config.repo_root.clone();
+            let ws_root = workspace_root.clone();
+            let tid = task.task_id.clone();
+            let _ = spawn_blocking_op(move || {
+                worktree::remove_rebase_worktree(&repo_root, &ws_root, &tid);
+                Ok(())
+            })
+            .await;
+        }
+
+        rebase_count += 1;
+
+        match rebase_result {
+            Ok(()) => {
+                eprintln!("auto-rebase: success for {}", task.task_id);
+                // Update last_rebase_at
+                let store = store.clone();
+                let tid = task.task_id.clone();
+                let _ = spawn_blocking_op(move || {
+                    store.update_task(&tid, |t| {
+                        t.last_rebase_at = Some(now_iso8601());
+                        Ok(())
+                    })
+                })
+                .await;
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                let is_lease = github::is_lease_rejection(&err_msg);
+
+                if is_lease {
+                    eprintln!(
+                        "auto-rebase: lease mismatch for {} — skipping for this cycle",
+                        task.task_id
+                    );
+                    // Lease mismatch: per-task failure, continue to next task
+                    continue;
+                }
+
+                eprintln!(
+                    "auto-rebase: failure for {}: {err_msg}",
+                    task.task_id
+                );
+
+                // Post failure comment on PR (deduplicated by head_sha)
+                let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
+
+                if should_post {
+                    let marker = format!(
+                        "<!-- ralph:rebase:{}:failed:{} -->",
+                        task.task_id, head_sha
+                    );
+                    let body = format!(
+                        "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
+                        task.task_id, head_sha
+                    );
+                    let owner = task.owner.clone();
+                    let repo = task.repo.clone();
+                    let comment_result = spawn_blocking_op(move || {
+                        github::post_pr_comment(&owner, &repo, pr_number, &body)
+                    })
+                    .await;
+
+                    // Only update dedup state if the comment was posted successfully.
+                    // If posting failed, we leave last_rebase_head_sha unchanged so
+                    // the next cycle retries.
+                    if comment_result.is_ok() {
+                        let store = store.clone();
+                        let tid = task.task_id.clone();
+                        let sha = head_sha.clone();
+                        let _ = spawn_blocking_op(move || {
+                            store.update_task(&tid, |t| {
+                                t.last_rebase_head_sha = Some(sha.clone());
+                                Ok(())
+                            })
+                        })
+                        .await;
+                    } else {
+                        eprintln!(
+                            "auto-rebase: failed to post PR comment for {} — will retry next cycle",
+                            task.task_id
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "auto-rebase: dedup — already posted failure for {} at head {}",
+                        task.task_id, head_sha
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Execute fetch + rebase + force-with-lease push in a worktree.
+///
+/// All three steps share a single `timeout` budget. Time consumed by earlier
+/// steps is subtracted from the budget available for later steps, so the
+/// total wall-clock time stays bounded to roughly `timeout`.
+fn execute_rebase(
+    worktree_path: &Path,
+    rebase_target: &str,
+    branch: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+
+    // Helper: remaining time or error if expired.
+    let remaining = |label: &str| -> Result<Duration> {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(RalphError::Orchestration(format!(
+                "{label}: per-attempt timeout exceeded"
+            )));
+        }
+        Ok(deadline - now)
+    };
+
+    // Fetch
+    let fetch_budget = remaining("git fetch")?;
+    let fetch_output = process::run_command_with_timeout(
+        std::process::Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(worktree_path),
+        fetch_budget,
+    )?;
+
+    if !fetch_output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&fetch_output.stderr).trim()
+        )));
+    }
+
+    // Rebase
+    let rebase_budget = remaining("git rebase")?;
+    let rebase_output = process::run_command_with_timeout(
+        std::process::Command::new("git")
+            .args(["rebase", rebase_target])
+            .current_dir(worktree_path),
+        rebase_budget,
+    )?;
+
+    if !rebase_output.status.success() {
+        // Abort the rebase to leave worktree clean
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(worktree_path)
+            .output();
+
+        return Err(RalphError::Orchestration(format!(
+            "git rebase failed: {}",
+            String::from_utf8_lossy(&rebase_output.stderr).trim()
+        )));
+    }
+
+    // Push with --force-with-lease (also under remaining budget)
+    let push_budget = remaining("git push")?;
+    let push_output = process::run_command_with_timeout(
+        std::process::Command::new("git")
+            .args(["push", "--force-with-lease", "origin", branch])
+            .current_dir(worktree_path),
+        push_budget,
+    )?;
+
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr).to_string();
+        return Err(RalphError::Orchestration(format!(
+            "git push --force-with-lease failed for branch {branch}: {stderr}"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Handle the PR creation/reuse flow for a completed task.

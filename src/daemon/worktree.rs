@@ -100,6 +100,44 @@ pub fn create_worktree_on_branch(
     Ok(wt_path)
 }
 
+/// Return the rebase worktree path for a task.
+pub fn rebase_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    worktrees_dir(workspace_root).join(format!("rebase-{task_id}"))
+}
+
+/// Remove a rebase worktree. Best-effort: logs warning on failure.
+pub fn remove_rebase_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
+    let wt_path = rebase_worktree_path(workspace_root, task_id);
+    if !wt_path.exists() {
+        return;
+    }
+
+    let output = Command::new("git")
+        .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+        .current_dir(repo_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            eprintln!(
+                "warning: failed to remove rebase worktree for {task_id}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            let _ = fs::remove_dir_all(&wt_path);
+        }
+        Err(err) => {
+            eprintln!("warning: failed to run git worktree remove for rebase-{task_id}: {err}");
+            let _ = fs::remove_dir_all(&wt_path);
+        }
+    }
+
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+}
+
 /// Remove a worktree for a task. Best-effort: logs warning on failure.
 pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
     let wt_path = task_worktree_path(workspace_root, task_id);
