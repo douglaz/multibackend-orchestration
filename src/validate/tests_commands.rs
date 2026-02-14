@@ -2,6 +2,7 @@ use super::*;
 
 use crate::validate::assertions::{
     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
+    assert_stdout_eq,
     git_head_commit, git_tag_commit,
 };
 use crate::validate::harness::RalphHarness;
@@ -65,6 +66,18 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "commands::project_list_multiple",
             func: project_list_multiple,
+        },
+        ConformanceTest {
+            name: "commands::version_long_flag",
+            func: version_long_flag,
+        },
+        ConformanceTest {
+            name: "commands::version_short_flag",
+            func: version_short_flag,
+        },
+        ConformanceTest {
+            name: "commands::version_no_workspace",
+            func: version_no_workspace,
         },
         ConformanceTest {
             name: "commands::exit_code_workspace_not_found",
@@ -458,6 +471,47 @@ fn project_list_multiple(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "list-proj-a");
         assert_stdout_contains(&output, "list-proj-b");
+    })
+}
+
+fn version_long_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let output = h
+            .ralph(["--version"])
+            .expect("ralph --version should execute");
+        assert_exit_code(&output, 0);
+        let expected = format!("ralph {}", env!("CARGO_PKG_VERSION"));
+        assert_stdout_eq(&output, &expected);
+    })
+}
+
+fn version_short_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let long_output = h
+            .ralph(["--version"])
+            .expect("ralph --version should execute");
+        assert_exit_code(&long_output, 0);
+
+        let short_output = h.ralph(["-V"]).expect("ralph -V should execute");
+        assert_exit_code(&short_output, 0);
+
+        let long_stdout = String::from_utf8_lossy(&long_output.stdout);
+        assert_stdout_eq(&short_output, &long_stdout);
+    })
+}
+
+fn version_no_workspace(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let output = h
+            .ralph(["--version"])
+            .expect("ralph --version should execute");
+        assert_exit_code(&output, 0);
+        let expected = format!("ralph {}", env!("CARGO_PKG_VERSION"));
+        assert_stdout_eq(&output, &expected);
     })
 }
 

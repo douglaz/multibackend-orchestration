@@ -1,0 +1,48 @@
+{
+  "project_id": "add-version-flag-to-ralph-cli-add-versio",
+  "project_name": "# Add `--version` Flag to Ralph CLI\n\nAdd version reporting t",
+  "created_at": "2026-02-14T15:28:40.243308451Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "bebb0d1a3a182e086488655f9616a3f9c5231443479d5ace870ba047d42a3a43",
+  "prompt_hash_at_loop_start": "bebb0d1a3a182e086488655f9616a3f9c5231443479d5ace870ba047d42a3a43",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "add-version-flag-to-ralph-cli",
+      "feature_name": "Add `--version` flag to Ralph CLI",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-add-version-flag-to-ralph-cli/20260214153035-spec.md",
+        "impl_notes": "loops/001-add-version-flag-to-ralph-cli/20260214153242-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-add-version-flag-to-ralph-cli/20260214153422-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-add-version-flag-to-ralph-cli/20260214153409-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T15:30:35.250643233Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
