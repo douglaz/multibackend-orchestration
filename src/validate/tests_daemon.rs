@@ -1971,15 +1971,16 @@ fn refinement_happy_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
-        // Set up a mock refinement backend that reads stdin and outputs a refined prompt
+        // Set up a mock refinement backend that reads stdin and outputs a
+        // structured refinement payload.
         let refine_script = h
             .write_mock_script(
                 "mock_refine_backend.sh",
                 r#"#!/bin/sh
 # Read stdin (the refinement prompt)
 cat > /dev/null
-# Output a refined prompt (must be >= 20 chars)
-printf 'Refined: implement the feature with proper error handling and tests.'
+# Output a structured refinement (body must be >= 20 chars)
+printf 'TITLE: Improve login flow robustness\n---\nRefined: implement the feature with proper error handling and tests.'
 exit 0
 "#,
             )
@@ -2050,10 +2051,7 @@ exit 0
 
         // The spawned child should have received the refined prompt
         let idea = fs::read_to_string(&idea_log).expect("read idea log");
-        assert_eq!(
-            idea,
-            "Refined: implement the feature with proper error handling and tests."
-        );
+        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
     })
 }
 

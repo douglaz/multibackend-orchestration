@@ -1,0 +1,17 @@
+{
+  "idea": "# Task: Rewrite GitHub Issue Title When Converting Issues to Tasks\n\n## Summary\nExtend the current GitHub issue rewriting functionality to also rewrite the issue title, not just the body.\n\n## Requirements\n- Locate the code that currently rewrites GitHub issue bodies for autonomous coding agents\n- Add functionality to rewrite the issue title using the same prompt refinement approach\n- The rewritten title should be concise and clearly summarize the task\n- Maintain consistency between the rewritten title and body\n\n## Constraints\n- Do not change the existing issue body rewriting behavior\n- The title rewrite should follow the same principles as the body rewrite (clear, structured, suitable for autonomous agents)\n\n## Acceptance Criteria\n- [ ] Issue title is rewritten when converting GitHub issues to task descriptions\n- [ ] Rewritten title accurately reflects the refined task\n- [ ] Title is concise (appropriate length for a title, not a paragraph)\n- [ ] Both title and body rewriting work together cohesively\n- [ ] Existing issue body rewriting functionality remains intact",
+  "idea_hash": "bb1d500c915f",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-14T16:50:29Z",
+  "completed_at": "2026-02-14T16:57:23Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 134.463650466,
+  "review_times_secs": [
+    98.581583099
+  ],
+  "revision_times_secs": [
+    180.922920173
+  ]
+}

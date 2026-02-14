@@ -364,7 +364,7 @@ async fn dispatch_task(
         match refine::refine_prompt(&raw_idea, &config.refinement_backend, &config.global_config)
             .await
         {
-            Ok(refined) => refined,
+            Ok(refined) => refined.body,
             Err(err) => {
                 eprintln!(
                     "warning: refinement failed for task {}, using raw idea: {err}",
