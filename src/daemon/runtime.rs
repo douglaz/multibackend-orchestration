@@ -754,7 +754,12 @@ async fn complete_task(
                 }
             }
         }
-        handle_pr_flow(store, config, &task).await;
+        if let Err(err) = handle_pr_flow(store, config, &task).await {
+            eprintln!(
+                "warning: PR flow failed for {}: {err}",
+                task.task_id
+            );
+        }
     }
 
     // Update labels (best-effort)
@@ -907,9 +912,9 @@ pub(crate) fn build_pr_body(
 /// 3. Gather context (diff stat, issue body) — failures degrade gracefully.
 /// 4. Build title via `build_pr_title` and body via `build_pr_body`.
 /// 5. Check for existing PR via `find_existing_pr`.
-/// 6. If existing PR: attempt `edit_pr` only; on failure, surface error, do NOT create.
+/// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
 /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) {
+async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
     let workspace_root = store
         .path()
         .parent()
@@ -919,7 +924,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
 
     let branch = match &task.branch {
         Some(b) => b.clone(),
-        None => return,
+        None => return Ok(()),
     };
 
     let wt_path = worktree::task_worktree_path(&workspace_root, &task.task_id);
@@ -934,7 +939,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                     "warning: failed to check diff for {}: {err}",
                     task.task_id
                 );
-                return;
+                return Ok(());
             }
         }
     };
@@ -966,7 +971,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                 task.task_id
             );
         }
-        return;
+        return Ok(());
     }
 
     // Step 2: Push branch to remote before PR creation/edit
@@ -980,7 +985,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                     "warning: failed to push branch {} for {}: {err}",
                     branch, task.task_id
                 );
-                return;
+                return Ok(());
             }
         }
     }
@@ -1022,7 +1027,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                 "warning: failed to write PR body file for {}: {err}",
                 task.task_id
             );
-            return;
+            return Ok(());
         }
     };
 
@@ -1072,11 +1077,11 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
                     }
                 }
                 Err(err) => {
-                    // Edit failed — surface error, do NOT fall through to create
-                    eprintln!(
-                        "warning: failed to edit PR for {}: {err}",
+                    // Edit failed — return error, do NOT fall through to create
+                    return Err(RalphError::Orchestration(format!(
+                        "failed to edit PR for {}: {err}",
                         task.task_id
-                    );
+                    )));
                 }
             }
         }
@@ -1120,6 +1125,8 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             }
         }
     }
+
+    Ok(())
 }
 
 /// Write the PR body content to a `NamedTempFile` for `--body-file` usage.
