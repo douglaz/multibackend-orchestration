@@ -607,6 +607,15 @@ fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &Daemo
         return;
     }
 
+    // Push branch to remote before PR creation
+    if let Err(err) = github::push_branch(&wt_path, &branch) {
+        eprintln!(
+            "warning: failed to push branch {} for {}: {err}",
+            branch, task.task_id
+        );
+        return;
+    }
+
     // Check for existing PR
     match github::find_existing_pr(&task.owner, &task.repo, &branch) {
         Ok(Some(url)) => {

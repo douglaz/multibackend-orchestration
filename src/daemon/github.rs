@@ -297,6 +297,25 @@ pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str)
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Push the current branch to the remote from a worktree.
+pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["push", "-u", "origin", branch])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to run git push: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git push failed for branch {}: {}",
+            branch,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Check whether the task branch has diverged from the base branch.
 ///
 /// First checks for uncommitted working-tree/index changes against HEAD,

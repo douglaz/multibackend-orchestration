@@ -117,6 +117,11 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::refinement_comment_idempotency_on_retry",
             func: refinement_comment_idempotency_on_retry,
         },
+        // --- Push-before-PR Tests ---
+        ConformanceTest {
+            name: "daemon::runtime_push_before_pr_create",
+            func: runtime_push_before_pr_create,
+        },
     ]
 }
 
@@ -2659,6 +2664,122 @@ exit 1
                 "refined-prompt comment should be posted exactly once (idempotent), found {marker_count}"
             );
         }
+    })
+}
+
+/// Test that the daemon pushes the branch to the remote before creating a PR.
+///
+/// Drives a task from pending → completed via mock ralph (with commit) so the
+/// PR flow is triggered. Verifies the branch is pushed and PR create succeeds.
+///
+/// Verifies:
+/// - Task reaches completed state
+/// - `git push` was performed (branch exists on the bare remote)
+/// - `gh pr create` was called after push
+/// - pr_url is populated
+fn runtime_push_before_pr_create(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let pr_create_log = h.temp_dir.path().join("pr_create_push_test.txt");
+        let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
+
+        // Mock gh: pr list returns empty, pr create succeeds and logs
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        printf ''
+        exit 0
+        ;;
+      create)
+        echo "called" > "{pr_create_log_str}"
+        printf 'https://github.com/acme/widgets/pull/42\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-130",
+                    "pending",
+                    130,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-130");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-130"),
+            "task should have been dispatched, stderr:\n{stderr}"
+        );
+
+        // Task should be completed
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-130")
+            .unwrap();
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "task should be completed"
+        );
+
+        // PR create should have been called (push succeeded first)
+        assert!(
+            pr_create_log.exists(),
+            "pr create should have been called after successful push"
+        );
+
+        // pr_url should be populated
+        assert_eq!(
+            task["pr_url"],
+            json!("https://github.com/acme/widgets/pull/42"),
+            "pr_url should be populated from successful PR creation"
+        );
     })
 }
 

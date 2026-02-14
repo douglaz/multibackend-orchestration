@@ -581,6 +581,14 @@ pub fn daemon_mock_ralph_with_commit_script() -> String {
     r###"#!/bin/sh
 case "$1" in
   auto)
+    # Set up a local bare remote so git push works from the worktree
+    bare_dir="$(pwd)/../_bare_remote.git"
+    if [ ! -d "$bare_dir" ]; then
+      git init --bare "$bare_dir" --quiet 2>/dev/null
+    fi
+    git remote remove origin 2>/dev/null
+    git remote add origin "$bare_dir"
+
     # Create a file and commit it so the branch diverges from base
     echo "mock change" > ralph_daemon_change.txt
     git add ralph_daemon_change.txt
