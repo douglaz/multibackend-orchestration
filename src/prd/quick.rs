@@ -348,7 +348,10 @@ impl QuickPrdPipeline {
         }
 
         // --- Finalization ---
-        let spec_path = working_dir.join("SPEC.md");
+        // Write the final spec inside the cache directory (under .ralph/) so it
+        // never pollutes the repo root. Previously this wrote to working_dir/SPEC.md
+        // which could get committed by `git add -A` if cleanup was interrupted.
+        let spec_path = cache_dir.join("SPEC.md");
         fs::write(&spec_path, &current_spec)?;
 
         let meta = QuickPrdMeta {
@@ -630,7 +633,8 @@ mod tests {
         assert!(result.cache_dir.join("review-1.json").exists());
         assert!(result.cache_dir.join("revision-1.md").exists());
         assert!(result.cache_dir.join("review-2.json").exists());
-        assert!(working_dir.join("SPEC.md").exists());
+        assert!(result.cache_dir.join("SPEC.md").exists());
+        assert!(!working_dir.join("SPEC.md").exists(), "SPEC.md should not be in repo root");
         assert!(result.cache_dir.join("meta.json").exists());
     }
 
@@ -668,7 +672,8 @@ mod tests {
         // Writer called 3 times for draft (1 + 2 retries)
         // Even though sections missing, pipeline proceeds best-effort
         assert_eq!(writer.call_count().await, 3);
-        assert!(working_dir.join("SPEC.md").exists());
+        assert!(result.cache_dir.join("SPEC.md").exists());
+        assert!(!working_dir.join("SPEC.md").exists(), "SPEC.md should not be in repo root");
         assert!(result.approved);
     }
 }
