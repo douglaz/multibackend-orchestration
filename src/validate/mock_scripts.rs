@@ -614,6 +614,39 @@ esac
     .to_owned()
 }
 
+/// Mock `ralph` script that switches the worktree to a different branch before
+/// creating a commit. Simulates how the orchestrator switches from the daemon
+/// branch (`ralph/daemon/{task_id}`) to a project branch during `ralph auto`.
+pub fn daemon_mock_ralph_with_branch_switch_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  auto)
+    # Set up a local bare remote so git push works from the worktree
+    bare_dir="$(pwd)/../_bare_remote.git"
+    if [ ! -d "$bare_dir" ]; then
+      git init --bare "$bare_dir" --quiet 2>/dev/null
+    fi
+    git remote remove origin 2>/dev/null
+    git remote add origin "$bare_dir"
+
+    # Switch to a different branch (simulating orchestrator behavior)
+    git checkout -b ralph/mock-project-branch 2>/dev/null
+
+    # Create a file and commit it so the branch diverges from base
+    echo "mock change" > ralph_daemon_change.txt
+    git add ralph_daemon_change.txt
+    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
 /// Mock `ralph` script that exits with non-zero for testing failure paths.
 pub fn daemon_mock_ralph_fail_script() -> String {
     r###"#!/bin/sh

@@ -122,6 +122,15 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_push_before_pr_create",
             func: runtime_push_before_pr_create,
         },
+        // --- Branch Resolution Regression Tests ---
+        ConformanceTest {
+            name: "daemon::runtime_branch_switch_updates_task_and_pr",
+            func: runtime_branch_switch_updates_task_and_pr,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_branch_unchanged_no_switch_log",
+            func: runtime_branch_unchanged_no_switch_log,
+        },
     ]
 }
 
@@ -2784,6 +2793,277 @@ exit 1
 }
 
 // =============================================================================
+// Branch Resolution Regression Tests
+// =============================================================================
+
+/// Verify that when a mock ralph switches the worktree branch (simulating
+/// orchestrator behavior), the daemon detects the change, updates task.branch
+/// in the store, and creates the PR with the resolved branch as --head.
+///
+/// Regression test for: daemon pushes stale branch after orchestrator switches
+/// worktree to a project branch, causing "No commits between master and branch".
+fn runtime_branch_switch_updates_task_and_pr(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let gh_head_log = h.temp_dir.path().join("gh_head_arg.txt");
+        let gh_head_log_str = gh_head_log.to_string_lossy().into_owned();
+
+        // Custom gh mock that captures the --head argument from pr create
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        printf ''
+        exit 0
+        ;;
+      create)
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --head) echo "$2" > "{gh_head_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        printf 'https://github.com/acme/widgets/pull/99\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path =
+            write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
+
+        // Pre-populate task with the original daemon branch
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-200",
+                    "pending",
+                    200,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-200");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Task must have been dispatched
+        assert!(
+            stderr.contains("dispatched task acme-widgets-200"),
+            "task should have been dispatched, stderr:\n{stderr}"
+        );
+
+        // Branch change log must be present
+        assert!(
+            stderr.contains("worktree branch changed"),
+            "expected 'worktree branch changed' log in stderr, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ralph/mock-project-branch"),
+            "expected new branch name in stderr, got:\n{stderr}"
+        );
+
+        // task.branch in store must be updated to the new branch
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-200")
+            .unwrap();
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "task should be completed"
+        );
+        assert_eq!(
+            task["branch"],
+            json!("ralph/mock-project-branch"),
+            "task.branch should be updated to the resolved worktree branch"
+        );
+
+        // PR creation was called with the new branch as --head
+        assert!(
+            gh_head_log.exists(),
+            "gh pr create should have been called"
+        );
+        let head_arg = fs::read_to_string(&gh_head_log)
+            .expect("read gh_head_log")
+            .trim()
+            .to_owned();
+        assert_eq!(
+            head_arg, "ralph/mock-project-branch",
+            "gh pr create --head should use the resolved branch, not the original daemon branch"
+        );
+
+        // PR URL should be populated
+        assert_eq!(
+            task["pr_url"],
+            json!("https://github.com/acme/widgets/pull/99"),
+            "pr_url should be populated"
+        );
+    })
+}
+
+/// Verify that when the mock ralph does NOT switch branches (stays on the
+/// original daemon branch), the branch resolution is a no-op: task.branch
+/// remains unchanged and no "worktree branch changed" log is emitted.
+fn runtime_branch_unchanged_no_switch_log(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let pr_create_log = h.temp_dir.path().join("pr_create_no_switch.txt");
+        let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        printf ''
+        exit 0
+        ;;
+      create)
+        echo "called" > "{pr_create_log_str}"
+        printf 'https://github.com/acme/widgets/pull/55\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        // Use the standard commit mock (no branch switch)
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-201",
+                    "pending",
+                    201,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-201");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Task dispatched
+        assert!(
+            stderr.contains("dispatched task acme-widgets-201"),
+            "task should have been dispatched, stderr:\n{stderr}"
+        );
+
+        // No branch-change log
+        assert!(
+            !stderr.contains("worktree branch changed"),
+            "should NOT contain 'worktree branch changed' when branch is unchanged, stderr:\n{stderr}"
+        );
+
+        // task.branch unchanged in store
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-201")
+            .unwrap();
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "task should be completed"
+        );
+        assert_eq!(
+            task["branch"],
+            json!("ralph/daemon/acme-widgets-201"),
+            "task.branch should remain unchanged when no branch switch occurs"
+        );
+
+        // PR still created
+        assert!(
+            pr_create_log.exists(),
+            "gh pr create should have been called even without branch switch"
+        );
+
+        // PR URL populated
+        assert_eq!(
+            task["pr_url"],
+            json!("https://github.com/acme/widgets/pull/55"),
+            "pr_url should be populated"
+        );
+    })
+}
+
+// =============================================================================
 // Test helpers
 // =============================================================================
 
@@ -2858,6 +3138,11 @@ fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
 /// Write the mock ralph that creates a commit (for PR diff tests).
 fn write_daemon_mock_ralph_with_commit(h: &RalphHarness) -> crate::Result<String> {
     write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_with_commit_script())
+}
+
+/// Write the mock ralph that switches branch and creates a commit (for branch resolution tests).
+fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result<String> {
+    write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_with_branch_switch_script())
 }
 
 fn read_count_file(path: &std::path::Path) -> u32 {
