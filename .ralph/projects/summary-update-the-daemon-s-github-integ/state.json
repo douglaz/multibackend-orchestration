@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "49d477afd0b5c57eaa152eddb7e72db3d4e62ac81038c6e04c571a26725b75fc",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "pure-pr-metadata-helpers-and-unit-tests",
       "feature_name": "Pure PR metadata helpers and unit tests",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -39,8 +39,45 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "78c7631096433a8840f25f07f5701e009dacdf8a",
       "started_at": "2026-02-14T21:02:40.512158428Z",
+      "completed_at": "2026-02-14T21:09:01.765316368Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "deterministic-pr-editcreate-flow-with-body-file",
+      "feature_name": "Deterministic PR Edit/Create Flow with Body-File Safety",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214211040-spec.md",
+        "impl_notes": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214211645-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214213248-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214212248-qa-001-fail.md",
+            "implementer_response": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214212340-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/002-deterministic-pr-editcreate-flow-with-body-file/20260214213020-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T21:10:40.791885303Z",
       "completed_at": null
     }
   ],
