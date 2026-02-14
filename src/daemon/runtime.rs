@@ -899,7 +899,16 @@ pub(crate) fn build_pr_body(
     body
 }
 
-/// Handle the PR creation/reuse flow for a completed task.
+/// Handle the PR creation/update flow for a completed task.
+///
+/// Deterministic flow:
+/// 1. Check for diff; if none, post no-diff comment and return.
+/// 2. Push branch to remote.
+/// 3. Gather context (diff stat, issue body) — failures degrade gracefully.
+/// 4. Build title via `build_pr_title` and body via `build_pr_body`.
+/// 5. Check for existing PR via `find_existing_pr`.
+/// 6. If existing PR: attempt `edit_pr` only; on failure, surface error, do NOT create.
+/// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
 async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) {
     let workspace_root = store
         .path()
@@ -915,7 +924,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
 
     let wt_path = worktree::task_worktree_path(&workspace_root, &task.task_id);
 
-    // Check if there's a diff
+    // Step 1: Check if there's a diff
     let has_changes = {
         let wt = wt_path.clone();
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
@@ -960,7 +969,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         return;
     }
 
-    // Push branch to remote before PR creation
+    // Step 2: Push branch to remote before PR creation/edit
     {
         let wt = wt_path.clone();
         let br = branch.clone();
@@ -976,85 +985,163 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         }
     }
 
-    // Check for existing PR
-    {
+    // Step 3: Gather context for PR body
+    // Diff stat — failure produces fallback text, does not abort.
+    let diff_stat: Option<String> = {
+        let wt = wt_path.clone();
+        match spawn_blocking_op(move || github::diff_stat(&wt)).await {
+            Ok(stat) => stat,
+            Err(err) => {
+                eprintln!(
+                    "warning: diff stat failed for {}: {err}; using fallback",
+                    task.task_id
+                );
+                None
+            }
+        }
+    };
+
+    // Issue body context from raw_idea
+    let issue_body = extract_issue_body(task.raw_idea.as_deref());
+
+    // Step 4: Build title and body via pure helpers
+    let title = build_pr_title(&format!("ralph: {}", task.task_id));
+    let pr_body = build_pr_body(
+        &branch,
+        diff_stat.as_deref(),
+        issue_body.as_deref(),
+        &task.task_id,
+        task.issue_number,
+    );
+
+    // Write body to a temp file for --body-file usage
+    let body_file = match write_body_file(&pr_body) {
+        Ok(f) => f,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to write PR body file for {}: {err}",
+                task.task_id
+            );
+            return;
+        }
+    };
+
+    // Step 5: Check for existing PR
+    let existing_pr_url = {
         let owner = task.owner.clone();
         let repo = task.repo.clone();
         let br = branch.clone();
         match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
-            Ok(Some(url)) => {
-                eprintln!("reusing existing PR for {}: {url}", task.task_id);
-                let store = store.clone();
-                let tid = task.task_id.clone();
-                let url_clone = url.clone();
-                if let Err(err) = spawn_blocking_op(move || {
-                    store.update_task(&tid, |t| {
-                        t.pr_url = Some(url_clone.clone());
-                        Ok(())
-                    })
-                })
-                .await
-                {
-                    eprintln!(
-                        "warning: failed to persist PR URL for {}: {err}",
-                        task.task_id
-                    );
-                }
-                return;
-            }
-            Ok(None) => {}
+            Ok(url) => url,
             Err(err) => {
                 eprintln!("warning: failed to check for existing PR: {err}");
+                None
             }
         }
-    }
+    };
 
-    // Create new PR
-    let title = format!("ralph: {}", task.task_id);
-    let body = format!(
-        "Automated PR for task `{}`.\n\nCloses #{}",
-        task.task_id, task.issue_number
-    );
-    {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let br = branch.clone();
-        let title = title.clone();
-        let body = body.clone();
-        match spawn_blocking_op(move || github::create_pr(&owner, &repo, &br, &title, &body)).await
-        {
-            Ok(url) => {
-                eprintln!("created PR for {}: {url}", task.task_id);
-                let store = store.clone();
-                let tid = task.task_id.clone();
-                let url_clone = url.clone();
-                if let Err(err) = spawn_blocking_op(move || {
-                    store.update_task(&tid, |t| {
-                        t.pr_url = Some(url_clone.clone());
-                        Ok(())
+    match existing_pr_url {
+        Some(url) => {
+            // Step 6: Existing PR — edit only, never fall through to create
+            eprintln!("editing existing PR for {}: {url}", task.task_id);
+            let url_for_edit = url.clone();
+            let title_clone = title.clone();
+            let body_path = body_file.path().to_path_buf();
+            match spawn_blocking_op(move || {
+                github::edit_pr(&url_for_edit, &title_clone, &body_path)
+            })
+            .await
+            {
+                Ok(()) => {
+                    // Persist the PR URL
+                    let store = store.clone();
+                    let tid = task.task_id.clone();
+                    let url_clone = url.clone();
+                    if let Err(err) = spawn_blocking_op(move || {
+                        store.update_task(&tid, |t| {
+                            t.pr_url = Some(url_clone.clone());
+                            Ok(())
+                        })
                     })
-                })
-                .await
-                {
+                    .await
+                    {
+                        eprintln!(
+                            "warning: failed to persist PR URL for {}: {err}",
+                            task.task_id
+                        );
+                    }
+                }
+                Err(err) => {
+                    // Edit failed — surface error, do NOT fall through to create
                     eprintln!(
-                        "warning: failed to persist PR URL for {}: {err}",
+                        "warning: failed to edit PR for {}: {err}",
                         task.task_id
                     );
                 }
             }
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to create PR for {}; continuing to terminal state: {err}",
-                    task.task_id
-                );
+        }
+        None => {
+            // Step 7: No existing PR — create new
+            let owner = task.owner.clone();
+            let repo = task.repo.clone();
+            let br = branch.clone();
+            let title_clone = title.clone();
+            let body_path = body_file.path().to_path_buf();
+            match spawn_blocking_op(move || {
+                github::create_pr_with_body_file(&owner, &repo, &br, &title_clone, &body_path)
+            })
+            .await
+            {
+                Ok(url) => {
+                    eprintln!("created PR for {}: {url}", task.task_id);
+                    let store = store.clone();
+                    let tid = task.task_id.clone();
+                    let url_clone = url.clone();
+                    if let Err(err) = spawn_blocking_op(move || {
+                        store.update_task(&tid, |t| {
+                            t.pr_url = Some(url_clone.clone());
+                            Ok(())
+                        })
+                    })
+                    .await
+                    {
+                        eprintln!(
+                            "warning: failed to persist PR URL for {}: {err}",
+                            task.task_id
+                        );
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to create PR for {}; continuing to terminal state: {err}",
+                        task.task_id
+                    );
+                }
             }
         }
     }
 }
 
+/// Write the PR body content to a `NamedTempFile` for `--body-file` usage.
+fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut tmp = tempfile::NamedTempFile::new().map_err(|err| {
+        RalphError::Orchestration(format!("failed to create temp file for PR body: {err}"))
+    })?;
+    tmp.write_all(body.as_bytes()).map_err(|err| {
+        RalphError::Orchestration(format!("failed to write PR body to temp file: {err}"))
+    })?;
+    tmp.flush().map_err(|err| {
+        RalphError::Orchestration(format!("failed to flush PR body temp file: {err}"))
+    })?;
+    Ok(tmp)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_pr_body, build_pr_title, extract_issue_body, extract_project_ref};
+    use super::{
+        build_pr_body, build_pr_title, extract_issue_body, extract_project_ref, write_body_file,
+    };
 
     #[test]
     fn build_pr_title_sanitizes_newlines() {
@@ -1113,5 +1200,64 @@ mod tests {
         assert_eq!(extract_issue_body(None), None);
         assert_eq!(extract_issue_body(Some("Title only")), None);
         assert_eq!(extract_issue_body(Some("Title\n\n   ")), None);
+    }
+
+    /// Verify that when diff stat is None (failure/unavailable), build_pr_body
+    /// still produces a valid body with fallback text. This exercises the
+    /// "diff stat failure → fallback" path at the helper level.
+    #[test]
+    fn runtime_pr_diff_stat_failure_fallback() {
+        // Simulate: diff stat generation failed (None), but we have issue context
+        let body = build_pr_body(
+            "ralph/my-project",
+            None, // diff stat unavailable
+            Some("Issue body context here"),
+            "acme-widgets-1",
+            1,
+        );
+        assert!(body.contains("Diff stat unavailable."));
+        assert!(body.contains("Issue body context here"));
+        assert!(body.contains("Project Ref: `my-project`"));
+        assert!(body.contains("Automated PR for task `acme-widgets-1`."));
+        assert!(body.contains("Closes #1"));
+    }
+
+    /// Verify that write_body_file produces a temp file whose content matches
+    /// the provided body string. This is a building block of the --body-file
+    /// integration.
+    #[test]
+    fn write_body_file_creates_readable_temp() {
+        let content = "Test PR body\n\nWith multiple lines";
+        let tmp = write_body_file(content).expect("write_body_file should succeed");
+        let read_back = std::fs::read_to_string(tmp.path()).expect("read temp file");
+        assert_eq!(read_back, content);
+    }
+
+    /// Verify that build_pr_body with diff stat present respects the 100-line cap.
+    #[test]
+    fn build_pr_body_diff_stat_cap() {
+        let lines: Vec<String> = (1..=150).map(|i| format!("file{i}.rs | 1 +")).collect();
+        let stat = lines.join("\n");
+        let body = build_pr_body("ralph/proj", Some(&stat), None, "task-2", 2);
+        // Should contain first 100 lines and truncation marker
+        assert!(body.contains("file1.rs | 1 +"));
+        assert!(body.contains("file100.rs | 1 +"));
+        assert!(body.contains("... (truncated)"));
+        // Should NOT contain line 101+
+        assert!(!body.contains("file101.rs"));
+    }
+
+    /// Verify that build_pr_body caps issue context to 4000 chars.
+    #[test]
+    fn build_pr_body_context_cap() {
+        // Use a character that doesn't appear in the template to avoid
+        // counting template content.
+        let long_context = "\u{2603}".repeat(5000); // snowman
+        let body = build_pr_body("ralph/proj", None, Some(&long_context), "task-3", 3);
+        let snowman_count = body.matches('\u{2603}').count();
+        assert_eq!(
+            snowman_count, 4000,
+            "issue context should be capped at 4000 chars, got {snowman_count}"
+        );
     }
 }

@@ -296,6 +296,99 @@ pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str)
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Get a diff stat summary (committed changes vs merge-base of default branch).
+///
+/// Returns `Ok(Some(stat))` on success, `Ok(None)` if the diff stat cannot be
+/// determined (e.g. no merge-base), or `Err` on execution failure.
+pub fn diff_stat(worktree_path: &std::path::Path) -> Result<Option<String>> {
+    let base = detect_base_branch(worktree_path);
+    let output = Command::new("git")
+        .args(["diff", "--stat", &format!("{base}...HEAD")])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to run git diff --stat: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stat = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if stat.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(stat))
+    }
+}
+
+/// Create a pull request using `--body-file` for large body content.
+/// Returns the PR URL on success, or an error.
+pub fn create_pr_with_body_file(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    title: &str,
+    body_file: &std::path::Path,
+) -> Result<String> {
+    let full_repo = format!("{owner}/{repo}");
+    let body_file_str = body_file.to_string_lossy();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            &full_repo,
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body-file",
+            &body_file_str,
+        ])
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr create failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Edit an existing PR by URL using `--body-file` for large body content.
+pub fn edit_pr(
+    pr_url: &str,
+    title: &str,
+    body_file: &std::path::Path,
+) -> Result<()> {
+    let body_file_str = body_file.to_string_lossy();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "edit",
+            pr_url,
+            "--title",
+            title,
+            "--body-file",
+            &body_file_str,
+        ])
+        .output()
+        .map_err(|err| RalphError::Orchestration(format!("failed to edit PR: {err}")))?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr edit failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Read the current branch name from a worktree.
 ///
 /// The orchestrator may switch the worktree to a project-specific branch

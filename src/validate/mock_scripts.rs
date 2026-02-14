@@ -538,6 +538,10 @@ case "$1" in
         printf 'https://github.com/mock/repo/pull/1\n'
         exit 0
         ;;
+      edit)
+        # PR edit — always succeed
+        exit 0
+        ;;
       *)
         echo "mock gh: unhandled pr subcommand: $2" >&2
         exit 1
@@ -653,6 +657,103 @@ pub fn daemon_mock_ralph_fail_script() -> String {
 case "$1" in
   auto)
     exit 1
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `gh` script that returns an existing PR URL from `pr list --head`,
+/// succeeds on `pr edit`, and logs `pr edit` and `pr create` calls via files.
+///
+/// Set `MOCK_GH_PR_EDIT_LOG` to a file path to record `pr edit` invocations.
+/// Set `MOCK_GH_PR_CREATE_LOG` to a file path to record `pr create` invocations.
+/// Set `MOCK_GH_PR_EDIT_FAIL` to "true" to make `pr edit` fail.
+pub fn daemon_mock_gh_edit_pr_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        # Return an existing PR URL to trigger edit path
+        for arg in "$@"; do
+          case "$arg" in
+            --head)
+              printf 'https://github.com/acme/widgets/pull/77'
+              exit 0
+              ;;
+          esac
+        done
+        printf ''
+        exit 0
+        ;;
+      create)
+        if [ -n "$MOCK_GH_PR_CREATE_LOG" ]; then
+          echo "called" > "$MOCK_GH_PR_CREATE_LOG"
+        fi
+        printf 'https://github.com/acme/widgets/pull/new\n'
+        exit 0
+        ;;
+      edit)
+        if [ -n "$MOCK_GH_PR_EDIT_LOG" ]; then
+          echo "$@" > "$MOCK_GH_PR_EDIT_LOG"
+        fi
+        if [ "$MOCK_GH_PR_EDIT_FAIL" = "true" ]; then
+          echo "mock edit failure" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script that creates a commit but makes `git diff --stat`
+/// fail against the base branch, exercising the diff-stat fallback path.
+/// It achieves this by removing the origin remote so diff_stat cannot
+/// find a base branch, but `has_diff` still returns true via the
+/// merge-base-less fallback.
+pub fn daemon_mock_ralph_with_commit_no_diffstat_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  auto)
+    # Set up a local bare remote so git push works
+    bare_dir="$(pwd)/../_bare_remote.git"
+    if [ ! -d "$bare_dir" ]; then
+      git init --bare "$bare_dir" --quiet 2>/dev/null
+    fi
+    git remote remove origin 2>/dev/null
+    git remote add origin "$bare_dir"
+
+    # Create a file and commit
+    echo "mock change" > ralph_daemon_change.txt
+    git add ralph_daemon_change.txt
+    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
+
+    # Remove symbolic-ref to break diff --stat base detection
+    git symbolic-ref --delete refs/remotes/origin/HEAD 2>/dev/null
+    # Remove origin/main and origin/master refs to prevent fallback detection
+    git update-ref -d refs/remotes/origin/main 2>/dev/null
+    git update-ref -d refs/remotes/origin/master 2>/dev/null
+
+    exit 0
     ;;
   *)
     echo "mock ralph: unhandled command: $1" >&2
