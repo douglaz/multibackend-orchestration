@@ -1,8 +1,7 @@
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
+
+use tokio::process::Command;
 
 use crate::error::RalphError;
 use crate::Result;
@@ -11,7 +10,7 @@ use crate::Result;
 pub struct SpawnedChild {
     pub pid: u32,
     pub pgid: u32,
-    pub child: std::process::Child,
+    pub child: tokio::process::Child,
 }
 
 /// Spawn `ralph auto` in a new session/process group.
@@ -19,7 +18,7 @@ pub struct SpawnedChild {
 /// Uses an in-process `libc::setsid()` call via `CommandExt::pre_exec` so the
 /// child gets its own session and process group without depending on an
 /// external `setsid` binary being available on PATH.
-pub fn spawn_ralph_auto(
+pub async fn spawn_ralph_auto(
     ralph_bin: &Path,
     worktree_path: &Path,
     idea: &str,
@@ -44,7 +43,12 @@ pub fn spawn_ralph_auto(
         ))
     })?;
 
-    let pid = child.id();
+    let pid = child.id().ok_or_else(|| {
+        RalphError::Orchestration(format!(
+            "spawned ralph auto without PID in {}",
+            worktree_path.display()
+        ))
+    })?;
     // After setsid(), the child's PID is also its PGID (it's the session
     // leader).
     let pgid = pid;
@@ -71,7 +75,7 @@ pub fn pid_exists(pid: u32) -> bool {
 
 /// Terminate a process group gracefully (SIGTERM), escalating to SIGKILL
 /// after the given timeout.
-pub fn terminate_process_group(pgid: u32, timeout: Duration) {
+pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
     if pgid == 0 {
         return;
     }
@@ -99,13 +103,25 @@ pub fn terminate_process_group(pgid: u32, timeout: Duration) {
         if !still_exists {
             return;
         }
-        thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // Escalate to SIGKILL
     // SAFETY: sending SIGKILL to a known process group.
     unsafe {
         libc::kill(neg_pgid, libc::SIGKILL);
+    }
+}
+
+pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(terminate_process_group(pgid, timeout)),
+        Err(err) => {
+            eprintln!("warning: failed to initialize tokio runtime for abort path: {err}");
+        }
     }
 }
 
@@ -123,7 +139,7 @@ mod tests {
             Path::new("/tmp/worktree"),
             "implement feature",
         );
-        let args: Vec<&OsStr> = cmd.get_args().collect();
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
         assert_eq!(
             args,
             vec![

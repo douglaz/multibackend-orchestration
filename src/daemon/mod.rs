@@ -243,12 +243,12 @@ fn terminate_process_group_if_present(
 ) {
     // Prefer killing by process group; fall back to single PID.
     if let Some(pgid) = child_pgid.filter(|v| *v > 0) {
-        daemon_process::terminate_process_group(pgid, Duration::from_secs(10));
+        daemon_process::terminate_process_group_blocking(pgid, Duration::from_secs(10));
         return;
     }
     if let Some(pid) = child_pid.filter(|v| *v > 0) {
         // No PGID available — treat the single PID as a one-member "group".
-        daemon_process::terminate_process_group(pid, Duration::from_secs(10));
+        daemon_process::terminate_process_group_blocking(pid, Duration::from_secs(10));
     }
 }
 

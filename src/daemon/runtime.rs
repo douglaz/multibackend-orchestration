@@ -36,7 +36,9 @@ pub struct DaemonRuntimeConfig {
 
 /// Active child process handle tracked by the runtime.
 struct ActiveChild {
-    child: std::process::Child,
+    pid: u32,
+    pgid: u32,
+    child: tokio::process::Child,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -382,7 +384,7 @@ async fn dispatch_task(
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        spawn_blocking_op(move || process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone)).await?
+        process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone).await?
     };
 
     // CAS-style update: only transition to in_progress if task is not
@@ -426,8 +428,18 @@ async fn dispatch_task(
         // Task was already terminal — kill the just-spawned child and
         // clean up the worktree.
         let mut child = spawned.child;
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Err(err) = child.kill().await {
+            eprintln!(
+                "warning: failed to kill child for terminal-race task {} (pid={}): {err}",
+                task.task_id, pid
+            );
+        }
+        if let Err(err) = child.wait().await {
+            eprintln!(
+                "warning: failed to wait child for terminal-race task {} (pid={}): {err}",
+                task.task_id, pid
+            );
+        }
         let repo_root = config.repo_root.clone();
         let tid = task.task_id.clone();
         // Best-effort worktree cleanup
@@ -448,6 +460,8 @@ async fn dispatch_task(
     children.insert(
         task.task_id.clone(),
         ActiveChild {
+            pid: spawned.pid,
+            pgid: spawned.pgid,
             child: spawned.child,
         },
     );
@@ -515,7 +529,10 @@ async fn collect_children(
                 // Still running
             }
             Err(err) => {
-                eprintln!("warning: failed to check child for {task_id}: {err}");
+                eprintln!(
+                    "warning: failed to check child for {task_id} (pid={} pgid={}): {err}",
+                    active.pid, active.pgid
+                );
                 finished.push((task_id.clone(), TaskState::Failed));
             }
         }
@@ -554,9 +571,16 @@ async fn drain_all_children(
         let remaining: Vec<String> = children.keys().cloned().collect();
         for task_id in remaining {
             if let Some(mut active) = children.remove(&task_id) {
-                eprintln!("warning: force-killing child for {task_id} (drain timeout)");
-                let _ = active.child.kill();
-                let _ = active.child.wait();
+                eprintln!(
+                    "warning: force-killing child for {task_id} (pid={} pgid={}, drain timeout)",
+                    active.pid, active.pgid
+                );
+                if let Err(err) = active.child.kill().await {
+                    eprintln!("warning: failed to kill child for {task_id}: {err}");
+                }
+                if let Err(err) = active.child.wait().await {
+                    eprintln!("warning: failed to wait child for {task_id}: {err}");
+                }
             }
             complete_task(store, config, &task_id, TaskState::Failed).await;
         }
