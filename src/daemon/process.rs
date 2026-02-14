@@ -88,6 +88,52 @@ fn build_ralph_auto_command(
     Ok(cmd)
 }
 
+/// Run a synchronous command with a timeout. Returns `Ok(output)` if the
+/// command completes within the deadline, or an error on timeout/failure.
+///
+/// Stdout and stderr are piped so the caller can inspect them.
+pub fn run_command_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Duration,
+) -> crate::Result<std::process::Output> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            crate::error::RalphError::Orchestration(format!("failed to spawn command: {err}"))
+        })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                let output = child.wait_with_output().map_err(|err| {
+                    crate::error::RalphError::Orchestration(format!(
+                        "failed to collect command output: {err}"
+                    ))
+                })?;
+                return Ok(output);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(crate::error::RalphError::Orchestration(
+                        "command timed out".to_owned(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => {
+                return Err(crate::error::RalphError::Orchestration(format!(
+                    "failed to check command status: {err}"
+                )));
+            }
+        }
+    }
+}
+
 /// Check if a process with the given PID exists.
 pub fn pid_exists(pid: u32) -> bool {
     if pid <= 1 {

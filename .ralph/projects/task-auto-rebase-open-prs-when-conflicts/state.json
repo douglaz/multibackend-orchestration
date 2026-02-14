@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "1bf98341f777312757863f1029e3379f4f62faa8c56077889f131e09c3ff8d8f",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "state-schema-config-plumbing-and-pr-merge-query",
       "feature_name": "State Schema, Config Plumbing, and PR Merge Query Infrastructure",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -39,8 +39,45 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "c4f33be9044c098f9ff350d254dd6cdef6f89539",
       "started_at": "2026-02-14T22:39:21.024227478Z",
+      "completed_at": "2026-02-14T22:53:09.300695036Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "deterministic-daemon-auto-rebase-runtime-and-pr",
+      "feature_name": "Deterministic Daemon Auto-Rebase Runtime and PR Failure Deduplication",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214225628-spec.md",
+        "impl_notes": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214231052-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214231908-review-001-feedback.md",
+            "response": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214232821-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214233412-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-deterministic-daemon-auto-rebase-runtime-and-pr/20260214231710-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T22:56:28.455233193Z",
       "completed_at": null
     }
   ],

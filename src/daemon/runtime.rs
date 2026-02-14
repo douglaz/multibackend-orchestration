@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
-use crate::daemon::github;
+use crate::daemon::github::{self, PrMergeStatus};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
@@ -35,6 +35,14 @@ pub struct DaemonRuntimeConfig {
     pub refinement_backend: String,
     /// Global config snapshot for runtime backend operations.
     pub global_config: GlobalConfig,
+    /// Whether auto-rebase is enabled for PR-backed tasks.
+    pub auto_rebase_enabled: bool,
+    /// Minimum interval (seconds) between rebase attempts for the same task.
+    pub rebase_interval_seconds: u64,
+    /// Maximum rebase attempts per daemon cycle.
+    pub max_rebases_per_cycle: u32,
+    /// Per-attempt timeout (seconds) for rebase operations.
+    pub rebase_timeout_seconds: u64,
 }
 
 /// Active child process handle tracked by the runtime.
@@ -107,6 +115,9 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
 
         // Collect finished children
         collect_children(store, config, &mut children).await;
+
+        // Auto-rebase phase: rebase eligible PR-backed task branches
+        auto_rebase_phase(store, config).await;
 
         // Poll for new issues
         let active_count = children.len() as u32;

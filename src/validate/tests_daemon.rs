@@ -237,6 +237,63 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_pr_diff_stat_fallback",
             func: runtime_pr_diff_stat_fallback,
         },
+        // --- Auto-Rebase Conformance Tests ---
+        ConformanceTest {
+            name: "daemon::rebase_disabled_skip",
+            func: rebase_disabled_skip,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_conflict_skip",
+            func: rebase_conflict_skip,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_closed_merged_skip",
+            func: rebase_closed_merged_skip,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_unknown_mergeability_skip",
+            func: rebase_unknown_mergeability_skip,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_branch_switched_task",
+            func: rebase_branch_switched_task,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_base_branch_from_pr",
+            func: rebase_base_branch_from_pr,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_pr_comment_not_issue",
+            func: rebase_pr_comment_not_issue,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_dedup_by_head_sha",
+            func: rebase_dedup_by_head_sha,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_force_with_lease_rejection",
+            func: rebase_force_with_lease_rejection,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_gh_pr_view_failure_break",
+            func: rebase_gh_pr_view_failure_break,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_per_cycle_cap",
+            func: rebase_per_cycle_cap,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_interval_skip",
+            func: rebase_interval_skip,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_status_last_rebase_column",
+            func: rebase_status_last_rebase_column,
+        },
+        ConformanceTest {
+            name: "daemon::rebase_backward_compat_state",
+            func: rebase_backward_compat_state,
+        },
     ]
 }
 
@@ -5104,6 +5161,940 @@ exit 1
 }
 
 // =============================================================================
+
+// =============================================================================
+// Auto-Rebase Conformance Tests
+// =============================================================================
+
+/// Test that auto-rebase is skipped when disabled by config.
+///
+/// Verifies:
+/// - `auto-rebase: skipped (disabled by config)` appears in stderr
+/// - No PR view queries are made
+fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Disable auto-rebase
+        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+            .expect("set auto_rebase_enabled failed");
+
+        // Seed a completed task with a PR URL
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-100",
+                    "completed",
+                    100,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-100");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/100");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("auto-rebase: skipped (disabled by config)"),
+            "expected disabled skip message in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that conflicting PR merge status causes skip.
+fn rebase_conflict_skip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-101",
+                    "completed",
+                    101,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-101");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/101");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"CONFLICTING","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("merge status is Conflicting"),
+            "expected Conflicting skip in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that closed/merged PRs cause skip.
+fn rebase_closed_merged_skip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-102",
+                    "completed",
+                    102,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-102");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/102");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"CLOSED","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("PR state is CLOSED (not OPEN)"),
+            "expected CLOSED skip in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that unknown mergeability causes skip.
+fn rebase_unknown_mergeability_skip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-103",
+                    "completed",
+                    103,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-103");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/103");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"UNKNOWN","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("merge status is Unknown"),
+            "expected Unknown skip in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that a branch-switched task rebases the correct (switched) branch.
+///
+/// Verifies the log mentions the switched branch name, not the default daemon branch.
+fn rebase_branch_switched_task(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-104",
+                    "completed",
+                    104,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                // Branch is switched to a project branch (not the daemon branch)
+                t["branch"] = json!("ralph/mock-project-branch");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/104");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"def456"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("branch=ralph/mock-project-branch"),
+            "expected switched branch in rebase log, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that the rebase target is `origin/<baseRefName>` from PR metadata.
+fn rebase_base_branch_from_pr(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-105",
+                    "completed",
+                    105,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-105");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/105");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"develop","headRefOid":"ghi789"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("target=origin/develop"),
+            "expected origin/develop as rebase target, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that failure comments are posted on PR (not issue).
+///
+/// Uses a mock git (push fails) and mock gh that logs pr comment calls to a file.
+fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let comment_log = h.temp_dir.path().join("pr_comment_log.txt");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-106",
+                    "completed",
+                    106,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-106");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/106");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+        let mock_git = h
+            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .expect("write mock git");
+        let mock_git_dir = mock_git
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        // Prepend mock git dir to PATH so it shadows real git during rebase
+        let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &path_with_mock_git),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                    ("MOCK_PR_COMMENT_LOG", &comment_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // The stderr should show the rebase attempt and failure
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("auto-rebase: failure for acme-widgets-106"),
+            "expected rebase failure in stderr, got:\n{stderr}"
+        );
+
+        // Comment log MUST exist — the mock gh logs pr comment calls to this file
+        assert!(
+            comment_log.exists(),
+            "PR comment log must exist at {} — failure comment was not posted",
+            comment_log.display()
+        );
+        let log_content = fs::read_to_string(&comment_log).expect("read comment log");
+        assert!(
+            log_content.contains("<!-- ralph:rebase:acme-widgets-106:failed:abc123 -->"),
+            "expected rebase failure marker in PR comment, got:\n{log_content}"
+        );
+    })
+}
+
+/// Test that failure comment dedup prevents duplicate posts for same head_sha.
+///
+/// Uses a mock git (push fails) to trigger the failure path, with
+/// `last_rebase_head_sha` pre-seeded to match the PR's `headRefOid`.
+fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let comment_log = h.temp_dir.path().join("dedup_comment_log.txt");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        // Pre-seed task with last_rebase_head_sha matching current head
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-107",
+                    "completed",
+                    107,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-107");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/107");
+                t["last_rebase_head_sha"] = json!("same_sha_123");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+        let mock_git = h
+            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .expect("write mock git");
+        let mock_git_dir = mock_git
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"same_sha_123"}"#;
+
+        let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &path_with_mock_git),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                    ("MOCK_PR_COMMENT_LOG", &comment_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Must see the dedup message in stderr
+        assert!(
+            stderr.contains("dedup"),
+            "expected dedup skip message in stderr, got:\n{stderr}"
+        );
+
+        // Comment log must NOT contain the failure marker (dedup prevents posting)
+        if comment_log.exists() {
+            let log_content = fs::read_to_string(&comment_log).expect("read comment log");
+            assert!(
+                !log_content.contains("<!-- ralph:rebase:acme-widgets-107:failed:same_sha_123 -->"),
+                "should not post duplicate failure comment for same head_sha, got:\n{log_content}"
+            );
+        }
+    })
+}
+
+/// Test that force-with-lease rejection is treated as per-task failure
+/// and processing continues to the next task.
+///
+/// Uses a mock git that fails push --force-with-lease with "stale info",
+/// and two tasks to verify the second task is still attempted.
+fn rebase_force_with_lease_rejection(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Two tasks — both eligible for rebase
+        write_tasks(
+            h,
+            vec![
+                {
+                    let mut t = task_json(
+                        "acme-widgets-108",
+                        "completed",
+                        108,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-108");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/108");
+                    t
+                },
+                {
+                    let mut t = task_json(
+                        "acme-widgets-109",
+                        "completed",
+                        109,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-109");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/109");
+                    t
+                },
+            ],
+        )
+        .expect("write_tasks failed");
+
+        // Write mock git that simulates lease rejection
+        let mock_git = h
+            .write_mock_script("git", &mock_scripts::daemon_mock_git_lease_reject_script())
+            .expect("write mock git");
+        let mock_git_dir = mock_git
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        // Prepend mock git dir to PATH so it shadows real git during rebase
+        let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &path_with_mock_git),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify lease mismatch was detected for first task
+        assert!(
+            stderr.contains("lease mismatch for acme-widgets-108"),
+            "expected lease mismatch message for first task, got:\n{stderr}"
+        );
+
+        // Verify processing continued to second task (not a break)
+        assert!(
+            stderr.contains("auto-rebase: rebasing acme-widgets-109")
+                || stderr.contains("lease mismatch for acme-widgets-109"),
+            "expected second task to be attempted after lease rejection of first, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that `gh pr view` failure stops processing for the cycle.
+fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Two tasks — both have PRs
+        write_tasks(
+            h,
+            vec![
+                {
+                    let mut t = task_json(
+                        "acme-widgets-109",
+                        "completed",
+                        109,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-109");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/109");
+                    t
+                },
+                {
+                    let mut t = task_json(
+                        "acme-widgets-110",
+                        "completed",
+                        110,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-110");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/110");
+                    t
+                },
+            ],
+        )
+        .expect("write_tasks failed");
+
+        // gh pr view fails with exit code 1
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", "rate limit exceeded"),
+                    ("MOCK_PR_VIEW_EXIT", "1"),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("gh pr view failed") && stderr.contains("stopping rebase processing"),
+            "expected gh pr view failure with break message, got:\n{stderr}"
+        );
+
+        // The second task should NOT have been attempted (break after first failure)
+        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
+        assert_eq!(
+            second_attempt_count, 0,
+            "second task should not be attempted after gh pr view failure"
+        );
+    })
+}
+
+/// Test that per-cycle cap limits rebase attempts.
+fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Set max_rebases_per_cycle to 1 via config
+        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+            .expect("set max_rebases_per_cycle failed");
+
+        // Create 3 tasks with PRs
+        write_tasks(
+            h,
+            vec![
+                {
+                    let mut t = task_json(
+                        "acme-widgets-120",
+                        "completed",
+                        120,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-120");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/120");
+                    t
+                },
+                {
+                    let mut t = task_json(
+                        "acme-widgets-121",
+                        "completed",
+                        121,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-121");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/121");
+                    t
+                },
+                {
+                    let mut t = task_json(
+                        "acme-widgets-122",
+                        "completed",
+                        122,
+                        "acme",
+                        "widgets",
+                        None,
+                        None,
+                    );
+                    t["branch"] = json!("ralph/daemon/acme-widgets-122");
+                    t["pr_url"] = json!("https://github.com/acme/widgets/pull/122");
+                    t
+                },
+            ],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should see cap message
+        assert!(
+            stderr.contains("per-cycle cap reached"),
+            "expected per-cycle cap message in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that recently-rebased interval causes skip.
+///
+/// Uses a dynamically-computed "now" timestamp to avoid time-fragility.
+fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Use a very large interval to ensure skip regardless of clock skew
+        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+            .expect("set rebase_interval_seconds failed");
+
+        // Dynamically compute a "just now" timestamp so test never becomes stale
+        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-130",
+                    "completed",
+                    130,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-130");
+                t["pr_url"] = json!("https://github.com/acme/widgets/pull/130");
+                t["last_rebase_at"] = json!(recent_timestamp);
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_PR_VIEW_JSON", pr_json),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("last rebased") && stderr.contains("interval="),
+            "expected interval skip message in stderr, got:\n{stderr}"
+        );
+    })
+}
+
+/// Test that `ralph daemon status` LAST REBASE column shows RFC3339 timestamp.
+fn rebase_status_last_rebase_column(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let timestamp = "2026-02-14T19:22:31Z";
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-140",
+                    "completed",
+                    140,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["last_rebase_at"] = json!(timestamp);
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let status = h
+            .ralph(["daemon", "status"])
+            .expect("daemon status should execute");
+        assert_exit_code(&status, 0);
+
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            stdout.contains("LAST REBASE"),
+            "expected LAST REBASE header, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains(timestamp),
+            "expected RFC3339 timestamp '{}' in output, got:\n{}",
+            timestamp,
+            stdout
+        );
+    })
+}
+
+/// Test that state deserialization is backward compatible (missing rebase fields).
+fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Write tasks without last_rebase_at / last_rebase_head_sha fields
+        let tasks_path = h.repo_root.join(".ralph").join("daemon").join("tasks.json");
+        if let Some(parent) = tasks_path.parent() {
+            fs::create_dir_all(parent).expect("create daemon dir");
+        }
+        let legacy_json = r#"[{
+            "task_id":"acme-widgets-150",
+            "state":"completed",
+            "issue_number":150,
+            "owner":"acme",
+            "repo":"widgets",
+            "child_pid":null,
+            "child_pgid":null,
+            "branch":null,
+            "pr_url":null,
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        }]"#;
+        fs::write(&tasks_path, legacy_json).expect("write legacy tasks");
+
+        let status = h
+            .ralph(["daemon", "status"])
+            .expect("daemon status should execute");
+        assert_exit_code(&status, 0);
+
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            stdout.contains("acme-widgets-150"),
+            "expected task to be listed, got:\n{stdout}"
+        );
+
+        // Verify the LAST REBASE column shows "-" for missing field
+        assert!(
+            stdout.contains("-"),
+            "expected '-' for missing last_rebase_at, got:\n{stdout}"
+        );
+
+        // Also verify deserialization round-trip works
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        assert_eq!(tasks.len(), 1);
+        assert!(
+            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
+            "last_rebase_at should be null/missing"
+        );
+    })
+}
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+// =============================================================================
 // Test helpers
 // =============================================================================
 
@@ -5232,6 +6223,10 @@ fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result
         h,
         &mock_scripts::daemon_mock_ralph_with_branch_switch_script(),
     )
+}
+
+fn write_daemon_mock_gh_rebase(h: &RalphHarness) -> crate::Result<String> {
+    write_mock_gh(h, &mock_scripts::daemon_mock_gh_rebase_script())
 }
 
 fn assert_invalid_verbose_flag_error(stderr: &str) {

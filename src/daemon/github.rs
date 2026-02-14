@@ -506,6 +506,50 @@ pub fn edit_pr(
     Ok(())
 }
 
+/// Extract a PR number from a GitHub PR URL.
+///
+/// Accepts URLs like `https://github.com/owner/repo/pull/123`.
+/// Returns `None` if the URL cannot be parsed.
+pub fn extract_pr_number(pr_url: &str) -> Option<u32> {
+    let parts: Vec<&str> = pr_url.trim_end_matches('/').rsplit('/').collect();
+    if parts.len() >= 2 && parts[1] == "pull" {
+        parts[0].parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Push with `--force-with-lease` from a worktree. Returns `Ok(())` on
+/// success, or an error. The caller can inspect the error message for
+/// lease rejection (see `is_lease_rejection`).
+pub fn push_force_with_lease(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["push", "--force-with-lease", "origin", branch])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to run git push --force-with-lease: {err}"))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(RalphError::Orchestration(format!(
+            "git push --force-with-lease failed for branch {branch}: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Check whether a push error message indicates a lease mismatch
+/// (`--force-with-lease` rejection).
+pub fn is_lease_rejection(error_msg: &str) -> bool {
+    error_msg.contains("stale info")
+        || error_msg.contains("[rejected]")
+        || error_msg.contains("failed to push")
+        || error_msg.contains("fetch first")
+}
+
 /// Read the current branch name from a worktree.
 ///
 /// The orchestrator may switch the worktree to a project-specific branch
@@ -842,6 +886,45 @@ mod tests {
         }"#;
         let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
         assert_eq!(info.merge_status, PrMergeStatus::Conflicting);
+    }
+
+    #[test]
+    fn extract_pr_number_from_standard_url() {
+        assert_eq!(
+            super::extract_pr_number("https://github.com/acme/widgets/pull/42"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn extract_pr_number_from_trailing_slash() {
+        assert_eq!(
+            super::extract_pr_number("https://github.com/acme/widgets/pull/7/"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn extract_pr_number_returns_none_for_non_pr_url() {
+        assert_eq!(
+            super::extract_pr_number("https://github.com/acme/widgets/issues/5"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_lease_rejection_detects_stale_info() {
+        assert!(super::is_lease_rejection("stale info"));
+    }
+
+    #[test]
+    fn is_lease_rejection_detects_rejected() {
+        assert!(super::is_lease_rejection("[rejected]"));
+    }
+
+    #[test]
+    fn is_lease_rejection_returns_false_for_unrelated() {
+        assert!(!super::is_lease_rejection("network timeout"));
     }
 
     #[test]

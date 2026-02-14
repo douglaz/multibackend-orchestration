@@ -764,6 +764,249 @@ esac
     .to_owned()
 }
 
+/// Mock `gh` script for daemon auto-rebase tests.
+///
+/// Environment variables:
+/// - `MOCK_PR_VIEW_JSON` — JSON response for `gh pr view --json ...`
+/// - `MOCK_PR_VIEW_EXIT` — exit code for `gh pr view` (default: 0)
+/// - `MOCK_PR_COMMENT_LOG` — file path to log pr comment bodies
+pub fn daemon_mock_gh_rebase_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for daemon auto-rebase tests.
+# Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
+# Env: MOCK_PR_VIEW_JSON - JSON response for `pr view --json`
+# Env: MOCK_PR_VIEW_EXIT - exit code for `pr view` (default 0)
+# Env: MOCK_PR_COMMENT_LOG - file to log pr comment bodies
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ -n "$MOCK_GH_ISSUES" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      view)
+        # Check if asking for JSON merge info
+        has_json=0
+        for arg in "$@"; do
+          if [ "$arg" = "mergeable,state,baseRefName,headRefOid" ]; then
+            has_json=1
+          fi
+        done
+        if [ "$has_json" = "1" ]; then
+          if [ -n "$MOCK_PR_VIEW_JSON" ]; then
+            printf '%s' "$MOCK_PR_VIEW_JSON"
+          else
+            printf '{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}'
+          fi
+          exit ${MOCK_PR_VIEW_EXIT:-0}
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        # Log the comment body
+        shift; shift # skip 'pr' 'comment'
+        pr_number="$1"
+        shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              if [ -n "$MOCK_PR_COMMENT_LOG" ]; then
+                echo "$2" >> "$MOCK_PR_COMMENT_LOG"
+              fi
+              shift 2
+              ;;
+            --repo) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `git` script for rebase tests. All git operations succeed except push,
+/// which fails with a generic error (triggering a failure comment).
+pub fn daemon_mock_git_rebase_fail_push_script() -> String {
+    r###"#!/bin/sh
+# Mock git for rebase tests. All ops succeed except push.
+case "$1" in
+  fetch) exit 0 ;;
+  rebase)
+    case "$2" in
+      --abort) exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  push)
+    echo "error: could not push to remote" >&2
+    exit 1
+    ;;
+  worktree)
+    case "$2" in
+      add)
+        # Create the directory so the daemon sees it exist
+        for arg in "$@"; do :; done
+        # Find the path argument (3rd positional after 'add' and flags)
+        shift; shift  # skip 'worktree' 'add'
+        wt_path=""
+        for arg in "$@"; do
+          case "$arg" in
+            --force|-b|HEAD) ;;
+            /*) wt_path="$arg" ;;
+          esac
+        done
+        if [ -n "$wt_path" ]; then
+          mkdir -p "$wt_path"
+          # Create a minimal .git file so git recognizes it
+          echo "gitdir: /dev/null" > "$wt_path/.git"
+        fi
+        exit 0
+        ;;
+      remove) exit 0 ;;
+      prune) exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  checkout) exit 0 ;;
+  rev-parse)
+    for arg in "$@"; do
+      if [ "$arg" = "--show-toplevel" ]; then
+        pwd
+        exit 0
+      fi
+      if [ "$arg" = "--abbrev-ref" ]; then
+        echo "mock-branch"
+        exit 0
+      fi
+    done
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `git` script for lease-rejection simulation. Succeeds on fetch and
+/// rebase, but fails push --force-with-lease with a `stale info` message.
+pub fn daemon_mock_git_lease_reject_script() -> String {
+    r###"#!/bin/sh
+# Mock git that simulates force-with-lease rejection.
+# fetch and rebase succeed; push --force-with-lease fails with stale info.
+case "$1" in
+  fetch) exit 0 ;;
+  rebase)
+    case "$2" in
+      --abort) exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  push)
+    for arg in "$@"; do
+      if [ "$arg" = "--force-with-lease" ]; then
+        echo "error: failed to push some refs" >&2
+        echo " ! [rejected] branch -> branch (stale info)" >&2
+        exit 1
+      fi
+    done
+    exit 0
+    ;;
+  worktree)
+    case "$2" in
+      add)
+        shift; shift
+        wt_path=""
+        for arg in "$@"; do
+          case "$arg" in
+            --force|-b|HEAD) ;;
+            /*) wt_path="$arg" ;;
+          esac
+        done
+        if [ -n "$wt_path" ]; then
+          mkdir -p "$wt_path"
+          echo "gitdir: /dev/null" > "$wt_path/.git"
+        fi
+        exit 0
+        ;;
+      remove) exit 0 ;;
+      prune) exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  checkout) exit 0 ;;
+  rev-parse)
+    for arg in "$@"; do
+      if [ "$arg" = "--show-toplevel" ]; then
+        pwd
+        exit 0
+      fi
+      if [ "$arg" = "--abbrev-ref" ]; then
+        echo "mock-branch"
+        exit 0
+      fi
+    done
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+"###
+    .to_owned()
+}
+
 pub fn always_reject_review_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
