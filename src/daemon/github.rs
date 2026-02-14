@@ -167,6 +167,38 @@ pub fn claim_issue(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
     Ok(())
 }
 
+/// Update the title of a GitHub issue.
+pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &str) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "edit",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--title",
+            title,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh issue edit --title: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue edit --title failed for {}#{}: {}",
+            full_repo,
+            issue_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Check whether a comment with the given marker already exists on the issue.
 pub fn comment_marker_exists(
     owner: &str,
@@ -339,6 +371,19 @@ pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> 
     Ok(())
 }
 
+/// Returns true when the worktree has an `origin` remote configured.
+pub fn has_origin_remote(worktree_path: &std::path::Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to check origin remote: {err}"))
+        })?;
+
+    Ok(output.status.success())
+}
+
 /// Check whether the task branch has diverged from the base branch.
 ///
 /// First checks for uncommitted working-tree/index changes against HEAD,
@@ -362,15 +407,34 @@ pub fn has_diff(worktree_path: &std::path::Path) -> Result<bool> {
     let base = detect_base_branch(worktree_path);
 
     // 3. Compare committed changes: merge-base of base..HEAD
-    let diff_status = Command::new("git")
+    let diff_output = Command::new("git")
         .args(["diff", "--quiet", &format!("{base}...HEAD")])
         .current_dir(worktree_path)
-        .status()
+        .output()
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run git diff against base: {err}"))
         })?;
 
-    Ok(!diff_status.success())
+    if diff_output.status.success() {
+        return Ok(false);
+    }
+
+    if diff_output.status.code() == Some(1) {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&diff_output.stderr).to_lowercase();
+    if is_invalid_revision_error(&stderr) {
+        eprintln!(
+            "warning: git diff base comparison used invalid/missing revision ({base}...HEAD); treating as no diff"
+        );
+        return Ok(false);
+    }
+
+    Err(RalphError::Orchestration(format!(
+        "git diff against base failed for {base}...HEAD: {}",
+        String::from_utf8_lossy(&diff_output.stderr).trim()
+    )))
 }
 
 /// Try to detect the base/default branch for diff comparison.
@@ -404,6 +468,13 @@ fn detect_base_branch(worktree_path: &std::path::Path) -> String {
 
     // Last resort: use HEAD~1 (will show last commit as diff)
     "HEAD~1".to_string()
+}
+
+fn is_invalid_revision_error(stderr_lower: &str) -> bool {
+    stderr_lower.contains("ambiguous argument")
+        || stderr_lower.contains("unknown revision")
+        || stderr_lower.contains("bad revision")
+        || stderr_lower.contains("not a valid object name")
 }
 
 /// Update labels for task completion: remove `ralph:in-progress`, add the
@@ -477,7 +548,11 @@ fn parse_issue_list(raw: &str) -> Result<Vec<RawGhIssue>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_issue_list, GhIssue};
+    use std::process::Command;
+
+    use tempfile::tempdir;
+
+    use super::{has_diff, is_invalid_revision_error, parse_issue_list, GhIssue};
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -512,5 +587,47 @@ mod tests {
             body: Some("body".to_owned()),
         };
         assert_eq!(issue.body.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn invalid_revision_patterns_are_detected() {
+        assert!(is_invalid_revision_error(
+            "fatal: ambiguous argument 'HEAD~1...HEAD': unknown revision"
+        ));
+        assert!(is_invalid_revision_error("fatal: bad revision 'foo'"));
+    }
+
+    #[test]
+    fn has_diff_returns_false_for_single_commit_head_tilde_base() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path();
+
+        git(repo, &["init"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+
+        std::fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-m", "initial"]);
+
+        let diff = has_diff(repo).expect("has_diff should not error for invalid base revision");
+        assert!(
+            !diff,
+            "single-commit fallback HEAD~1 should be treated as no diff"
+        );
+    }
+
+    fn git(repo_root: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

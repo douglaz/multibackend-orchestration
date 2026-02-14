@@ -438,6 +438,24 @@ async fn dispatch_task(
         }
     }
 
+    // Update GitHub issue title with refined title (best-effort).
+    if let Some(ref title) = refined_title {
+        let owner = task.owner.clone();
+        let repo = task.repo.clone();
+        let issue_number = task.issue_number;
+        let title = title.clone();
+        if let Err(err) = spawn_blocking_op(move || {
+            github::update_issue_title(&owner, &repo, issue_number, &title)
+        })
+        .await
+        {
+            eprintln!(
+                "warning: failed to update issue title for {}: {err}",
+                task.task_id
+            );
+        }
+    }
+
     // Post refined-prompt comment (best-effort, never aborts dispatch).
     {
         let owner = task.owner.clone();
