@@ -1,4 +1,5 @@
 //! Tests for `ralph tail --tmux` command behavior without requiring real tmux.
+#![allow(clippy::await_holding_lock)]
 
 use std::fs;
 use std::sync::{Mutex, MutexGuard};

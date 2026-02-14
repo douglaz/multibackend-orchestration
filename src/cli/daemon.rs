@@ -3,7 +3,7 @@ use std::process::Command;
 use clap::{Args, Subcommand};
 
 use crate::config::resolve_daemon_config;
-use crate::daemon::runtime::DaemonRuntimeConfig;
+use crate::daemon::runtime::{spawn_blocking_op, DaemonRuntimeConfig};
 use crate::daemon::{abort_task, TaskStore};
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
@@ -43,15 +43,17 @@ pub struct DaemonAbortArgs {
     pub task_id_or_number: String,
 }
 
-pub fn execute(args: DaemonArgs) -> Result<()> {
+pub async fn execute(args: DaemonArgs) -> Result<()> {
     match args.command {
-        DaemonCommand::Start(start_args) => execute_start(start_args),
-        DaemonCommand::Status => execute_status(),
-        DaemonCommand::Abort(abort_args) => execute_abort(abort_args),
+        DaemonCommand::Start(start_args) => execute_start(start_args).await,
+        DaemonCommand::Status => spawn_blocking_op(execute_status).await,
+        DaemonCommand::Abort(abort_args) => {
+            spawn_blocking_op(move || execute_abort(abort_args)).await
+        }
     }
 }
 
-fn execute_start(args: DaemonStartArgs) -> Result<()> {
+async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
     let daemon_cfg = effective_daemon_config(&workspace)?;
 
@@ -113,7 +115,7 @@ fn execute_start(args: DaemonStartArgs) -> Result<()> {
         global_config: workspace.config.clone(),
     };
 
-    crate::daemon::runtime::run(&store, &runtime_config)
+    crate::daemon::runtime::run(&store, &runtime_config).await
 }
 
 fn execute_status() -> Result<()> {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Result;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct GlobalConfig {
     #[serde(default)]
@@ -164,20 +164,22 @@ pub struct WorkflowConfig {
     pub max_qa_iterations: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommitMessageStyle {
+    #[default]
     Conventional,
     Descriptive,
     Minimal,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum PromptChangeAction {
     Continue,
     RestartLoop,
+    #[default]
     Abort,
 }
 
@@ -209,18 +211,6 @@ pub struct GitConfig {
     pub sign_commits: bool,
     #[serde(default = "default_git_base_branch")]
     pub base_branch: String,
-}
-
-impl Default for GlobalConfig {
-    fn default() -> Self {
-        Self {
-            workspace: WorkspaceConfig::default(),
-            backends: BackendConfigs::default(),
-            workflow: WorkflowConfig::default(),
-            templates: TemplateConfig::default(),
-            git: GitConfig::default(),
-        }
-    }
 }
 
 impl Default for WorkspaceConfig {
@@ -332,18 +322,6 @@ impl Default for WorkflowConfig {
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
         }
-    }
-}
-
-impl Default for CommitMessageStyle {
-    fn default() -> Self {
-        Self::Conventional
-    }
-}
-
-impl Default for PromptChangeAction {
-    fn default() -> Self {
-        Self::Abort
     }
 }
 

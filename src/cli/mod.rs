@@ -297,7 +297,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Tail(args) => tail::execute(args).await,
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
-        Commands::Daemon(args) => daemon::execute(args),
+        Commands::Daemon(args) => daemon::execute(args).await,
     }
 }
 

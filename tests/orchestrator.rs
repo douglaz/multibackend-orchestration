@@ -121,7 +121,7 @@ fn setup_workspace_with_project(
 
     let project_id = "01-poc".to_owned();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: "Proof of Concept".to_owned(),
@@ -930,7 +930,7 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
 
     let project_id = "01-poc".to_owned();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: "Proof of Concept".to_owned(),
@@ -1265,7 +1265,7 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
 
     let project_id = "01-poc".to_owned();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: "Proof of Concept".to_owned(),
@@ -1651,7 +1651,7 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
 
     let project_id = "01-poc".to_owned();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: "Proof of Concept".to_owned(),
@@ -2113,7 +2113,7 @@ fn setup_workspace_with_qa(
 
     let project_id = "01-poc".to_owned();
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: project_id.clone(),
             name: "Proof of Concept".to_owned(),

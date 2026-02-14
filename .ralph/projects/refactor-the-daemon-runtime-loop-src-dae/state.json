@@ -1,0 +1,54 @@
+{
+  "project_id": "refactor-the-daemon-runtime-loop-src-dae",
+  "project_name": "Refactor the daemon runtime loop (src/daemon/runtime.rs) fro",
+  "created_at": "2026-02-14T03:37:05.342725769Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "1ac3248369731bbb6403c1b3df35fcb4ca634dafd283ff949d3b291c555d8f2e",
+  "prompt_hash_at_loop_start": "1ac3248369731bbb6403c1b3df35fcb4ca634dafd283ff949d3b291c555d8f2e",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "async-cli-propagation-and-spawn-blocking-helper",
+      "feature_name": "Async CLI Propagation and spawn_blocking Helper",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034014-spec.md",
+        "impl_notes": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034213-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035501-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034604-qa-001-fail.md",
+            "implementer_response": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035100-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035408-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T03:40:14.696337018Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

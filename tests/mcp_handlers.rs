@@ -8,6 +8,7 @@
 //! these tests must change the working directory. To prevent races
 //! in the multi-threaded test runner, all tests serialize through
 //! a static mutex.
+#![allow(clippy::await_holding_lock)]
 
 use std::fs;
 use std::sync::Mutex;

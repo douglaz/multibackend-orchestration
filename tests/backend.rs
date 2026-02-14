@@ -1,4 +1,5 @@
 //! Unit tests for backend registry and alternation logic.
+#![allow(clippy::await_holding_lock)]
 
 use std::fs;
 use std::sync::{Arc, Mutex, MutexGuard};

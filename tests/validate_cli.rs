@@ -5,7 +5,7 @@
 
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ralph::validate::{execute, ValidateArgs};
 
@@ -76,7 +76,7 @@ fn ralph_bin_absolute() -> PathBuf {
 }
 
 /// Build a relative path from `cwd` to `target` by stripping the common prefix.
-fn make_relative(target: &PathBuf, cwd: &PathBuf) -> PathBuf {
+fn make_relative(target: &Path, cwd: &Path) -> PathBuf {
     // Find common prefix length
     let target_components: Vec<_> = target.components().collect();
     let cwd_components: Vec<_> = cwd.components().collect();

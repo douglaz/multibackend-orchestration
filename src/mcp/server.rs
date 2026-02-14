@@ -44,13 +44,11 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpServer<R, W> {
                 continue;
             }
 
-            if method.starts_with("notifications/") {
-                if message.id.is_none() {
-                    continue;
-                }
-                // notifications/* with an id is an invalid request — fall through
-                // to the match arm's `_` branch, which returns -32601.
+            if method.starts_with("notifications/") && message.id.is_none() {
+                continue;
             }
+            // notifications/* with an id is an invalid request — fall through
+            // to the match arm's `_` branch, which returns -32601.
 
             match method {
                 "initialize" => {

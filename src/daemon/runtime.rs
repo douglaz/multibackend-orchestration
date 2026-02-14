@@ -14,6 +14,7 @@ use crate::util::time::now_iso8601;
 use crate::Result;
 
 /// Configuration for the daemon runtime loop.
+#[derive(Clone)]
 pub struct DaemonRuntimeConfig {
     pub owner: String,
     pub repo: String,
@@ -39,8 +40,25 @@ struct ActiveChild {
     child: std::process::Child,
 }
 
+pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(op)
+        .await
+        .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
+}
+
 /// Run the daemon loop: reconcile, then poll/claim/dispatch/collect.
-pub fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
+pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
+    let store = store.clone();
+    let config = config.clone();
+
+    spawn_blocking_op(move || run_sync(&store, &config)).await
+}
+
+fn run_sync(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
     // Phase 1: Startup reconciliation
     reconcile_tasks(store)?;
     reconcile_worktrees(store, config)?;
@@ -113,15 +131,14 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .filter(|t| !t.state.is_terminal())
         .map(|t| t.task_id.clone())
         .collect();
+    let workspace_root = store
+        .path()
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
     worktree::reconcile_worktrees(
         &config.repo_root,
-        &store
-            .path()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf(),
+        workspace_root,
         &active_ids,
     );
     Ok(())
@@ -136,8 +153,8 @@ fn adopt_pending_tasks(
     let tasks = store.load()?;
     let pending: Vec<DaemonTask> = tasks
         .iter()
-        .cloned()
         .filter(|t| t.state == TaskState::Pending)
+        .cloned()
         .collect();
 
     for mut task in pending {
@@ -583,13 +600,7 @@ fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &Daemo
     let wt_path = worktree::task_worktree_path(workspace_root, &task.task_id);
 
     // Check if there's a diff
-    let has_changes = match github::has_diff(&wt_path) {
-        Ok(v) => v,
-        Err(_) => {
-            // Worktree may already be gone; no diff means no PR
-            false
-        }
-    };
+    let has_changes = github::has_diff(&wt_path).unwrap_or_default();
 
     if !has_changes {
         // No diff: post idempotent "no changes" comment

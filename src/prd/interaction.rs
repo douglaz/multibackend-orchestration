@@ -198,10 +198,12 @@ impl UserInteraction for NonInteractiveInteraction {
 
 #[derive(Debug, Clone, Default)]
 pub struct MockInteraction {
-    queued_answers: Arc<Mutex<VecDeque<Option<BTreeMap<String, String>>>>>,
+    queued_answers: Arc<Mutex<QueuedAnswers>>,
     status_messages: Arc<Mutex<Vec<String>>>,
     stage_completions: Arc<Mutex<Vec<(Stage, String)>>>,
 }
+
+type QueuedAnswers = VecDeque<Option<BTreeMap<String, String>>>;
 
 impl MockInteraction {
     pub fn new(canned_answers: Vec<Option<BTreeMap<String, String>>>) -> Self {

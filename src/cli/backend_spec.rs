@@ -40,13 +40,13 @@ mod tests {
     #[test]
     fn validate_bare_claude() {
         let config = GlobalConfig::default();
-        validate_backend_spec(&"claude", &config).expect("bare claude should be valid");
+        validate_backend_spec("claude", &config).expect("bare claude should be valid");
     }
 
     #[test]
     fn validate_bare_codex() {
         let config = GlobalConfig::default();
-        validate_backend_spec(&"codex", &config).expect("bare codex should be valid");
+        validate_backend_spec("codex", &config).expect("bare codex should be valid");
     }
 
     #[test]

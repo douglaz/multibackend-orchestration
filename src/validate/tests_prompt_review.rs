@@ -328,7 +328,7 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
         // Verify the loop completed successfully.
         let state = h.load_state("pr-stable-model").expect("load state");
         assert!(
-            state["loops"].as_array().map_or(false, |l| !l.is_empty()),
+            state["loops"].as_array().is_some_and(|l| !l.is_empty()),
             "at least one loop should have been completed"
         );
     })

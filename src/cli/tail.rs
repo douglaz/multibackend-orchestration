@@ -1039,18 +1039,10 @@ created_at: 2026-02-06T20:00:00Z
                 TailEventKind::Artifact { .. } | TailEventKind::GitCommit { .. } => None,
             })
             .collect();
-        assert!(descriptions
-            .iter()
-            .any(|item| *item == "loop 1 (Feature A) started"));
-        assert!(descriptions
-            .iter()
-            .any(|item| *item == "loop 1 (Feature A) completed"));
-        assert!(descriptions
-            .iter()
-            .any(|item| *item == "loop 2 completion check started"));
-        assert!(descriptions
-            .iter()
-            .any(|item| *item == "loop 2 completion verdict: CONTINUE"));
+        assert!(descriptions.contains(&"loop 1 (Feature A) started"));
+        assert!(descriptions.contains(&"loop 1 (Feature A) completed"));
+        assert!(descriptions.contains(&"loop 2 completion check started"));
+        assert!(descriptions.contains(&"loop 2 completion verdict: CONTINUE"));
 
         let git = events.iter().find_map(|event| match &event.kind {
             TailEventKind::GitCommit {

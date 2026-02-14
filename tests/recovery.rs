@@ -60,7 +60,7 @@ fn setup_project() -> (TempDir, std::path::PathBuf, String) {
     fs::write(&prompt_path, "# Build a demo\n").expect("write prompt");
 
     create_project(
-        &mut workspace,
+        &workspace,
         CreateProjectOptions {
             id: "01-poc".to_owned(),
             name: "Proof of Concept".to_owned(),

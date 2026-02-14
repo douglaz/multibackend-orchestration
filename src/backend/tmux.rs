@@ -282,11 +282,9 @@ fn sanitize_tmux_label(raw: &str) -> String {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             prev_dash = ch == '-';
             result.push(ch);
-        } else {
-            if !prev_dash && !result.is_empty() {
-                result.push('-');
-                prev_dash = true;
-            }
+        } else if !prev_dash && !result.is_empty() {
+            result.push('-');
+            prev_dash = true;
         }
     }
     // Trim trailing dash
