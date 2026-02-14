@@ -119,10 +119,22 @@ pub fn fetch_issue_body(
 }
 
 /// Filter out issues that already have any `ralph:*` label.
+/// Filter issues to only those that are claimable.
+///
+/// An issue is NOT claimable if it has any `ralph:` label other than
+/// `ralph:ready` (the trigger label). Labels like `ralph:in-progress`,
+/// `ralph:completed`, `ralph:failed` indicate the daemon already owns it.
 pub fn filter_claimable(issues: Vec<GhIssue>) -> Vec<GhIssue> {
+    const TRIGGER_LABELS: &[&str] = &["ralph:ready"];
+
     issues
         .into_iter()
-        .filter(|issue| !issue.labels.iter().any(|l| l.starts_with("ralph:")))
+        .filter(|issue| {
+            !issue.labels.iter().any(|l| {
+                l.starts_with("ralph:")
+                    && !TRIGGER_LABELS.iter().any(|trigger| l == trigger)
+            })
+        })
         .collect()
 }
 
