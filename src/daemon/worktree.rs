@@ -18,7 +18,8 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// Create a git worktree for the given task.
 ///
 /// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
-/// `.ralph/daemon/worktrees/<task_id>/`.
+/// `.ralph/daemon/worktrees/<task_id>/`. If the branch already exists
+/// (e.g. from a previous failed run), reuses it instead of passing `-b`.
 pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
 
@@ -31,20 +32,44 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     }
 
     let branch_name = format!("ralph/daemon/{task_id}");
-    let output = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            &branch_name,
-            &wt_path.to_string_lossy(),
-            "HEAD",
-        ])
+
+    // Check if the branch already exists (e.g. from a previous failed run
+    // where the worktree was cleaned up but the branch was not).
+    let branch_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
         .current_dir(repo_root)
         .output()
-        .map_err(|err| {
-            RalphError::Orchestration(format!("failed to create worktree for {task_id}: {err}"))
-        })?;
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let output = if branch_exists {
+        // Reuse existing branch
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                &wt_path.to_string_lossy(),
+                &branch_name,
+            ])
+            .current_dir(repo_root)
+            .output()
+    } else {
+        // Create new branch
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                &branch_name,
+                &wt_path.to_string_lossy(),
+                "HEAD",
+            ])
+            .current_dir(repo_root)
+            .output()
+    }
+    .map_err(|err| {
+        RalphError::Orchestration(format!("failed to create worktree for {task_id}: {err}"))
+    })?;
 
     if !output.status.success() {
         return Err(RalphError::Orchestration(format!(
@@ -54,6 +79,52 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     }
 
     Ok(wt_path)
+}
+
+/// Clean a worktree of any dirty files outside `.ralph/`, restoring it to a
+/// pristine state matching the branch HEAD. This prevents the orchestrator
+/// from aborting due to uncommitted changes left by a previous run or by
+/// backend side-effects (e.g. codex writing files to the cwd).
+pub fn clean_worktree(wt_path: &Path) -> Result<()> {
+    // Discard modifications to tracked files (excluding .ralph/)
+    let checkout = Command::new("git")
+        .args(["checkout", "--", "."])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run git checkout in worktree {}: {err}",
+                wt_path.display()
+            ))
+        })?;
+    if !checkout.status.success() {
+        eprintln!(
+            "warning: git checkout in worktree {} failed: {}",
+            wt_path.display(),
+            String::from_utf8_lossy(&checkout.stderr).trim()
+        );
+    }
+
+    // Remove untracked files (excluding .ralph/)
+    let clean = Command::new("git")
+        .args(["clean", "-fd", "--exclude=.ralph"])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run git clean in worktree {}: {err}",
+                wt_path.display()
+            ))
+        })?;
+    if !clean.status.success() {
+        eprintln!(
+            "warning: git clean in worktree {} failed: {}",
+            wt_path.display(),
+            String::from_utf8_lossy(&clean.stderr).trim()
+        );
+    }
+
+    Ok(())
 }
 
 /// Remove a worktree for a task. Best-effort: logs warning on failure.

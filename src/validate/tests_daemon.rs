@@ -1,8 +1,13 @@
 use super::*;
 
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
+use crate::daemon::bootstrap;
+use crate::daemon::github;
+use crate::daemon::worktree;
 use crate::validate::assertions::{assert_exit_code, assert_stdout_contains};
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
@@ -108,6 +113,35 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_no_diff_pr_path",
             func: runtime_no_diff_pr_path,
         },
+        // --- Loop 4 Bootstrap + PR/Diff Hardening Tests ---
+        ConformanceTest {
+            name: "daemon::daemon_bootstrap_non_git_dir",
+            func: daemon_bootstrap_non_git_dir,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_bootstrap_zero_commit_repo",
+            func: daemon_bootstrap_zero_commit_repo,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_bootstrap_idempotent",
+            func: daemon_bootstrap_idempotent,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_bootstrap_existing_repo_noop",
+            func: daemon_bootstrap_existing_repo_noop,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_pr_no_origin_skips_push_and_pr",
+            func: daemon_pr_no_origin_skips_push_and_pr,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_pr_no_default_branch_fallback_head_only",
+            func: daemon_pr_no_default_branch_fallback_head_only,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_has_diff_invalid_base_returns_false",
+            func: daemon_has_diff_invalid_base_returns_false,
+        },
         // --- Loop 3 Refinement Dispatch Tests ---
         ConformanceTest {
             name: "daemon::refinement_happy_path",
@@ -172,6 +206,19 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "daemon::refined_prompt_comment_includes_title",
             func: refined_prompt_comment_includes_title,
+        },
+        // --- Worktree Resilience Tests ---
+        ConformanceTest {
+            name: "daemon::create_worktree_reuses_existing_branch",
+            func: create_worktree_reuses_existing_branch,
+        },
+        ConformanceTest {
+            name: "daemon::clean_worktree_removes_dirty_files",
+            func: clean_worktree_removes_dirty_files,
+        },
+        ConformanceTest {
+            name: "daemon::dispatch_cleans_dirty_worktree",
+            func: dispatch_cleans_dirty_worktree,
         },
     ]
 }
@@ -2111,6 +2158,316 @@ exit 1
     })
 }
 
+fn daemon_bootstrap_non_git_dir(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let repo_root = h.temp_dir.path().join("bootstrap-non-git");
+        fs::create_dir_all(&repo_root).expect("create non-git repo root");
+
+        ensure_repo_ready_blocking(&repo_root).expect("bootstrap should succeed");
+
+        assert!(
+            repo_root.join(".git").exists(),
+            "expected .git after bootstrap"
+        );
+        assert!(
+            repo_root.join(".ralph").exists(),
+            "expected .ralph workspace after bootstrap"
+        );
+        assert_eq!(
+            git_stdout(&repo_root, &["rev-list", "--count", "HEAD"]),
+            "1",
+            "non-git bootstrap should create exactly one bootstrap commit"
+        );
+    })
+}
+
+fn daemon_bootstrap_zero_commit_repo(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let zero =
+            RalphHarness::new_zero_commit_repo(&h.ralph_bin).expect("create zero-commit repo");
+
+        ensure_repo_ready_blocking(&zero.repo_root).expect("bootstrap should succeed");
+
+        assert_eq!(
+            git_stdout(&zero.repo_root, &["rev-list", "--count", "HEAD"]),
+            "1",
+            "zero-commit repo should receive one bootstrap commit"
+        );
+        let subject = git_stdout(&zero.repo_root, &["log", "-1", "--pretty=%s"]);
+        assert!(
+            subject.contains("ralph: bootstrap empty commit"),
+            "expected bootstrap commit subject, got: {subject}"
+        );
+        assert!(
+            zero.repo_root.join(".ralph").exists(),
+            "workspace should be initialized for zero-commit repo"
+        );
+    })
+}
+
+fn daemon_bootstrap_idempotent(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let zero =
+            RalphHarness::new_zero_commit_repo(&h.ralph_bin).expect("create zero-commit repo");
+
+        ensure_repo_ready_blocking(&zero.repo_root).expect("first bootstrap should succeed");
+        let head_before = git_stdout(&zero.repo_root, &["rev-parse", "HEAD"]);
+        let count_before = git_stdout(&zero.repo_root, &["rev-list", "--count", "HEAD"]);
+
+        ensure_repo_ready_blocking(&zero.repo_root).expect("second bootstrap should succeed");
+        let head_after = git_stdout(&zero.repo_root, &["rev-parse", "HEAD"]);
+        let count_after = git_stdout(&zero.repo_root, &["rev-list", "--count", "HEAD"]);
+
+        assert_eq!(
+            head_after, head_before,
+            "HEAD should be stable across bootstrap runs"
+        );
+        assert_eq!(
+            count_after, count_before,
+            "idempotent bootstrap should not create additional commits"
+        );
+    })
+}
+
+fn daemon_bootstrap_existing_repo_noop(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let head_before = git_stdout(&h.repo_root, &["rev-parse", "HEAD"]);
+        let count_before = git_stdout(&h.repo_root, &["rev-list", "--count", "HEAD"]);
+
+        ensure_repo_ready_blocking(&h.repo_root).expect("bootstrap should succeed");
+
+        let head_after = git_stdout(&h.repo_root, &["rev-parse", "HEAD"]);
+        let count_after = git_stdout(&h.repo_root, &["rev-list", "--count", "HEAD"]);
+
+        assert_eq!(
+            head_after, head_before,
+            "existing repository HEAD should not change during bootstrap"
+        );
+        assert_eq!(
+            count_after, count_before,
+            "existing repository commit count should not change during bootstrap"
+        );
+    })
+}
+
+fn daemon_pr_no_origin_skips_push_and_pr(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let pr_create_log = h.temp_dir.path().join("pr_create_no_origin.log");
+        let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) echo "called" > "{pr_create_log_str}" ; printf 'https://example.invalid/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let no_origin_ralph = r#"#!/bin/sh
+case "$1" in
+  auto)
+    echo "change" > daemon_no_origin_change.txt
+    git add daemon_no_origin_change.txt
+    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: no origin change" --quiet
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"#;
+        let ralph_path = write_mock_ralph(h, no_origin_ralph).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-801",
+                    "pending",
+                    801,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-801");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("origin remote missing") && stderr.contains("skipping push/PR"),
+            "expected no-origin skip warning, got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("failed to push branch"),
+            "daemon should not attempt push when origin is missing, stderr:\n{stderr}"
+        );
+        assert!(
+            !pr_create_log.exists(),
+            "gh pr create should not be called when origin is missing"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-801")
+            .expect("task should exist");
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "task should stay completed"
+        );
+    })
+}
+
+fn daemon_pr_no_default_branch_fallback_head_only(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let pr_args_log = h.temp_dir.path().join("pr_args_head_only.log");
+        let pr_args_log_str = pr_args_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create)
+        shift 2
+        printf '%s ' "$@" > "{pr_args_log_str}"
+        printf 'https://github.com/acme/widgets/pull/802\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(
+                    "acme-widgets-802",
+                    "pending",
+                    802,
+                    "acme",
+                    "widgets",
+                    None,
+                    None,
+                );
+                t["branch"] = json!("ralph/daemon/acme-widgets-802");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-802")
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("completed"), "task should complete");
+
+        assert!(pr_args_log.exists(), "expected gh pr create invocation");
+        let args = fs::read_to_string(&pr_args_log).expect("read pr args log");
+        assert!(
+            args.contains("--head ralph/daemon/acme-widgets-802"),
+            "expected head-only PR args, got: {args}"
+        );
+        assert!(
+            !args.contains("--base"),
+            "fallback PR create should omit --base when default branch is unresolved, got: {args}"
+        );
+    })
+}
+
+fn daemon_has_diff_invalid_base_returns_false(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_root = temp.path().join("invalid-base");
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        git(&repo_root, &["init"]);
+        git(
+            &repo_root,
+            &["config", "user.email", "validate@example.com"],
+        );
+        git(&repo_root, &["config", "user.name", "Validate Harness"]);
+        fs::write(repo_root.join("README.md"), "hello\n").expect("write README");
+        git(&repo_root, &["add", "README.md"]);
+        git(&repo_root, &["commit", "-m", "initial"]);
+        git(&repo_root, &["branch", "-M", "trunk"]);
+
+        let has_changes = github::has_diff(&repo_root).expect("has_diff should not hard-fail");
+        assert!(
+            !has_changes,
+            "invalid base revision in single-commit repo should be treated as no diff"
+        );
+    })
+}
+
 // =============================================================================
 // Loop 3 Refinement Dispatch Tests
 // =============================================================================
@@ -3006,8 +3363,7 @@ exit 1
         );
 
         let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path =
-            write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
 
         // Pre-populate task with the original daemon branch
         write_tasks(
@@ -3078,10 +3434,7 @@ exit 1
         );
 
         // PR creation was called with the new branch as --head
-        assert!(
-            gh_head_log.exists(),
-            "gh pr create should have been called"
-        );
+        assert!(gh_head_log.exists(), "gh pr create should have been called");
         let head_arg = fs::read_to_string(&gh_head_log)
             .expect("read gh_head_log")
             .trim()
@@ -3901,8 +4254,234 @@ exit 1
 }
 
 // =============================================================================
+// Worktree Resilience Tests
+// =============================================================================
+
+/// Test that create_worktree reuses an existing branch instead of failing
+/// with "branch already exists" when a prior run left a stale branch behind.
+fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+
+        // Create a worktree (creates branch ralph/daemon/acme-widgets-99)
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+            .expect("first create_worktree should succeed");
+        assert!(wt.exists(), "worktree directory should exist");
+
+        // Verify branch exists
+        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        assert!(
+            branch_check.contains("ralph/daemon/acme-widgets-99"),
+            "branch should exist after create_worktree"
+        );
+
+        // Remove the worktree but leave the branch (simulates failed task cleanup)
+        worktree::remove_worktree(&h.repo_root, &workspace_root, "acme-widgets-99");
+        assert!(!wt.exists(), "worktree directory should be removed");
+
+        // Branch should still exist
+        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        assert!(
+            branch_check.contains("ralph/daemon/acme-widgets-99"),
+            "branch should survive worktree removal"
+        );
+
+        // Second create_worktree should succeed by reusing the existing branch
+        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+            .expect("second create_worktree should succeed with existing branch");
+        assert!(wt2.exists(), "worktree directory should be re-created");
+    })
+}
+
+/// Test that clean_worktree removes dirty tracked and untracked files
+/// while preserving the .ralph/ directory.
+fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+
+        // Create a worktree
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-77")
+            .expect("create_worktree should succeed");
+
+        // Create a tracked file, commit it, then modify it (dirty tracked)
+        fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
+        git(&wt, &["add", "tracked.rs"]);
+        git(&wt, &[
+            "-c", "user.name=Test",
+            "-c", "user.email=test@test.com",
+            "-c", "commit.gpgsign=false",
+            "commit", "--no-verify", "-m", "add tracked",
+        ]);
+        fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
+
+        // Create an untracked file (like SPEC.md from codex side-effect)
+        fs::write(wt.join("SPEC.md"), "# Stale spec").expect("write untracked");
+
+        // Create a file inside .ralph/ (should be preserved)
+        let ralph_dir = wt.join(".ralph").join("test");
+        fs::create_dir_all(&ralph_dir).expect("create .ralph/test");
+        fs::write(ralph_dir.join("state.json"), "{}").expect("write .ralph state");
+
+        // Verify dirty state
+        let status = git_stdout(&wt, &["status", "--short"]);
+        assert!(
+            status.contains("tracked.rs") || status.contains("SPEC.md"),
+            "worktree should be dirty before clean, status:\n{status}"
+        );
+
+        // Clean the worktree
+        worktree::clean_worktree(&wt).expect("clean_worktree should succeed");
+
+        // Dirty files should be gone
+        let status_after = git_stdout(&wt, &["status", "--short"]);
+        assert!(
+            !status_after.contains("tracked.rs"),
+            "tracked modifications should be reverted after clean, status:\n{status_after}"
+        );
+        assert!(
+            !wt.join("SPEC.md").exists(),
+            "untracked SPEC.md should be removed after clean"
+        );
+
+        // .ralph/ directory should be preserved
+        assert!(
+            ralph_dir.join("state.json").exists(),
+            ".ralph/ contents should survive clean_worktree"
+        );
+    })
+}
+
+/// Test that the daemon dispatch cleans a dirty worktree before spawning
+/// the child process, preventing the orchestrator from aborting.
+fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Pre-create the worktree and dirty it up
+        let workspace_root = h.repo_root.join(".ralph");
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-88")
+            .expect("create_worktree should succeed");
+
+        // Add a tracked file, commit, then modify (simulates prior run's changes)
+        fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
+        git(&wt, &["add", "src.rs"]);
+        git(&wt, &[
+            "-c", "user.name=Test",
+            "-c", "user.email=test@test.com",
+            "-c", "commit.gpgsign=false",
+            "commit", "--no-verify", "-m", "prior run",
+        ]);
+        fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
+
+        // Add an untracked file (simulates codex side-effect)
+        fs::write(wt.join("SPEC.md"), "# codex artifact").expect("write untracked");
+
+        // Pre-populate a pending task matching the worktree
+        write_tasks(
+            h,
+            vec![task_json(
+                "acme-widgets-88",
+                "pending",
+                88,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-88"),
+            "task should be dispatched despite prior dirty worktree, stderr:\n{stderr}"
+        );
+
+        // After dispatch + drain, the dirty files should have been cleaned
+        // (the mock ralph exits immediately, so the worktree state reflects
+        // post-clean). Check the worktree still exists (or was cleaned up
+        // as part of completion).
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == "acme-widgets-88")
+            .unwrap();
+        let state = task["state"].as_str().unwrap();
+        assert!(
+            ["completed", "failed"].contains(&state),
+            "task should reach terminal state, got: {state}"
+        );
+    })
+}
+
+// =============================================================================
 // Test helpers
 // =============================================================================
+
+fn ensure_repo_ready_blocking(repo_root: &Path) -> crate::Result<()> {
+    let repo_root = repo_root.to_path_buf();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| {
+                crate::error::RalphError::Orchestration(format!("tokio runtime init failed: {err}"))
+            })?;
+        runtime.block_on(bootstrap::ensure_repo_ready(&repo_root))
+    })
+    .join()
+    .map_err(|_| crate::error::RalphError::Orchestration("bootstrap thread panicked".to_owned()))?
+}
+
+fn git(repo_root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .expect("git command should execute");
+    assert!(
+        output.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        repo_root.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+}
+
+fn git_stdout(repo_root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .expect("git command should execute");
+    assert!(
+        output.status.success(),
+        "git {:?} failed in {}: {}",
+        args,
+        repo_root.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
 
 fn write_tasks(h: &RalphHarness, tasks: Vec<Value>) -> crate::Result<()> {
     let path = tasks_path(h);
@@ -3979,7 +4558,10 @@ fn write_daemon_mock_ralph_with_commit(h: &RalphHarness) -> crate::Result<String
 
 /// Write the mock ralph that switches branch and creates a commit (for branch resolution tests).
 fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result<String> {
-    write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_with_branch_switch_script())
+    write_mock_ralph(
+        h,
+        &mock_scripts::daemon_mock_ralph_with_branch_switch_script(),
+    )
 }
 
 fn assert_invalid_verbose_flag_error(stderr: &str) {

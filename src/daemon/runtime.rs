@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::GlobalConfig;
+use crate::daemon::bootstrap;
 use crate::daemon::github;
 use crate::daemon::process;
 use crate::daemon::refine;
@@ -69,7 +70,10 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
     if let Ok(content) = std::fs::read_to_string(log_file) {
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(50);
-        eprintln!("--- last output from {task_id} ({}) ---", log_file.display());
+        eprintln!(
+            "--- last output from {task_id} ({}) ---",
+            log_file.display()
+        );
         for line in &lines[start..] {
             eprintln!("  {line}");
         }
@@ -183,11 +187,7 @@ fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Resul
         .parent()
         .and_then(|p| p.parent())
         .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
-    worktree::reconcile_worktrees(
-        &config.repo_root,
-        workspace_root,
-        &active_ids,
-    );
+    worktree::reconcile_worktrees(&config.repo_root, workspace_root, &active_ids);
     Ok(())
 }
 
@@ -238,6 +238,7 @@ async fn adopt_pending_tasks(
         }
         if let Err(err) = dispatch_task(store, config, children, &task).await {
             eprintln!("warning: failed to re-adopt task {}: {err}", task.task_id);
+            complete_task(store, config, &task.task_id, TaskState::Failed).await;
         }
     }
 
@@ -340,6 +341,7 @@ async fn poll_and_claim(
         // Dispatch
         if let Err(err) = dispatch_task(store, config, children, &task).await {
             eprintln!("warning: failed to dispatch task {}: {err}", task_id);
+            complete_task(store, config, &task_id, TaskState::Failed).await;
         }
 
         claimed += 1;
@@ -361,6 +363,8 @@ async fn dispatch_task(
     children: &mut HashMap<String, ActiveChild>,
     task: &DaemonTask,
 ) -> Result<()> {
+    bootstrap::ensure_repo_ready(&config.repo_root).await?;
+
     let workspace_root = store
         .path()
         .parent()
@@ -368,13 +372,21 @@ async fn dispatch_task(
         .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?
         .to_path_buf();
 
-    // Create worktree
+    // Create worktree (reuses existing branch if present)
     let wt_path = {
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task.task_id.clone();
         spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid)).await?
     };
+
+    // Clean worktree of any dirty files from previous runs or backend
+    // side-effects. This prevents the orchestrator from aborting due to
+    // uncommitted changes outside `.ralph/`.
+    {
+        let wt = wt_path.clone();
+        spawn_blocking_op(move || worktree::clean_worktree(&wt)).await?;
+    }
 
     // Resolve raw idea. Legacy tasks are hydrated from GitHub if `raw_idea`
     // is missing.
@@ -383,8 +395,7 @@ async fn dispatch_task(
         None => {
             let store_clone = store.clone();
             let task_clone = task.clone();
-            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone))
-                .await?
+            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone)).await?
         }
     };
 
@@ -844,8 +855,7 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             let wt = wt_path.clone();
-            if let Ok(actual_branch) =
-                spawn_blocking_op(move || github::current_branch(&wt)).await
+            if let Ok(actual_branch) = spawn_blocking_op(move || github::current_branch(&wt)).await
             {
                 if task.branch.as_deref() != Some(&actual_branch) {
                     eprintln!(
@@ -937,10 +947,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return;
             }
         }
@@ -957,14 +964,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             task.task_id
         );
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                "no-diff",
-                &body,
-            )
+            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
         })
         .await
         {
@@ -974,6 +974,28 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
             );
         }
         return;
+    }
+
+    // Skip push/PR flow when no origin remote exists in the task worktree.
+    {
+        let wt = wt_path.clone();
+        let has_origin = match spawn_blocking_op(move || github::has_origin_remote(&wt)).await {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to check origin remote for {}; skipping push/PR: {err}",
+                    task.task_id
+                );
+                return;
+            }
+        };
+        if !has_origin {
+            eprintln!(
+                "warning: origin remote missing for {}; skipping push/PR flow",
+                task.task_id
+            );
+            return;
+        }
     }
 
     // Push branch to remote before PR creation
