@@ -45,6 +45,27 @@ impl RalphHarness {
         })
     }
 
+    /// Create a harness with a git repo that has zero commits (only `git init`).
+    pub fn new_zero_commit_repo<P: AsRef<Path>>(bin: P) -> Result<Self> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path().join("repo");
+        let ralph_bin = bin.as_ref().to_path_buf();
+        fs::create_dir_all(&repo_root)?;
+
+        run_git(&repo_root, &["init"])?;
+        run_git(
+            &repo_root,
+            &["config", "user.email", "validate@example.com"],
+        )?;
+        run_git(&repo_root, &["config", "user.name", "Validate Harness"])?;
+
+        Ok(Self {
+            temp_dir,
+            repo_root,
+            ralph_bin,
+        })
+    }
+
     pub fn ralph<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,

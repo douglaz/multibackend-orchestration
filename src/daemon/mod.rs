@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod github;
 pub mod process;
 pub mod refine;
