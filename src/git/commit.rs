@@ -8,7 +8,7 @@ use crate::git::{
 use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
-pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph/**";
+pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph";
 
 /// Returns the diff of both staged and unstaged changes against HEAD.
 pub fn working_tree_diff(workdir: &Path) -> Result<String> {
