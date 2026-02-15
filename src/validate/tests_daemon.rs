@@ -252,6 +252,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::dispatch_cleans_dirty_worktree",
             func: dispatch_cleans_dirty_worktree,
         },
+        ConformanceTest {
+            name: "daemon::runtime_create_worktree_handles_stale_metadata",
+            func: runtime_create_worktree_handles_stale_metadata,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_reuse_worktree_corrects_branch_mismatch",
+            func: runtime_reuse_worktree_corrects_branch_mismatch,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_preserves_project_artifacts",
+            func: runtime_retrigger_preserves_project_artifacts,
+        },
         // --- Deterministic PR Edit/Create Tests ---
         ConformanceTest {
             name: "daemon::runtime_pr_edit_existing_uses_body_file",
@@ -2639,14 +2651,16 @@ fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> Te
         )
         .expect("write failed task failed");
 
-        let wt_path = h
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees")
-            .join(task_id);
-        fs::create_dir_all(&wt_path).expect("create preserved worktree");
-        let preserved_marker = wt_path.join("preserved-marker.txt");
+        let workspace_root = h.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create preserved worktree");
+        let preserved_marker = wt_path.join(".ralph").join("preserved-marker.txt");
+        fs::create_dir_all(
+            preserved_marker
+                .parent()
+                .expect("preserved marker parent should exist"),
+        )
+        .expect("create preserved marker parent");
         fs::write(&preserved_marker, "from-initial-failure").expect("write preserved marker");
 
         write_tasks(
@@ -5467,6 +5481,205 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
     })
 }
 
+/// Test that create_worktree recovers from stale git worktree metadata by
+/// pruning before `git worktree add`.
+fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+        let task_id = "acme-widgets-381";
+
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("initial create_worktree should succeed");
+        assert!(wt.exists(), "worktree should exist after initial creation");
+
+        // Simulate a crash/manual delete: remove the directory without
+        // `git worktree remove`, leaving stale metadata under .git/worktrees.
+        fs::remove_dir_all(&wt).expect("remove worktree dir directly");
+        assert!(
+            !wt.exists(),
+            "worktree dir should be removed to simulate stale metadata"
+        );
+
+        let list_before = git_stdout(&h.repo_root, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list_before.contains(task_id),
+            "expected stale worktree metadata for task before recreation, got:\n{list_before}"
+        );
+
+        // Must succeed because create_worktree now prunes before `worktree add`.
+        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create_worktree should recover from stale metadata");
+        assert!(wt2.exists(), "worktree should be recreated after prune");
+    })
+}
+
+/// Test that reusing an existing worktree corrects a branch mismatch by
+/// force-checking out the expected daemon branch.
+fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+        let task_id = "acme-widgets-382";
+        let expected_branch = format!("ralph/daemon/{task_id}");
+        let mismatched_branch = "tmp-branch-mismatch-382";
+
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("initial create_worktree should succeed");
+        assert!(wt.exists(), "worktree should exist");
+
+        git(&wt, &["checkout", "-b", mismatched_branch]);
+        let before = git_stdout(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            before, mismatched_branch,
+            "test setup should move worktree to mismatched branch"
+        );
+
+        let reused = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("reuse path should correct branch mismatch");
+        assert_eq!(reused, wt, "reuse path should return same worktree path");
+
+        let after = git_stdout(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            after, expected_branch,
+            "reuse path should force-checkout expected daemon branch"
+        );
+    })
+}
+
+/// Test retry dispatch preserves `.ralph/projects/<id>/loops/*` artifacts after
+/// clean+dispatch+failed-terminal retry flow.
+fn runtime_retrigger_preserves_project_artifacts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-383";
+        let project_id = "retry-proj-383";
+        let workspace_root = h.repo_root.join(".ralph");
+        let expected_branch = format!("ralph/daemon/{task_id}");
+
+        // Pre-create the task worktree and project artifacts from a prior run.
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create_worktree should succeed");
+        let artifact_path = wt
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+            .join("loops")
+            .join("001-prior-failure")
+            .join("artifact.md");
+        let artifact_content = "artifact from prior failed attempt";
+        let parent = artifact_path
+            .parent()
+            .expect("artifact parent should exist");
+        fs::create_dir_all(parent).expect("create artifact parent dirs");
+        fs::write(&artifact_path, artifact_content).expect("write artifact");
+
+        // Add untracked noise outside .ralph that should be removed by clean_worktree.
+        let dirty_path = wt.join("SPEC.md");
+        fs::write(&dirty_path, "# stale file from previous run").expect("write dirty file");
+        assert!(
+            dirty_path.exists(),
+            "dirty file should exist before retry dispatch"
+        );
+
+        // Seed legacy failed task with project context for retry.
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "failed", 383, "acme", "widgets", None, None);
+                t["project_id"] = json!(project_id);
+                t["branch"] = json!(expected_branch);
+                t["raw_idea"] = json!("Retry task\n\nPreserve prior loop artifacts.");
+                t
+            }],
+        )
+        .expect("write failed task failed");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let retrigger = h
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&retrigger, 0);
+
+        let tasks_pending = load_tasks(h).expect("load_tasks after retrigger");
+        let pending_task = tasks_pending
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist after retrigger");
+        assert_eq!(
+            pending_task["state"],
+            json!("pending"),
+            "retrigger should transition task to pending"
+        );
+
+        let artifact_path_str = artifact_path.to_string_lossy().into_owned();
+        let dirty_path_str = dirty_path.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    [ "$2" = "--project" ] || exit 81
+    [ "$3" = "{project_id}" ] || exit 82
+    [ -f "{artifact_path_str}" ] || exit 83
+    grep -q "artifact from prior failed attempt" "{artifact_path_str}" || exit 84
+    [ ! -f "{dirty_path_str}" ] || exit 85
+    exit 1
+    ;;
+  auto)
+    echo "unexpected auto dispatch" >&2
+    exit 86
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 87
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["state"],
+            json!("failed"),
+            "mock ralph exits non-zero so retry should finish as failed"
+        );
+
+        assert!(
+            artifact_path.exists(),
+            "project loop artifact should survive retry clean+dispatch cycle"
+        );
+        let content_after = fs::read_to_string(&artifact_path).expect("read artifact");
+        assert_eq!(
+            content_after, artifact_content,
+            "project loop artifact content should be preserved"
+        );
+        assert!(
+            !dirty_path.exists(),
+            "clean_worktree should remove non-.ralph stale files before spawn"
+        );
+    })
+}
+
 // =============================================================================
 // Deterministic PR Edit/Create Tests
 // =============================================================================
@@ -7050,14 +7263,10 @@ fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> Test
         )
         .expect("write_tasks failed");
 
-        // Pre-create worktree directory so daemon reuses it.
-        let wt_path = h
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees")
-            .join(task_id);
-        fs::create_dir_all(&wt_path).expect("create worktree dir");
+        // Pre-create a real git worktree so daemon reuses it.
+        let workspace_root = h.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create worktree");
 
         // Valid project: has state.json
         let valid_proj_dir = wt_path.join(".ralph").join("projects").join("valid-proj");
@@ -7159,14 +7368,10 @@ fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) ->
         )
         .expect("write_tasks failed");
 
-        // Pre-create worktree with a single valid project.
-        let wt_path = h
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees")
-            .join(task_id);
-        fs::create_dir_all(&wt_path).expect("create worktree dir");
+        // Pre-create a real git worktree with a single valid project.
+        let workspace_root = h.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create worktree");
 
         let proj_dir = wt_path
             .join(".ralph")
@@ -7179,8 +7384,7 @@ fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) ->
         // Also create a loops directory to simulate prior artifacts
         let loops_dir = proj_dir.join("loops").join("001-initial");
         fs::create_dir_all(&loops_dir).expect("create loops dir");
-        fs::write(loops_dir.join("artifact.md"), "prior attempt artifact")
-            .expect("write artifact");
+        fs::write(loops_dir.join("artifact.md"), "prior attempt artifact").expect("write artifact");
 
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
         let args_log = h.temp_dir.path().join("backfill_args.log");

@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "0fec38ab8b386d4891192a02d64f4b258cbea16167fe2b6e2784ab556b270507",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -48,7 +48,7 @@
       "slug": "dispatch-time-project-context-backfill-for-legacy",
       "feature_name": "Dispatch-time project context backfill for legacy failed retries",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -76,8 +76,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "715b782121c789258cf941f61eb653c7f2b1a57c",
       "started_at": "2026-02-15T17:51:17.514028729Z",
+      "completed_at": "2026-02-15T18:25:57.045863241Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "worktree-hardening-with-stale-metadata-recovery",
+      "feature_name": "Worktree hardening with stale-metadata recovery, branch-mismatch correction, and artifact preservation validation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-worktree-hardening-with-stale-metadata-recovery/20260215182834-spec.md",
+        "impl_notes": "loops/003-worktree-hardening-with-stale-metadata-recovery/20260215183500-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-worktree-hardening-with-stale-metadata-recovery/20260215184823-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-worktree-hardening-with-stale-metadata-recovery/20260215184753-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-15T18:28:34.261769447Z",
       "completed_at": null
     }
   ],
