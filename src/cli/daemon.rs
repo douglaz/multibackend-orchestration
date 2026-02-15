@@ -392,6 +392,13 @@ fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
         )));
     }
 
+    // Switch origin from HTTPS to SSH so git push works without a credential helper
+    let ssh_url = format!("git@github.com:{owner}/{repo}.git");
+    let _ = Command::new("git")
+        .args(["remote", "set-url", "origin", &ssh_url])
+        .current_dir(repo_dir)
+        .output();
+
     // Bootstrap after successful clone
     bootstrap::ensure_repo_ready_sync(repo_dir)?;
     Ok(())
