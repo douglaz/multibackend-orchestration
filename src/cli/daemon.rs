@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 
 use crate::config::resolve_daemon_config;
 use crate::daemon::runtime::{spawn_blocking_op, DaemonRuntimeConfig};
-use crate::daemon::{abort_task, TaskStore};
+use crate::daemon::{abort_task, github, TaskStore};
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
@@ -83,6 +83,22 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     };
 
     let (owner, repo_name) = parse_repo_slug(&repo)?;
+
+    {
+        let label_owner = owner.clone();
+        let label_repo = repo_name.clone();
+        if let Err(err) = spawn_blocking_op(move || {
+            github::ensure_labels_best_effort(&label_owner, &label_repo);
+            Ok(())
+        })
+        .await
+        {
+            eprintln!(
+                "warning: startup label preflight join failure for {}/{}: {}",
+                owner, repo_name, err
+            );
+        }
+    }
 
     println!(
         "daemon start validated for repo {} (poll={}s, max_concurrent={}, labels={})",
@@ -225,14 +241,12 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
 fn preflight_check_gh() -> Result<()> {
     match Command::new("gh").arg("--version").output() {
         Ok(_) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(RalphError::Validation(
-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
+            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
                  post comments, and create PRs. Install it from https://cli.github.com/ \
                  or run inside `nix develop`."
-                    .to_owned(),
-            ))
-        }
+                .to_owned(),
+        )),
         Err(err) => Err(RalphError::Validation(format!(
             "gh (GitHub CLI) check failed: {err}"
         ))),

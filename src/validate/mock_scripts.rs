@@ -548,6 +548,17 @@ case "$1" in
         ;;
     esac
     ;;
+  label)
+    case "$2" in
+      create)
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   repo)
     case "$2" in
       view)
@@ -718,6 +729,15 @@ case "$1" in
         ;;
     esac
     ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
 esac
 exit 1
@@ -856,6 +876,15 @@ case "$1" in
         ;;
       *)
         echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
         exit 1
         ;;
     esac

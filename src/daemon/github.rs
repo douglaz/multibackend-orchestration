@@ -5,6 +5,26 @@ use serde::Deserialize;
 use crate::error::RalphError;
 use crate::Result;
 
+pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
+    (
+        "ralph:ready",
+        "#0e8a16",
+        "Issue is ready for Ralph daemon pickup",
+    ),
+    (
+        "ralph:in-progress",
+        "#fbca04",
+        "Ralph daemon is working on this issue",
+    ),
+    (
+        "ralph:completed",
+        "#1d76db",
+        "Ralph daemon completed this issue",
+    ),
+    ("ralph:failed", "#d93f0b", "Ralph daemon task failed"),
+    ("ralph:aborted", "#e4e669", "Ralph daemon task was aborted"),
+];
+
 /// Represents a single issue returned from `gh issue list`.
 #[derive(Debug, Clone)]
 pub struct GhIssue {
@@ -239,9 +259,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
         ])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to run gh issue edit --title: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
         })?;
 
     if !output.status.success() {
@@ -477,11 +495,7 @@ pub fn create_pr_with_body_file(
 }
 
 /// Edit an existing PR by URL using `--body-file` for large body content.
-pub fn edit_pr(
-    pr_url: &str,
-    title: &str,
-    body_file: &std::path::Path,
-) -> Result<()> {
+pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
     let body_file_str = body_file.to_string_lossy();
     let output = Command::new("gh")
         .args([
@@ -741,6 +755,59 @@ pub fn update_terminal_labels_best_effort(
     }
 }
 
+/// Ensure required lifecycle labels exist in the repository.
+///
+/// This is best-effort and intentionally non-failing: startup must continue
+/// even when label creation fails.
+pub fn ensure_labels_best_effort(owner: &str, repo: &str) {
+    let full_repo = format!("{owner}/{repo}");
+
+    for (name, color, description) in REQUIRED_LABELS {
+        let output = Command::new("gh")
+            .args([
+                "label",
+                "create",
+                name,
+                "--repo",
+                &full_repo,
+                "--color",
+                color,
+                "--description",
+                description,
+            ])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let combined = format!("{stdout}\n{stderr}");
+                if combined.to_ascii_lowercase().contains("already exists") {
+                    continue;
+                }
+
+                let detail = stderr.trim();
+                let detail = if detail.is_empty() {
+                    stdout.trim()
+                } else {
+                    detail
+                };
+                eprintln!(
+                    "warning: failed to ensure label '{}' for {}: {}",
+                    name, full_repo, detail
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to run gh label create for '{}' in {}: {}",
+                    name, full_repo, err
+                );
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawGhIssue {
     number: u32,
@@ -792,11 +859,15 @@ fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::process::Command;
 
     use tempfile::tempdir;
 
-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
+    use super::{
+        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
+        PrMergeStatus, REQUIRED_LABELS,
+    };
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -937,6 +1008,30 @@ mod tests {
         }"#;
         let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
         assert_eq!(info.merge_status, PrMergeStatus::Unknown);
+    }
+
+    #[test]
+    fn required_labels_are_unique_and_include_lifecycle_labels() {
+        let names: Vec<&str> = REQUIRED_LABELS.iter().map(|(name, _, _)| *name).collect();
+        let unique: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "REQUIRED_LABELS must not contain duplicate names"
+        );
+
+        for required in [
+            "ralph:ready",
+            "ralph:in-progress",
+            "ralph:completed",
+            "ralph:failed",
+            "ralph:aborted",
+        ] {
+            assert!(
+                unique.contains(required),
+                "REQUIRED_LABELS is missing required lifecycle label: {required}"
+            );
+        }
     }
 
     fn git(repo_root: &std::path::Path, args: &[&str]) {

@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Requirements Alignment",
+      "feedback": "The spec standardizes on `ralph:completed`, but the feature request and acceptance criteria mention `ralph:done`. This needs an explicit decision and compatibility plan (alias support, migration, or criteria update) so behavior and tests match the intended contract."
+    },
+    {
+      "area": "Idempotency / Behavior",
+      "feedback": "Using `gh label create --force` is idempotent but not non-destructive: it updates existing labels each startup and can overwrite repo-customized colors/descriptions. The stated requirement says to skip existing labels, so this approach should be revised or explicitly justified as intentional."
+    },
+    {
+      "area": "Completeness / Drift Risk",
+      "feedback": "Making literal replacement optional leaves a drift hazard: label usage is currently spread across `src/daemon/github.rs`, `src/daemon/runtime.rs`, and `src/daemon/mod.rs`. Either centralize label constants now or add a guard test that all workflow-used `ralph:*` labels are included in the ensure list."
+    },
+    {
+      "area": "Testing Coverage",
+      "feedback": "Updating only shared mock scripts is likely incomplete. `src/validate/tests_daemon.rs` contains many custom inline `gh` scripts with strict unknown-command failure paths; they must also handle `gh label create` (or be wrapped) to prevent regressions/noisy warnings."
+    },
+    {
+      "area": "Edge Cases / Scope Clarity",
+      "feedback": "Daemon polling uses configurable labels (`workspace.daemon_labels`). Ensuring only the fixed Ralph lifecycle labels may not prevent startup/runtime issues when custom poll labels are missing. Clarify whether custom configured labels are out of scope or include handling for them."
+    }
+  ]
+}
