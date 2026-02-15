@@ -63,6 +63,107 @@ where
         .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
 }
 
+/// Re-trigger a failed task by claiming its GitHub issue first, then applying a
+/// CAS-style `failed -> pending` transition.
+///
+/// Claim ordering is strict:
+/// 1. Claim issue (`ralph:in-progress`) on GitHub.
+/// 2. Under exclusive store lock, transition only if current state is `failed`.
+/// 3. On CAS conflict, best-effort release claim and return conflict.
+pub fn retrigger_failed_task(store: &TaskStore, task_id: &str) -> Result<DaemonTask> {
+    let snapshot = store
+        .load()?
+        .into_iter()
+        .find(|task| task.task_id == task_id)
+        .ok_or_else(|| RalphError::Validation(format!("task not found: {task_id}")))?;
+
+    if snapshot.state != TaskState::Failed {
+        return Err(RalphError::Validation(format!(
+            "task {task_id} is not failed (current state: {})",
+            snapshot.state
+        )));
+    }
+
+    // Claim first: never mutate state out of failed unless issue claim succeeds.
+    if let Err(err) = github::claim_issue(&snapshot.owner, &snapshot.repo, snapshot.issue_number) {
+        eprintln!(
+            "retrigger: event=claim_failure task_id={} repo={}/{} issue_number={} error={}",
+            snapshot.task_id, snapshot.owner, snapshot.repo, snapshot.issue_number, err
+        );
+        return Err(RalphError::Orchestration(format!(
+            "failed to claim issue for retrigger {}: {err}",
+            snapshot.task_id
+        )));
+    }
+
+    enum CasOutcome {
+        Updated(DaemonTask),
+        Conflict(TaskState),
+        Missing,
+    }
+
+    let cas_outcome = store.with_exclusive_tasks(|tasks| {
+        let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) else {
+            return Ok(CasOutcome::Missing);
+        };
+
+        if task.state != TaskState::Failed {
+            return Ok(CasOutcome::Conflict(task.state.clone()));
+        }
+
+        task.state = TaskState::Pending;
+        task.child_pid = None;
+        task.child_pgid = None;
+        task.updated_at = now_iso8601();
+        Ok(CasOutcome::Updated(task.clone()))
+    })?;
+
+    match cas_outcome {
+        CasOutcome::Updated(task) => {
+            eprintln!(
+                "retrigger: event=success task_id={} repo={}/{} issue_number={} transition=failed_to_pending",
+                task.task_id, task.owner, task.repo, task.issue_number
+            );
+            Ok(task)
+        }
+        CasOutcome::Conflict(actual_state) => {
+            eprintln!(
+                "retrigger: event=cas_conflict task_id={} expected_state=failed actual_state={}",
+                snapshot.task_id, actual_state
+            );
+            best_effort_release_claim(&snapshot);
+            Err(RalphError::GitConflict {
+                details: format!(
+                    "task {} changed state before retrigger CAS (expected failed, got {})",
+                    snapshot.task_id, actual_state
+                ),
+            })
+        }
+        CasOutcome::Missing => {
+            eprintln!(
+                "retrigger: event=cas_conflict task_id={} expected_state=failed actual_state=missing",
+                snapshot.task_id
+            );
+            best_effort_release_claim(&snapshot);
+            Err(RalphError::GitConflict {
+                details: format!(
+                    "task {} disappeared before retrigger CAS transition",
+                    snapshot.task_id
+                ),
+            })
+        }
+    }
+}
+
+fn best_effort_release_claim(task: &DaemonTask) {
+    if let Err(err) = github::release_claim(&task.owner, &task.repo, task.issue_number) {
+        eprintln!(
+            "retrigger: event=claim_release_failure task_id={} repo={}/{} issue_number={} error={}",
+            task.task_id, task.owner, task.repo, task.issue_number, err
+        );
+    }
+}
+
 /// Terminal cleanup policy:
 /// - completed: cleanup worktree
 /// - aborted: cleanup worktree
@@ -964,10 +1065,7 @@ async fn complete_task(
             }
         }
         if let Err(err) = handle_pr_flow(store, config, &task).await {
-            eprintln!(
-                "warning: PR flow failed for {}: {err}",
-                task.task_id
-            );
+            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
         }
     }
 
@@ -1040,7 +1138,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
     }
 }
 
-
 // =============================================================================
 // Auto-Rebase Phase
 // =============================================================================
@@ -1077,17 +1174,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
     for task in &all_tasks {
         // Explicit skip reasons for missing PR URL / branch
         if task.pr_url.is_none() {
-            eprintln!(
-                "auto-rebase: skip {} — no PR URL",
-                task.task_id
-            );
+            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
             continue;
         }
         if task.branch.is_none() {
-            eprintln!(
-                "auto-rebase: skip {} — no task branch",
-                task.task_id
-            );
+            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
             continue;
         }
         if rebase_count >= config.max_rebases_per_cycle {
@@ -1132,10 +1223,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         let merge_info = {
             let owner = task.owner.clone();
             let repo = task.repo.clone();
-            match spawn_blocking_op(move || {
-                github::query_pr_merge_info(&owner, &repo, pr_number)
-            })
-            .await
+            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
+                .await
             {
                 Ok(info) => info,
                 Err(err) => {
@@ -1266,19 +1355,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
                     continue;
                 }
 
-                eprintln!(
-                    "auto-rebase: failure for {}: {err_msg}",
-                    task.task_id
-                );
+                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
 
                 // Post failure comment on PR (deduplicated by head_sha)
                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
 
                 if should_post {
-                    let marker = format!(
-                        "<!-- ralph:rebase:{}:failed:{} -->",
-                        task.task_id, head_sha
-                    );
+                    let marker =
+                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
                     let body = format!(
                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
                         task.task_id, head_sha
@@ -1507,7 +1591,11 @@ pub(crate) fn build_pr_body(
 /// 5. Check for existing PR via `find_existing_pr`.
 /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
 /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
+async fn handle_pr_flow(
+    store: &TaskStore,
+    _config: &DaemonRuntimeConfig,
+    task: &DaemonTask,
+) -> Result<()> {
     let workspace_root = store
         .path()
         .parent()
@@ -1528,10 +1616,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return Ok(());
             }
         }
@@ -1657,9 +1742,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
     let title = task
         .refined_title
         .clone()
-        .or_else(|| {
-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
-        })
+        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
         .unwrap_or(title);
 
     match existing_pr_url {
@@ -1797,11 +1880,9 @@ mod tests {
         assert!(body.contains("Closes #42"));
         assert!(body.contains("Diff stat unavailable."));
         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
-        assert!(
-            body.contains(
-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
-            )
-        );
+        assert!(body.contains(
+            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+        ));
     }
 
     #[test]

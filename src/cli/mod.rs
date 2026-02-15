@@ -605,4 +605,17 @@ mod tests {
 
         assert_eq!(abort_args.task_id_or_number, "acme-widgets-42");
     }
+
+    #[test]
+    fn parses_daemon_retrigger_with_task_id() {
+        let cli = Cli::parse_from(["ralph", "daemon", "retrigger", "acme-widgets-42"]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Retrigger(retrigger_args) = args.command else {
+            panic!("expected daemon retrigger command");
+        };
+
+        assert_eq!(retrigger_args.task_id, "acme-widgets-42");
+    }
 }

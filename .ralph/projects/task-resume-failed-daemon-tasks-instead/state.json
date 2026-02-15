@@ -1,0 +1,48 @@
+{
+  "project_id": "task-resume-failed-daemon-tasks-instead",
+  "project_name": "# Task: Resume failed daemon tasks instead of re-dispatching",
+  "created_at": "2026-02-15T17:33:07.193967536Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "0fec38ab8b386d4891192a02d64f4b258cbea16167fe2b6e2784ab556b270507",
+  "prompt_hash_at_loop_start": "0fec38ab8b386d4891192a02d64f4b258cbea16167fe2b6e2784ab556b270507",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "claim-first-retry-state-transition-with-cas",
+      "feature_name": "Claim-first retry state transition with CAS conflict safety",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-claim-first-retry-state-transition-with-cas/20260215173830-spec.md",
+        "impl_notes": "loops/001-claim-first-retry-state-transition-with-cas/20260215174345-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-claim-first-retry-state-transition-with-cas/20260215174921-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-claim-first-retry-state-transition-with-cas/20260215174851-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-15T17:38:30.232201282Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

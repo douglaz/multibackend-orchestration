@@ -64,6 +64,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::abort_stale_pid_and_terminal_state_handling",
             func: abort_stale_pid_and_terminal_state_handling,
         },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_claim_failure_preserves_failed_state",
+            func: runtime_retrigger_claim_failure_preserves_failed_state,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_claim_then_cas_conflict_does_not_set_pending",
+            func: runtime_retrigger_claim_then_cas_conflict_does_not_set_pending,
+        },
         // --- Loop 2 Runtime Tests ---
         ConformanceTest {
             name: "daemon::runtime_reconciliation_on_startup",
@@ -336,6 +344,7 @@ fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
         assert_stdout_contains(&help, "start");
         assert_stdout_contains(&help, "status");
         assert_stdout_contains(&help, "abort");
+        assert_stdout_contains(&help, "retrigger");
 
         // Use --single-iteration and mock gh so runtime exits cleanly
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
@@ -486,7 +495,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
         let output = h
             .ralph_env(
-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
@@ -945,6 +960,194 @@ fn abort_stale_pid_and_terminal_state_handling(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("already terminal"),
             "expected terminal-state error, got:\n{combined}"
+        );
+    })
+}
+
+fn runtime_retrigger_claim_failure_preserves_failed_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-410";
+        write_tasks(
+            h,
+            vec![task_json(
+                task_id, "failed", 410, "acme", "widgets", None, None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let claim_marker = h.temp_dir.path().join("retrigger_claim_failure_claim.log");
+        let release_marker = h
+            .temp_dir
+            .path()
+            .join("retrigger_claim_failure_release.log");
+        let claim_marker_str = claim_marker.to_string_lossy().into_owned();
+        let release_marker_str = release_marker.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      edit)
+        if printf '%s\n' "$@" | grep -q -- "--add-label"; then
+          printf 'claim\n' >> "{claim_marker_str}"
+          echo "mock claim failure" >&2
+          exit 1
+        fi
+        if printf '%s\n' "$@" | grep -q -- "--remove-label"; then
+          printf 'release\n' >> "{release_marker_str}"
+          exit 0
+        fi
+        exit 0
+        ;;
+      list) printf '[]' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "mock gh: unhandled command: $*" >&2
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let output = h
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&output, 1);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("failed to claim issue for retrigger"),
+            "expected retrigger claim failure error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("event=claim_failure"),
+            "expected structured claim_failure log, got:\n{combined}"
+        );
+        assert!(claim_marker.exists(), "claim attempt should be recorded");
+        assert!(
+            !release_marker.exists(),
+            "claim release should not be attempted when claim failed"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("failed"));
+    })
+}
+
+fn runtime_retrigger_claim_then_cas_conflict_does_not_set_pending(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-411";
+        write_tasks(
+            h,
+            vec![task_json(
+                task_id, "failed", 411, "acme", "widgets", None, None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let claim_marker = h.temp_dir.path().join("retrigger_cas_conflict_claim.log");
+        let release_marker = h.temp_dir.path().join("retrigger_cas_conflict_release.log");
+        let tasks_path = tasks_path(h);
+        let claim_marker_str = claim_marker.to_string_lossy().into_owned();
+        let release_marker_str = release_marker.to_string_lossy().into_owned();
+        let tasks_path_str = tasks_path.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      edit)
+        if printf '%s\n' "$@" | grep -q -- "--add-label"; then
+          printf 'claim\n' >> "{claim_marker_str}"
+          tmp="{tasks_path_str}.tmp"
+          sed '0,/"state": "failed"/s//"state": "aborted"/' "{tasks_path_str}" > "$tmp" || exit 91
+          mv "$tmp" "{tasks_path_str}" || exit 92
+          exit 0
+        fi
+        if printf '%s\n' "$@" | grep -q -- "--remove-label"; then
+          printf 'release\n' >> "{release_marker_str}"
+          exit 0
+        fi
+        exit 0
+        ;;
+      list) printf '[]' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "mock gh: unhandled command: $*" >&2
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let output = h
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&output, 1);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("changed state before retrigger CAS"),
+            "expected CAS conflict error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("event=cas_conflict"),
+            "expected structured cas_conflict log, got:\n{combined}"
+        );
+        assert!(claim_marker.exists(), "claim attempt should be recorded");
+        assert!(
+            release_marker.exists(),
+            "claim release should be attempted on CAS conflict"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("aborted"));
+        assert_ne!(
+            task["state"],
+            json!("pending"),
+            "CAS conflict must never leave task pending"
         );
     })
 }
@@ -2254,7 +2457,8 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
                     None,
                 );
                 t["project_id"] = json!(project_id);
-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                t["raw_idea"] =
+                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
                 t
             }],
         )
@@ -3362,7 +3566,10 @@ exit 0
 
         // The spawned child should have received the refined prompt
         let idea = fs::read_to_string(&idea_log).expect("read idea log");
-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
+        assert_eq!(
+            idea,
+            "Refined: implement the feature with proper error handling and tests."
+        );
     })
 }
 
@@ -4707,8 +4914,7 @@ exit 1
             .find(|t| t["task_id"] == "acme-widgets-301")
             .unwrap();
         assert!(
-            task.get("refined_title").is_none()
-                || task["refined_title"].is_null(),
+            task.get("refined_title").is_none() || task["refined_title"].is_null(),
             "refined_title should not be set when refinement is disabled"
         );
     })
@@ -5035,10 +5241,7 @@ exit 1
         assert_exit_code(&output, 0);
 
         // Check that the comment body includes the bold title
-        assert!(
-            comment_log.exists(),
-            "comment should have been posted"
-        );
+        assert!(comment_log.exists(), "comment should have been posted");
         let log = fs::read_to_string(&comment_log).expect("read comment log");
         assert!(
             log.contains("**Bold comment title test**"),
@@ -5068,7 +5271,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         assert!(wt.exists(), "worktree directory should exist");
 
         // Verify branch exists
-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        let branch_check = git_stdout(
+            &h.repo_root,
+            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
+        );
         assert!(
             branch_check.contains("ralph/daemon/acme-widgets-99"),
             "branch should exist after create_worktree"
@@ -5079,7 +5285,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         assert!(!wt.exists(), "worktree directory should be removed");
 
         // Branch should still exist
-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        let branch_check = git_stdout(
+            &h.repo_root,
+            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
+        );
         assert!(
             branch_check.contains("ralph/daemon/acme-widgets-99"),
             "branch should survive worktree removal"
@@ -5106,12 +5315,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
         // Create a tracked file, commit it, then modify it (dirty tracked)
         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
         git(&wt, &["add", "tracked.rs"]);
-        git(&wt, &[
-            "-c", "user.name=Test",
-            "-c", "user.email=test@test.com",
-            "-c", "commit.gpgsign=false",
-            "commit", "--no-verify", "-m", "add tracked",
-        ]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                "add tracked",
+            ],
+        );
         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
 
         // Create an untracked file (like SPEC.md from codex side-effect)
@@ -5165,12 +5383,21 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
         // Add a tracked file, commit, then modify (simulates prior run's changes)
         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
         git(&wt, &["add", "src.rs"]);
-        git(&wt, &[
-            "-c", "user.name=Test",
-            "-c", "user.email=test@test.com",
-            "-c", "commit.gpgsign=false",
-            "commit", "--no-verify", "-m", "prior run",
-        ]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                "prior run",
+            ],
+        );
         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
 
         // Add an untracked file (simulates codex side-effect)
@@ -5470,10 +5697,7 @@ exit 1
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // pr edit was attempted
-        assert!(
-            pr_edit_log.exists(),
-            "pr edit should have been attempted"
-        );
+        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
 
         // pr create should NOT have been called (no fallthrough on edit failure)
         assert!(
@@ -5613,10 +5837,7 @@ exit 1
         assert_exit_code(&output, 0);
 
         // pr create should have been called
-        assert!(
-            pr_create_log.exists(),
-            "pr create should have been called"
-        );
+        assert!(pr_create_log.exists(), "pr create should have been called");
 
         // Body file should have been captured and contain structured content
         assert!(
@@ -5811,8 +6032,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
 
         // Disable auto-rebase
-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
-            .expect("set auto_rebase_enabled failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_auto_rebase_enabled",
+            "false",
+        ])
+        .expect("set auto_rebase_enabled failed");
 
         // Seed a completed task with a PR URL
         write_tasks(
@@ -6163,7 +6389,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
         let mock_git = h
-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .write_mock_script(
+                "git",
+                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
+            )
             .expect("write mock git");
         let mock_git_dir = mock_git
             .parent()
@@ -6251,7 +6480,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
         let mock_git = h
-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .write_mock_script(
+                "git",
+                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
+            )
             .expect("write mock git");
         let mock_git_dir = mock_git
             .parent()
@@ -6468,7 +6700,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
         );
 
         // The second task should NOT have been attempted (break after first failure)
-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
+        let second_attempt_count = stderr
+            .matches("auto-rebase: rebasing acme-widgets-110")
+            .count();
         assert_eq!(
             second_attempt_count, 0,
             "second task should not be attempted after gh pr view failure"
@@ -6482,8 +6716,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
 
         // Set max_rebases_per_cycle to 1 via config
-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
-            .expect("set max_rebases_per_cycle failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_max_rebases_per_cycle",
+            "1",
+        ])
+        .expect("set max_rebases_per_cycle failed");
 
         // Create 3 tasks with PRs
         write_tasks(
@@ -6574,11 +6813,17 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
 
         // Use a very large interval to ensure skip regardless of clock skew
-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
-            .expect("set rebase_interval_seconds failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_rebase_interval_seconds",
+            "999999",
+        ])
+        .expect("set rebase_interval_seconds failed");
 
         // Dynamically compute a "just now" timestamp so test never becomes stale
-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let recent_timestamp =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         write_tasks(
             h,
@@ -6719,7 +6964,10 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
         let tasks = load_tasks(h).expect("load_tasks failed");
         assert_eq!(tasks.len(), 1);
         assert!(
-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
+            tasks[0]
+                .get("last_rebase_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
             "last_rebase_at should be null/missing"
         );
     })
