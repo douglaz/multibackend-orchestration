@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\nImplement automatic creation of required Ralph GitHub labels (`ralph:ready`, `ralph:in-progress`, `ralph:done`, etc.) when the daemon starts managing a new repository. This prevents runtime failures when attempting to claim issues in repos without pre-configured labels.\n\n## Problem\nCurrently, the daemon fails to claim issues when required labels don't exist in the repository:\n```\nwarning: failed to claim issue #1: orchestration error: gh issue edit (claim) failed for owner/repo#1: 'ralph:in-progress' not found\n```\n\n## Requirements\n- Automatically create all required Ralph labels during the `clone_or_bootstrap` phase or at the start of each repo's runtime\n- Use `gh label create` command (idempotent operation — skip if label already exists)\n- Required labels to create:\n  - `ralph:ready`\n  - `ralph:in-progress`\n  - `ralph:done`\n  - (any other labels used by the daemon workflow)\n- Handle errors gracefully (log warnings but don't fail bootstrap if label creation fails)\n\n## Implementation Location\n- Primary file: `src/daemon/bootstrap.rs`\n- May involve: `src/backend/gh.rs` or label-related utilities\n\n## Acceptance Criteria\n- [ ] Labels are created automatically during repo bootstrap/initialization\n- [ ] Operation is idempotent (doesn't error if labels already exist)\n- [ ] All required Ralph labels are included in the creation list\n- [ ] Daemon can successfully claim issues on freshly-cloned repos without manual label setup\n- [ ] Appropriate error handling and logging for label creation failures",
+  "idea_hash": "1d979e684ee3",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-15T16:00:10Z",
+  "completed_at": "2026-02-15T16:11:21Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 249.822341655,
+  "review_times_secs": [
+    194.720723471
+  ],
+  "revision_times_secs": [
+    227.115693305
+  ]
+}

@@ -45,6 +45,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: start_validates_inputs_and_workspace,
         },
         ConformanceTest {
+            name: "daemon::label_ensure_startup",
+            func: label_ensure_startup,
+        },
+        ConformanceTest {
+            name: "daemon::label_ensure_already_exists",
+            func: label_ensure_already_exists,
+        },
+        ConformanceTest {
+            name: "daemon::label_ensure_hard_failure",
+            func: label_ensure_hard_failure,
+        },
+        ConformanceTest {
             name: "daemon::status_reads_store_with_locking",
             func: status_reads_store_with_locking,
         },
@@ -837,6 +849,252 @@ fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn label_ensure_startup(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let lines: Vec<&str> = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            github::REQUIRED_LABELS.len(),
+            "expected exactly {} label create calls, got:\n{}",
+            github::REQUIRED_LABELS.len(),
+            log_raw
+        );
+
+        for (label_name, _, _) in github::REQUIRED_LABELS {
+            let needle = format!("create {label_name}");
+            let count = lines.iter().filter(|line| line.contains(&needle)).count();
+            assert_eq!(
+                count, 1,
+                "expected one create call for '{label_name}', got {count}:\n{}",
+                log_raw
+            );
+        }
+    })
+}
+
+fn label_ensure_already_exists(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        if [ "$3" = "ralph:in-progress" ]; then
+          echo "label already exists" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("failed to ensure label 'ralph:in-progress'"),
+            "already-exists label should not emit failure warning, stderr:\n{stderr}"
+        );
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let call_count = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert_eq!(
+            call_count,
+            github::REQUIRED_LABELS.len(),
+            "expected startup to attempt all lifecycle labels"
+        );
+    })
+}
+
+fn label_ensure_hard_failure(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        if [ "$3" = "ralph:failed" ]; then
+          echo "permission denied" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to ensure label 'ralph:failed'"),
+            "expected warning for hard label creation failure, stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("permission denied"),
+            "expected command stderr to be surfaced in warning, stderr:\n{stderr}"
+        );
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let call_count = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert_eq!(
+            call_count,
+            github::REQUIRED_LABELS.len(),
+            "expected startup to attempt all lifecycle labels"
+        );
+    })
+}
+
 fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -1378,6 +1636,10 @@ case "$1" in
     printf 'acme/widgets\n'
     exit 0
     ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
@@ -1645,6 +1907,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -1784,6 +2050,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -1916,6 +2186,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -2123,6 +2397,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
@@ -2250,6 +2528,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
@@ -2621,6 +2903,10 @@ JSON
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -3097,6 +3383,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -3356,6 +3646,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -3467,6 +3761,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -3902,6 +4200,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
@@ -4028,6 +4330,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4192,6 +4498,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4328,6 +4638,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4451,6 +4765,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4583,6 +4901,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4842,6 +5164,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -4952,6 +5278,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -5070,6 +5400,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -5189,6 +5523,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -5302,6 +5640,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -5814,6 +6156,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -5951,6 +6297,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -6094,6 +6444,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
@@ -6229,6 +6583,10 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#

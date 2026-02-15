@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use crate::config::resolve_daemon_config;
 use crate::daemon::bootstrap;
 use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
-use crate::daemon::{abort_task, resolve_task_index, TaskStore};
+use crate::daemon::{abort_task, github, resolve_task_index, TaskStore};
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
@@ -134,6 +134,9 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
 
         // Clone or bootstrap the repo
         clone_or_bootstrap(&owner, &repo_name, &repo_dir)?;
+
+        // Ensure lifecycle labels exist (best-effort, non-blocking)
+        github::ensure_labels_best_effort(&owner, &repo_name);
 
         // Load workspace from repo's .ralph/
         let workspace = Workspace::load(repo_dir.join(".ralph"))?;
