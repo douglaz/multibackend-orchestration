@@ -1503,6 +1503,9 @@ case "$1" in
         printf '[]'
         exit 0
         ;;
+      edit)
+        exit 0
+        ;;
       create)
         echo "called" > "{pr_create_log_str}"
         echo "should not be called when PR exists" >&2
