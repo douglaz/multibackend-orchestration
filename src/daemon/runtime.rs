@@ -474,6 +474,29 @@ async fn poll_and_claim(
     Ok(())
 }
 
+/// Scan a task worktree for valid projects under `.ralph/projects/*/state.json`.
+///
+/// Returns a list of project IDs where `state.json` exists. Directories without
+/// `state.json` are silently ignored. Filesystem errors on individual entries are
+/// logged and skipped.
+fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
+    let projects_dir = worktree_path.join(".ralph").join("projects");
+    let entries = match std::fs::read_dir(&projects_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let state_path = entry.path().join("state.json");
+        if state_path.is_file() {
+            found.push(name);
+        }
+    }
+    found
+}
+
 /// Dispatch a single task: create worktree, spawn child, update state.
 ///
 /// Uses a CAS-style transition: after spawning the child, the task is only
@@ -511,6 +534,51 @@ async fn dispatch_task(
         let wt = wt_path.clone();
         spawn_blocking_op(move || worktree::clean_worktree(&wt)).await?;
     }
+
+    // Dispatch-time project discovery for legacy failed tasks that were stored
+    // without a project_id. Scan the worktree for `.ralph/projects/*/state.json`
+    // and persist the discovered project_id before spawn.
+    let effective_project_id = if task.project_id.is_some() {
+        task.project_id.clone()
+    } else {
+        let wt = wt_path.clone();
+        let discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
+        match discovered.len() {
+            0 => None,
+            1 => {
+                let project_id = discovered.into_iter().next().unwrap();
+                eprintln!(
+                    "dispatch: event=project_backfill task_id={} discovered_project_id={project_id}",
+                    task.task_id
+                );
+                let store_clone = store.clone();
+                let tid = task.task_id.clone();
+                let pid = project_id.clone();
+                if let Err(err) = spawn_blocking_op(move || {
+                    store_clone.update_task(&tid, |t| {
+                        t.project_id = Some(pid.clone());
+                        Ok(())
+                    })
+                })
+                .await
+                {
+                    eprintln!(
+                        "dispatch: event=project_backfill_persist_failure task_id={} project_id={project_id} error={err}",
+                        task.task_id
+                    );
+                    return Err(err);
+                }
+                Some(project_id)
+            }
+            n => {
+                eprintln!(
+                    "dispatch: event=project_discovery_ambiguous task_id={} count={n} projects={:?}",
+                    task.task_id, discovered
+                );
+                None
+            }
+        }
+    };
 
     // Resolve raw idea. Legacy tasks are hydrated from GitHub if `raw_idea`
     // is missing.
@@ -615,13 +683,13 @@ async fn dispatch_task(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Spawn child process. Resume dispatch is driven only by persisted
-    // task.project_id; discovered workspace context is intentionally ignored.
+    // Spawn child process. Routing uses persisted context only:
+    // effective_project_id includes any dispatch-time backfill discovery.
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        match task.project_id.as_deref() {
+        match effective_project_id.as_deref() {
             Some(project_id) => {
                 eprintln!(
                     "dispatch: task {} has project_id={project_id}; using ralph run --project",

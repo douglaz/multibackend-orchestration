@@ -326,6 +326,15 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::rebase_backward_compat_state",
             func: rebase_backward_compat_state,
         },
+        // --- Loop 2 Dispatch-time Project Backfill Tests ---
+        ConformanceTest {
+            name: "daemon::discover_project_id_ignores_dirs_without_state_json",
+            func: discover_project_id_ignores_dirs_without_state_json,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_dispatch_backfills_legacy_failed_task_project_id",
+            func: runtime_dispatch_backfills_legacy_failed_task_project_id,
+        },
     ]
 }
 
@@ -7009,6 +7018,248 @@ fn git(repo_root: &Path, args: &[&str]) {
         repo_root.display(),
         String::from_utf8_lossy(&output.stderr).trim()
     );
+}
+
+// =============================================================================
+// Loop 2 Dispatch-time Project Backfill Tests
+// =============================================================================
+
+/// Asserts stray project directories without `state.json` are ignored by
+/// dispatch-time project discovery.
+///
+/// Sets up a worktree with:
+/// - `.ralph/projects/valid-proj/state.json` (valid)
+/// - `.ralph/projects/stray-proj/` (no state.json — stray)
+///
+/// The legacy task (project_id = null) should discover only `valid-proj` and
+/// dispatch via `ralph run --project valid-proj`.
+fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-500";
+
+        // Seed a legacy task with no project_id.
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "pending", 500, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Legacy task\n\nShould discover valid project.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Pre-create worktree directory so daemon reuses it.
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join(task_id);
+        fs::create_dir_all(&wt_path).expect("create worktree dir");
+
+        // Valid project: has state.json
+        let valid_proj_dir = wt_path.join(".ralph").join("projects").join("valid-proj");
+        fs::create_dir_all(&valid_proj_dir).expect("create valid project dir");
+        fs::write(valid_proj_dir.join("state.json"), r#"{"status":"active"}"#)
+            .expect("write valid state.json");
+
+        // Stray project: directory only, no state.json
+        let stray_proj_dir = wt_path.join(".ralph").join("projects").join("stray-proj");
+        fs::create_dir_all(&stray_proj_dir).expect("create stray project dir");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let args_log = h.temp_dir.path().join("discovery_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    printf '%s\n' "$3" >> "{args_log_str}"
+    exit 0
+    ;;
+  auto)
+    printf 'auto\n' > "{args_log_str}"
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify dispatch used `ralph run --project valid-proj`
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("run\n--project\nvalid-proj\n"),
+            "expected run --project valid-proj, got:\n{args}"
+        );
+
+        // Verify project_id was persisted to the task store
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["project_id"],
+            json!("valid-proj"),
+            "project_id should be backfilled to valid-proj"
+        );
+    })
+}
+
+/// Asserts dispatch-time scan discovers a single valid project for a legacy
+/// failed task, persists `project_id`, and uses `ralph run --project`.
+///
+/// Sets up:
+/// - A failed task with no `project_id` (legacy), retriggered to pending
+/// - A worktree with exactly one valid project under `.ralph/projects/`
+///
+/// Verifies:
+/// - `project_id` is persisted in the task store before spawn
+/// - Child is spawned via `ralph run --project <id>`
+fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-501";
+        let expected_project_id = "backfill-proj-501";
+
+        // Seed a legacy task: originally failed with no project_id, now
+        // retriggered back to pending.
+        write_tasks(
+            h,
+            vec![{
+                let mut t = task_json(task_id, "pending", 501, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Legacy failed task\n\nShould backfill project_id.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Pre-create worktree with a single valid project.
+        let wt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join(task_id);
+        fs::create_dir_all(&wt_path).expect("create worktree dir");
+
+        let proj_dir = wt_path
+            .join(".ralph")
+            .join("projects")
+            .join(expected_project_id);
+        fs::create_dir_all(&proj_dir).expect("create project dir");
+        fs::write(proj_dir.join("state.json"), r#"{"status":"completed"}"#)
+            .expect("write state.json");
+
+        // Also create a loops directory to simulate prior artifacts
+        let loops_dir = proj_dir.join("loops").join("001-initial");
+        fs::create_dir_all(&loops_dir).expect("create loops dir");
+        fs::write(loops_dir.join("artifact.md"), "prior attempt artifact")
+            .expect("write artifact");
+
+        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let args_log = h.temp_dir.path().join("backfill_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    printf '%s\n' "$3" >> "{args_log_str}"
+    exit 1
+    ;;
+  auto)
+    printf 'auto\n' > "{args_log_str}"
+    exit 1
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("event=project_backfill"),
+            "expected project_backfill structured log, stderr:\n{stderr}"
+        );
+
+        // Verify dispatch used `ralph run --project <id>`
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with(&format!("run\n--project\n{expected_project_id}\n")),
+            "expected run --project {expected_project_id}, got:\n{args}"
+        );
+
+        // Verify project_id was persisted to the task store
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["project_id"],
+            json!(expected_project_id),
+            "project_id should be backfilled"
+        );
+
+        // Verify prior artifacts are preserved (task failed so worktree is kept)
+        let artifact_path = wt_path
+            .join(".ralph")
+            .join("projects")
+            .join(expected_project_id)
+            .join("loops")
+            .join("001-initial")
+            .join("artifact.md");
+        assert!(
+            artifact_path.exists(),
+            "prior loop artifacts should be preserved after dispatch"
+        );
+    })
 }
 
 fn git_stdout(repo_root: &Path, args: &[&str]) -> String {

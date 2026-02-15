@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "0fec38ab8b386d4891192a02d64f4b258cbea16167fe2b6e2784ab556b270507",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "claim-first-retry-state-transition-with-cas",
       "feature_name": "Claim-first retry state transition with CAS conflict safety",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -39,8 +39,45 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "0ca4a20fc24a95cc0d7a7d0a01c6215470b0e8cd",
       "started_at": "2026-02-15T17:38:30.232201282Z",
+      "completed_at": "2026-02-15T17:49:21.451357520Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "dispatch-time-project-context-backfill-for-legacy",
+      "feature_name": "Dispatch-time project context backfill for legacy failed retries",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215175117-spec.md",
+        "impl_notes": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215175627-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215182557-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215180959-qa-001-fail.md",
+            "implementer_response": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215181043-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/002-dispatch-time-project-context-backfill-for-legacy/20260215182412-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-15T17:51:17.514028729Z",
       "completed_at": null
     }
   ],
