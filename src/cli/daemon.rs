@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{Args, Subcommand};
@@ -18,14 +20,16 @@ pub struct DaemonArgs {
 #[derive(Debug, Subcommand)]
 pub enum DaemonCommand {
     Start(DaemonStartArgs),
-    Status,
+    Status(DaemonStatusArgs),
     Abort(DaemonAbortArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct DaemonStartArgs {
     #[arg(long)]
-    pub repo: Option<String>,
+    pub data_dir: PathBuf,
+    #[arg(long = "repo")]
+    pub repo: Vec<String>,
     #[arg(long, value_parser = super::parse_positive_u64)]
     pub poll_seconds: Option<u64>,
     #[arg(long, value_parser = super::parse_positive_u32)]
@@ -41,14 +45,24 @@ pub struct DaemonStartArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct DaemonStatusArgs {
+    #[arg(long)]
+    pub data_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct DaemonAbortArgs {
+    #[arg(long)]
+    pub data_dir: PathBuf,
     pub task_id_or_number: String,
 }
 
 pub async fn execute(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Start(start_args) => execute_start(start_args).await,
-        DaemonCommand::Status => spawn_blocking_op(execute_status).await,
+        DaemonCommand::Status(status_args) => {
+            spawn_blocking_op(move || execute_status(status_args)).await
+        }
         DaemonCommand::Abort(abort_args) => {
             spawn_blocking_op(move || execute_abort(abort_args)).await
         }
@@ -56,6 +70,28 @@ pub async fn execute(args: DaemonArgs) -> Result<()> {
 }
 
 async fn execute_start(args: DaemonStartArgs) -> Result<()> {
+    if args.repo.is_empty() {
+        return Err(RalphError::Validation(
+            "at least one --repo owner/repo is required".to_owned(),
+        ));
+    }
+
+    let mut normalized_repos = Vec::with_capacity(args.repo.len());
+    let mut seen = HashSet::new();
+    for repo in &args.repo {
+        validate_repo_slug(repo)?;
+        let normalized = repo.trim().to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            return Err(RalphError::Validation(format!(
+                "duplicate --repo: {}",
+                normalized
+            )));
+        }
+        normalized_repos.push(normalized);
+    }
+
+    let _ = &args.data_dir;
+
     preflight_check_gh()?;
     let workspace = Workspace::discover()?;
     let daemon_cfg = effective_daemon_config(&workspace)?;
@@ -68,19 +104,10 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         args.labels
     };
 
-    let repo = match args.repo {
-        Some(repo) => {
-            validate_repo_slug(&repo)?;
-            repo
-        }
-        None => match daemon_cfg.repo {
-            Some(repo) => {
-                validate_repo_slug(&repo)?;
-                repo
-            }
-            None => resolve_repo_from_gh()?,
-        },
-    };
+    let repo = normalized_repos
+        .first()
+        .expect("repo list is non-empty after validation")
+        .to_owned();
 
     let (owner, repo_name) = parse_repo_slug(&repo)?;
 
@@ -126,7 +153,8 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     crate::daemon::runtime::run(&store, &runtime_config).await
 }
 
-fn execute_status() -> Result<()> {
+fn execute_status(args: DaemonStatusArgs) -> Result<()> {
+    let _ = args.data_dir;
     let workspace = Workspace::discover()?;
     let store = TaskStore::new(&workspace.root);
     let tasks = store.load()?;
@@ -162,6 +190,7 @@ fn execute_status() -> Result<()> {
 }
 
 fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
+    let _ = args.data_dir;
     let workspace = Workspace::discover()?;
     let store = TaskStore::new(&workspace.root);
     let task = abort_task(&store, &args.task_id_or_number)?;
@@ -193,12 +222,23 @@ fn effective_daemon_config(workspace: &Workspace) -> Result<crate::config::Effec
 
 fn validate_repo_slug(repo: &str) -> Result<()> {
     let trimmed = repo.trim();
-    let mut parts = trimmed.split('/');
+    let Some((owner, name)) = trimmed.split_once('/') else {
+        return Err(RalphError::Validation(format!(
+            "invalid repo '{}': expected owner/repo",
+            repo
+        )));
+    };
 
-    let owner = parts.next().unwrap_or_default();
-    let name = parts.next().unwrap_or_default();
-
-    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+    let invalid = owner.is_empty()
+        || name.is_empty()
+        || name.contains('/')
+        || owner == "."
+        || owner == ".."
+        || name == "."
+        || name == ".."
+        || !is_valid_repo_component(owner)
+        || !is_valid_repo_component(name);
+    if invalid {
         return Err(RalphError::Validation(format!(
             "invalid repo '{}': expected owner/repo",
             repo
@@ -209,17 +249,16 @@ fn validate_repo_slug(repo: &str) -> Result<()> {
 }
 
 fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+    validate_repo_slug(repo)?;
     let trimmed = repo.trim();
-    let mut parts = trimmed.split('/');
-    let owner = parts.next().unwrap_or_default().to_owned();
-    let name = parts.next().unwrap_or_default().to_owned();
-    if owner.is_empty() || name.is_empty() {
-        return Err(RalphError::Validation(format!(
-            "invalid repo '{}': expected owner/repo",
-            repo
-        )));
-    }
-    Ok((owner, name))
+    let (owner, name) = trimmed.split_once('/').unwrap_or_default();
+    Ok((owner.to_owned(), name.to_owned()))
+}
+
+fn is_valid_repo_component(component: &str) -> bool {
+    component
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
 }
 
 fn preflight_check_gh() -> Result<()> {
@@ -237,36 +276,6 @@ fn preflight_check_gh() -> Result<()> {
             "gh (GitHub CLI) check failed: {err}"
         ))),
     }
-}
-
-fn resolve_repo_from_gh() -> Result<String> {
-    let output = Command::new("gh")
-        .args([
-            "repo",
-            "view",
-            "--json",
-            "nameWithOwner",
-            "-q",
-            ".nameWithOwner",
-        ])
-        .output()
-        .map_err(|err| {
-            RalphError::Validation(format!(
-                "could not resolve repo from gh; set --repo or workspace.daemon_repo: {}",
-                err
-            ))
-        })?;
-
-    if !output.status.success() {
-        return Err(RalphError::Validation(format!(
-            "could not resolve repo from gh; set --repo or workspace.daemon_repo: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let repo = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    validate_repo_slug(&repo)?;
-    Ok(repo)
 }
 
 fn resolve_git_root(workspace: &Workspace) -> Result<std::path::PathBuf> {

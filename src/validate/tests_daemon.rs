@@ -721,7 +721,13 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
 
         let merged_start = h
             .ralph_env(
-                ["daemon", "start", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/project-override",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
@@ -757,7 +763,7 @@ fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
 
         let with_workspace = h
             .ralph_env(
-                ["daemon", "start", "--single-iteration"],
+                ["daemon", "start", "--single-iteration", "--repo", "octo/demo"],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
