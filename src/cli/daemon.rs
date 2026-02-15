@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 
 use crate::config::resolve_daemon_config;
 use crate::daemon::bootstrap;
-use crate::daemon::runtime::{spawn_blocking_op, DaemonRuntimeConfig};
+use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
 use crate::daemon::{abort_task, resolve_task_index, TaskStore};
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
@@ -23,6 +23,7 @@ pub enum DaemonCommand {
     Start(DaemonStartArgs),
     Status(DaemonStatusArgs),
     Abort(DaemonAbortArgs),
+    Retrigger(DaemonRetriggerArgs),
 }
 
 #[derive(Debug, Args)]
@@ -58,6 +59,11 @@ pub struct DaemonAbortArgs {
     pub task_id_or_number: String,
 }
 
+#[derive(Debug, Args)]
+pub struct DaemonRetriggerArgs {
+    pub task_id: String,
+}
+
 pub async fn execute(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Start(start_args) => execute_start(start_args).await,
@@ -66,6 +72,9 @@ pub async fn execute(args: DaemonArgs) -> Result<()> {
         }
         DaemonCommand::Abort(abort_args) => {
             spawn_blocking_op(move || execute_abort(abort_args)).await
+        }
+        DaemonCommand::Retrigger(retrigger_args) => {
+            spawn_blocking_op(move || execute_retrigger(retrigger_args)).await
         }
     }
 }
@@ -285,6 +294,36 @@ fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     Ok(())
 }
 
+fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
+    let workspace = Workspace::discover()?;
+    let store = TaskStore::new(&workspace.root);
+    let task = retrigger_failed_task(&store, &args.task_id)?;
+    println!("retriggered task {}", task.task_id);
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn effective_daemon_config(workspace: &Workspace) -> Result<crate::config::EffectiveDaemonConfig> {
+    let project_config = match workspace.active_project_id() {
+        Some(project_id) if workspace.project_exists(&project_id) => {
+            load_project_config_if_exists(&workspace.project_dir(&project_id))?
+        }
+        Some(project_id) => {
+            eprintln!(
+                "warning: active project '{}' no longer exists; using workspace daemon config",
+                project_id
+            );
+            None
+        }
+        None => None,
+    };
+
+    Ok(resolve_daemon_config(
+        &workspace.config,
+        project_config.as_ref(),
+    ))
+}
+
 /// Scan `<data-dir>/*/*/.ralph/daemon/tasks.json` for task stores.
 fn scan_task_stores(data_dir: &Path) -> Result<Vec<TaskStore>> {
     let mut stores = Vec::new();
@@ -448,14 +487,12 @@ fn is_valid_repo_component(component: &str) -> bool {
 fn preflight_check_gh() -> Result<()> {
     match Command::new("gh").arg("--version").output() {
         Ok(_) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(RalphError::Validation(
-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
+            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
                  post comments, and create PRs. Install it from https://cli.github.com/ \
                  or run inside `nix develop`."
-                    .to_owned(),
-            ))
-        }
+                .to_owned(),
+        )),
         Err(err) => Err(RalphError::Validation(format!(
             "gh (GitHub CLI) check failed: {err}"
         ))),

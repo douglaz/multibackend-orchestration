@@ -22,8 +22,10 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
 pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
+    let branch_name = format!("ralph/daemon/{task_id}");
 
     if wt_path.exists() {
+        verify_worktree_branch(&wt_path, &branch_name)?;
         return Ok(wt_path);
     }
 
@@ -31,12 +33,16 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         fs::create_dir_all(parent)?;
     }
 
-    let branch_name = format!("ralph/daemon/{task_id}");
+    prune_worktrees(repo_root, task_id);
 
     // Check if the branch already exists (e.g. from a previous failed run
     // where the worktree was cleaned up but the branch was not).
     let branch_exists = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch_name}"),
+        ])
         .current_dir(repo_root)
         .output()
         .map(|o| o.status.success())
@@ -45,12 +51,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     let output = if branch_exists {
         // Reuse existing branch
         Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &wt_path.to_string_lossy(),
-                &branch_name,
-            ])
+            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
             .current_dir(repo_root)
             .output()
     } else {
@@ -79,6 +80,101 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     }
 
     Ok(wt_path)
+}
+
+fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
+    let current = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to verify worktree branch in {}: {err}",
+                wt_path.display()
+            ))
+        })?;
+
+    if !current.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "failed to verify worktree branch in {}: {}",
+            wt_path.display(),
+            String::from_utf8_lossy(&current.stderr).trim()
+        )));
+    }
+
+    let actual_branch = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+    if actual_branch == expected_branch {
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: worktree: event=branch_mismatch path={} actual_branch={} expected_branch={expected_branch}",
+        wt_path.display(),
+        actual_branch
+    );
+    eprintln!(
+        "warning: worktree: event=branch_correction_attempt path={} actual_branch={} expected_branch={expected_branch}",
+        wt_path.display(),
+        actual_branch
+    );
+
+    let checkout = Command::new("git")
+        .args(["checkout", "--force", expected_branch])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to correct worktree branch in {} from {} to {}: {err}",
+                wt_path.display(),
+                actual_branch,
+                expected_branch
+            ))
+        })?;
+
+    if checkout.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_owned();
+    eprintln!(
+        "warning: worktree: event=branch_correction_failure path={} actual_branch={} expected_branch={expected_branch} error={stderr}",
+        wt_path.display(),
+        actual_branch
+    );
+
+    Err(RalphError::Orchestration(format!(
+        "failed to correct worktree branch in {}: actual branch '{}' does not match expected '{}' and git checkout --force failed: {}",
+        wt_path.display(),
+        actual_branch,
+        expected_branch,
+        stderr
+    )))
+}
+
+fn prune_worktrees(repo_root: &Path, task_id: &str) {
+    match Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let removed_entries = stdout.contains("Removing") || stderr.contains("Removing");
+            eprintln!(
+                "debug: worktree: event=prune task_id={task_id} status={} removed_entries={} stdout={} stderr={}",
+                output.status,
+                removed_entries,
+                stdout.replace('\n', "\\n"),
+                stderr.replace('\n', "\\n")
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "debug: worktree: event=prune task_id={task_id} status=spawn_error removed_entries=false error={err}"
+            );
+        }
+    }
 }
 
 /// Clean a worktree of any dirty files outside `.ralph/`, restoring it to a

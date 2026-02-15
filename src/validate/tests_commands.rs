@@ -2,8 +2,7 @@ use super::*;
 
 use crate::validate::assertions::{
     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
-    assert_stdout_eq,
-    git_head_commit, git_tag_commit,
+    assert_stdout_eq, git_head_commit, git_tag_commit,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::standard_mock_script;
@@ -489,7 +488,10 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
         );
         let version_part = &stdout["ralph ".len()..];
         assert!(
-            version_part.chars().next().map_or(false, |c| c.is_ascii_digit()),
+            version_part
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_ascii_digit()),
             "expected semver version after 'ralph ', got: {stdout}"
         );
     })
