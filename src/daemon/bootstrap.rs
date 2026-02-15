@@ -38,8 +38,9 @@ pub fn ensure_repo_ready_sync(repo_root: &Path) -> Result<()> {
         )));
     }
 
+    ensure_fallback_identity_if_missing(repo_root)?;
+
     if is_head_unborn(repo_root)? {
-        ensure_fallback_identity_if_missing(repo_root)?;
         run_git_checked(
             repo_root,
             &[
