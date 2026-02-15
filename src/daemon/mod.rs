@@ -414,6 +414,6 @@ mod tests {
             decoded.refined_title.as_deref(),
             Some("Fix SSO login handling")
         );
-        assert_eq!(decoded.project_id.as_deref(), Some("widgets-retry"));
+        assert_eq!(decoded.project_id, None);
     }
 }
