@@ -26,6 +26,10 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
 
     if wt_path.exists() {
         verify_worktree_branch(&wt_path, &branch_name)?;
+        // Ensure config is present even for reused worktrees (may have been
+        // created before the config-copy logic, or by quick-prd which doesn't
+        // copy config).
+        copy_workspace_config(workspace_root, &wt_path);
         return Ok(wt_path);
     }
 
@@ -79,7 +83,57 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         )));
     }
 
+    // .ralph/ is gitignored so worktrees don't inherit workspace config.
+    // Copy ralph.toml and templates/ from the main repo so that
+    // `Workspace::discover()` + `Workspace::load()` work inside the worktree.
+    copy_workspace_config(workspace_root, &wt_path);
+
     Ok(wt_path)
+}
+
+/// Copy essential workspace config files from the main `.ralph/` into a
+/// worktree's `.ralph/` directory.  Best-effort: failures are logged but
+/// not fatal (the orchestrator may still work if config was already present).
+fn copy_workspace_config(workspace_root: &Path, wt_path: &Path) {
+    let wt_ralph = wt_path.join(".ralph");
+    let _ = fs::create_dir_all(&wt_ralph);
+
+    // ralph.toml
+    let src_toml = workspace_root.join("ralph.toml");
+    if src_toml.is_file() {
+        if let Err(err) = fs::copy(&src_toml, wt_ralph.join("ralph.toml")) {
+            eprintln!(
+                "warning: failed to copy ralph.toml into worktree {}: {err}",
+                wt_path.display()
+            );
+        }
+    }
+
+    // templates/
+    let src_templates = workspace_root.join("templates");
+    if src_templates.is_dir() {
+        if let Err(err) = copy_dir_recursive(&src_templates, &wt_ralph.join("templates")) {
+            eprintln!(
+                "warning: failed to copy templates/ into worktree {}: {err}",
+                wt_path.display()
+            );
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
