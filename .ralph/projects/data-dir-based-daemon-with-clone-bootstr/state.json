@@ -7,9 +7,9 @@
   "prompt_hash_at_loop_start": "8b3fde8a884264d26c6d19c34cee7442be4130149146ee7df9051501d6d01c91",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
-  "current_phase": "committing",
-  "phase_iteration": 1,
+  "current_loop": 2,
+  "current_phase": "qa",
+  "phase_iteration": 2,
   "status": "in_progress",
   "loops": [
     {
@@ -17,7 +17,7 @@
       "slug": "cli-argument-restructuring-and-validation",
       "feature_name": "CLI Argument Restructuring and Validation Hardening",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -45,8 +45,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "87f2c61bb0c580830fb60ca47f76177cf32c2788",
       "started_at": "2026-02-15T03:07:14.595931667Z",
+      "completed_at": "2026-02-15T03:30:49.651143008Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "daemon-start-data-dir-provisioning-and-multi-repo",
+      "feature_name": "Daemon Start Data-Dir Provisioning and Multi-Repo Runtime Fan-Out",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-daemon-start-data-dir-provisioning-and-multi-repo/20260215033220-spec.md",
+        "impl_notes": "loops/002-daemon-start-data-dir-provisioning-and-multi-repo/20260215035521-impl-notes.md",
+        "reviews": [],
+        "approval": null,
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/002-daemon-start-data-dir-provisioning-and-multi-repo/20260215040548-qa-001-fail.md",
+            "implementer_response": "loops/002-daemon-start-data-dir-provisioning-and-multi-repo/20260215040811-impl-qa-response-001.md"
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-15T03:32:20.767835731Z",
       "completed_at": null
     }
   ],

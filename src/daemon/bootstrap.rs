@@ -22,7 +22,7 @@ pub async fn ensure_repo_ready(repo_root: &Path) -> Result<()> {
         .map_err(|err| RalphError::Orchestration(format!("bootstrap task join failure: {err}")))?
 }
 
-fn ensure_repo_ready_sync(repo_root: &Path) -> Result<()> {
+pub fn ensure_repo_ready_sync(repo_root: &Path) -> Result<()> {
     if !repo_root.exists() {
         std::fs::create_dir_all(repo_root)?;
     }
