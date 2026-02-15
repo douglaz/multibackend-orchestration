@@ -17,7 +17,7 @@ pub fn discover_workspace_root(start: Option<&Path>) -> Result<PathBuf> {
 
     loop {
         let candidate = current.join(".ralph");
-        if candidate.is_dir() {
+        if candidate.is_dir() && candidate.join("ralph.toml").is_file() {
             return Ok(candidate);
         }
 
