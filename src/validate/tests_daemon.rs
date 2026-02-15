@@ -2991,14 +2991,13 @@ fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> Te
         )
         .expect("write failed task failed");
 
-        let wt_path = dh
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees")
-            .join(task_id);
-        fs::create_dir_all(&wt_path).expect("create preserved worktree");
-        let preserved_marker = wt_path.join("preserved-marker.txt");
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create preserved worktree");
+        // Place marker inside .ralph/ so it survives git clean --exclude=.ralph
+        let preserved_marker_dir = wt_path.join(".ralph").join("preserved");
+        fs::create_dir_all(&preserved_marker_dir).expect("create preserved marker dir");
+        let preserved_marker = preserved_marker_dir.join("preserved-marker.txt");
         fs::write(&preserved_marker, "from-initial-failure").expect("write preserved marker");
 
         write_tasks(
@@ -5967,15 +5966,16 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
 /// clean+dispatch+failed-terminal retry flow.
 fn runtime_retrigger_preserves_project_artifacts(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-383";
         let project_id = "retry-proj-383";
-        let workspace_root = h.repo_root.join(".ralph");
+        let workspace_root = dh.repo_root.join(".ralph");
         let expected_branch = format!("ralph/daemon/{task_id}");
 
         // Pre-create the task worktree and project artifacts from a prior run.
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let wt = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
             .expect("create_worktree should succeed");
         let artifact_path = wt
             .join(".ralph")
@@ -6001,7 +6001,7 @@ fn runtime_retrigger_preserves_project_artifacts(h: &RalphHarness) -> TestResult
 
         // Seed legacy failed task with project context for retry.
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "failed", 383, "acme", "widgets", None, None);
                 t["project_id"] = json!(project_id);
@@ -6012,13 +6012,14 @@ fn runtime_retrigger_preserves_project_artifacts(h: &RalphHarness) -> TestResult
         )
         .expect("write failed task failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let retrigger = h
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        // retrigger uses Workspace::discover() so must run from repo_root
+        let retrigger = dh
             .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
             .expect("daemon retrigger should execute");
         assert_exit_code(&retrigger, 0);
 
-        let tasks_pending = load_tasks(h).expect("load_tasks after retrigger");
+        let tasks_pending = load_tasks(&dh).expect("load_tasks after retrigger");
         let pending_task = tasks_pending
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -6053,10 +6054,10 @@ case "$1" in
 esac
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6069,7 +6070,7 @@ esac
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -8088,13 +8089,14 @@ fn git(repo_root: &Path, args: &[&str]) {
 /// dispatch via `ralph run --project valid-proj`.
 fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-500";
 
         // Seed a legacy task with no project_id.
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "pending", 500, "acme", "widgets", None, None);
                 t["raw_idea"] = json!("Legacy task\n\nShould discover valid project.");
@@ -8104,8 +8106,8 @@ fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> Test
         .expect("write_tasks failed");
 
         // Pre-create a real git worktree so daemon reuses it.
-        let workspace_root = h.repo_root.join(".ralph");
-        let wt_path = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
             .expect("create worktree");
 
         // Valid project: has state.json
@@ -8118,8 +8120,8 @@ fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> Test
         let stray_proj_dir = wt_path.join(".ralph").join("projects").join("stray-proj");
         fs::create_dir_all(&stray_proj_dir).expect("create stray project dir");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let args_log = h.temp_dir.path().join("discovery_args.log");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("discovery_args.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
 
         let ralph_script = format!(
@@ -8142,10 +8144,10 @@ case "$1" in
 esac
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -8166,7 +8168,7 @@ esac
         );
 
         // Verify project_id was persisted to the task store
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -8191,7 +8193,8 @@ esac
 /// - Child is spawned via `ralph run --project <id>`
 fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-501";
         let expected_project_id = "backfill-proj-501";
@@ -8199,7 +8202,7 @@ fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) ->
         // Seed a legacy task: originally failed with no project_id, now
         // retriggered back to pending.
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "pending", 501, "acme", "widgets", None, None);
                 t["raw_idea"] = json!("Legacy failed task\n\nShould backfill project_id.");
@@ -8209,8 +8212,8 @@ fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) ->
         .expect("write_tasks failed");
 
         // Pre-create a real git worktree with a single valid project.
-        let workspace_root = h.repo_root.join(".ralph");
-        let wt_path = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
             .expect("create worktree");
 
         let proj_dir = wt_path
@@ -8226,8 +8229,8 @@ fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) ->
         fs::create_dir_all(&loops_dir).expect("create loops dir");
         fs::write(loops_dir.join("artifact.md"), "prior attempt artifact").expect("write artifact");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let args_log = h.temp_dir.path().join("backfill_args.log");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("backfill_args.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
 
         let ralph_script = format!(
@@ -8250,10 +8253,10 @@ case "$1" in
 esac
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -8280,7 +8283,7 @@ esac
         );
 
         // Verify project_id was persisted to the task store
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
