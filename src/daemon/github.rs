@@ -239,9 +239,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
         ])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to run gh issue edit --title: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
         })?;
 
     if !output.status.success() {
@@ -477,11 +475,7 @@ pub fn create_pr_with_body_file(
 }
 
 /// Edit an existing PR by URL using `--body-file` for large body content.
-pub fn edit_pr(
-    pr_url: &str,
-    title: &str,
-    body_file: &std::path::Path,
-) -> Result<()> {
+pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
     let body_file_str = body_file.to_string_lossy();
     let output = Command::new("gh")
         .args([
@@ -796,7 +790,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
+    use super::{
+        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
+        PrMergeStatus,
+    };
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {

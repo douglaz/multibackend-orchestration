@@ -177,7 +177,10 @@ pub fn assert_artifact_timestamp_naming(path: &Path) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_else(|| panic!("artifact path does not have a valid file name: {path:?}"));
-    let re = Regex::new(r"^\d{14}-[a-z0-9-]+\.md$").expect("valid regex");
+    let re = Regex::new(
+        r"^(\d{14}-[a-z0-9-]+\.md|\d{14}-agent-output-[a-z0-9_-]+-\d+\.log)$",
+    )
+    .expect("valid regex");
     assert!(
         re.is_match(name),
         "expected timestamped artifact name, got '{}'",

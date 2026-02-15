@@ -964,10 +964,7 @@ async fn complete_task(
             }
         }
         if let Err(err) = handle_pr_flow(store, config, &task).await {
-            eprintln!(
-                "warning: PR flow failed for {}: {err}",
-                task.task_id
-            );
+            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
         }
     }
 
@@ -1040,7 +1037,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
     }
 }
 
-
 // =============================================================================
 // Auto-Rebase Phase
 // =============================================================================
@@ -1077,17 +1073,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
     for task in &all_tasks {
         // Explicit skip reasons for missing PR URL / branch
         if task.pr_url.is_none() {
-            eprintln!(
-                "auto-rebase: skip {} — no PR URL",
-                task.task_id
-            );
+            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
             continue;
         }
         if task.branch.is_none() {
-            eprintln!(
-                "auto-rebase: skip {} — no task branch",
-                task.task_id
-            );
+            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
             continue;
         }
         if rebase_count >= config.max_rebases_per_cycle {
@@ -1132,10 +1122,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         let merge_info = {
             let owner = task.owner.clone();
             let repo = task.repo.clone();
-            match spawn_blocking_op(move || {
-                github::query_pr_merge_info(&owner, &repo, pr_number)
-            })
-            .await
+            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
+                .await
             {
                 Ok(info) => info,
                 Err(err) => {
@@ -1266,19 +1254,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
                     continue;
                 }
 
-                eprintln!(
-                    "auto-rebase: failure for {}: {err_msg}",
-                    task.task_id
-                );
+                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
 
                 // Post failure comment on PR (deduplicated by head_sha)
                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
 
                 if should_post {
-                    let marker = format!(
-                        "<!-- ralph:rebase:{}:failed:{} -->",
-                        task.task_id, head_sha
-                    );
+                    let marker =
+                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
                     let body = format!(
                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
                         task.task_id, head_sha
@@ -1507,7 +1490,11 @@ pub(crate) fn build_pr_body(
 /// 5. Check for existing PR via `find_existing_pr`.
 /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
 /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
+async fn handle_pr_flow(
+    store: &TaskStore,
+    _config: &DaemonRuntimeConfig,
+    task: &DaemonTask,
+) -> Result<()> {
     let workspace_root = store
         .path()
         .parent()
@@ -1528,10 +1515,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!(
-                    "warning: failed to check diff for {}: {err}",
-                    task.task_id
-                );
+                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
                 return Ok(());
             }
         }
@@ -1657,9 +1641,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: 
     let title = task
         .refined_title
         .clone()
-        .or_else(|| {
-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
-        })
+        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
         .unwrap_or(title);
 
     match existing_pr_url {
@@ -1797,11 +1779,9 @@ mod tests {
         assert!(body.contains("Closes #42"));
         assert!(body.contains("Diff stat unavailable."));
         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
-        assert!(
-            body.contains(
-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
-            )
-        );
+        assert!(body.contains(
+            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+        ));
     }
 
     #[test]
