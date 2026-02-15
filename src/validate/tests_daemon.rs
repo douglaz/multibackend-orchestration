@@ -45,6 +45,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: start_validates_inputs_and_workspace,
         },
         ConformanceTest {
+            name: "daemon::label_ensure_startup",
+            func: label_ensure_startup,
+        },
+        ConformanceTest {
+            name: "daemon::label_ensure_already_exists",
+            func: label_ensure_already_exists,
+        },
+        ConformanceTest {
+            name: "daemon::label_ensure_hard_failure",
+            func: label_ensure_hard_failure,
+        },
+        ConformanceTest {
             name: "daemon::status_reads_store_with_locking",
             func: status_reads_store_with_locking,
         },
@@ -63,6 +75,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "daemon::abort_stale_pid_and_terminal_state_handling",
             func: abort_stale_pid_and_terminal_state_handling,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_claim_failure_preserves_failed_state",
+            func: runtime_retrigger_claim_failure_preserves_failed_state,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_claim_then_cas_conflict_does_not_set_pending",
+            func: runtime_retrigger_claim_then_cas_conflict_does_not_set_pending,
         },
         // --- Loop 2 Runtime Tests ---
         ConformanceTest {
@@ -244,6 +264,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::dispatch_cleans_dirty_worktree",
             func: dispatch_cleans_dirty_worktree,
         },
+        ConformanceTest {
+            name: "daemon::runtime_create_worktree_handles_stale_metadata",
+            func: runtime_create_worktree_handles_stale_metadata,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_reuse_worktree_corrects_branch_mismatch",
+            func: runtime_reuse_worktree_corrects_branch_mismatch,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_retrigger_preserves_project_artifacts",
+            func: runtime_retrigger_preserves_project_artifacts,
+        },
         // --- Deterministic PR Edit/Create Tests ---
         ConformanceTest {
             name: "daemon::runtime_pr_edit_existing_uses_body_file",
@@ -318,6 +350,44 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::rebase_backward_compat_state",
             func: rebase_backward_compat_state,
         },
+        // --- Loop 2 Data-Dir Provisioning Tests ---
+        ConformanceTest {
+            name: "daemon::daemon_start_bootstraps_empty_dir",
+            func: daemon_start_bootstraps_empty_dir,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_start_rejects_git_data_dir",
+            func: daemon_start_rejects_git_data_dir,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_start_rejects_duplicate_repo",
+            func: daemon_start_rejects_duplicate_repo,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_start_clone_failure_propagates",
+            func: daemon_start_clone_failure_propagates,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_status_multi_repo",
+            func: daemon_status_multi_repo,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_abort_cross_repo",
+            func: daemon_abort_cross_repo,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_abort_ambiguous_bare_number",
+            func: daemon_abort_ambiguous_bare_number,
+        },
+        // --- Loop 2 Dispatch-time Project Backfill Tests ---
+        ConformanceTest {
+            name: "daemon::discover_project_id_ignores_dirs_without_state_json",
+            func: discover_project_id_ignores_dirs_without_state_json,
+        },
+        ConformanceTest {
+            name: "daemon::runtime_dispatch_backfills_legacy_failed_task_project_id",
+            func: runtime_dispatch_backfills_legacy_failed_task_project_id,
+        },
     ]
 }
 
@@ -327,20 +397,22 @@ pub fn tests() -> Vec<ConformanceTest> {
 
 fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let help = h
+        let help = dh
             .ralph(["daemon", "--help"])
             .expect("daemon --help should execute");
         assert_exit_code(&help, 0);
         assert_stdout_contains(&help, "start");
         assert_stdout_contains(&help, "status");
         assert_stdout_contains(&help, "abort");
+        assert_stdout_contains(&help, "retrigger");
 
         // Use --single-iteration and mock gh so runtime exits cleanly
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let start = h
-            .ralph_env(
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let start = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -362,7 +434,7 @@ fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
         assert_exit_code(&start, 0);
         assert_stdout_contains(&start, "daemon start validated for repo acme/widgets");
 
-        let status = h
+        let status = dh
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&status, 0);
@@ -373,7 +445,7 @@ fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
             "expected task output, got:\n{combined}"
         );
 
-        let abort = h
+        let abort = dh
             .ralph(["daemon", "abort", "123"])
             .expect("daemon abort should execute");
         assert_exit_code(&abort, 2);
@@ -387,11 +459,12 @@ fn cli_parse_start_status_abort(h: &RalphHarness) -> TestResult {
 
 fn verbose_flag_accepted_by_start(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let output = h
-            .ralph_env(
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -439,11 +512,12 @@ fn verbose_flag_rejected_by_status_and_abort(h: &RalphHarness) -> TestResult {
 
 fn verbose_output_present_when_enabled(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let output = h
-            .ralph_env(
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -481,11 +555,12 @@ fn verbose_output_present_when_enabled(h: &RalphHarness) -> TestResult {
 
 fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let output = h
-            .ralph_env(
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let output = dh
+            .daemon_env(
                 ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
                 &[("PATH", &gh_path)],
             )
@@ -506,12 +581,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
 
 fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Use --single-iteration and mock gh for the daemon start
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let default_start = h
-            .ralph_env(
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let default_start = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -528,71 +604,71 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "poll=60s, max_concurrent=5, labels=ralph:ready",
         );
 
-        let poll_default = h
+        let poll_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_poll_seconds"])
             .expect("config get workspace.daemon_poll_seconds should succeed");
         assert_eq!(poll_default.trim(), "60");
 
-        let conc_default = h
+        let conc_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_max_concurrent"])
             .expect("config get workspace.daemon_max_concurrent should succeed");
         assert_eq!(conc_default.trim(), "5");
 
-        let labels_default = h
+        let labels_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_labels"])
             .expect("config get workspace.daemon_labels should succeed");
         assert_eq!(labels_default.trim(), "[\n  \"ralph:ready\"\n]");
 
-        let refinement_enabled_default = h
+        let refinement_enabled_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_refinement_enabled"])
             .expect("config get workspace.daemon_refinement_enabled should succeed");
         assert_eq!(refinement_enabled_default.trim(), "true");
 
-        let refinement_backend_default = h
+        let refinement_backend_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_refinement_backend"])
             .expect("config get workspace.daemon_refinement_backend should succeed");
         assert_eq!(refinement_backend_default.trim(), "claude(sonnet)");
 
-        let auto_rebase_enabled_default = h
+        let auto_rebase_enabled_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_auto_rebase_enabled"])
             .expect("config get workspace.daemon_auto_rebase_enabled should succeed");
         assert_eq!(auto_rebase_enabled_default.trim(), "true");
 
-        let rebase_interval_default = h
+        let rebase_interval_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_rebase_interval_seconds"])
             .expect("config get workspace.daemon_rebase_interval_seconds should succeed");
         assert_eq!(rebase_interval_default.trim(), "1800");
 
-        let rebase_cap_default = h
+        let rebase_cap_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_max_rebases_per_cycle"])
             .expect("config get workspace.daemon_max_rebases_per_cycle should succeed");
         assert_eq!(rebase_cap_default.trim(), "3");
 
-        let rebase_timeout_default = h
+        let rebase_timeout_default = dh
             .ralph_ok(["config", "get", "workspace.daemon_rebase_timeout_seconds"])
             .expect("config get workspace.daemon_rebase_timeout_seconds should succeed");
         assert_eq!(rebase_timeout_default.trim(), "120");
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_auto_rebase_enabled",
             "false",
         ])
         .expect("set workspace.daemon_auto_rebase_enabled failed");
-        let auto_rebase_enabled_updated = h
+        let auto_rebase_enabled_updated = dh
             .ralph_ok(["config", "get", "workspace.daemon_auto_rebase_enabled"])
             .expect("config get workspace.daemon_auto_rebase_enabled should succeed");
         assert_eq!(auto_rebase_enabled_updated.trim(), "false");
 
-        h.create_project(
+        dh.create_project(
             "daemon-config",
             "Daemon Config",
             "Project used for daemon config merge checks",
         )
         .expect("create_project failed");
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.poll_seconds",
@@ -601,7 +677,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.poll_seconds failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.max_concurrent",
@@ -610,7 +686,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.max_concurrent failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.labels",
@@ -619,7 +695,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.labels failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.repo",
@@ -628,7 +704,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.repo failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.refinement_enabled",
@@ -637,7 +713,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.refinement_enabled failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.refinement_backend",
@@ -646,7 +722,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.refinement_backend failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.auto_rebase_enabled",
@@ -655,7 +731,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.auto_rebase_enabled failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.rebase_interval_seconds",
@@ -664,7 +740,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.rebase_interval_seconds failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.max_rebases_per_cycle",
@@ -673,7 +749,7 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "daemon-config",
         ])
         .expect("set daemon.max_rebases_per_cycle failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "daemon.rebase_timeout_seconds",
@@ -683,15 +759,15 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
         ])
         .expect("set daemon.rebase_timeout_seconds failed");
 
-        h.ralph_ok(["project", "use", "daemon-config"])
+        dh.ralph_ok(["project", "use", "daemon-config"])
             .expect("project use should succeed");
 
-        let refinement_enabled_project = h
+        let refinement_enabled_project = dh
             .ralph_ok(["config", "get", "daemon.refinement_enabled"])
             .expect("config get daemon.refinement_enabled should succeed");
         assert_eq!(refinement_enabled_project.trim(), "false");
 
-        let refinement_backend_project = h
+        let refinement_backend_project = dh
             .ralph_ok(["config", "get", "daemon.refinement_backend"])
             .expect("config get daemon.refinement_backend should succeed");
         assert_eq!(
@@ -699,36 +775,42 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
             "codex(gpt-5.3-codex-medium)"
         );
 
-        let auto_rebase_enabled_project = h
+        let auto_rebase_enabled_project = dh
             .ralph_ok(["config", "get", "daemon.auto_rebase_enabled"])
             .expect("config get daemon.auto_rebase_enabled should succeed");
         assert_eq!(auto_rebase_enabled_project.trim(), "false");
 
-        let rebase_interval_project = h
+        let rebase_interval_project = dh
             .ralph_ok(["config", "get", "daemon.rebase_interval_seconds"])
             .expect("config get daemon.rebase_interval_seconds should succeed");
         assert_eq!(rebase_interval_project.trim(), "900");
 
-        let rebase_cap_project = h
+        let rebase_cap_project = dh
             .ralph_ok(["config", "get", "daemon.max_rebases_per_cycle"])
             .expect("config get daemon.max_rebases_per_cycle should succeed");
         assert_eq!(rebase_cap_project.trim(), "5");
 
-        let rebase_timeout_project = h
+        let rebase_timeout_project = dh
             .ralph_ok(["config", "get", "daemon.rebase_timeout_seconds"])
             .expect("config get daemon.rebase_timeout_seconds should succeed");
         assert_eq!(rebase_timeout_project.trim(), "240");
 
-        let merged_start = h
-            .ralph_env(
-                ["daemon", "start", "--single-iteration"],
+        let merged_start = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&merged_start, 0);
         assert_stdout_contains(
             &merged_start,
-            "daemon start validated for repo acme/project-override",
+            "daemon start validated for repo acme/widgets",
         );
         assert_stdout_contains(
             &merged_start,
@@ -739,45 +821,293 @@ fn config_merge_and_defaults(h: &RalphHarness) -> TestResult {
 
 fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let no_workspace = h
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Verify that daemon start fails when --repo is missing (validation error)
+        let no_repo = dh
             .ralph([
                 "daemon",
                 "start",
-                "--repo",
-                "acme/widgets",
                 "--single-iteration",
             ])
             .expect("daemon start should execute");
-        assert_exit_code(&no_workspace, 2);
+        assert_exit_code(&no_repo, 2);
 
-        h.init_workspace().expect("init failed");
-
-        let gh_path = write_mock_gh(h, "#!/bin/sh\necho \"octo/demo\"\n")
+        // Verify that daemon start succeeds with proper setup
+        let gh_path = write_mock_gh(&dh, "#!/bin/sh\necho \"octo/demo\"\n")
             .expect("write mock gh should succeed");
 
-        let with_workspace = h
-            .ralph_env(
-                ["daemon", "start", "--single-iteration"],
+        let with_repo = dh
+            .daemon_env(
+                ["daemon", "start", "--single-iteration", "--repo", "octo/demo"],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
-        assert_exit_code(&with_workspace, 0);
-        assert_stdout_contains(&with_workspace, "daemon start validated for repo octo/demo");
+        assert_exit_code(&with_repo, 0);
+        assert_stdout_contains(&with_repo, "daemon start validated for repo octo/demo");
+    })
+}
+
+fn label_ensure_startup(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let lines: Vec<&str> = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            github::REQUIRED_LABELS.len(),
+            "expected exactly {} label create calls, got:\n{}",
+            github::REQUIRED_LABELS.len(),
+            log_raw
+        );
+
+        for (label_name, _, _) in github::REQUIRED_LABELS {
+            let needle = format!("create {label_name}");
+            let count = lines.iter().filter(|line| line.contains(&needle)).count();
+            assert_eq!(
+                count, 1,
+                "expected one create call for '{label_name}', got {count}:\n{}",
+                log_raw
+            );
+        }
+    })
+}
+
+fn label_ensure_already_exists(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        if [ "$3" = "ralph:in-progress" ]; then
+          echo "label already exists" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("failed to ensure label 'ralph:in-progress'"),
+            "already-exists label should not emit failure warning, stderr:\n{stderr}"
+        );
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let call_count = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert_eq!(
+            call_count,
+            github::REQUIRED_LABELS.len(),
+            "expected startup to attempt all lifecycle labels"
+        );
+    })
+}
+
+fn label_ensure_hard_failure(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let label_log = h.temp_dir.path().join("label_create.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create)
+        echo "$@" >> "{label_log_str}"
+        if [ "$3" = "ralph:failed" ]; then
+          echo "permission denied" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to ensure label 'ralph:failed'"),
+            "expected warning for hard label creation failure, stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("permission denied"),
+            "expected command stderr to be surfaced in warning, stderr:\n{stderr}"
+        );
+
+        let log_raw = fs::read_to_string(&label_log).expect("label create log should exist");
+        let call_count = log_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert_eq!(
+            call_count,
+            github::REQUIRED_LABELS.len(),
+            "expected startup to attempt all lifecycle labels"
+        );
     })
 }
 
 fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let empty = h
+        let empty = dh
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&empty, 0);
         assert_stdout_contains(&empty, "no daemon tasks");
 
         write_tasks(
-            h,
+            &dh,
             vec![
                 task_json(
                     "acme-widgets-41",
@@ -801,7 +1131,7 @@ fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let populated = h
+        let populated = dh
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&populated, 0);
@@ -815,10 +1145,11 @@ fn status_reads_store_with_locking(h: &RalphHarness) -> TestResult {
 
 fn abort_by_full_task_id(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-10",
                 "in_progress",
@@ -831,13 +1162,13 @@ fn abort_by_full_task_id(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let output = h
+        let output = dh
             .ralph(["daemon", "abort", "acme-widgets-10"])
             .expect("daemon abort should execute");
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "aborted task acme-widgets-10");
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["state"], json!("aborted"));
     })
@@ -845,10 +1176,11 @@ fn abort_by_full_task_id(h: &RalphHarness) -> TestResult {
 
 fn abort_by_bare_number_ambiguous_error(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![
                 task_json(
                     "acme-widgets-7",
@@ -864,7 +1196,7 @@ fn abort_by_bare_number_ambiguous_error(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let output = h
+        let output = dh
             .ralph(["daemon", "abort", "7"])
             .expect("daemon abort should execute");
         assert_exit_code(&output, 2);
@@ -875,7 +1207,7 @@ fn abort_by_bare_number_ambiguous_error(h: &RalphHarness) -> TestResult {
             "expected ambiguous error, got:\n{combined}"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks[0]["state"], json!("pending"));
         assert_eq!(tasks[1]["state"], json!("pending"));
     })
@@ -883,10 +1215,11 @@ fn abort_by_bare_number_ambiguous_error(h: &RalphHarness) -> TestResult {
 
 fn abort_when_daemon_not_running(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-99",
                 "pending",
@@ -899,23 +1232,24 @@ fn abort_when_daemon_not_running(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let output = h
+        let output = dh
             .ralph(["daemon", "abort", "99"])
             .expect("daemon abort should execute");
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "aborted task acme-widgets-99");
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks[0]["state"], json!("aborted"));
     })
 }
 
 fn abort_stale_pid_and_terminal_state_handling(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-55",
                 "in_progress",
@@ -928,15 +1262,15 @@ fn abort_stale_pid_and_terminal_state_handling(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let first_abort = h
+        let first_abort = dh
             .ralph(["daemon", "abort", "acme-widgets-55"])
             .expect("daemon abort should execute");
         assert_exit_code(&first_abort, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks[0]["state"], json!("aborted"));
 
-        let second_abort = h
+        let second_abort = dh
             .ralph(["daemon", "abort", "acme-widgets-55"])
             .expect("daemon abort should execute");
         assert_exit_code(&second_abort, 2);
@@ -945,6 +1279,194 @@ fn abort_stale_pid_and_terminal_state_handling(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("already terminal"),
             "expected terminal-state error, got:\n{combined}"
+        );
+    })
+}
+
+fn runtime_retrigger_claim_failure_preserves_failed_state(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-410";
+        write_tasks(
+            h,
+            vec![task_json(
+                task_id, "failed", 410, "acme", "widgets", None, None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let claim_marker = h.temp_dir.path().join("retrigger_claim_failure_claim.log");
+        let release_marker = h
+            .temp_dir
+            .path()
+            .join("retrigger_claim_failure_release.log");
+        let claim_marker_str = claim_marker.to_string_lossy().into_owned();
+        let release_marker_str = release_marker.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      edit)
+        if printf '%s\n' "$@" | grep -q -- "--add-label"; then
+          printf 'claim\n' >> "{claim_marker_str}"
+          echo "mock claim failure" >&2
+          exit 1
+        fi
+        if printf '%s\n' "$@" | grep -q -- "--remove-label"; then
+          printf 'release\n' >> "{release_marker_str}"
+          exit 0
+        fi
+        exit 0
+        ;;
+      list) printf '[]' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "mock gh: unhandled command: $*" >&2
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let output = h
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&output, 1);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("failed to claim issue for retrigger"),
+            "expected retrigger claim failure error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("event=claim_failure"),
+            "expected structured claim_failure log, got:\n{combined}"
+        );
+        assert!(claim_marker.exists(), "claim attempt should be recorded");
+        assert!(
+            !release_marker.exists(),
+            "claim release should not be attempted when claim failed"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("failed"));
+    })
+}
+
+fn runtime_retrigger_claim_then_cas_conflict_does_not_set_pending(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-411";
+        write_tasks(
+            h,
+            vec![task_json(
+                task_id, "failed", 411, "acme", "widgets", None, None,
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let claim_marker = h.temp_dir.path().join("retrigger_cas_conflict_claim.log");
+        let release_marker = h.temp_dir.path().join("retrigger_cas_conflict_release.log");
+        let tasks_path = tasks_path(h);
+        let claim_marker_str = claim_marker.to_string_lossy().into_owned();
+        let release_marker_str = release_marker.to_string_lossy().into_owned();
+        let tasks_path_str = tasks_path.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      edit)
+        if printf '%s\n' "$@" | grep -q -- "--add-label"; then
+          printf 'claim\n' >> "{claim_marker_str}"
+          tmp="{tasks_path_str}.tmp"
+          sed '0,/"state": "failed"/s//"state": "aborted"/' "{tasks_path_str}" > "$tmp" || exit 91
+          mv "$tmp" "{tasks_path_str}" || exit 92
+          exit 0
+        fi
+        if printf '%s\n' "$@" | grep -q -- "--remove-label"; then
+          printf 'release\n' >> "{release_marker_str}"
+          exit 0
+        fi
+        exit 0
+        ;;
+      list) printf '[]' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "mock gh: unhandled command: $*" >&2
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+
+        let output = h
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&output, 1);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("changed state before retrigger CAS"),
+            "expected CAS conflict error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("event=cas_conflict"),
+            "expected structured cas_conflict log, got:\n{combined}"
+        );
+        assert!(claim_marker.exists(), "claim attempt should be recorded");
+        assert!(
+            release_marker.exists(),
+            "claim release should be attempted on CAS conflict"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(task["state"], json!("aborted"));
+        assert_ne!(
+            task["state"],
+            json!("pending"),
+            "CAS conflict must never leave task pending"
         );
     })
 }
@@ -962,11 +1484,12 @@ fn abort_stale_pid_and_terminal_state_handling(h: &RalphHarness) -> TestResult {
 /// - reconciliation is logged in stderr
 fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Pre-populate tasks with in_progress state and fake PID/PGID
         write_tasks(
-            h,
+            &dh,
             vec![
                 task_json(
                     "acme-widgets-10",
@@ -999,15 +1522,15 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Run daemon with --single-iteration to trigger reconciliation then exit.
         // Reconciliation resets in_progress -> pending before any adoption.
         // Re-adoption may fail (worktree creation in test env) but that's fine;
         // we verify reconciliation happened via stderr and task state.
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1028,7 +1551,7 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
             "expected reconciliation message in stderr, got:\n{stderr}"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks.len(), 3, "should still have 3 tasks");
 
         // The completed task should remain completed
@@ -1073,7 +1596,8 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
 /// - max_concurrent is respected (only 1 task claimed)
 fn runtime_polling_filter_overflow(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Create a mock gh that returns exactly 100 issues, some with ralph:* labels.
         // Issues 1-5 have ralph:in-progress labels (should be filtered).
@@ -1112,17 +1636,21 @@ case "$1" in
     printf 'acme/widgets\n'
     exit 0
     ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
 
-        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Use max_concurrent=1 to limit claiming. The overflow warning should
         // still be emitted based on the poll result count.
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1145,7 +1673,7 @@ exit 1
         );
 
         // At most 1 task should have been claimed (max_concurrent=1)
-        let tasks = load_tasks(h);
+        let tasks = load_tasks(&dh);
         let task_count = match tasks {
             Ok(ref t) => t.len(),
             Err(_) => 0,
@@ -1168,11 +1696,12 @@ exit 1
 /// - The task reaches terminal state after drain
 fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Pre-populate a pending task
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-50",
                 "pending",
@@ -1185,11 +1714,11 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1211,14 +1740,14 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
         );
 
         // Worktrees base directory must exist
-        let wt_base = h.repo_root.join(".ralph").join("daemon").join("worktrees");
+        let wt_base = dh.repo_root.join(".ralph").join("daemon").join("worktrees");
         assert!(
             wt_base.exists(),
             "worktrees base directory must exist after dispatch"
         );
 
         // Task should have reached a terminal state after drain
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-50")
@@ -1242,11 +1771,12 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
 /// - PID/PGID are cleared in the terminal state
 fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Pre-populate a pending task
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-60",
                 "pending",
@@ -1259,11 +1789,11 @@ fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1292,7 +1822,7 @@ fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
 
         // Since single-iteration drains children, the task should have
         // reached a terminal state with cleared PID/PGID.
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-60")
@@ -1324,13 +1854,14 @@ fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
 /// - The comment log file shows exactly the expected number of postings
 fn runtime_idempotent_comments(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Create a mock gh that tracks comment calls via a file.
         // The "view" handler returns previously posted comments so the
         // idempotency check can find existing markers.
-        let comment_log = h.temp_dir.path().join("comment_log.txt");
-        let comment_count_file = h.temp_dir.path().join("comment_count.txt");
+        let comment_log = dh.temp_dir.path().join("comment_log.txt");
+        let comment_count_file = dh.temp_dir.path().join("comment_count.txt");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
         let comment_count_str = comment_count_file.to_string_lossy().into_owned();
 
@@ -1376,18 +1907,22 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Pre-populate a pending task that will be dispatched, complete,
         // and trigger a comment.
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-70",
                 "pending",
@@ -1401,8 +1936,8 @@ exit 1
         .expect("write_tasks failed");
 
         // First daemon run — should post comment(s) on completion
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1430,8 +1965,8 @@ exit 1
         // Second daemon run — comments should be de-duplicated (markers
         // already exist in the mock view output). Since the task is already
         // terminal, no new comments should be posted.
-        let output2 = h
-            .ralph_env(
+        let output2 = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1465,14 +2000,15 @@ exit 1
 /// - task pr_url is populated from the existing PR
 fn runtime_pr_reuse_no_diff(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Track whether `pr create` was called
-        let pr_create_log = h.temp_dir.path().join("pr_create_called.txt");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_called.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
         // Track `pr list` calls
-        let pr_list_log = h.temp_dir.path().join("pr_list_called.txt");
+        let pr_list_log = dh.temp_dir.path().join("pr_list_called.txt");
         let pr_list_log_str = pr_list_log.to_string_lossy().into_owned();
 
         // Mock gh: pr list --head returns existing PR URL, pr create logs and fails
@@ -1514,20 +2050,24 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
         // Use mock ralph that creates a commit (so has_diff returns true)
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         // Pre-populate a PENDING task — the daemon will dispatch it, the
         // mock ralph will commit a change, the child exits 0, triggering
         // complete_task → handle_pr_flow.
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-80",
@@ -1544,8 +2084,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1566,7 +2106,7 @@ exit 1
         );
 
         // Task should be completed
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-80")
@@ -1611,9 +2151,10 @@ exit 1
 /// - `pr create` was actually attempted
 fn runtime_pr_create_failure_terminal(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_create_log = h.temp_dir.path().join("pr_create_attempted.txt");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_attempted.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
         // Mock gh: pr list returns empty string (simulating `gh pr list -q ".[0].url"`
@@ -1645,19 +2186,23 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
         // Use mock ralph that creates a commit (so has_diff returns true → PR flow)
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         // Pre-populate a PENDING task — daemon dispatches it, mock ralph
         // commits, child exits 0, complete_task → handle_pr_flow → pr create fails
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-90",
@@ -1674,8 +2219,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1696,7 +2241,7 @@ exit 1
         );
 
         // Task should be completed despite PR failure
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-90")
@@ -1737,14 +2282,15 @@ exit 1
 /// - No in_progress tasks remain after single-iteration completes
 fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Pre-populate a pending task that should be dispatched and drained
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-100",
                 "pending",
@@ -1757,8 +2303,8 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1773,7 +2319,7 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
         assert_stdout_contains(&output, "daemon start validated for repo acme/widgets");
 
         // Verify no tasks are left in_progress (deterministic drain)
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         for task in &tasks {
             let state = task["state"].as_str().unwrap_or("unknown");
             assert_ne!(
@@ -1794,10 +2340,11 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
 /// - spawned child receives argv `auto --idea <hydrated_idea>`
 fn runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement so the raw hydrated idea is passed through unchanged.
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -1807,7 +2354,7 @@ fn runtime_adopt_pending_fetches_raw_idea_and_uses_idea_flag(h: &RalphHarness) -
 
         // Seed a legacy pending task with no raw_idea field.
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-130",
                 "pending",
@@ -1850,13 +2397,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
-        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, gh_script).expect("write mock gh");
 
-        let args_log = h.temp_dir.path().join("daemon_args.log");
-        let idea_log = h.temp_dir.path().join("daemon_idea.log");
+        let args_log = dh.temp_dir.path().join("daemon_args.log");
+        let idea_log = dh.temp_dir.path().join("daemon_idea.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
@@ -1874,10 +2425,10 @@ Hydrated body"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -1890,7 +2441,7 @@ exit 0
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-130")
@@ -1920,10 +2471,11 @@ exit 0
 /// - spawned child receives argv `auto --idea <fallback_idea>`
 fn runtime_adopt_pending_fetch_failure_uses_metadata_fallback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement so the fallback idea is passed through unchanged.
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -1932,7 +2484,7 @@ fn runtime_adopt_pending_fetch_failure_uses_metadata_fallback(h: &RalphHarness) 
         .expect("set refinement_enabled failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-131",
                 "pending",
@@ -1976,14 +2528,18 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
-        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, gh_script).expect("write mock gh");
 
         let fallback_idea = "Issue #131 (acme/widgets)\n\nIssue body unavailable from GitHub; using daemon task metadata.";
-        let args_log = h.temp_dir.path().join("daemon_args_fallback.log");
-        let idea_log = h.temp_dir.path().join("daemon_idea_fallback.log");
+        let args_log = dh.temp_dir.path().join("daemon_args_fallback.log");
+        let idea_log = dh.temp_dir.path().join("daemon_idea_fallback.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
@@ -2001,10 +2557,10 @@ Issue body unavailable from GitHub; using daemon task metadata."
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2022,7 +2578,7 @@ exit 0
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-131")
@@ -2055,11 +2611,12 @@ exit 0
 /// - Final persisted state is aborted, not in_progress or completed
 fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Pre-populate a pending task that the daemon will try to re-adopt
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-110",
                 "pending",
@@ -2075,13 +2632,13 @@ fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestRes
         // Abort the task BEFORE starting the daemon. This simulates the race
         // condition where abort runs concurrently with dispatch — the task
         // moves to terminal state before the runtime can transition it.
-        let abort_output = h
+        let abort_output = dh
             .ralph(["daemon", "abort", "acme-widgets-110"])
             .expect("daemon abort should execute");
         assert_exit_code(&abort_output, 0);
 
         // Verify the task is now aborted
-        let tasks_before = load_tasks(h).expect("load_tasks failed");
+        let tasks_before = load_tasks(&dh).expect("load_tasks failed");
         let task_before = tasks_before
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-110")
@@ -2095,11 +2652,11 @@ fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestRes
         // Now start the daemon. It will try to re-adopt the (now-aborted)
         // task via adopt_pending_tasks, but the CAS guard in dispatch_task
         // should detect the terminal state and skip activation.
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2114,7 +2671,7 @@ fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestRes
 
         // The task MUST still be aborted — the runtime must not have
         // overwritten it with in_progress or completed.
-        let tasks_after = load_tasks(h).expect("load_tasks failed");
+        let tasks_after = load_tasks(&dh).expect("load_tasks failed");
         let task_after = tasks_after
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-110")
@@ -2148,9 +2705,10 @@ fn runtime_abort_during_dispatch_preserves_terminal(h: &RalphHarness) -> TestRes
 /// - `project_id` remains persisted
 fn runtime_task_fails_worktree_preserved(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let ralph_script = r#"#!/bin/sh
 case "$1" in
   run)
@@ -2168,10 +2726,10 @@ case "$1" in
     ;;
 esac
 "#;
-        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, ralph_script).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-350",
@@ -2189,8 +2747,8 @@ esac
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2203,7 +2761,7 @@ esac
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-350")
@@ -2211,7 +2769,7 @@ esac
         assert_eq!(task["state"], json!("failed"));
         assert_eq!(task["project_id"], json!("retry-proj-350"));
 
-        let wt_path = h
+        let wt_path = dh
             .repo_root
             .join(".ralph")
             .join("daemon")
@@ -2235,14 +2793,15 @@ esac
 /// - Failed-state policy preserves worktree
 fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-351";
         let project_id = "retry-proj-351";
         let issue_number = 351u32;
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     task_id,
@@ -2254,22 +2813,23 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
                     None,
                 );
                 t["project_id"] = json!(project_id);
-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                t["raw_idea"] =
+                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
                 t
             }],
         )
         .expect("write_tasks failed");
 
-        let wt_path = h
+        let wt_path = dh
             .repo_root
             .join(".ralph")
             .join("daemon")
             .join("worktrees")
             .join(task_id);
-        let tasks_path_str = tasks_path(h).to_string_lossy().into_owned();
-        let spawn_marker = h.temp_dir.path().join("cas_spawned.marker");
+        let tasks_path_str = tasks_path(&dh).to_string_lossy().into_owned();
+        let spawn_marker = dh.temp_dir.path().join("cas_spawned.marker");
         let spawn_marker_str = spawn_marker.to_string_lossy().into_owned();
-        let lock_ready = h.temp_dir.path().join("cas_lock_ready.marker");
+        let lock_ready = dh.temp_dir.path().join("cas_lock_ready.marker");
         let lock_ready_str = lock_ready.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
@@ -2343,11 +2903,15 @@ JSON
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
 
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -2359,10 +2923,10 @@ sleep 30
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2385,7 +2949,7 @@ exit 0
             "expected failed-state preserve log from terminal-race cleanup path, stderr:\n{stderr}"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -2410,13 +2974,14 @@ exit 0
 /// - Retry dispatch uses `ralph run --project <id>`
 fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-360";
         let project_id = "retry-proj-360";
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "failed", 360, "acme", "widgets", None, None);
                 t["project_id"] = json!(project_id);
@@ -2426,18 +2991,17 @@ fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> Te
         )
         .expect("write failed task failed");
 
-        let wt_path = h
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("worktrees")
-            .join(task_id);
-        fs::create_dir_all(&wt_path).expect("create preserved worktree");
-        let preserved_marker = wt_path.join("preserved-marker.txt");
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create preserved worktree");
+        // Place marker inside .ralph/ so it survives git clean --exclude=.ralph
+        let preserved_marker_dir = wt_path.join(".ralph").join("preserved");
+        fs::create_dir_all(&preserved_marker_dir).expect("create preserved marker dir");
+        let preserved_marker = preserved_marker_dir.join("preserved-marker.txt");
         fs::write(&preserved_marker, "from-initial-failure").expect("write preserved marker");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "pending", 360, "acme", "widgets", None, None);
                 t["project_id"] = json!(project_id);
@@ -2447,8 +3011,8 @@ fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> Te
         )
         .expect("write retry pending task failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let args_log = h.temp_dir.path().join("retry_dispatch_args.log");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("retry_dispatch_args.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
         let wt_path_str = wt_path.to_string_lossy().into_owned();
         let preserved_marker_str = preserved_marker.to_string_lossy().into_owned();
@@ -2476,10 +3040,10 @@ case "$1" in
 esac
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2499,7 +3063,7 @@ esac
             "retry dispatch should use run --project"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -2530,11 +3094,12 @@ esac
 /// - Existing task worktree is removed on daemon startup reconciliation
 fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-361";
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "pending", 361, "acme", "widgets", None, None);
                 t["raw_idea"] = json!("Abort cleanup task\n\nEnsure worktree is removed.");
@@ -2543,12 +3108,12 @@ fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let abort_output = h
+        let abort_output = dh
             .ralph(["daemon", "abort", task_id])
             .expect("daemon abort should execute");
         assert_exit_code(&abort_output, 0);
 
-        let wt_path = h
+        let wt_path = dh
             .repo_root
             .join(".ralph")
             .join("daemon")
@@ -2557,11 +3122,11 @@ fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
         fs::create_dir_all(&wt_path).expect("create aborted worktree");
         fs::write(wt_path.join("marker.txt"), "cleanup-me").expect("write aborted marker");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2574,7 +3139,7 @@ fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
@@ -2596,11 +3161,12 @@ fn runtime_aborted_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
 /// - Completed-state cleanup removes task worktree
 fn runtime_succeeded_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let task_id = "acme-widgets-362";
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(task_id, "pending", 362, "acme", "widgets", None, None);
                 t["raw_idea"] = json!("Success cleanup task\n\nEnsure worktree is removed.");
@@ -2609,7 +3175,7 @@ fn runtime_succeeded_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let ralph_script = r#"#!/bin/sh
 case "$1" in
   auto)
@@ -2621,10 +3187,10 @@ case "$1" in
     ;;
 esac
 "#;
-        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2637,14 +3203,14 @@ esac
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)
             .expect("task should exist");
         assert_eq!(task["state"], json!("completed"));
 
-        let wt_path = h
+        let wt_path = dh
             .repo_root
             .join(".ralph")
             .join("daemon")
@@ -2667,24 +3233,25 @@ esac
 /// - `ralph run --project ...` is not used for fresh tasks
 fn runtime_fresh_dispatch_ignores_discovered_project(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        h.create_project(
+        dh.create_project(
             "discovered-proj",
             "Discovered Project",
             "Project used to simulate discovered context",
         )
         .expect("create_project failed");
-        h.ralph_ok(["project", "use", "discovered-proj"])
+        dh.ralph_ok(["project", "use", "discovered-proj"])
             .expect("project use should succeed");
         fs::write(
-            h.repo_root.join(".git").join("ralph-active-project"),
+            dh.repo_root.join(".git").join("ralph-active-project"),
             "discovered-proj\n",
         )
         .expect("write discovered project marker");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-352",
@@ -2701,8 +3268,8 @@ fn runtime_fresh_dispatch_ignores_discovered_project(h: &RalphHarness) -> TestRe
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let args_log = h.temp_dir.path().join("fresh_dispatch_args.log");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("fresh_dispatch_args.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -2723,10 +3290,10 @@ case "$1" in
 esac
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2760,14 +3327,15 @@ esac
 /// - pr_url remains null
 fn runtime_no_diff_pr_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Track `pr create` calls
-        let pr_create_log = h.temp_dir.path().join("pr_create_no_diff.txt");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_no_diff.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
         // Track comment calls and their content
-        let comment_log = h.temp_dir.path().join("comment_no_diff.txt");
+        let comment_log = dh.temp_dir.path().join("comment_no_diff.txt");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
 
         // Mock gh: pr list returns empty, pr create logs but should never be called,
@@ -2814,20 +3382,24 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
 
         // Use the standard mock ralph that does NOT create commits (just exits 0).
         // This means has_diff will return false → no-diff path.
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Pre-populate a PENDING task with a branch set
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-120",
@@ -2844,8 +3416,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -2866,7 +3438,7 @@ exit 1
         );
 
         // Task should be completed
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-120")
@@ -2908,7 +3480,7 @@ exit 1
         // Run again — the no-diff comment should be idempotent (not posted twice).
         // Reset the task to pending to trigger another run.
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-120",
@@ -2930,8 +3502,8 @@ exit 1
             .matches("<!-- ralph:task:acme-widgets-120:no-diff -->")
             .count();
 
-        let output2 = h
-            .ralph_env(
+        let output2 = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3050,9 +3622,10 @@ fn daemon_bootstrap_existing_repo_noop(h: &RalphHarness) -> TestResult {
 
 fn daemon_pr_no_origin_skips_push_and_pr(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_create_log = h.temp_dir.path().join("pr_create_no_origin.log");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_no_origin.log");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
@@ -3072,11 +3645,15 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
 
         let no_origin_ralph = r#"#!/bin/sh
 case "$1" in
@@ -3092,10 +3669,10 @@ case "$1" in
     ;;
 esac
 "#;
-        let ralph_path = write_mock_ralph(h, no_origin_ralph).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, no_origin_ralph).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-801",
@@ -3112,8 +3689,8 @@ esac
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3140,7 +3717,7 @@ esac
             "gh pr create should not be called when origin is missing"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-801")
@@ -3155,9 +3732,10 @@ esac
 
 fn daemon_pr_no_default_branch_fallback_head_only(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_args_log = h.temp_dir.path().join("pr_args_head_only.log");
+        let pr_args_log = dh.temp_dir.path().join("pr_args_head_only.log");
         let pr_args_log_str = pr_args_log.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
@@ -3182,15 +3760,19 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-802",
@@ -3207,8 +3789,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3221,7 +3803,7 @@ exit 1
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-802")
@@ -3280,11 +3862,12 @@ fn daemon_has_diff_invalid_base_returns_false(_h: &RalphHarness) -> TestResult {
 /// - Task completes successfully
 fn refinement_happy_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set up a mock refinement backend that reads stdin and outputs a
         // structured refinement payload.
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_backend.sh",
                 r#"#!/bin/sh
@@ -3299,14 +3882,14 @@ exit 0
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
         // Configure the claude backend command to use our mock
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
         // Seed a pending task with a raw_idea
@@ -3320,12 +3903,12 @@ exit 0
             None,
         );
         task["raw_idea"] = json!("Fix the login bug\n\nUsers cannot log in with SSO.");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
         // Mock ralph that records the idea it receives
-        let idea_log = h.temp_dir.path().join("refinement_idea.log");
+        let idea_log = dh.temp_dir.path().join("refinement_idea.log");
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -3333,10 +3916,10 @@ printf '%s' "$3" > "{idea_log_str}"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3362,7 +3945,10 @@ exit 0
 
         // The spawned child should have received the refined prompt
         let idea = fs::read_to_string(&idea_log).expect("read idea log");
-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
+        assert_eq!(
+            idea,
+            "Refined: implement the feature with proper error handling and tests."
+        );
     })
 }
 
@@ -3375,10 +3961,11 @@ exit 0
 /// - Dispatch completes successfully despite refinement failure
 fn refinement_failure_fallback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set up a mock refinement backend that fails
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_fail.sh",
                 "#!/bin/sh\necho 'backend error' >&2\nexit 1\n",
@@ -3386,14 +3973,14 @@ fn refinement_failure_fallback(h: &RalphHarness) -> TestResult {
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
         let raw_idea_text = "Raw bug report title\n\nRaw bug report body with details.";
@@ -3407,11 +3994,11 @@ fn refinement_failure_fallback(h: &RalphHarness) -> TestResult {
             None,
         );
         task["raw_idea"] = json!(raw_idea_text);
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
-        let idea_log = h.temp_dir.path().join("fallback_idea.log");
+        let idea_log = dh.temp_dir.path().join("fallback_idea.log");
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -3419,10 +4006,10 @@ printf '%s' "$3" > "{idea_log_str}"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3461,10 +4048,11 @@ exit 0
 /// - No refinement-related warnings in logs
 fn refinement_disabled_uses_raw_idea(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -3473,21 +4061,21 @@ fn refinement_disabled_uses_raw_idea(h: &RalphHarness) -> TestResult {
         .expect("set refinement_enabled failed");
 
         // Set up a backend that would fail to prove it's never called
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_nocall.sh",
                 "#!/bin/sh\necho 'SHOULD NOT BE CALLED' >&2\nexit 1\n",
             )
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
         let raw_idea_text = "Disabled refinement task\n\nBody of the task.";
@@ -3501,11 +4089,11 @@ fn refinement_disabled_uses_raw_idea(h: &RalphHarness) -> TestResult {
             None,
         );
         task["raw_idea"] = json!(raw_idea_text);
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
-        let idea_log = h.temp_dir.path().join("disabled_idea.log");
+        let idea_log = dh.temp_dir.path().join("disabled_idea.log");
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -3513,10 +4101,10 @@ printf '%s' "$3" > "{idea_log_str}"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3554,10 +4142,11 @@ exit 0
 /// - Task reaches terminal state normally
 fn refinement_comment_failure_non_blocking(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement to simplify (just test comment failure path)
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -3576,7 +4165,7 @@ fn refinement_comment_failure_non_blocking(h: &RalphHarness) -> TestResult {
             None,
         );
         task["raw_idea"] = json!(raw_idea_text);
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
         // Mock gh where comment posting always fails
         let gh_script = r#"#!/bin/sh
@@ -3610,12 +4199,16 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#;
-        let gh_path = write_mock_gh(h, gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, gh_script).expect("write mock gh");
 
-        let idea_log = h.temp_dir.path().join("comment_fail_idea.log");
+        let idea_log = dh.temp_dir.path().join("comment_fail_idea.log");
         let idea_log_str = idea_log.to_string_lossy().into_owned();
         let ralph_script = format!(
             r#"#!/bin/sh
@@ -3623,10 +4216,10 @@ printf '%s' "$3" > "{idea_log_str}"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3671,13 +4264,14 @@ exit 0
 /// - The overall sequence matches spec requirements
 fn refinement_strict_ordering(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let order_log = h.temp_dir.path().join("ordering.log");
+        let order_log = dh.temp_dir.path().join("ordering.log");
         let order_log_str = order_log.to_string_lossy().into_owned();
 
         // Mock refinement backend that logs step 1 (refine)
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_order.sh",
                 &format!(
@@ -3692,14 +4286,14 @@ exit 0
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
         // Mock gh that logs step 2 (comment) — comment calls happen after refine
@@ -3735,11 +4329,15 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
 
         // Mock ralph that logs step 3 (spawn)
         let ralph_script = format!(
@@ -3748,7 +4346,7 @@ echo "step:spawn" >> "{order_log_str}"
 exit 0
 "#
         );
-        let ralph_path = write_mock_ralph(h, &ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-204",
@@ -3760,10 +4358,10 @@ exit 0
             None,
         );
         task["raw_idea"] = json!("Ordering test\n\nBody.");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3834,10 +4432,11 @@ exit 0
 /// - Both dispatches complete successfully
 fn refinement_comment_idempotency_on_retry(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement to simplify (focus on comment idempotency)
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -3845,8 +4444,8 @@ fn refinement_comment_idempotency_on_retry(h: &RalphHarness) -> TestResult {
         ])
         .expect("set refinement_enabled failed");
 
-        let comment_log = h.temp_dir.path().join("idempotent_comment.log");
-        let comment_count_file = h.temp_dir.path().join("idempotent_comment_count.txt");
+        let comment_log = dh.temp_dir.path().join("idempotent_comment.log");
+        let comment_count_file = dh.temp_dir.path().join("idempotent_comment_count.txt");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
         let comment_count_str = comment_count_file.to_string_lossy().into_owned();
 
@@ -3898,12 +4497,16 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-205",
@@ -3915,11 +4518,11 @@ exit 1
             None,
         );
         task["raw_idea"] = json!("Idempotency test\n\nBody.");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
         // First run
-        let output1 = h
-            .ralph_env(
+        let output1 = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -3954,11 +4557,11 @@ exit 1
             None,
         );
         task2["raw_idea"] = json!("Idempotency test\n\nBody.");
-        write_tasks(h, vec![task2]).expect("write_tasks re-seed failed");
+        write_tasks(&dh, vec![task2]).expect("write_tasks re-seed failed");
 
         // Second run
-        let output2 = h
-            .ralph_env(
+        let output2 = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4002,9 +4605,10 @@ exit 1
 /// - pr_url is populated
 fn runtime_push_before_pr_create(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_create_log = h.temp_dir.path().join("pr_create_push_test.txt");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_push_test.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
         // Mock gh: pr list returns empty, pr create succeeds and logs
@@ -4033,16 +4637,20 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-130",
@@ -4059,8 +4667,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4080,7 +4688,7 @@ exit 1
         );
 
         // Task should be completed
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-130")
@@ -4118,9 +4726,10 @@ exit 1
 /// worktree to a project branch, causing "No commits between master and branch".
 fn runtime_branch_switch_updates_task_and_pr(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_head_log = h.temp_dir.path().join("gh_head_arg.txt");
+        let gh_head_log = dh.temp_dir.path().join("gh_head_arg.txt");
         let gh_head_log_str = gh_head_log.to_string_lossy().into_owned();
 
         // Custom gh mock that captures the --head argument from pr create
@@ -4155,17 +4764,21 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_branch_switch(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_branch_switch(&dh).expect("write mock ralph");
 
         // Pre-populate task with the original daemon branch
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-200",
@@ -4182,8 +4795,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4215,7 +4828,7 @@ exit 1
         );
 
         // task.branch in store must be updated to the new branch
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-200")
@@ -4256,9 +4869,10 @@ exit 1
 /// remains unchanged and no "worktree branch changed" log is emitted.
 fn runtime_branch_unchanged_no_switch_log(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_create_log = h.temp_dir.path().join("pr_create_no_switch.txt");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_no_switch.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
         let gh_script = format!(
@@ -4286,17 +4900,21 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
         // Use the standard commit mock (no branch switch)
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-201",
@@ -4313,8 +4931,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4342,7 +4960,7 @@ exit 1
         );
 
         // task.branch unchanged in store
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-201")
@@ -4381,9 +4999,10 @@ exit 1
 /// `.ralph/daemon/logs/{task_id}.log`, surviving worktree cleanup.
 fn runtime_child_output_captured_in_log(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
         // Mock ralph that prints known output to stdout and stderr
         let ralph_script = r#"#!/bin/sh
@@ -4399,10 +5018,10 @@ case "$1" in
     ;;
 esac
 "#;
-        let ralph_path = write_mock_ralph(h, ralph_script).expect("write mock ralph");
+        let ralph_path = write_mock_ralph(&dh, ralph_script).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-300",
@@ -4419,8 +5038,8 @@ esac
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4434,7 +5053,7 @@ esac
         assert_exit_code(&output, 0);
 
         // Verify log file exists
-        let log_path = h
+        let log_path = dh
             .repo_root
             .join(".ralph")
             .join("daemon")
@@ -4458,7 +5077,7 @@ esac
         );
 
         // Verify task completed
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-300")
@@ -4486,10 +5105,11 @@ esac
 /// PR is created with that refined title.
 fn refinement_title_in_pr(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set up a mock refinement backend that outputs a structured title + body.
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_title.sh",
                 r#"#!/bin/sh
@@ -4501,17 +5121,17 @@ exit 0
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
-        let pr_title_log = h.temp_dir.path().join("pr_title_refined.txt");
+        let pr_title_log = dh.temp_dir.path().join("pr_title_refined.txt");
         let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
 
         // Custom gh mock that captures the --title argument from pr create
@@ -4543,13 +5163,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-300",
@@ -4562,10 +5186,10 @@ exit 1
         );
         task["raw_idea"] = json!("Fix the login bug\n\nUsers cannot log in with SSO.");
         task["branch"] = json!("ralph/daemon/acme-widgets-300");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4593,7 +5217,7 @@ exit 1
         );
 
         // refined_title should be persisted in the task store
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-300")
@@ -4610,10 +5234,11 @@ exit 1
 /// original title extracted from raw_idea.
 fn refinement_disabled_pr_uses_original_title(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -4621,7 +5246,7 @@ fn refinement_disabled_pr_uses_original_title(h: &RalphHarness) -> TestResult {
         ])
         .expect("set refinement_enabled failed");
 
-        let pr_title_log = h.temp_dir.path().join("pr_title_disabled.txt");
+        let pr_title_log = dh.temp_dir.path().join("pr_title_disabled.txt");
         let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
 
         let gh_script = format!(
@@ -4652,13 +5277,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-301",
@@ -4671,10 +5300,10 @@ exit 1
         );
         task["raw_idea"] = json!("Original issue title\n\nBody of the issue.");
         task["branch"] = json!("ralph/daemon/acme-widgets-301");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4701,14 +5330,13 @@ exit 1
         );
 
         // refined_title should not be set
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-301")
             .unwrap();
         assert!(
-            task.get("refined_title").is_none()
-                || task["refined_title"].is_null(),
+            task.get("refined_title").is_none() || task["refined_title"].is_null(),
             "refined_title should not be set when refinement is disabled"
         );
     })
@@ -4718,10 +5346,11 @@ exit 1
 /// original title extracted from raw_idea.
 fn refinement_failure_pr_uses_original_title(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set up a failing refinement backend
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_fail_pr.sh",
                 "#!/bin/sh\necho 'backend error' >&2\nexit 1\n",
@@ -4729,17 +5358,17 @@ fn refinement_failure_pr_uses_original_title(h: &RalphHarness) -> TestResult {
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
-        let pr_title_log = h.temp_dir.path().join("pr_title_failure.txt");
+        let pr_title_log = dh.temp_dir.path().join("pr_title_failure.txt");
         let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
 
         let gh_script = format!(
@@ -4770,13 +5399,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-302",
@@ -4789,10 +5422,10 @@ exit 1
         );
         task["raw_idea"] = json!("Failure fallback title\n\nBody of the issue.");
         task["branch"] = json!("ralph/daemon/acme-widgets-302");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4830,10 +5463,11 @@ exit 1
 /// to the `ralph: {task_id}` format.
 fn legacy_task_without_raw_idea_pr_uses_fallback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable refinement so it doesn't interfere
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -4841,7 +5475,7 @@ fn legacy_task_without_raw_idea_pr_uses_fallback(h: &RalphHarness) -> TestResult
         ])
         .expect("set refinement_enabled failed");
 
-        let pr_title_log = h.temp_dir.path().join("pr_title_legacy.txt");
+        let pr_title_log = dh.temp_dir.path().join("pr_title_legacy.txt");
         let pr_title_log_str = pr_title_log.to_string_lossy().into_owned();
 
         // gh mock: issue view returns title/body for hydration
@@ -4888,13 +5522,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         // Task without raw_idea; the hydration from issue view will produce
         // an empty title ("\n\n") so extract_original_title returns None,
@@ -4909,10 +5547,10 @@ exit 1
             None,
         );
         // Note: no raw_idea field set — will be hydrated from mock gh
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -4944,10 +5582,11 @@ exit 1
 /// the refinement produces a structured title.
 fn refined_prompt_comment_includes_title(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set up a mock refinement backend that outputs a structured title + body.
-        let refine_script = h
+        let refine_script = dh
             .write_mock_script(
                 "mock_refine_comment_title.sh",
                 r#"#!/bin/sh
@@ -4959,17 +5598,17 @@ exit 0
             .expect("write mock refine backend");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
 
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "backends.claude.command",
             &refine_script_str,
         ])
         .expect("set claude command failed");
-        h.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set claude args failed");
 
-        let comment_log = h.temp_dir.path().join("comment_title_test.log");
+        let comment_log = dh.temp_dir.path().join("comment_title_test.log");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
 
         // Custom gh mock that captures comment body
@@ -5000,13 +5639,17 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let mut task = task_json(
             "acme-widgets-304",
@@ -5018,10 +5661,10 @@ exit 1
             None,
         );
         task["raw_idea"] = json!("Comment title test\n\nBody of the issue.");
-        write_tasks(h, vec![task]).expect("write_tasks failed");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5035,10 +5678,7 @@ exit 1
         assert_exit_code(&output, 0);
 
         // Check that the comment body includes the bold title
-        assert!(
-            comment_log.exists(),
-            "comment should have been posted"
-        );
+        assert!(comment_log.exists(), "comment should have been posted");
         let log = fs::read_to_string(&comment_log).expect("read comment log");
         assert!(
             log.contains("**Bold comment title test**"),
@@ -5068,7 +5708,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         assert!(wt.exists(), "worktree directory should exist");
 
         // Verify branch exists
-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        let branch_check = git_stdout(
+            &h.repo_root,
+            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
+        );
         assert!(
             branch_check.contains("ralph/daemon/acme-widgets-99"),
             "branch should exist after create_worktree"
@@ -5079,7 +5722,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         assert!(!wt.exists(), "worktree directory should be removed");
 
         // Branch should still exist
-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
+        let branch_check = git_stdout(
+            &h.repo_root,
+            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
+        );
         assert!(
             branch_check.contains("ralph/daemon/acme-widgets-99"),
             "branch should survive worktree removal"
@@ -5106,12 +5752,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
         // Create a tracked file, commit it, then modify it (dirty tracked)
         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
         git(&wt, &["add", "tracked.rs"]);
-        git(&wt, &[
-            "-c", "user.name=Test",
-            "-c", "user.email=test@test.com",
-            "-c", "commit.gpgsign=false",
-            "commit", "--no-verify", "-m", "add tracked",
-        ]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                "add tracked",
+            ],
+        );
         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
 
         // Create an untracked file (like SPEC.md from codex side-effect)
@@ -5155,22 +5810,32 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
 /// the child process, preventing the orchestrator from aborting.
 fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Pre-create the worktree and dirty it up
-        let workspace_root = h.repo_root.join(".ralph");
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-88")
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt = worktree::create_worktree(&dh.repo_root, &workspace_root, "acme-widgets-88")
             .expect("create_worktree should succeed");
 
         // Add a tracked file, commit, then modify (simulates prior run's changes)
         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
         git(&wt, &["add", "src.rs"]);
-        git(&wt, &[
-            "-c", "user.name=Test",
-            "-c", "user.email=test@test.com",
-            "-c", "commit.gpgsign=false",
-            "commit", "--no-verify", "-m", "prior run",
-        ]);
+        git(
+            &wt,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "-m",
+                "prior run",
+            ],
+        );
         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
 
         // Add an untracked file (simulates codex side-effect)
@@ -5178,7 +5843,7 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
 
         // Pre-populate a pending task matching the worktree
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 "acme-widgets-88",
                 "pending",
@@ -5191,11 +5856,11 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5218,7 +5883,7 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
         // (the mock ralph exits immediately, so the worktree state reflects
         // post-clean). Check the worktree still exists (or was cleaned up
         // as part of completion).
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-88")
@@ -5227,6 +5892,207 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
         assert!(
             ["completed", "failed"].contains(&state),
             "task should reach terminal state, got: {state}"
+        );
+    })
+}
+
+/// Test that create_worktree recovers from stale git worktree metadata by
+/// pruning before `git worktree add`.
+fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+        let task_id = "acme-widgets-381";
+
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("initial create_worktree should succeed");
+        assert!(wt.exists(), "worktree should exist after initial creation");
+
+        // Simulate a crash/manual delete: remove the directory without
+        // `git worktree remove`, leaving stale metadata under .git/worktrees.
+        fs::remove_dir_all(&wt).expect("remove worktree dir directly");
+        assert!(
+            !wt.exists(),
+            "worktree dir should be removed to simulate stale metadata"
+        );
+
+        let list_before = git_stdout(&h.repo_root, &["worktree", "list", "--porcelain"]);
+        assert!(
+            list_before.contains(task_id),
+            "expected stale worktree metadata for task before recreation, got:\n{list_before}"
+        );
+
+        // Must succeed because create_worktree now prunes before `worktree add`.
+        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("create_worktree should recover from stale metadata");
+        assert!(wt2.exists(), "worktree should be recreated after prune");
+    })
+}
+
+/// Test that reusing an existing worktree corrects a branch mismatch by
+/// force-checking out the expected daemon branch.
+fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let workspace_root = h.repo_root.join(".ralph");
+        let task_id = "acme-widgets-382";
+        let expected_branch = format!("ralph/daemon/{task_id}");
+        let mismatched_branch = "tmp-branch-mismatch-382";
+
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("initial create_worktree should succeed");
+        assert!(wt.exists(), "worktree should exist");
+
+        git(&wt, &["checkout", "-b", mismatched_branch]);
+        let before = git_stdout(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            before, mismatched_branch,
+            "test setup should move worktree to mismatched branch"
+        );
+
+        let reused = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+            .expect("reuse path should correct branch mismatch");
+        assert_eq!(reused, wt, "reuse path should return same worktree path");
+
+        let after = git_stdout(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            after, expected_branch,
+            "reuse path should force-checkout expected daemon branch"
+        );
+    })
+}
+
+/// Test retry dispatch preserves `.ralph/projects/<id>/loops/*` artifacts after
+/// clean+dispatch+failed-terminal retry flow.
+fn runtime_retrigger_preserves_project_artifacts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-383";
+        let project_id = "retry-proj-383";
+        let workspace_root = dh.repo_root.join(".ralph");
+        let expected_branch = format!("ralph/daemon/{task_id}");
+
+        // Pre-create the task worktree and project artifacts from a prior run.
+        let wt = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create_worktree should succeed");
+        let artifact_path = wt
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+            .join("loops")
+            .join("001-prior-failure")
+            .join("artifact.md");
+        let artifact_content = "artifact from prior failed attempt";
+        let parent = artifact_path
+            .parent()
+            .expect("artifact parent should exist");
+        fs::create_dir_all(parent).expect("create artifact parent dirs");
+        fs::write(&artifact_path, artifact_content).expect("write artifact");
+
+        // Add untracked noise outside .ralph that should be removed by clean_worktree.
+        let dirty_path = wt.join("SPEC.md");
+        fs::write(&dirty_path, "# stale file from previous run").expect("write dirty file");
+        assert!(
+            dirty_path.exists(),
+            "dirty file should exist before retry dispatch"
+        );
+
+        // Seed legacy failed task with project context for retry.
+        write_tasks(
+            &dh,
+            vec![{
+                let mut t = task_json(task_id, "failed", 383, "acme", "widgets", None, None);
+                t["project_id"] = json!(project_id);
+                t["branch"] = json!(expected_branch);
+                t["raw_idea"] = json!("Retry task\n\nPreserve prior loop artifacts.");
+                t
+            }],
+        )
+        .expect("write failed task failed");
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        // retrigger uses Workspace::discover() so must run from repo_root
+        let retrigger = dh
+            .ralph_env(["daemon", "retrigger", task_id], &[("PATH", &gh_path)])
+            .expect("daemon retrigger should execute");
+        assert_exit_code(&retrigger, 0);
+
+        let tasks_pending = load_tasks(&dh).expect("load_tasks after retrigger");
+        let pending_task = tasks_pending
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist after retrigger");
+        assert_eq!(
+            pending_task["state"],
+            json!("pending"),
+            "retrigger should transition task to pending"
+        );
+
+        let artifact_path_str = artifact_path.to_string_lossy().into_owned();
+        let dirty_path_str = dirty_path.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    [ "$2" = "--project" ] || exit 81
+    [ "$3" = "{project_id}" ] || exit 82
+    [ -f "{artifact_path_str}" ] || exit 83
+    grep -q "artifact from prior failed attempt" "{artifact_path_str}" || exit 84
+    [ ! -f "{dirty_path_str}" ] || exit 85
+    exit 1
+    ;;
+  auto)
+    echo "unexpected auto dispatch" >&2
+    exit 86
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 87
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["state"],
+            json!("failed"),
+            "mock ralph exits non-zero so retry should finish as failed"
+        );
+
+        assert!(
+            artifact_path.exists(),
+            "project loop artifact should survive retry clean+dispatch cycle"
+        );
+        let content_after = fs::read_to_string(&artifact_path).expect("read artifact");
+        assert_eq!(
+            content_after, artifact_content,
+            "project loop artifact content should be preserved"
+        );
+        assert!(
+            !dirty_path.exists(),
+            "clean_worktree should remove non-.ralph stale files before spawn"
         );
     })
 }
@@ -5245,10 +6111,11 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
 /// - task pr_url is set to the existing PR URL
 fn runtime_pr_edit_existing_uses_body_file(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_edit_log = h.temp_dir.path().join("pr_edit.log");
-        let pr_create_log = h.temp_dir.path().join("pr_create_edit_test.log");
+        let pr_edit_log = dh.temp_dir.path().join("pr_edit.log");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_edit_test.log");
         let pr_edit_log_str = pr_edit_log.to_string_lossy().into_owned();
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
@@ -5290,16 +6157,20 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-400",
@@ -5317,8 +6188,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5355,7 +6226,7 @@ exit 1
         );
 
         // pr_url should be set to the existing PR
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-400")
@@ -5380,10 +6251,11 @@ exit 1
 /// - Task still reaches completed state (label updates and cleanup proceed)
 fn runtime_pr_edit_failure_no_duplicate_create(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_edit_log = h.temp_dir.path().join("pr_edit_fail.log");
-        let pr_create_log = h.temp_dir.path().join("pr_create_edit_fail.log");
+        let pr_edit_log = dh.temp_dir.path().join("pr_edit_fail.log");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_edit_fail.log");
         let pr_edit_log_str = pr_edit_log.to_string_lossy().into_owned();
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
 
@@ -5426,16 +6298,20 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-401",
@@ -5453,8 +6329,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5470,10 +6346,7 @@ exit 1
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // pr edit was attempted
-        assert!(
-            pr_edit_log.exists(),
-            "pr edit should have been attempted"
-        );
+        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
 
         // pr create should NOT have been called (no fallthrough on edit failure)
         assert!(
@@ -5494,7 +6367,7 @@ exit 1
         );
 
         // Task should still reach completed state (label updates and cleanup proceed)
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-401")
@@ -5524,10 +6397,11 @@ exit 1
 /// - pr_url is populated from the create result
 fn runtime_pr_create_uses_body_file(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_create_log = h.temp_dir.path().join("pr_create_bodyfile.log");
-        let pr_body_log = h.temp_dir.path().join("pr_body_content.log");
+        let pr_create_log = dh.temp_dir.path().join("pr_create_bodyfile.log");
+        let pr_body_log = dh.temp_dir.path().join("pr_body_content.log");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
         let pr_body_log_str = pr_body_log.to_string_lossy().into_owned();
 
@@ -5571,16 +6445,20 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph_with_commit(h).expect("write mock ralph");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph_with_commit(&dh).expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-402",
@@ -5598,8 +6476,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5613,10 +6491,7 @@ exit 1
         assert_exit_code(&output, 0);
 
         // pr create should have been called
-        assert!(
-            pr_create_log.exists(),
-            "pr create should have been called"
-        );
+        assert!(pr_create_log.exists(), "pr create should have been called");
 
         // Body file should have been captured and contain structured content
         assert!(
@@ -5642,7 +6517,7 @@ exit 1
         );
 
         // pr_url should be populated
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-402")
@@ -5665,9 +6540,10 @@ exit 1
 /// - Body still contains Issue Context section
 fn runtime_pr_diff_stat_fallback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let pr_body_log = h.temp_dir.path().join("pr_body_diffstat_fallback.log");
+        let pr_body_log = dh.temp_dir.path().join("pr_body_diffstat_fallback.log");
         let pr_body_log_str = pr_body_log.to_string_lossy().into_owned();
 
         // Mock gh that captures body-file content
@@ -5708,12 +6584,16 @@ case "$1" in
     esac
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
 esac
 exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(h, &gh_script).expect("write mock gh");
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
         // Use mock ralph that creates a commit but breaks diff stat base detection
         let ralph_path = write_mock_ralph(
             h,
@@ -5722,7 +6602,7 @@ exit 1
         .expect("write mock ralph");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-403",
@@ -5740,8 +6620,8 @@ exit 1
         )
         .expect("write_tasks failed");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5755,7 +6635,7 @@ exit 1
         assert_exit_code(&output, 0);
 
         // Task should be completed
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == "acme-widgets-403")
@@ -5808,15 +6688,16 @@ exit 1
 /// - No PR view queries are made
 fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Disable auto-rebase
-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+        dh.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
             .expect("set auto_rebase_enabled failed");
 
         // Seed a completed task with a PR URL
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-100",
@@ -5834,11 +6715,11 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5862,10 +6743,11 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
 /// Test that conflicting PR merge status causes skip.
 fn rebase_conflict_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-101",
@@ -5883,12 +6765,12 @@ fn rebase_conflict_skip(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"CONFLICTING","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5916,10 +6798,11 @@ fn rebase_conflict_skip(h: &RalphHarness) -> TestResult {
 /// Test that closed/merged PRs cause skip.
 fn rebase_closed_merged_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-102",
@@ -5937,12 +6820,12 @@ fn rebase_closed_merged_skip(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"CLOSED","baseRefName":"master","headRefOid":"abc123"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -5970,10 +6853,11 @@ fn rebase_closed_merged_skip(h: &RalphHarness) -> TestResult {
 /// Test that unknown mergeability causes skip.
 fn rebase_unknown_mergeability_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-103",
@@ -5991,12 +6875,12 @@ fn rebase_unknown_mergeability_skip(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"UNKNOWN","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6026,10 +6910,11 @@ fn rebase_unknown_mergeability_skip(h: &RalphHarness) -> TestResult {
 /// Verifies the log mentions the switched branch name, not the default daemon branch.
 fn rebase_branch_switched_task(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-104",
@@ -6048,12 +6933,12 @@ fn rebase_branch_switched_task(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"def456"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6081,10 +6966,11 @@ fn rebase_branch_switched_task(h: &RalphHarness) -> TestResult {
 /// Test that the rebase target is `origin/<baseRefName>` from PR metadata.
 fn rebase_base_branch_from_pr(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-105",
@@ -6102,12 +6988,12 @@ fn rebase_base_branch_from_pr(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"develop","headRefOid":"ghi789"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6137,13 +7023,14 @@ fn rebase_base_branch_from_pr(h: &RalphHarness) -> TestResult {
 /// Uses a mock git (push fails) and mock gh that logs pr comment calls to a file.
 fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let comment_log = h.temp_dir.path().join("pr_comment_log.txt");
+        let comment_log = dh.temp_dir.path().join("pr_comment_log.txt");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-106",
@@ -6162,7 +7049,7 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
         .expect("write_tasks failed");
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
-        let mock_git = h
+        let mock_git = dh
             .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
             .expect("write mock git");
         let mock_git_dir = mock_git
@@ -6170,15 +7057,15 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
         // Prepend mock git dir to PATH so it shadows real git during rebase
         let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6223,14 +7110,15 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
 /// `last_rebase_head_sha` pre-seeded to match the PR's `headRefOid`.
 fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let comment_log = h.temp_dir.path().join("dedup_comment_log.txt");
+        let comment_log = dh.temp_dir.path().join("dedup_comment_log.txt");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
 
         // Pre-seed task with last_rebase_head_sha matching current head
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-107",
@@ -6250,7 +7138,7 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
         .expect("write_tasks failed");
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
-        let mock_git = h
+        let mock_git = dh
             .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
             .expect("write mock git");
         let mock_git_dir = mock_git
@@ -6258,14 +7146,14 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"same_sha_123"}"#;
 
         let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6308,11 +7196,12 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
 /// and two tasks to verify the second task is still attempted.
 fn rebase_force_with_lease_rejection(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Two tasks — both eligible for rebase
         write_tasks(
-            h,
+            &dh,
             vec![
                 {
                     let mut t = task_json(
@@ -6347,7 +7236,7 @@ fn rebase_force_with_lease_rejection(h: &RalphHarness) -> TestResult {
         .expect("write_tasks failed");
 
         // Write mock git that simulates lease rejection
-        let mock_git = h
+        let mock_git = dh
             .write_mock_script("git", &mock_scripts::daemon_mock_git_lease_reject_script())
             .expect("write mock git");
         let mock_git_dir = mock_git
@@ -6355,15 +7244,15 @@ fn rebase_force_with_lease_rejection(h: &RalphHarness) -> TestResult {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
         // Prepend mock git dir to PATH so it shadows real git during rebase
         let path_with_mock_git = format!("{mock_git_dir}:{gh_path}");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6400,11 +7289,12 @@ fn rebase_force_with_lease_rejection(h: &RalphHarness) -> TestResult {
 /// Test that `gh pr view` failure stops processing for the cycle.
 fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Two tasks — both have PRs
         write_tasks(
-            h,
+            &dh,
             vec![
                 {
                     let mut t = task_json(
@@ -6439,11 +7329,11 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
         .expect("write_tasks failed");
 
         // gh pr view fails with exit code 1
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6468,7 +7358,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
         );
 
         // The second task should NOT have been attempted (break after first failure)
-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
+        let second_attempt_count = stderr
+            .matches("auto-rebase: rebasing acme-widgets-110")
+            .count();
         assert_eq!(
             second_attempt_count, 0,
             "second task should not be attempted after gh pr view failure"
@@ -6479,15 +7371,16 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
 /// Test that per-cycle cap limits rebase attempts.
 fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Set max_rebases_per_cycle to 1 via config
-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+        dh.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
             .expect("set max_rebases_per_cycle failed");
 
         // Create 3 tasks with PRs
         write_tasks(
-            h,
+            &dh,
             vec![
                 {
                     let mut t = task_json(
@@ -6535,12 +7428,12 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6571,17 +7464,19 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
 /// Uses a dynamically-computed "now" timestamp to avoid time-fragility.
 fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Use a very large interval to ensure skip regardless of clock skew
-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+        dh.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
             .expect("set rebase_interval_seconds failed");
 
         // Dynamically compute a "just now" timestamp so test never becomes stale
-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let recent_timestamp =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-130",
@@ -6600,12 +7495,12 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let gh_path = write_daemon_mock_gh_rebase(h).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+        let gh_path = write_daemon_mock_gh_rebase(&dh).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
         let pr_json = r#"{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}"#;
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -6633,11 +7528,12 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
 /// Test that `ralph daemon status` LAST REBASE column shows RFC3339 timestamp.
 fn rebase_status_last_rebase_column(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         let timestamp = "2026-02-14T19:22:31Z";
         write_tasks(
-            h,
+            &dh,
             vec![{
                 let mut t = task_json(
                     "acme-widgets-140",
@@ -6654,7 +7550,7 @@ fn rebase_status_last_rebase_column(h: &RalphHarness) -> TestResult {
         )
         .expect("write_tasks failed");
 
-        let status = h
+        let status = dh
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&status, 0);
@@ -6676,10 +7572,11 @@ fn rebase_status_last_rebase_column(h: &RalphHarness) -> TestResult {
 /// Test that state deserialization is backward compatible (missing rebase fields).
 fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
         // Write tasks without last_rebase_at / last_rebase_head_sha fields
-        let tasks_path = h.repo_root.join(".ralph").join("daemon").join("tasks.json");
+        let tasks_path = dh.repo_root.join(".ralph").join("daemon").join("tasks.json");
         if let Some(parent) = tasks_path.parent() {
             fs::create_dir_all(parent).expect("create daemon dir");
         }
@@ -6698,7 +7595,7 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
         }]"#;
         fs::write(&tasks_path, legacy_json).expect("write legacy tasks");
 
-        let status = h
+        let status = dh
             .ralph(["daemon", "status"])
             .expect("daemon status should execute");
         assert_exit_code(&status, 0);
@@ -6716,11 +7613,414 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
         );
 
         // Also verify deserialization round-trip works
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         assert_eq!(tasks.len(), 1);
         assert!(
-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
+            tasks[0]
+                .get("last_rebase_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true),
             "last_rebase_at should be null/missing"
+        );
+    })
+}
+
+// =============================================================================
+// Loop 2 Data-Dir Provisioning and Multi-Repo Tests
+// =============================================================================
+
+/// Create an empty data-dir, run daemon start with a mock gh that simulates
+/// clone. Assert: repo dir exists, .ralph/ workspace initialized, tasks.json
+/// written, daemon completes exit 0.
+fn daemon_start_bootstraps_empty_dir(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("fresh-data");
+        let data_dir_str = data_dir.to_string_lossy().into_owned();
+
+        let gh_path = write_mock_gh(
+            h,
+            &mock_scripts::daemon_mock_gh_clone_script(),
+        )
+        .expect("write mock gh");
+
+        let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--data-dir",
+                    &data_dir_str,
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let repo_dir = data_dir.join("acme").join("widgets");
+        assert!(
+            repo_dir.join(".git").exists(),
+            "repo should have been cloned: {}",
+            repo_dir.display()
+        );
+        assert!(
+            repo_dir.join(".ralph").exists(),
+            ".ralph/ workspace should be initialized: {}",
+            repo_dir.display()
+        );
+    })
+}
+
+/// Create a data-dir inside an existing git repo. Verify daemon start rejects
+/// it with a clear error.
+fn daemon_start_rejects_git_data_dir(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // h.repo_root is already a git repo. Use a subdirectory of it as data-dir.
+        let git_subdir = h.repo_root.join("daemon-data");
+        std::fs::create_dir_all(&git_subdir).expect("create subdir");
+        let data_dir_str = git_subdir.to_string_lossy().into_owned();
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--data-dir",
+                    &data_dir_str,
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[],
+            )
+            .expect("daemon start should execute");
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert_ne!(exit_code, 0, "daemon start should fail");
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("must not be inside a git repository"),
+            "expected git repo guard error, got:\n{combined}"
+        );
+    })
+}
+
+/// Run daemon start with duplicate --repo values. Verify rejection.
+fn daemon_start_rejects_duplicate_repo(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir_str = temp.path().to_string_lossy().into_owned();
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--data-dir",
+                    &data_dir_str,
+                    "--repo",
+                    "acme/widgets",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[],
+            )
+            .expect("daemon start should execute");
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert_ne!(exit_code, 0, "daemon start should fail with duplicate repo");
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("duplicate --repo"),
+            "expected duplicate repo error, got:\n{combined}"
+        );
+    })
+}
+
+/// Run daemon start with a mock gh that fails on clone. Verify the error
+/// propagates and no .ralph/ directory is created.
+fn daemon_start_clone_failure_propagates(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("clone-fail");
+        let data_dir_str = data_dir.to_string_lossy().into_owned();
+
+        let gh_path = write_mock_gh(
+            h,
+            &mock_scripts::daemon_mock_gh_clone_script(),
+        )
+        .expect("write mock gh");
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--data-dir",
+                    &data_dir_str,
+                    "--repo",
+                    "acme/nonexistent",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("MOCK_GH_CLONE_FAIL", "true")],
+            )
+            .expect("daemon start should execute");
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert_ne!(exit_code, 0, "daemon start should fail on clone failure");
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("clone") || combined.contains("Could not resolve"),
+            "expected clone failure message, got:\n{combined}"
+        );
+
+        // Ensure bootstrap did not silently run
+        let repo_dir = data_dir.join("acme").join("nonexistent");
+        assert!(
+            !repo_dir.join(".ralph").exists(),
+            ".ralph/ should not exist after clone failure"
+        );
+    })
+}
+
+/// Pre-populate tasks for two repos under a data-dir. Run daemon status.
+/// Assert both repos' tasks appear.
+fn daemon_status_multi_repo(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        // Set up two repos under data-dir
+        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("daemon harness 1");
+        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
+            .expect("daemon harness 2");
+
+        // Initialize workspaces
+        dh1.init_workspace().expect("init 1");
+        dh2.init_workspace().expect("init 2");
+
+        // Write tasks for repo 1
+        write_tasks(
+            &dh1,
+            vec![task_json(
+                "acme-widgets-10",
+                "pending",
+                10,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write tasks 1");
+
+        // Write tasks for repo 2
+        write_tasks(
+            &dh2,
+            vec![task_json(
+                "acme-gadgets-20",
+                "in_progress",
+                20,
+                "acme",
+                "gadgets",
+                Some(1234),
+                Some(1234),
+            )],
+        )
+        .expect("write tasks 2");
+
+        // Copy both repos under a single data-dir
+        let combined_data = temp.path().join("combined");
+        std::fs::create_dir_all(combined_data.join("acme")).expect("create acme dir");
+
+        // Copy repo 1
+        copy_dir_recursive(&dh1.repo_root, &combined_data.join("acme").join("widgets"))
+            .expect("copy repo 1");
+        // Copy repo 2
+        copy_dir_recursive(&dh2.repo_root, &combined_data.join("acme").join("gadgets"))
+            .expect("copy repo 2");
+
+        let combined_str = combined_data.to_string_lossy().into_owned();
+        let output = h
+            .ralph_env(
+                ["daemon", "status", "--data-dir", &combined_str],
+                &[],
+            )
+            .expect("daemon status should execute");
+        assert_exit_code(&output, 0);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("acme-widgets-10"),
+            "expected widgets task in output, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("acme-gadgets-20"),
+            "expected gadgets task in output, got:\n{stdout}"
+        );
+    })
+}
+
+/// Pre-populate tasks for two repos with different issue numbers. Abort by
+/// full task ID from one repo. Assert correct task aborted.
+fn daemon_abort_cross_repo(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let combined_data = temp.path().join("combined");
+
+        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("daemon harness 1");
+        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
+            .expect("daemon harness 2");
+
+        dh1.init_workspace().expect("init 1");
+        dh2.init_workspace().expect("init 2");
+
+        write_tasks(
+            &dh1,
+            vec![task_json(
+                "acme-widgets-10",
+                "in_progress",
+                10,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write tasks 1");
+
+        write_tasks(
+            &dh2,
+            vec![task_json(
+                "acme-gadgets-20",
+                "in_progress",
+                20,
+                "acme",
+                "gadgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write tasks 2");
+
+        std::fs::create_dir_all(combined_data.join("acme")).expect("create acme dir");
+        copy_dir_recursive(&dh1.repo_root, &combined_data.join("acme").join("widgets"))
+            .expect("copy repo 1");
+        copy_dir_recursive(&dh2.repo_root, &combined_data.join("acme").join("gadgets"))
+            .expect("copy repo 2");
+
+        let combined_str = combined_data.to_string_lossy().into_owned();
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "abort",
+                    "--data-dir",
+                    &combined_str,
+                    "acme-widgets-10",
+                ],
+                &[],
+            )
+            .expect("daemon abort should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "aborted task acme-widgets-10");
+
+        // Verify the widget task was aborted
+        let tasks_path = combined_data
+            .join("acme")
+            .join("widgets")
+            .join(".ralph")
+            .join("daemon")
+            .join("tasks.json");
+        let raw = fs::read_to_string(tasks_path).expect("read tasks");
+        let tasks: Vec<Value> = serde_json::from_str(&raw).expect("parse tasks");
+        assert_eq!(tasks[0]["state"], json!("aborted"));
+
+        // Verify the gadgets task was NOT aborted
+        let tasks_path2 = combined_data
+            .join("acme")
+            .join("gadgets")
+            .join(".ralph")
+            .join("daemon")
+            .join("tasks.json");
+        let raw2 = fs::read_to_string(tasks_path2).expect("read tasks 2");
+        let tasks2: Vec<Value> = serde_json::from_str(&raw2).expect("parse tasks 2");
+        assert_eq!(tasks2[0]["state"], json!("in_progress"));
+    })
+}
+
+/// Pre-populate tasks in two repos with the same bare issue number. Run daemon
+/// abort with the bare number. Assert ambiguous error listing both repos.
+fn daemon_abort_ambiguous_bare_number(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let combined_data = temp.path().join("combined");
+
+        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("daemon harness 1");
+        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
+            .expect("daemon harness 2");
+
+        dh1.init_workspace().expect("init 1");
+        dh2.init_workspace().expect("init 2");
+
+        write_tasks(
+            &dh1,
+            vec![task_json(
+                "acme-widgets-42",
+                "pending",
+                42,
+                "acme",
+                "widgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write tasks 1");
+
+        write_tasks(
+            &dh2,
+            vec![task_json(
+                "acme-gadgets-42",
+                "pending",
+                42,
+                "acme",
+                "gadgets",
+                None,
+                None,
+            )],
+        )
+        .expect("write tasks 2");
+
+        std::fs::create_dir_all(combined_data.join("acme")).expect("create acme dir");
+        copy_dir_recursive(&dh1.repo_root, &combined_data.join("acme").join("widgets"))
+            .expect("copy repo 1");
+        copy_dir_recursive(&dh2.repo_root, &combined_data.join("acme").join("gadgets"))
+            .expect("copy repo 2");
+
+        let combined_str = combined_data.to_string_lossy().into_owned();
+        let output = h
+            .ralph_env(
+                ["daemon", "abort", "--data-dir", &combined_str, "42"],
+                &[],
+            )
+            .expect("daemon abort should execute");
+
+        assert_exit_code(&output, 2);
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("ambiguous"),
+            "expected ambiguous error, got:\n{combined}"
         );
     })
 }
@@ -6729,9 +8029,20 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
 // Test helpers
 // =============================================================================
 
-// =============================================================================
-// Test helpers
-// =============================================================================
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
+}
 
 fn ensure_repo_ready_blocking(repo_root: &Path) -> crate::Result<()> {
     let repo_root = repo_root.to_path_buf();
@@ -6761,6 +8072,241 @@ fn git(repo_root: &Path, args: &[&str]) {
         repo_root.display(),
         String::from_utf8_lossy(&output.stderr).trim()
     );
+}
+
+// =============================================================================
+// Loop 2 Dispatch-time Project Backfill Tests
+// =============================================================================
+
+/// Asserts stray project directories without `state.json` are ignored by
+/// dispatch-time project discovery.
+///
+/// Sets up a worktree with:
+/// - `.ralph/projects/valid-proj/state.json` (valid)
+/// - `.ralph/projects/stray-proj/` (no state.json — stray)
+///
+/// The legacy task (project_id = null) should discover only `valid-proj` and
+/// dispatch via `ralph run --project valid-proj`.
+fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-500";
+
+        // Seed a legacy task with no project_id.
+        write_tasks(
+            &dh,
+            vec![{
+                let mut t = task_json(task_id, "pending", 500, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Legacy task\n\nShould discover valid project.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Pre-create a real git worktree so daemon reuses it.
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create worktree");
+
+        // Valid project: has state.json
+        let valid_proj_dir = wt_path.join(".ralph").join("projects").join("valid-proj");
+        fs::create_dir_all(&valid_proj_dir).expect("create valid project dir");
+        fs::write(valid_proj_dir.join("state.json"), r#"{"status":"active"}"#)
+            .expect("write valid state.json");
+
+        // Stray project: directory only, no state.json
+        let stray_proj_dir = wt_path.join(".ralph").join("projects").join("stray-proj");
+        fs::create_dir_all(&stray_proj_dir).expect("create stray project dir");
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("discovery_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    printf '%s\n' "$3" >> "{args_log_str}"
+    exit 0
+    ;;
+  auto)
+    printf 'auto\n' > "{args_log_str}"
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify dispatch used `ralph run --project valid-proj`
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("run\n--project\nvalid-proj\n"),
+            "expected run --project valid-proj, got:\n{args}"
+        );
+
+        // Verify project_id was persisted to the task store
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["project_id"],
+            json!("valid-proj"),
+            "project_id should be backfilled to valid-proj"
+        );
+    })
+}
+
+/// Asserts dispatch-time scan discovers a single valid project for a legacy
+/// failed task, persists `project_id`, and uses `ralph run --project`.
+///
+/// Sets up:
+/// - A failed task with no `project_id` (legacy), retriggered to pending
+/// - A worktree with exactly one valid project under `.ralph/projects/`
+///
+/// Verifies:
+/// - `project_id` is persisted in the task store before spawn
+/// - Child is spawned via `ralph run --project <id>`
+fn runtime_dispatch_backfills_legacy_failed_task_project_id(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let task_id = "acme-widgets-501";
+        let expected_project_id = "backfill-proj-501";
+
+        // Seed a legacy task: originally failed with no project_id, now
+        // retriggered back to pending.
+        write_tasks(
+            &dh,
+            vec![{
+                let mut t = task_json(task_id, "pending", 501, "acme", "widgets", None, None);
+                t["raw_idea"] = json!("Legacy failed task\n\nShould backfill project_id.");
+                t
+            }],
+        )
+        .expect("write_tasks failed");
+
+        // Pre-create a real git worktree with a single valid project.
+        let workspace_root = dh.repo_root.join(".ralph");
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create worktree");
+
+        let proj_dir = wt_path
+            .join(".ralph")
+            .join("projects")
+            .join(expected_project_id);
+        fs::create_dir_all(&proj_dir).expect("create project dir");
+        fs::write(proj_dir.join("state.json"), r#"{"status":"completed"}"#)
+            .expect("write state.json");
+
+        // Also create a loops directory to simulate prior artifacts
+        let loops_dir = proj_dir.join("loops").join("001-initial");
+        fs::create_dir_all(&loops_dir).expect("create loops dir");
+        fs::write(loops_dir.join("artifact.md"), "prior attempt artifact").expect("write artifact");
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("backfill_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  run)
+    printf '%s\n' "$1" > "{args_log_str}"
+    printf '%s\n' "$2" >> "{args_log_str}"
+    printf '%s\n' "$3" >> "{args_log_str}"
+    exit 1
+    ;;
+  auto)
+    printf 'auto\n' > "{args_log_str}"
+    exit 1
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("event=project_backfill"),
+            "expected project_backfill structured log, stderr:\n{stderr}"
+        );
+
+        // Verify dispatch used `ralph run --project <id>`
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with(&format!("run\n--project\n{expected_project_id}\n")),
+            "expected run --project {expected_project_id}, got:\n{args}"
+        );
+
+        // Verify project_id was persisted to the task store
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["project_id"],
+            json!(expected_project_id),
+            "project_id should be backfilled"
+        );
+
+        // Verify prior artifacts are preserved (task failed so worktree is kept)
+        let artifact_path = wt_path
+            .join(".ralph")
+            .join("projects")
+            .join(expected_project_id)
+            .join("loops")
+            .join("001-initial")
+            .join("artifact.md");
+        assert!(
+            artifact_path.exists(),
+            "prior loop artifacts should be preserved after dispatch"
+        );
+    })
 }
 
 fn git_stdout(repo_root: &Path, args: &[&str]) -> String {

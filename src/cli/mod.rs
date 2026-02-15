@@ -545,6 +545,8 @@ mod tests {
             "ralph",
             "daemon",
             "start",
+            "--data-dir",
+            "/tmp/test",
             "--repo",
             "acme/widgets",
             "--poll-seconds",
@@ -563,7 +565,8 @@ mod tests {
             panic!("expected daemon start command");
         };
 
-        assert_eq!(start_args.repo.as_deref(), Some("acme/widgets"));
+        assert_eq!(start_args.data_dir, std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(start_args.repo, vec!["acme/widgets".to_owned()]);
         assert_eq!(start_args.poll_seconds, Some(30));
         assert_eq!(start_args.max_concurrent, Some(2));
         assert_eq!(
@@ -578,6 +581,8 @@ mod tests {
             "ralph",
             "daemon",
             "start",
+            "--data-dir",
+            "/tmp/test",
             "--repo",
             "acme/widgets",
             "--max-concurrent",
@@ -590,12 +595,33 @@ mod tests {
             panic!("expected daemon start command");
         };
 
+        assert_eq!(start_args.data_dir, std::path::PathBuf::from("/tmp/test"));
         assert_eq!(start_args.max_concurrent, Some(1));
     }
 
     #[test]
+    fn parses_daemon_status_with_data_dir() {
+        let cli = Cli::parse_from(["ralph", "daemon", "status", "--data-dir", "/tmp/test"]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Status(status_args) = args.command else {
+            panic!("expected daemon status command");
+        };
+
+        assert_eq!(status_args.data_dir, std::path::PathBuf::from("/tmp/test"));
+    }
+
+    #[test]
     fn parses_daemon_abort_with_task_selector() {
-        let cli = Cli::parse_from(["ralph", "daemon", "abort", "acme-widgets-42"]);
+        let cli = Cli::parse_from([
+            "ralph",
+            "daemon",
+            "abort",
+            "--data-dir",
+            "/tmp/test",
+            "acme-widgets-42",
+        ]);
         let Commands::Daemon(args) = cli.command else {
             panic!("expected daemon command");
         };
@@ -603,6 +629,20 @@ mod tests {
             panic!("expected daemon abort command");
         };
 
+        assert_eq!(abort_args.data_dir, std::path::PathBuf::from("/tmp/test"));
         assert_eq!(abort_args.task_id_or_number, "acme-widgets-42");
+    }
+
+    #[test]
+    fn parses_daemon_retrigger_with_task_id() {
+        let cli = Cli::parse_from(["ralph", "daemon", "retrigger", "acme-widgets-42"]);
+        let Commands::Daemon(args) = cli.command else {
+            panic!("expected daemon command");
+        };
+        let super::daemon::DaemonCommand::Retrigger(retrigger_args) = args.command else {
+            panic!("expected daemon retrigger command");
+        };
+
+        assert_eq!(retrigger_args.task_id, "acme-widgets-42");
     }
 }

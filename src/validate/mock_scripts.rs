@@ -548,8 +548,32 @@ case "$1" in
         ;;
     esac
     ;;
+  label)
+    case "$2" in
+      create)
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   repo)
     case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
       view)
         printf 'acme/widgets\n'
         exit 0
@@ -718,6 +742,15 @@ case "$1" in
         ;;
     esac
     ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
 esac
 exit 1
@@ -860,6 +893,15 @@ case "$1" in
         ;;
     esac
     ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
   repo)
     case "$2" in
       view) printf 'acme/widgets\n' ; exit 0 ;;
@@ -925,8 +967,21 @@ case "$1" in
   rev-parse)
     for arg in "$@"; do
       if [ "$arg" = "--show-toplevel" ]; then
-        pwd
-        exit 0
+        # Only succeed if CWD is actually inside a git repo (has .git).
+        # Walk up from CWD to find .git; fail if not found.
+        check_dir="$(pwd)"
+        while true; do
+          if [ -d "$check_dir/.git" ] || [ -f "$check_dir/.git" ]; then
+            echo "$check_dir"
+            exit 0
+          fi
+          parent="$(dirname "$check_dir")"
+          if [ "$parent" = "$check_dir" ]; then
+            echo "fatal: not a git repository" >&2
+            exit 128
+          fi
+          check_dir="$parent"
+        done
       fi
       if [ "$arg" = "--abbrev-ref" ]; then
         echo "mock-branch"
@@ -991,8 +1046,20 @@ case "$1" in
   rev-parse)
     for arg in "$@"; do
       if [ "$arg" = "--show-toplevel" ]; then
-        pwd
-        exit 0
+        # Only succeed if CWD is actually inside a git repo (has .git).
+        check_dir="$(pwd)"
+        while true; do
+          if [ -d "$check_dir/.git" ] || [ -f "$check_dir/.git" ]; then
+            echo "$check_dir"
+            exit 0
+          fi
+          parent="$(dirname "$check_dir")"
+          if [ "$parent" = "$check_dir" ]; then
+            echo "fatal: not a git repository" >&2
+            exit 128
+          fi
+          check_dir="$parent"
+        done
       fi
       if [ "$arg" = "--abbrev-ref" ]; then
         echo "mock-branch"
@@ -1002,6 +1069,99 @@ case "$1" in
     exit 0
     ;;
   *) exit 0 ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `gh` script for daemon clone tests. Handles `gh repo clone <slug> <dir>`
+/// by creating a git repo at the target directory. All other commands behave like
+/// `daemon_mock_gh_script()`.
+///
+/// Set `MOCK_GH_CLONE_FAIL` to "true" to simulate clone failure.
+pub fn daemon_mock_gh_clone_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for daemon clone + runtime tests.
+# Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
+# Env: MOCK_GH_CLONE_FAIL - if "true", `repo clone` fails
+
+case "$1" in
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ "$MOCK_GH_CLONE_FAIL" = "true" ]; then
+          echo "error: Could not resolve to a Repository" >&2
+          exit 1
+        fi
+        # Simulate clone by creating a git repo
+        mkdir -p "$target_dir"
+        git init "$target_dir" --quiet 2>/dev/null
+        git -C "$target_dir" config user.email "mock@test"
+        git -C "$target_dir" config user.name "MockClone"
+        touch "$target_dir/.gitkeep"
+        git -C "$target_dir" add .gitkeep
+        git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        exit 0
+        ;;
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  issue)
+    case "$2" in
+      list)
+        if [ -n "$MOCK_GH_ISSUES" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit) exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
 esac
 "###
     .to_owned()

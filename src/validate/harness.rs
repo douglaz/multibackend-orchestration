@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
@@ -24,19 +25,7 @@ impl RalphHarness {
         let temp_dir = TempDir::new()?;
         let repo_root = temp_dir.path().join("repo");
         let ralph_bin = bin.as_ref().to_path_buf();
-        fs::create_dir_all(&repo_root)?;
-
-        run_git(&repo_root, &["init"])?;
-        run_git(
-            &repo_root,
-            &["config", "user.email", "validate@example.com"],
-        )?;
-        run_git(&repo_root, &["config", "user.name", "Validate Harness"])?;
-
-        fs::write(repo_root.join(".gitkeep"), "")?;
-        run_git(&repo_root, &["add", ".gitkeep"])?;
-        run_git(&repo_root, &["commit", "-m", "chore: initial commit"])?;
-        run_git(&repo_root, &["branch", "-M", "master"])?;
+        initialize_git_repo(&repo_root, true)?;
 
         Ok(Self {
             temp_dir,
@@ -50,14 +39,7 @@ impl RalphHarness {
         let temp_dir = TempDir::new()?;
         let repo_root = temp_dir.path().join("repo");
         let ralph_bin = bin.as_ref().to_path_buf();
-        fs::create_dir_all(&repo_root)?;
-
-        run_git(&repo_root, &["init"])?;
-        run_git(
-            &repo_root,
-            &["config", "user.email", "validate@example.com"],
-        )?;
-        run_git(&repo_root, &["config", "user.name", "Validate Harness"])?;
+        initialize_git_repo(&repo_root, false)?;
 
         Ok(Self {
             temp_dir,
@@ -66,11 +48,35 @@ impl RalphHarness {
         })
     }
 
+    /// Create a harness with repo_root at `<temp_dir>/<owner>/<repo>` to model
+    /// a daemon data-dir layout.
+    pub fn new_daemon<P: AsRef<Path>>(bin: P, owner: &str, repo: &str) -> Result<Self> {
+        let temp_dir = TempDir::new()?;
+        let repo_root = temp_dir.path().join(owner).join(repo);
+        let ralph_bin = bin.as_ref().to_path_buf();
+        initialize_git_repo(&repo_root, true)?;
+
+        Ok(Self {
+            temp_dir,
+            repo_root,
+            ralph_bin,
+        })
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    pub fn data_dir_str(&self) -> String {
+        self.data_dir().to_string_lossy().into_owned()
+    }
+
     pub fn ralph<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let args = self.prepare_cli_args(args);
         let output = Command::new(&self.ralph_bin)
             .args(args)
             .current_dir(&self.repo_root)
@@ -86,6 +92,7 @@ impl RalphHarness {
         use std::io::Write;
         use std::process::Stdio;
 
+        let args = self.prepare_cli_args(args);
         let mut child = Command::new(&self.ralph_bin)
             .args(args)
             .current_dir(&self.repo_root)
@@ -107,8 +114,23 @@ impl RalphHarness {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let args = self.prepare_cli_args(args);
         let mut command = Command::new(&self.ralph_bin);
         command.args(args).current_dir(&self.repo_root);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        Ok(command.output()?)
+    }
+
+    pub fn daemon_env<I, S>(&self, args: I, env_vars: &[(&str, &str)]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = self.prepare_cli_args(args);
+        let mut command = Command::new(&self.ralph_bin);
+        command.args(args).current_dir(self.data_dir());
         for (key, value) in env_vars {
             command.env(key, value);
         }
@@ -263,6 +285,19 @@ impl RalphHarness {
         Ok(())
     }
 
+    fn prepare_cli_args<I, S>(&self, args: I) -> Vec<OsString>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut prepared: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_os_string())
+            .collect();
+        inject_daemon_data_dir_arg(self.data_dir(), &mut prepared);
+        prepared
+    }
+
     pub fn create_project(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
         let prompt_path = self.temp_dir.path().join(format!("{id}-prompt.md"));
         fs::write(&prompt_path, prompt)?;
@@ -325,6 +360,48 @@ impl RalphHarness {
         files.sort();
         Ok(files)
     }
+}
+
+fn initialize_git_repo(repo_root: &Path, with_initial_commit: bool) -> Result<()> {
+    fs::create_dir_all(repo_root)?;
+
+    run_git(repo_root, &["init"])?;
+    run_git(repo_root, &["config", "user.email", "validate@example.com"])?;
+    run_git(repo_root, &["config", "user.name", "Validate Harness"])?;
+
+    if with_initial_commit {
+        fs::write(repo_root.join(".gitkeep"), "")?;
+        run_git(repo_root, &["add", ".gitkeep"])?;
+        run_git(repo_root, &["commit", "-m", "chore: initial commit"])?;
+        run_git(repo_root, &["branch", "-M", "master"])?;
+    }
+
+    Ok(())
+}
+
+fn inject_daemon_data_dir_arg(data_dir: &Path, args: &mut Vec<OsString>) {
+    if args.len() < 2 {
+        return;
+    }
+    if args[0] != OsStr::new("daemon") {
+        return;
+    }
+
+    let subcommand = args[1].as_os_str();
+    let needs_data_dir = subcommand == OsStr::new("start")
+        || subcommand == OsStr::new("status")
+        || subcommand == OsStr::new("abort");
+    if !needs_data_dir {
+        return;
+    }
+
+    let has_data_dir = args.iter().any(|arg| arg == OsStr::new("--data-dir"));
+    if has_data_dir {
+        return;
+    }
+
+    args.insert(2, data_dir.as_os_str().to_os_string());
+    args.insert(2, OsString::from("--data-dir"));
 }
 
 fn load_json(path: &Path) -> Result<Value> {

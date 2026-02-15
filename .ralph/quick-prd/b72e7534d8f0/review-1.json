@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Retry State Transition",
+      "feedback": "Change 2 transitions `Failed -> Pending` before GitHub claim. If `claim_issue` fails, the task can be left `pending` with no child, and it will not be polled again (existing task IDs are skipped; `adopt_pending` runs only at startup). Define atomic ordering (claim first, then state transition) or rollback on claim failure."
+    },
+    {
+      "area": "Legacy Failed Task Backfill",
+      "feedback": "The spec only discovers `project_id` after future child exits. Existing failed tasks already missing `project_id` (the current production pain) will still retry via `ralph auto` on first relabel, so branch collisions can still happen. Add startup/backfill or dispatch-time discovery for failed tasks with `project_id = null`."
+    },
+    {
+      "area": "Project Discovery Robustness",
+      "feedback": "Directory-count discovery (`.ralph/projects/*`) is brittle: it does not validate `state.json` and may select non-project directories. In ambiguous multi-project cases, falling back to fresh `auto` can worsen collisions. Validate project directories explicitly and define deterministic fallback behavior."
+    },
+    {
+      "area": "Inconsistent Worktree/Branch Handling",
+      "feedback": "The spec says inconsistent branch/worktree state is already handled, but `create_worktree` returns early when the path exists without verifying expected branch/HEAD, and stale git worktree metadata can still break `git worktree add`. Add explicit recovery logic and tests for stale metadata / wrong checked-out branch cases."
+    },
+    {
+      "area": "Test Coverage Gaps",
+      "feedback": "Proposed tests do not cover: (1) retrigger claim failure behavior (must not strand task in pending), and (2) the acceptance criterion on preserving and continuing prior planning/implementation artifacts (assert `.ralph/projects/<id>/loops` continuity across retries)."
+    }
+  ]
+}

@@ -24,6 +24,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: artifact_naming,
         },
         ConformanceTest {
+            name: "run::agent_output_artifacts",
+            func: agent_output_artifacts,
+        },
+        ConformanceTest {
+            name: "run::planner_no_agent_output",
+            func: planner_no_agent_output,
+        },
+        ConformanceTest {
             name: "run::artifact_frontmatter",
             func: artifact_frontmatter,
         },
@@ -186,6 +194,80 @@ fn artifact_frontmatter(h: &RalphHarness) -> TestResult {
         assert!(fm.get("project").is_some(), "missing 'project' frontmatter");
         assert!(fm.get("backend").is_some(), "missing 'backend' frontmatter");
         assert!(fm.get("role").is_some(), "missing 'role' frontmatter");
+    })
+}
+
+fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-agent-output";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let names = artifacts
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("artifact filename should be valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let agent_output = names
+            .iter()
+            .filter(|name| name.contains("-agent-output-") && name.ends_with(".log"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            !agent_output.is_empty(),
+            "expected at least one agent-output log artifact in loop directory"
+        );
+        assert!(
+            agent_output
+                .iter()
+                .any(|name| name.contains("-agent-output-implementer-")),
+            "expected implementer agent-output artifact"
+        );
+        assert!(
+            agent_output
+                .iter()
+                .any(|name| name.contains("-agent-output-reviewer-")),
+            "expected reviewer agent-output artifact"
+        );
+    })
+}
+
+fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-no-planner-agent-output";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let names = artifacts
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("artifact filename should be valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("-agent-output-planner-")),
+            "planner should not write agent-output artifacts"
+        );
     })
 }
 

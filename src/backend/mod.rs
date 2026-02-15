@@ -7,23 +7,29 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tracing::{debug, info, warn};
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
+use crate::util::time::now_timestamp_yyyymmddhhmmss;
 use crate::Result;
 
 use self::tmux::RealTmuxRunner;
 use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
+
+pub(crate) static CLI_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -94,6 +100,97 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
     })
 }
 
+fn sanitize_role_for_filename(role: &str) -> String {
+    let sanitized = role
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn build_cli_output_filename(role: &str) -> String {
+    let timestamp = now_timestamp_yyyymmddhhmmss();
+    let counter = CLI_OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp}-agent-output-{role}-{counter}.log")
+}
+
+pub(crate) async fn persist_cli_output(
+    loop_dir: Option<&Path>,
+    backend_name: &str,
+    role: Option<&str>,
+    exit_status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) {
+    let Some(loop_dir) = loop_dir else {
+        debug!(
+            backend = backend_name,
+            role = ?role,
+            "skipping backend output artifact: loop_dir is not set"
+        );
+        return;
+    };
+
+    let role_value = role
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("unknown");
+    let file_role = sanitize_role_for_filename(role_value);
+    let filename = build_cli_output_filename(&file_role);
+    let artifact_path = loop_dir.join(filename);
+    let exit_status_text = exit_status
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    let content = format!(
+        "=== Backend Output Log ===\nbackend: {backend_name}\nrole: {role_value}\nexit_status: {exit_status_text}\n\n=== STDOUT ===\n{}\n\n=== STDERR ===\n{}\n",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+
+    if let Err(err) = fs::create_dir_all(loop_dir).await {
+        warn!(
+            backend = backend_name,
+            role = role_value,
+            path = %loop_dir.display(),
+            error = %err,
+            "failed to prepare loop directory for backend output artifact"
+        );
+        return;
+    }
+
+    match fs::write(&artifact_path, content).await {
+        Ok(()) => {
+            info!(
+                path = %artifact_path.display(),
+                backend = backend_name,
+                role = role_value,
+                "wrote backend output artifact"
+            );
+        }
+        Err(err) => {
+            warn!(
+                backend = backend_name,
+                role = role_value,
+                path = %artifact_path.display(),
+                error = %err,
+                "failed to write backend output artifact"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CliBackend {
     name: String,
@@ -101,6 +198,7 @@ pub struct CliBackend {
     args: Vec<String>,
     timeout: Duration,
     env: BTreeMap<String, String>,
+    shared_context: Option<SharedTmuxContext>,
 }
 
 impl CliBackend {
@@ -117,6 +215,7 @@ impl CliBackend {
             args,
             timeout,
             env,
+            shared_context: None,
         }
     }
 
@@ -139,6 +238,11 @@ impl CliBackend {
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
+
+    pub(crate) fn with_shared_context(mut self, shared_context: SharedTmuxContext) -> Self {
+        self.shared_context = Some(shared_context);
+        self
+    }
 }
 
 #[async_trait]
@@ -148,6 +252,12 @@ impl Backend for CliBackend {
     }
 
     async fn execute(&self, prompt: &str) -> Result<String> {
+        let execution_ctx = match &self.shared_context {
+            Some(shared_context) => Some(shared_context.get().await),
+            None => None,
+        };
+        let role = execution_ctx.as_ref().and_then(|ctx| ctx.role.as_deref());
+
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
         cmd.args(&self.args)
@@ -156,16 +266,24 @@ impl Backend for CliBackend {
             .stderr(std::process::Stdio::piped())
             .envs(self.env.clone());
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| RalphError::BackendCommandFailed {
-                backend: self.name.clone(),
-                details: format!(
-                    "{err} (command='{}', resolved='{}')",
-                    self.command,
-                    resolved_command.display()
-                ),
-            })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                debug!(
+                    backend = self.name(),
+                    role = ?role,
+                    "skipping backend output artifact: process spawn failed"
+                );
+                return Err(RalphError::BackendCommandFailed {
+                    backend: self.name.clone(),
+                    details: format!(
+                        "{err} (command='{}', resolved='{}')",
+                        self.command,
+                        resolved_command.display()
+                    ),
+                });
+            }
+        };
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await.map_err(|err| {
@@ -176,15 +294,34 @@ impl Backend for CliBackend {
             })?;
         }
 
-        let output = timeout(self.timeout, child.wait_with_output())
-            .await
-            .map_err(|_| RalphError::BackendTimeout {
-                backend: self.name.clone(),
-            })?
-            .map_err(|err| RalphError::BackendCommandFailed {
+        let output = match timeout(self.timeout, child.wait_with_output()).await {
+            Ok(wait_result) => wait_result.map_err(|err| RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
                 details: err.to_string(),
-            })?;
+            })?,
+            Err(_) => {
+                debug!(
+                    backend = self.name(),
+                    role = ?role,
+                    "skipping backend output artifact: command timed out before output capture"
+                );
+                return Err(RalphError::BackendTimeout {
+                    backend: self.name.clone(),
+                });
+            }
+        };
+
+        persist_cli_output(
+            execution_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.loop_dir.as_deref()),
+            self.name(),
+            role,
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
+        )
+        .await;
 
         if !output.status.success() {
             return Err(RalphError::BackendCommandFailed {
@@ -205,9 +342,9 @@ impl Backend for CliBackend {
 }
 
 /// Shared execution context that the orchestrator updates before each backend
-/// invocation, allowing TmuxBackend instances to read loop/role info without
+/// invocation, allowing backend instances to read loop/role info without
 /// a change to the Backend trait.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SharedTmuxContext(Arc<Mutex<TmuxExecutionContext>>);
 
 impl SharedTmuxContext {
@@ -260,8 +397,8 @@ impl BackendRegistry {
         }
     }
 
-    /// Set the tmux execution context (loop number, role) for the next backend
-    /// invocation. This is a no-op when tmux mode is disabled.
+    /// Set the execution context (loop number, role, loop_dir) for the next
+    /// backend invocation.
     pub async fn set_tmux_context(&self, ctx: TmuxExecutionContext) {
         self.tmux_context.set(ctx).await;
     }
@@ -470,13 +607,21 @@ fn backend_with_optional_tmux(
             shared_ctx,
         ))
     } else {
-        Arc::new(backend)
+        Arc::new(backend.with_shared_context(shared_ctx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_backend_spec, BackendSpec};
+    use std::collections::{BTreeMap, HashSet};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+
+    use super::tmux_backend::TmuxExecutionContext;
+    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend, SharedTmuxContext};
+    use crate::error::RalphError;
 
     #[test]
     fn parse_backend_spec_accepts_bare_name() {
@@ -520,5 +665,244 @@ mod tests {
     #[test]
     fn parse_backend_spec_rejects_missing_opening_paren() {
         assert!(parse_backend_spec("claudeopus)").is_err());
+    }
+
+    async fn cli_backend_with_context(
+        command: &str,
+        args: Vec<String>,
+        timeout: Duration,
+        loop_dir: Option<PathBuf>,
+        role: Option<&str>,
+    ) -> CliBackend {
+        let shared = SharedTmuxContext::default();
+        shared
+            .set(TmuxExecutionContext {
+                loop_number: Some(1),
+                role: role.map(ToOwned::to_owned),
+                loop_dir,
+            })
+            .await;
+
+        CliBackend::new(
+            "test-backend",
+            command.to_owned(),
+            args,
+            timeout,
+            BTreeMap::new(),
+        )
+        .with_shared_context(shared)
+    }
+
+    fn list_agent_output_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let entries = std::fs::read_dir(dir).expect("read_dir should succeed");
+        for entry in entries {
+            let entry = entry.expect("directory entry should load");
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if entry.path().is_file() && name.contains("-agent-output-") && name.ends_with(".log") {
+                files.push(entry.path());
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[tokio::test]
+    async fn cli_backend_writes_output_artifact_on_success() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "cat",
+            vec![],
+            Duration::from_secs(2),
+            Some(loop_dir.path().to_path_buf()),
+            Some("implementer"),
+        )
+        .await;
+
+        let output = Backend::execute(&backend, "hello artifact\n")
+            .await
+            .expect("backend should succeed");
+        assert_eq!(output, "hello artifact\n");
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert_eq!(files.len(), 1, "expected exactly one output artifact");
+
+        let content = std::fs::read_to_string(&files[0]).expect("artifact should be readable");
+        assert!(content.contains("backend: test-backend"));
+        assert!(content.contains("role: implementer"));
+        assert!(content.contains("exit_status: 0"));
+        assert!(content.contains("=== STDOUT ==="));
+        assert!(content.contains("hello artifact"));
+        assert!(content.contains("=== STDERR ==="));
+    }
+
+    #[tokio::test]
+    async fn cli_backend_writes_output_artifact_on_nonzero_exit() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "sh",
+            vec![
+                "-c".to_owned(),
+                "echo stdout-line; echo stderr-line >&2; exit 7".to_owned(),
+            ],
+            Duration::from_secs(2),
+            Some(loop_dir.path().to_path_buf()),
+            Some("implementer"),
+        )
+        .await;
+
+        let result = Backend::execute(&backend, "ignored").await;
+        match result {
+            Err(RalphError::BackendCommandFailed { .. }) => {}
+            other => panic!("expected BackendCommandFailed, got: {other:?}"),
+        }
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert_eq!(files.len(), 1, "expected exactly one output artifact");
+
+        let content = std::fs::read_to_string(&files[0]).expect("artifact should be readable");
+        assert!(content.contains("exit_status: 7"));
+        assert!(content.contains("stdout-line"));
+        assert!(content.contains("stderr-line"));
+    }
+
+    #[tokio::test]
+    async fn cli_backend_does_not_write_artifact_when_loop_dir_is_none() {
+        let output_dir = tempdir().expect("tempdir should succeed");
+        let backend =
+            cli_backend_with_context("cat", vec![], Duration::from_secs(2), None, Some("qa")).await;
+
+        let output = Backend::execute(&backend, "no artifact expected\n")
+            .await
+            .expect("backend should succeed");
+        assert_eq!(output, "no artifact expected\n");
+
+        let files = list_agent_output_files(output_dir.path());
+        assert!(
+            files.is_empty(),
+            "expected no output artifacts when loop_dir is not set"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_backend_artifact_filename_has_timestamp_prefix() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "cat",
+            vec![],
+            Duration::from_secs(2),
+            Some(loop_dir.path().to_path_buf()),
+            Some("implementer"),
+        )
+        .await;
+
+        Backend::execute(&backend, "filename test")
+            .await
+            .expect("backend should succeed");
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert_eq!(files.len(), 1, "expected one artifact");
+        let name = files[0]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("filename should be UTF-8");
+
+        assert!(
+            name.len() > 14,
+            "filename should include a 14-digit timestamp prefix: {name}"
+        );
+        assert!(
+            name.as_bytes()[..14]
+                .iter()
+                .copied()
+                .all(|ch| ch.is_ascii_digit()),
+            "filename should start with YYYYMMDDHHMMSS timestamp: {name}"
+        );
+        assert!(
+            name.contains("-agent-output-implementer-"),
+            "filename missing role section: {name}"
+        );
+        assert!(
+            name.ends_with(".log"),
+            "filename should end with .log: {name}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_backend_counter_makes_filenames_unique_on_rapid_invocations() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "cat",
+            vec![],
+            Duration::from_secs(2),
+            Some(loop_dir.path().to_path_buf()),
+            Some("reviewer"),
+        )
+        .await;
+
+        Backend::execute(&backend, "first")
+            .await
+            .expect("first invocation should succeed");
+        Backend::execute(&backend, "second")
+            .await
+            .expect("second invocation should succeed");
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert_eq!(files.len(), 2, "expected two artifacts");
+        let unique_names = files
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .expect("filename should be utf-8")
+                    .to_owned()
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(unique_names.len(), 2, "filenames must be unique");
+    }
+
+    #[tokio::test]
+    async fn cli_backend_does_not_write_artifact_on_timeout() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "sh",
+            vec!["-c".to_owned(), "sleep 1".to_owned()],
+            Duration::from_millis(25),
+            Some(loop_dir.path().to_path_buf()),
+            Some("qa"),
+        )
+        .await;
+
+        let result = Backend::execute(&backend, "timeout").await;
+        match result {
+            Err(RalphError::BackendTimeout { .. }) => {}
+            other => panic!("expected BackendTimeout, got: {other:?}"),
+        }
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert!(files.is_empty(), "expected no artifact on timeout");
+    }
+
+    #[tokio::test]
+    async fn cli_backend_does_not_write_artifact_on_spawn_failure() {
+        let loop_dir = tempdir().expect("tempdir should succeed");
+        let backend = cli_backend_with_context(
+            "__ralph_command_should_not_exist__",
+            vec![],
+            Duration::from_secs(1),
+            Some(loop_dir.path().to_path_buf()),
+            Some("implementer"),
+        )
+        .await;
+
+        let result = Backend::execute(&backend, "spawn fail").await;
+        match result {
+            Err(RalphError::BackendCommandFailed { .. }) => {}
+            other => panic!("expected BackendCommandFailed, got: {other:?}"),
+        }
+
+        let files = list_agent_output_files(loop_dir.path());
+        assert!(files.is_empty(), "expected no artifact on spawn failure");
     }
 }
