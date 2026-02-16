@@ -618,6 +618,35 @@ async fn dispatch_task(
         }
     };
 
+    // When resuming a project (`ralph run --project`), the project state lives
+    // on the project branch (e.g. `ralph/<project_id>`), not on the daemon task
+    // branch. Checkout the project branch so `ralph run` can find state.json.
+    // Only attempt if the branch actually exists (it won't for fresh projects
+    // that haven't committed yet).
+    if let Some(ref project_id) = effective_project_id {
+        let wt = wt_path.clone();
+        let branch = format!("ralph/{project_id}");
+        let branch_clone = branch.clone();
+        let checkout_result =
+            spawn_blocking_op(move || worktree::checkout_branch_in_worktree(&wt, &branch_clone))
+                .await;
+        match checkout_result {
+            Ok(()) => {
+                eprintln!(
+                    "dispatch: checked out project branch {branch} for task {}",
+                    task.task_id
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "dispatch: project branch {branch} checkout failed for task {} (may not exist yet): {err}",
+                    task.task_id
+                );
+                // Not fatal — the orchestrator will create the branch if needed.
+            }
+        }
+    }
+
     // Resolve raw idea. Legacy tasks are hydrated from GitHub if `raw_idea`
     // is missing.
     let raw_idea = match &task.raw_idea {

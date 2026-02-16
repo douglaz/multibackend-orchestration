@@ -472,7 +472,7 @@ pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_
         .output();
 }
 
-fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result<()> {
+pub fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result<()> {
     let checkout = Command::new("git")
         .args(["checkout", "--force", "--ignore-other-worktrees", branch])
         .current_dir(worktree_path)
