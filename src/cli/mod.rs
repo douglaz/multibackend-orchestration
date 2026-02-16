@@ -405,7 +405,8 @@ mod tests {
         assert_eq!(args.idea, "smart onboarding");
         assert!(args.non_interactive);
         assert!(!args.interactive);
-        assert_eq!(args.ask_max, 5);
+        assert_eq!(args.ask_max, Some(5));
+        assert_eq!(args.preset, None);
         assert_eq!(
             args.answers.as_deref(),
             Some(std::path::Path::new("answers.yaml"))
@@ -413,6 +414,35 @@ mod tests {
         assert!(args.resume);
         assert!(args.dry_run);
         assert_eq!(args.backend.as_deref(), Some("claude(opus)"));
+    }
+
+    #[test]
+    fn parses_prd_command_with_implicit_defaults() {
+        let cli = Cli::parse_from(["ralph", "prd", "--idea", "smart onboarding"]);
+        let Commands::Prd(args) = cli.command else {
+            panic!("expected prd command");
+        };
+
+        assert_eq!(args.ask_max, None);
+        assert_eq!(args.preset, None);
+    }
+
+    #[test]
+    fn parses_prd_command_with_preset() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "prd",
+            "--idea",
+            "smart onboarding",
+            "--preset",
+            "discuss",
+        ]);
+        let Commands::Prd(args) = cli.command else {
+            panic!("expected prd command");
+        };
+
+        assert_eq!(args.preset, Some(super::prd::PrdPreset::Discuss));
+        assert_eq!(args.ask_max, None);
     }
 
     #[test]

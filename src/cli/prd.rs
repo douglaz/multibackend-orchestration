@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
@@ -12,6 +12,34 @@ use crate::prd::{
 use crate::workspace::Workspace;
 use crate::Result;
 
+const DEFAULT_ASK_MAX: u32 = 3;
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum PrdPreset {
+    Full,
+    Discuss,
+    Fast,
+}
+
+impl PrdPreset {
+    fn default_ask_max(self) -> u32 {
+        match self {
+            Self::Full => 3,
+            Self::Discuss => 1,
+            Self::Fast => 0,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Discuss => "discuss",
+            Self::Fast => "fast",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct PrdArgs {
     #[arg(long)]
@@ -20,8 +48,10 @@ pub struct PrdArgs {
     pub non_interactive: bool,
     #[arg(long, conflicts_with = "non_interactive")]
     pub interactive: bool,
-    #[arg(long, default_value_t = 3)]
-    pub ask_max: u32,
+    #[arg(long)]
+    pub ask_max: Option<u32>,
+    #[arg(long)]
+    pub preset: Option<PrdPreset>,
     #[arg(long)]
     pub answers: Option<PathBuf>,
     #[arg(long)]
@@ -34,6 +64,9 @@ pub struct PrdArgs {
 
 pub async fn execute(args: PrdArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
+    let ask_max = resolved_ask_max(&args);
+
+    let preset = args.preset.unwrap_or(PrdPreset::Full);
 
     let mut registry = BackendRegistry::new(
         &workspace.config,
@@ -69,7 +102,8 @@ pub async fn execute(args: PrdArgs) -> Result<()> {
             "interactive"
         }
     );
-    println!("  ask max rounds: {}", args.ask_max);
+    println!("  ask preset: {}", preset.name());
+    println!("  ask max rounds: {}", ask_max);
     println!("  resume: {}", args.resume);
     println!();
 
@@ -100,7 +134,7 @@ pub async fn execute(args: PrdArgs) -> Result<()> {
     let options = PrdOptions {
         idea: args.idea.clone(),
         backend_spec: backend_spec.clone(),
-        ask_max: args.ask_max,
+        ask_max,
         resume: args.resume,
         dry_run: args.dry_run,
     };
@@ -125,4 +159,66 @@ pub async fn execute(args: PrdArgs) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+fn resolved_ask_max(args: &PrdArgs) -> u32 {
+    args.ask_max
+        .or_else(|| args.preset.map(|preset| preset.default_ask_max()))
+        .unwrap_or(DEFAULT_ASK_MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_ask_max_prefers_explicit_flag_over_preset() {
+        let args = PrdArgs {
+            idea: "x".into(),
+            non_interactive: false,
+            interactive: false,
+            ask_max: Some(7),
+            preset: Some(PrdPreset::Fast),
+            answers: None,
+            resume: false,
+            dry_run: false,
+            backend: None,
+        };
+
+        assert_eq!(resolved_ask_max(&args), 7);
+    }
+
+    #[test]
+    fn resolved_ask_max_falls_back_to_preset_default() {
+        let args = PrdArgs {
+            idea: "x".into(),
+            non_interactive: false,
+            interactive: false,
+            ask_max: None,
+            preset: Some(PrdPreset::Discuss),
+            answers: None,
+            resume: false,
+            dry_run: false,
+            backend: None,
+        };
+
+        assert_eq!(resolved_ask_max(&args), PrdPreset::Discuss.default_ask_max());
+    }
+
+    #[test]
+    fn resolved_ask_max_falls_back_to_full_default() {
+        let args = PrdArgs {
+            idea: "x".into(),
+            non_interactive: false,
+            interactive: false,
+            ask_max: None,
+            preset: None,
+            answers: None,
+            resume: false,
+            dry_run: false,
+            backend: None,
+        };
+
+        assert_eq!(resolved_ask_max(&args), DEFAULT_ASK_MAX);
+    }
 }
