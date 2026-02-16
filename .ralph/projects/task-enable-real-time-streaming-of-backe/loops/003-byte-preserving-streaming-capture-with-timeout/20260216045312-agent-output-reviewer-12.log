@@ -1,0 +1,44 @@
+=== Backend Output Log ===
+backend: claude(opus)
+role: reviewer
+exit_status: 0
+
+=== STDOUT ===
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] `CliBackend::execute` delegates to `execute_streaming` which uses `child.stdout.take()` with `AsyncReadExt::read_buf` into a `BytesMut` chunk buffer instead of `child.wait_with_output()`.
+- [x] Raw bytes (including `\r`, partial lines, binary data) are appended to an in-memory `Vec<u8>` accumulator as each chunk arrives — no per-chunk string conversion.
+- [x] Each chunk of raw bytes is simultaneously written to the `LogWriter` via `write_bytes()` as it is read, enabling real-time log visibility.
+- [x] `String::from_utf8_lossy()` is called exactly once on the accumulated `Vec<u8>` only at the final return point of successful execution (line 298).
+- [x] The `Backend` trait is extended with `execute_with_log(prompt, Option<&mut LogWriter>)` with a default implementation that falls back to `execute()`.
+- [x] On timeout: `kill_and_reap_child` (which calls `child.kill().await` then `child.wait().await`) is invoked before returning the error (line 306).
+- [x] On timeout: a footer line `\n--- timeout ts=<ISO8601> ---\n` is written to the `LogWriter` before returning `BackendTimeout` (line 309).
+- [x] On fatal stdout read I/O error: the same `kill_and_reap_child` cleanup is applied (line 301).
+- [x] Partial output captured before timeout/error is preserved in the log (bytes streamed as they arrive, before timeout fires).
+- [x] No zombie child processes remain — `kill_and_reap_child` calls both `kill()` and `wait()`, verified by unit tests checking `libc::kill(pid, 0) == ESRCH`.
+- [x] `execute_with_timeout_retries` passes `Some(log_writer)` into `backend.execute_with_log()` and no longer calls `log_writer.write_str(&output)` post-hoc.
+- [x] `LogWriter` best-effort failure policy preserved: `write_bytes` warns on error and sets `self.file = None` to disable further writes without affecting execution.
+- [x] Unit tests cover CR/partial-line byte preservation (`cli_backend_streaming_preserves_exact_bytes_in_log`), exact byte-match verification, timeout kill/reap (`cli_backend_timeout_kills_and_reaps_child_and_writes_footer`), and timeout footer formatting (`timeout_footer_format_contains_timestamp`).
+- [x] Conformance test `streaming::mid_execution_visibility` added and registered.
+- [x] Conformance test `streaming::timeout_cleanup` added and registered.
+- [x] All conformance tests registered in `src/validate/mod.rs` via `tests_streaming::tests()`.
+- [x] `cargo test` and `cargo check` reported passing by implementer.
+
+## Notes
+
+The implementation is clean and well-structured. Key design decisions are sound:
+
+- **`execute_streaming` as a private method** with `execute` and `execute_with_log` delegating to it avoids code duplication while keeping the trait interface clean.
+- **`kill_and_reap_child` helper** properly suppresses `ErrorKind::InvalidInput` (child already dead) to avoid noisy warnings.
+- **Stderr is collected concurrently** via `tokio::spawn`, preventing deadlocks when both stdout and stderr buffers fill.
+- **`TmuxBackend`** gets a reasonable `execute_with_log` override that writes output post-hoc since tmux doesn't support chunked streaming — this is an appropriate compromise.
+- The diff includes some `rustfmt`-only changes in unrelated files (`daemon.rs`, `github.rs`, `refine.rs`, `runtime.rs`, `worktree.rs`, `tests_daemon.rs`, `tests_commands.rs`) which are harmless formatting normalization.
+
+## Commit Message
+
+feat(streaming): byte-preserving chunked backend capture with timeout kill/reap and conformance coverage
+
+
+=== STDERR ===
+

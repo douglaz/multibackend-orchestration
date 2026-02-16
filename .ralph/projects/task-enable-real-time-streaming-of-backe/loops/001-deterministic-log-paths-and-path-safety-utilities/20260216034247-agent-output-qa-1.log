@@ -1,0 +1,1067 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: PASS
+
+## Manual Testing
+- Built artifact and verified it runs:
+  - Command: `ls -l result/bin/ralph && ./result/bin/ralph --version`
+  - Output: `result/bin/ralph` exists and `ralph 0.1.0` (exit 0).
+- Exercised the new library functions via an ad-hoc Rust program (real runtime usage, not unit tests):
+  - Command: `nix develop -c cargo run --quiet --manifest-path "$tmpdir/Cargo.toml"` (tmp project with `ralph` path dependency).
+  - Output:
+    - `loop7=/tmp/qa-project/loops/007/agent-output-implementer.log`
+    - `loop0=/tmp/qa-project/loops/000/agent-output-planner.log`
+    - `loop999=/tmp/qa-project/loops/999/agent-output-planner.log`
+    - `prompt_reviewer=/tmp/qa-project/agent-output-prompt-reviewer.log`
+    - `parent_exists=true`
+    - `sanitize('../')=`
+    - `sanitize('; rm -rf')=rm_-rf`
+    - `sanitize('backend label with spaces')=backend_label_with_spaces`
+    - `sanitize('日本語')=`
+    - `sanitize('')=`
+- Checked source-level path-derivation safety:
+  - Command: `rg -n "loop_slug|agent-output-" src/output_log.rs`
+  - Output: only role-based `agent-output-{role}.log` path construction and test literals; no `loop_slug` usage in this module.
+
+## Automated Tests
+- `nix develop -c cargo check`: passed (`Finished 'dev' profile`, exit 0).
+- `nix develop -c cargo test`: passed (unit + integration suites; no failures, exit 0).
+- `nix build -L`: passed, produced `./result/bin/ralph`; Nix check phase also ran tests and conformance validate suite (`184 passed; 0 failed`, exit 0).
+- `nix develop -c cargo test output_log::tests -- --nocapture`: passed (`7 passed; 0 failed`, exit 0).
+
+## Acceptance Criteria Verification
+- [x] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`: verified via `ls -l src/output_log.rs` and `rg -n "pub mod output_log;" src/lib.rs` (`8:pub mod output_log;`).
+- [x] `log_path_for_role(..., Some(loop), role)` returns `{project_dir}/loops/{loop:03}/agent-output-{role}.log`: verified manually in runtime output (`loop7`, `loop0`, `loop999`).
+- [x] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns root-level prompt-reviewer log path: verified (`prompt_reviewer=/tmp/qa-project/agent-output-prompt-reviewer.log`).
+- [x] `log_path_for_role` does not use `loop_slug` or backend name in derived paths: verified by source scan (`rg`) and function body (`agent-output-{role}.log`, loop-number directory only).
+- [x] `ensure_log_parent(path)` creates parent directories and returns success: verified by manual run (`parent_exists=true` after call).
+- [x] `sanitize_for_filename()` replacement/collapse/trim behavior: verified with manual inputs showing unsafe chars replaced/collapsed and trimmed outputs.
+- [x] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters: verified with `''`, `日本語`, `../`, `; rm -rf`.
+- [x] Unit tests cover required path/sanitization edge cases: verified by targeted suite `output_log::tests` (7 tests include loop paths, prompt-reviewer path, loop 0/999, parent creation, unsafe chars, underscore behavior, empty input).
+- [x] `cargo test` passes with new tests: verified via `nix develop -c cargo test` (pass).
+- [x] No existing code modified beyond adding module declaration in `src/lib.rs`: matches the provided implementation diff (new `src/output_log.rs` + `src/lib.rs` module export only).
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c6487-b4de-7fa2-ab59-7e81e6f8c7d8
+--------
+user
+You are a QA engineer validating an implementation against its specification.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- `<TS>-impl-notes.md`
+- The current implementation diff
+
+Your PRIMARY job is manual, hands-on testing — exercise the actual product as a real user would. Automated test suites are a secondary confirmation, not a substitute for real verification.
+
+Your job is to:
+1. **Build the project** so you have a working artifact (e.g. `cargo build`, `npm run build`, `nix build`, etc.)
+2. **Manually test the implemented feature end-to-end** by actually using it:
+   - For CLI tools: run the built binary with real arguments, inspect stdout/stderr, check exit codes, test edge cases (missing args, bad input, help flags, etc.)
+   - For APIs: make real HTTP requests (e.g. `curl`, `wget`) against a running server, verify response bodies, status codes, headers
+   - For libraries: write and execute small ad-hoc scripts that import and exercise the new functionality
+   - For UI changes: launch the application and interact with it, verify visual/behavioral correctness
+3. **Verify each acceptance criterion from the spec individually** with a concrete manual test — do not just assume passing unit tests means the criterion is satisfied
+4. **Run automated test suites** (e.g. `cargo test`, `npm test`) as a secondary check to catch regressions
+5. Report concrete commands executed, their actual output, and your interpretation
+6. Do NOT edit any source files — only run checks and report findings
+
+IMPORTANT: A QA pass requires evidence of REAL usage, not just "all tests passed." If the spec says "ralph init creates a config file," you must actually run `ralph init` in a temp directory and verify the file exists with correct contents. If the spec says "the API returns 404 for missing resources," you must actually curl that endpoint and show the 404 response.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If all checks pass:
+
+# QA: PASS
+
+## Manual Testing
+- <what you tested manually, the commands you ran, and what you observed>
+- <another manual test with actual output snippets>
+
+## Automated Tests
+- <command 1>: <result summary>
+- <command 2>: <result summary>
+
+## Acceptance Criteria Verification
+- [ ] <criterion 1>: <how you verified it manually, with evidence>
+- [ ] <criterion 2>: <how you verified it manually, with evidence>
+
+---
+
+If any checks fail:
+
+# QA: FAIL
+
+## Failures
+1. <what failed and how — include the actual command, expected output, and actual output>
+2. <another failure if applicable>
+
+## Suggested Fixes
+1. <concrete fix suggestion tied to a failure>
+2. <another fix if applicable>
+
+---
+
+## Context Provided
+
+### Master Prompt
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+### Feature Specification
+---
+artifact: spec
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T03:37:12Z
+---
+
+Now I have a comprehensive understanding of the codebase. Let me analyze the current state and plan the first feature.
+
+**Current state**: Loop 0, planning phase, no loops completed, no previous specs. This is the very first feature to plan.
+
+The project requires 5 main behavioral changes plus tests. The logical first feature should be the foundational pieces that other features depend on: **deterministic log paths** and **path safety utilities**. These are pure functions with no dependencies that everything else builds on.
+
+# Feature: Deterministic Log Paths and Path Safety Utilities
+
+## Description
+Add the foundational utility layer for deterministic, role-based log path derivation and filename sanitization. This introduces a new `output_log` module with two core functions: `log_path_for_role()` which derives deterministic log file paths from `(project_dir, loop_number, role)` tuples following the specified naming convention, and `sanitize_for_filename()` which strips unsafe characters from backend labels for use in log separators/headers. These are pure, stateless functions that form the base layer for all subsequent streaming, append, and retry-attribution work.
+
+## Acceptance Criteria
+- [ ] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`
+- [ ] `log_path_for_role(project_dir, loop_number: Option<u32>, role: &str) -> PathBuf` returns `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log` when `loop_number` is `Some`
+- [ ] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns `{project_dir}/agent-output-prompt-reviewer.log`
+- [ ] `log_path_for_role` does NOT use `loop_slug` or backend name in derived paths
+- [ ] `ensure_log_parent(path)` creates parent directories if they don't exist, returns `io::Result<()>`
+- [ ] `sanitize_for_filename(label: &str) -> String` replaces non-alphanumeric/non-hyphen/non-underscore characters with `_`, collapses consecutive underscores, and trims leading/trailing underscores
+- [ ] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters
+- [ ] Unit tests cover: normal loop+role paths, prompt-reviewer root path, edge cases (loop 0, loop 999), sanitization of unsafe chars (`../`, `; rm -rf`, spaces, unicode), empty string handling
+- [ ] `cargo test` passes with all new tests
+- [ ] No existing code is modified beyond adding the module declaration in `lib.rs`
+
+## Files to Modify/Create
+- `src/output_log.rs` — New module containing `log_path_for_role()`, `ensure_log_parent()`, and `sanitize_for_filename()` functions, plus `#[cfg(test)] mod tests` with comprehensive unit tests
+- `src/lib.rs` — Add `pub mod output_log;` declaration
+
+## Dependencies
+- Requires: none (first feature, pure utility functions)
+- Blocks: retry attribution/append semantics, streaming byte preservation, timeout cleanup, conformance tests (all subsequent features will use these path utilities)
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T03:39:01Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added new module `src/output_log.rs:1` with:
+  - `log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf` (`src/output_log.rs:5`)
+  - `ensure_log_parent(path: &Path) -> io::Result<()>` (`src/output_log.rs:16`)
+  - `sanitize_for_filename(label: &str) -> String` (`src/output_log.rs:25`)
+- Implemented deterministic path derivation exactly by loop number + role, with zero-padded loop directory (`{loop_number:03}`), and root-level path when `loop_number` is `None`.
+- Implemented sanitization to replace disallowed characters with `_`, collapse consecutive underscores, and trim leading/trailing underscores.
+- Added comprehensive unit tests in `src/output_log.rs:42` for loop paths, prompt-reviewer root path, loop edge cases (0/999), directory creation, unsafe input (`../`, `; rm -rf`, spaces, unicode), underscore collapsing, and empty input.
+- Registered the module in `src/lib.rs:8` via `pub mod output_log;`.
+
+## Spec Deviations
+- None.
+
+## Testing
+- Ran `cargo test` (full suite): passed.
+- Ran `cargo check`: passed.
+
+
+### Implementation Diff
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad..5b84083 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod daemon;
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000..4baa98c
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+### Prior QA History
+
+
+
+## System Guardrails
+
+- Run all available build, test, and check commands.
+- Report concrete commands and their output.
+- Do NOT edit any source files — only run checks and report findings.
+- If all acceptance criteria pass, return `# QA: PASS` with evidence.
+- If any check fails, return `# QA: FAIL` with specific failure details and suggested fixes.
+
+## Master Prompt
+
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T03:37:12Z
+---
+
+Now I have a comprehensive understanding of the codebase. Let me analyze the current state and plan the first feature.
+
+**Current state**: Loop 0, planning phase, no loops completed, no previous specs. This is the very first feature to plan.
+
+The project requires 5 main behavioral changes plus tests. The logical first feature should be the foundational pieces that other features depend on: **deterministic log paths** and **path safety utilities**. These are pure functions with no dependencies that everything else builds on.
+
+# Feature: Deterministic Log Paths and Path Safety Utilities
+
+## Description
+Add the foundational utility layer for deterministic, role-based log path derivation and filename sanitization. This introduces a new `output_log` module with two core functions: `log_path_for_role()` which derives deterministic log file paths from `(project_dir, loop_number, role)` tuples following the specified naming convention, and `sanitize_for_filename()` which strips unsafe characters from backend labels for use in log separators/headers. These are pure, stateless functions that form the base layer for all subsequent streaming, append, and retry-attribution work.
+
+## Acceptance Criteria
+- [ ] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`
+- [ ] `log_path_for_role(project_dir, loop_number: Option<u32>, role: &str) -> PathBuf` returns `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log` when `loop_number` is `Some`
+- [ ] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns `{project_dir}/agent-output-prompt-reviewer.log`
+- [ ] `log_path_for_role` does NOT use `loop_slug` or backend name in derived paths
+- [ ] `ensure_log_parent(path)` creates parent directories if they don't exist, returns `io::Result<()>`
+- [ ] `sanitize_for_filename(label: &str) -> String` replaces non-alphanumeric/non-hyphen/non-underscore characters with `_`, collapses consecutive underscores, and trims leading/trailing underscores
+- [ ] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters
+- [ ] Unit tests cover: normal loop+role paths, prompt-reviewer root path, edge cases (loop 0, loop 999), sanitization of unsafe chars (`../`, `; rm -rf`, spaces, unicode), empty string handling
+- [ ] `cargo test` passes with all new tests
+- [ ] No existing code is modified beyond adding the module declaration in `lib.rs`
+
+## Files to Modify/Create
+- `src/output_log.rs` — New module containing `log_path_for_role()`, `ensure_log_parent()`, and `sanitize_for_filename()` functions, plus `#[cfg(test)] mod tests` with comprehensive unit tests
+- `src/lib.rs` — Add `pub mod output_log;` declaration
+
+## Dependencies
+- Requires: none (first feature, pure utility functions)
+- Blocks: retry attribution/append semantics, streaming byte preservation, timeout cleanup, conformance tests (all subsequent features will use these path utilities)
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T03:39:01Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added new module `src/output_log.rs:1` with:
+  - `log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf` (`src/output_log.rs:5`)
+  - `ensure_log_parent(path: &Path) -> io::Result<()>` (`src/output_log.rs:16`)
+  - `sanitize_for_filename(label: &str) -> String` (`src/output_log.rs:25`)
+- Implemented deterministic path derivation exactly by loop number + role, with zero-padded loop directory (`{loop_number:03}`), and root-level path when `loop_number` is `None`.
+- Implemented sanitization to replace disallowed characters with `_`, collapse consecutive underscores, and trim leading/trailing underscores.
+- Added comprehensive unit tests in `src/output_log.rs:42` for loop paths, prompt-reviewer root path, loop edge cases (0/999), directory creation, unsafe input (`../`, `; rm -rf`, spaces, unicode), underscore collapsing, and empty input.
+- Registered the module in `src/lib.rs:8` via `pub mod output_log;`.
+
+## Spec Deviations
+- None.
+
+## Testing
+- Ran `cargo test` (full suite): passed.
+- Ran `cargo check`: passed.
+
+
+## Current Diff
+
+```diff
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad..5b84083 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod daemon;
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000..4baa98c
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+```
+
+## Prior QA History
+
+(none)
+
+mcp startup: no servers
+
+thinking
+**Planning comprehensive QA validation**
+codex
+I’m going to validate this as a QA pass by building the project first, then manually exercising the new `output_log` behavior with real commands/scripts, and finally running automated suites for regression coverage. I’ll collect concrete command outputs for each acceptance criterion.
+
+thinking
+**Inspecting files before commands**
+exec
+/run/current-system/sw/bin/bash -lc 'pwd; ls -la' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+total 292
+drwxr-xr-x  6 root root  4096 Feb 16 03:37 .
+drwxr-xr-x  8 root root  4096 Feb 16 03:18 ..
+-rw-r--r--  1 root root   112 Feb 16 03:18 .git
+-rw-r--r--  1 root root   104 Feb 16 03:18 .gitignore
+drwxr-xr-x  6 root root  4096 Feb 16 03:18 .ralph
+-rw-r--r--  1 root root  3803 Feb 16 03:18 AGENTS.md
+-rw-r--r--  1 root root 31893 Feb 16 03:18 Cargo.lock
+-rw-r--r--  1 root root   696 Feb 16 03:18 Cargo.toml
+-rw-r--r--  1 root root 14140 Feb 16 03:18 PLAN-qa-phase.md
+-rw-r--r--  1 root root  7880 Feb 16 03:18 PLAN-qa-validate.md
+-rw-r--r--  1 root root 38293 Feb 16 03:18 PLAN.md
+-rw-r--r--  1 root root 48099 Feb 16 03:18 PRD.md
+-rw-r--r--  1 root root  4609 Feb 16 03:18 PROMPT-auto-branch-sync.md
+-rw-r--r--  1 root root  7103 Feb 16 03:18 PROMPT-codex-reasoning-effort.md
+-rw-r--r--  1 root root  5701 Feb 16 03:18 PROMPT-explicit-models.md
+-rw-r--r--  1 root root  6212 Feb 16 03:18 PROMPT-per-role-models.md
+-rw-r--r--  1 root root 16482 Feb 16 03:18 PROMPT-prd-pipeline.md
+-rw-r--r--  1 root root  3196 Feb 16 03:18 PROMPT-reformatter.md
+
+thinking
+**Planning comprehensive build steps**
+codex
+I’ve confirmed the workspace state. Next I’m running the project’s documented build/check/test commands (`nix develop -c cargo check`, `nix develop -c cargo test`, `nix build -L`) so we have a validated artifact before manual feature testing.
+
+thinking
+**Considering sequential run duration**
+exec
+/run/current-system/sw/bin/bash -lc 'nix develop -c cargo check' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 386ms:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+
+thinking
+**Running tests in nix environment**
+exec
+/run/current-system/sw/bin/bash -lc 'nix develop -c cargo test' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 4.83s:
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/ralph-3b3d545b10a51b88)
+
+running 382 tests
+test backend::codex::tests::parse_codex_model_effort_no_suffix ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_high ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_low ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_xhigh ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_medium ... ok
+test backend::codex::tests::parse_codex_model_effort_unknown_suffix ... ok
+test backend::tests::parse_backend_spec_accepts_bare_name ... ok
+test backend::tests::parse_backend_spec_accepts_name_with_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_model ... ok
+test backend::tests::parse_backend_spec_rejects_missing_closing_paren ... ok
+test backend::tests::parse_backend_spec_rejects_empty_name ... ok
+test backend::tests::parse_backend_spec_rejects_missing_opening_paren ... ok
+test backend::tmux::tests::format_window_label_basic ... ok
+test backend::tmux::tests::format_window_label_long_values_truncated ... ok
+test backend::tmux::tests::format_window_label_reviewer_role ... ok
+test backend::tmux::tests::format_window_label_planner_role ... ok
+
+thinking
+**Planning detailed build run**
+exec
+/run/current-system/sw/bin/bash -lc 'nix build -L' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+thinking
+**Monitoring build progress**
+codex
+`nix build -L` is still compiling in the Nix derivation; I’m polling until it completes so we can use the built artifact for manual CLI-level verification.
+ succeeded in 1m 11s:
+this derivation will be built:
+  /nix/store/lipkm8bqkmdzsv3zxpahbjg4hlkhf8bq-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv
+building '/nix/store/lipkm8bqkmdzsv3zxpahbjg4hlkhf8bq-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv'...
+ralph-static-x86_64-unknown-linux-musl> Running phase: unpackPhase
+ralph-static-x86_64-unknown-linux-musl> unpacking source archive /nix/store/p39x1qnysrs1r7hmgmd4fci9067nh0kx-i2g0x08b3jvj9zfnrmadrxyligd0h72y-source
+ralph-static-x86_64-unknown-linux-musl> source root is i2g0x08b3jvj9zfnrmadrxyligd0h72y-source
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: patchPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Validating consistency between /build/i2g0x08b3jvj9zfnrmadrxyligd0h72y-source/Cargo.lock and /build/cargo-vendor-dir/Cargo.lock
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: configurePhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: buildPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoBuildHook
+ralph-static-x86_64-unknown-linux-musl> cargoBuildHook flags: -j 16 --target x86_64-unknown-linux-musl --offline --profile release
+ralph-static-x86_64-unknown-linux-musl>    Compiling proc-macro2 v1.0.106
+ralph-static-x86_64-unknown-linux-musl>    Compiling unicode-ident v1.0.22
+
+thinking
+**Planning manual library tests**
+codex
+The build/check suites completed successfully, including the Nix build artifact. I’m now doing direct manual verification for this feature with ad-hoc runtime exercises of `log_path_for_role`, `ensure_log_parent`, and `sanitize_for_filename`, plus a source scan for `loop_slug` usage in log-path derivation.
+exec
+/run/current-system/sw/bin/bash -lc 'ls -l result/bin/ralph && ./result/bin/ralph --version' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+-r-xr-xr-x 1 root root 11755872 Jan  1  1970 result/bin/ralph
+ralph 0.1.0
+
+thinking
+**Creating temp cargo project for manual tests**
+exec
+/run/current-system/sw/bin/bash -lc 'tmpdir=$(mktemp -d)
+mkdir -p "$tmpdir/src"
+cat > "$tmpdir/Cargo.toml" <<'"'EOF'
+[package]
+name = \"qa_output_log_probe\"
+version = \"0.1.0\"
+edition = \"2021\"
+
+[dependencies]
+ralph = { path = \"/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27\" }
+EOF
+cat > \""'$tmpdir/src/main.rs" <<'"'EOF'
+use ralph::output_log::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
+use std::path::Path;
+
+fn main() {
+    let project_dir = Path::new(\"/tmp/qa-project\");
+
+    let p1 = log_path_for_role(project_dir, Some(7), \"implementer\");
+    let p2 = log_path_for_role(project_dir, Some(0), \"planner\");
+    let p3 = log_path_for_role(project_dir, Some(999), \"planner\");
+    let p4 = log_path_for_role(project_dir, None, \"prompt-reviewer\");
+
+    println"'!("loop7={}", p1.display());
+    println!("loop0={}", p2.display());
+    println!("loop999={}", p3.display());
+    println!("prompt_reviewer={}", p4.display());
+
+    let ensure_target = Path::new("/tmp/qa-output-log-parent-check/loops/004/agent-output-reviewer.log");
+    let _ = std::fs::remove_dir_all("/tmp/qa-output-log-parent-check");
+    ensure_log_parent(ensure_target).expect("ensure_log_parent should create parent dirs");
+    println!(
+        "parent_exists={}",
+        ensure_target.parent().unwrap().try_exists().unwrap()
+    );
+
+    println!("sanitize('"'../')={}\", sanitize_for_filename(\"../\"));
+    println"'!("sanitize('"'; rm -rf')={}\", sanitize_for_filename(\"; rm -rf\"));
+    println"'!(
+        "sanitize('"'backend label with spaces')={}\",
+        sanitize_for_filename(\"backend label with spaces\")
+    );
+    println"'!("sanitize('"'日本語')={}\", sanitize_for_filename(\"日本語\"));
+    println"'!("sanitize('"'')={}\", sanitize_for_filename(\"\"));
+}
+EOF
+nix develop -c cargo run --quiet --manifest-path \""'$tmpdir/Cargo.toml"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 22.00s:
+loop7=/tmp/qa-project/loops/007/agent-output-implementer.log
+loop0=/tmp/qa-project/loops/000/agent-output-planner.log
+loop999=/tmp/qa-project/loops/999/agent-output-planner.log
+prompt_reviewer=/tmp/qa-project/agent-output-prompt-reviewer.log
+parent_exists=true
+sanitize('../')=
+sanitize('; rm -rf')=rm_-rf
+sanitize('backend label with spaces')=backend_label_with_spaces
+sanitize('日本語')=
+sanitize('')=
+
+thinking
+**Planning manual edge case checks**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"loop_slug|backend\" src/output_log.rs src/lib.rs; echo '---'; sed -n '1,80p' src/output_log.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/output_log.rs:105:        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
+src/lib.rs:1:pub mod backend;
+---
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+    let filename = format!("agent-output-{role}.log");
+    match loop_number {
+        Some(loop_number) => project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}"))
+            .join(filename),
+        None => project_dir.join(filename),
+    }
+}
+
+pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+
+thinking
+**Checking code modifications**
+codex
+I’ve run direct function-level manual probes and source inspection. Next I’m confirming the diff scope and then I’ll summarize each acceptance criterion with exact command evidence.
+exec
+/run/current-system/sw/bin/bash -lc "git diff --name-only -- src/lib.rs src/output_log.rs; echo '---'; git diff --name-only" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+---
+
+thinking
+**Verifying committed changes and test coverage**
+exec
+/run/current-system/sw/bin/bash -lc 'nix develop -c cargo test output_log::tests -- --nocapture' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+warning: Git tree '/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27' is dirty
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/ralph-3b3d545b10a51b88)
+
+running 7 tests
+test output_log::tests::derives_prompt_reviewer_root_log_path_when_loop_is_none ... ok
+test output_log::tests::derives_loop_scoped_log_path ... ok
+test output_log::tests::formats_loop_number_edges_with_three_digits ... ok
+test output_log::tests::sanitization_handles_empty_input ... ok
+test output_log::tests::sanitization_collapses_and_trims_underscores ... ok
+test output_log::tests::sanitizes_unsafe_filename_characters ... ok
+test output_log::tests::creates_missing_parent_directories ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 375 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/ralph-d69b6ba59463a452)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+thinking
+**Planning module verification commands**
+exec
+/run/current-system/sw/bin/bash -lc 'ls -l src/output_log.rs && rg -n "pub mod output_log;" src/lib.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+-rw-r--r-- 1 root root 3672 Feb 16 03:38 src/output_log.rs
+8:pub mod output_log;
+
+thinking
+**Checking loop_slug references**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "loop_slug|agent-output-" src/output_log.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+6:    let filename = format!("agent-output-{role}.log");
+54:            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
+64:            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
+76:            Path::new("/tmp/project/loops/000/agent-output-planner.log")
+80:            Path::new("/tmp/project/loops/999/agent-output-planner.log")
+87:        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
+
+thinking
+**Checking for old loop_slug usage**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "loop_slug" src | head -n 20' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/workflow/orchestrator.rs:404:                                    loop_slug: &slug,
+src/workflow/orchestrator.rs:436:                                    loop_slug: "completion",
+src/workflow/orchestrator.rs:463:                        loop_slug,
+src/workflow/orchestrator.rs:501:                            &loop_slug,
+src/workflow/orchestrator.rs:547:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:598:                            &loop_slug,
+src/workflow/orchestrator.rs:648:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:690:                            feedback_rel_path(&project_dir, loop_number, &loop_slug, iteration)?;
+src/workflow/orchestrator.rs:699:                            &loop_slug,
+src/workflow/orchestrator.rs:749:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:790:                        loop_slug,
+src/workflow/orchestrator.rs:857:                        &loop_slug,
+src/workflow/orchestrator.rs:900:                                    loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:942:                                    loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:984:                        loop_slug,
+src/workflow/orchestrator.rs:1033:                                &loop_slug,
+src/workflow/orchestrator.rs:1046:                            &loop_slug,
+src/workflow/orchestrator.rs:1093:                                        loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:1120:                                        loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:1161:                    let (loop_number, loop_slug, feature_name, approval_rel) = {
+
+thinking
+**Verifying log filename origins**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "agent-output|output.*log|log.*path" src/workflow src/backend src/daemon | head -n 120' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/daemon/runtime.rs:74:/// Return the log file path for a task.
+src/daemon/runtime.rs:75:fn task_log_path(store: &TaskStore, task_id: &str) -> PathBuf {
+src/daemon/runtime.rs:512:    let log_path = task_log_path(store, &task.task_id);
+src/daemon/runtime.rs:513:    if let Some(parent) = log_path.parent() {
+src/daemon/runtime.rs:529:                process::spawn_ralph_run(&ralph_bin, &wt, project_id, &log_path).await?
+src/daemon/runtime.rs:536:                process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
+src/daemon/runtime.rs:653:            log_file: log_path,
+src/daemon/runtime.rs:999:    let log_path = task_log_path(store, task_id);
+src/daemon/runtime.rs:1002:        log_path.display()
+
+thinking
+**Refining search to locate agent output**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "agent-output" src' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/output_log.rs:6:    let filename = format!("agent-output-{role}.log");
+src/output_log.rs:54:            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
+src/output_log.rs:64:            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
+src/output_log.rs:76:            Path::new("/tmp/project/loops/000/agent-output-planner.log")
+src/output_log.rs:80:            Path::new("/tmp/project/loops/999/agent-output-planner.log")
+src/output_log.rs:87:        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
+
+thinking
+**Planning detailed QA report**
+codex
+# QA: PASS
+
+## Manual Testing
+- Built artifact and verified it runs:
+  - Command: `ls -l result/bin/ralph && ./result/bin/ralph --version`
+  - Output: `result/bin/ralph` exists and `ralph 0.1.0` (exit 0).
+- Exercised the new library functions via an ad-hoc Rust program (real runtime usage, not unit tests):
+  - Command: `nix develop -c cargo run --quiet --manifest-path "$tmpdir/Cargo.toml"` (tmp project with `ralph` path dependency).
+  - Output:
+    - `loop7=/tmp/qa-project/loops/007/agent-output-implementer.log`
+    - `loop0=/tmp/qa-project/loops/000/agent-output-planner.log`
+    - `loop999=/tmp/qa-project/loops/999/agent-output-planner.log`
+    - `prompt_reviewer=/tmp/qa-project/agent-output-prompt-reviewer.log`
+    - `parent_exists=true`
+    - `sanitize('../')=`
+    - `sanitize('; rm -rf')=rm_-rf`
+    - `sanitize('backend label with spaces')=backend_label_with_spaces`
+    - `sanitize('日本語')=`
+    - `sanitize('')=`
+- Checked source-level path-derivation safety:
+  - Command: `rg -n "loop_slug|agent-output-" src/output_log.rs`
+  - Output: only role-based `agent-output-{role}.log` path construction and test literals; no `loop_slug` usage in this module.
+
+## Automated Tests
+- `nix develop -c cargo check`: passed (`Finished 'dev' profile`, exit 0).
+- `nix develop -c cargo test`: passed (unit + integration suites; no failures, exit 0).
+- `nix build -L`: passed, produced `./result/bin/ralph`; Nix check phase also ran tests and conformance validate suite (`184 passed; 0 failed`, exit 0).
+- `nix develop -c cargo test output_log::tests -- --nocapture`: passed (`7 passed; 0 failed`, exit 0).
+
+## Acceptance Criteria Verification
+- [x] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`: verified via `ls -l src/output_log.rs` and `rg -n "pub mod output_log;" src/lib.rs` (`8:pub mod output_log;`).
+- [x] `log_path_for_role(..., Some(loop), role)` returns `{project_dir}/loops/{loop:03}/agent-output-{role}.log`: verified manually in runtime output (`loop7`, `loop0`, `loop999`).
+- [x] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns root-level prompt-reviewer log path: verified (`prompt_reviewer=/tmp/qa-project/agent-output-prompt-reviewer.log`).
+- [x] `log_path_for_role` does not use `loop_slug` or backend name in derived paths: verified by source scan (`rg`) and function body (`agent-output-{role}.log`, loop-number directory only).
+- [x] `ensure_log_parent(path)` creates parent directories and returns success: verified by manual run (`parent_exists=true` after call).
+- [x] `sanitize_for_filename()` replacement/collapse/trim behavior: verified with manual inputs showing unsafe chars replaced/collapsed and trimmed outputs.
+- [x] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters: verified with `''`, `日本語`, `../`, `; rm -rf`.
+- [x] Unit tests cover required path/sanitization edge cases: verified by targeted suite `output_log::tests` (7 tests include loop paths, prompt-reviewer path, loop 0/999, parent creation, unsafe chars, underscore behavior, empty input).
+- [x] `cargo test` passes with new tests: verified via `nix develop -c cargo test` (pass).
+- [x] No existing code modified beyond adding module declaration in `src/lib.rs`: matches the provided implementation diff (new `src/output_log.rs` + `src/lib.rs` module export only).
+tokens used
+110,734
+

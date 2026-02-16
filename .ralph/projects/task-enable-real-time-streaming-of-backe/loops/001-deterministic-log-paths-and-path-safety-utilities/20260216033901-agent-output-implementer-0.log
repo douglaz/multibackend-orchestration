@@ -1,0 +1,2367 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+exit_status: 0
+
+=== STDOUT ===
+# Implementation Notes
+
+## Decisions Made
+- Added new module `src/output_log.rs:1` with:
+  - `log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf` (`src/output_log.rs:5`)
+  - `ensure_log_parent(path: &Path) -> io::Result<()>` (`src/output_log.rs:16`)
+  - `sanitize_for_filename(label: &str) -> String` (`src/output_log.rs:25`)
+- Implemented deterministic path derivation exactly by loop number + role, with zero-padded loop directory (`{loop_number:03}`), and root-level path when `loop_number` is `None`.
+- Implemented sanitization to replace disallowed characters with `_`, collapse consecutive underscores, and trim leading/trailing underscores.
+- Added comprehensive unit tests in `src/output_log.rs:42` for loop paths, prompt-reviewer root path, loop edge cases (0/999), directory creation, unsafe input (`../`, `; rm -rf`, spaces, unicode), underscore collapsing, and empty input.
+- Registered the module in `src/lib.rs:8` via `pub mod output_log;`.
+
+## Spec Deviations
+- None.
+
+## Testing
+- Ran `cargo test` (full suite): passed.
+- Ran `cargo check`: passed.
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c6486-0e5d-7be1-8dec-fd75b7908734
+--------
+user
+You are a software developer implementing a feature specification.
+
+Given a feature spec, implement it by:
+1. Creating/modifying the specified files
+2. Following project conventions
+3. Writing clean, tested code
+4. VERIFYING your changes compile — after making all changes, run the project's build/check command (e.g. `cargo check`, `nix build`, `npm test`, etc.) and fix any compilation errors before submitting your response
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
+
+# Implementation Notes
+
+## Decisions Made
+- <decision and rationale>
+
+## Spec Deviations
+- <any items that couldn't be implemented exactly as specified, with explanation>
+
+## Testing
+- <how to verify the implementation>
+
+---
+
+If this is a review-response pass, output `<TS>-impl-response-III.md` in this format:
+
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. <change tied to required feedback item>
+
+## Could Not Address
+- <feedback item not addressed and why> (or "None")
+
+## Pending Changes (Pre-Commit)
+(optional)
+- <summary of uncommitted changes>
+
+---
+
+## Context Provided
+
+### Feature Specification
+---
+artifact: spec
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T03:37:12Z
+---
+
+Now I have a comprehensive understanding of the codebase. Let me analyze the current state and plan the first feature.
+
+**Current state**: Loop 0, planning phase, no loops completed, no previous specs. This is the very first feature to plan.
+
+The project requires 5 main behavioral changes plus tests. The logical first feature should be the foundational pieces that other features depend on: **deterministic log paths** and **path safety utilities**. These are pure functions with no dependencies that everything else builds on.
+
+# Feature: Deterministic Log Paths and Path Safety Utilities
+
+## Description
+Add the foundational utility layer for deterministic, role-based log path derivation and filename sanitization. This introduces a new `output_log` module with two core functions: `log_path_for_role()` which derives deterministic log file paths from `(project_dir, loop_number, role)` tuples following the specified naming convention, and `sanitize_for_filename()` which strips unsafe characters from backend labels for use in log separators/headers. These are pure, stateless functions that form the base layer for all subsequent streaming, append, and retry-attribution work.
+
+## Acceptance Criteria
+- [ ] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`
+- [ ] `log_path_for_role(project_dir, loop_number: Option<u32>, role: &str) -> PathBuf` returns `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log` when `loop_number` is `Some`
+- [ ] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns `{project_dir}/agent-output-prompt-reviewer.log`
+- [ ] `log_path_for_role` does NOT use `loop_slug` or backend name in derived paths
+- [ ] `ensure_log_parent(path)` creates parent directories if they don't exist, returns `io::Result<()>`
+- [ ] `sanitize_for_filename(label: &str) -> String` replaces non-alphanumeric/non-hyphen/non-underscore characters with `_`, collapses consecutive underscores, and trims leading/trailing underscores
+- [ ] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters
+- [ ] Unit tests cover: normal loop+role paths, prompt-reviewer root path, edge cases (loop 0, loop 999), sanitization of unsafe chars (`../`, `; rm -rf`, spaces, unicode), empty string handling
+- [ ] `cargo test` passes with all new tests
+- [ ] No existing code is modified beyond adding the module declaration in `lib.rs`
+
+## Files to Modify/Create
+- `src/output_log.rs` — New module containing `log_path_for_role()`, `ensure_log_parent()`, and `sanitize_for_filename()` functions, plus `#[cfg(test)] mod tests` with comprehensive unit tests
+- `src/lib.rs` — Add `pub mod output_log;` declaration
+
+## Dependencies
+- Requires: none (first feature, pure utility functions)
+- Blocks: retry attribution/append semantics, streaming byte preservation, timeout cleanup, conformance tests (all subsequent features will use these path utilities)
+
+
+### Review Feedback (if responding to review)
+
+
+### Review History (prior iterations)
+
+
+
+## System Guardrails
+
+- Keep edits scoped to this loop's feature and acceptance criteria.
+- In review responses, address each required change explicitly.
+- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits.
+
+## Master Prompt
+
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 1
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T03:37:12Z
+---
+
+Now I have a comprehensive understanding of the codebase. Let me analyze the current state and plan the first feature.
+
+**Current state**: Loop 0, planning phase, no loops completed, no previous specs. This is the very first feature to plan.
+
+The project requires 5 main behavioral changes plus tests. The logical first feature should be the foundational pieces that other features depend on: **deterministic log paths** and **path safety utilities**. These are pure functions with no dependencies that everything else builds on.
+
+# Feature: Deterministic Log Paths and Path Safety Utilities
+
+## Description
+Add the foundational utility layer for deterministic, role-based log path derivation and filename sanitization. This introduces a new `output_log` module with two core functions: `log_path_for_role()` which derives deterministic log file paths from `(project_dir, loop_number, role)` tuples following the specified naming convention, and `sanitize_for_filename()` which strips unsafe characters from backend labels for use in log separators/headers. These are pure, stateless functions that form the base layer for all subsequent streaming, append, and retry-attribution work.
+
+## Acceptance Criteria
+- [ ] A new module `src/output_log.rs` exists and is registered in `src/lib.rs`
+- [ ] `log_path_for_role(project_dir, loop_number: Option<u32>, role: &str) -> PathBuf` returns `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log` when `loop_number` is `Some`
+- [ ] `log_path_for_role(project_dir, None, "prompt-reviewer")` returns `{project_dir}/agent-output-prompt-reviewer.log`
+- [ ] `log_path_for_role` does NOT use `loop_slug` or backend name in derived paths
+- [ ] `ensure_log_parent(path)` creates parent directories if they don't exist, returns `io::Result<()>`
+- [ ] `sanitize_for_filename(label: &str) -> String` replaces non-alphanumeric/non-hyphen/non-underscore characters with `_`, collapses consecutive underscores, and trims leading/trailing underscores
+- [ ] `sanitize_for_filename` handles empty input, unicode, path separators, shell metacharacters
+- [ ] Unit tests cover: normal loop+role paths, prompt-reviewer root path, edge cases (loop 0, loop 999), sanitization of unsafe chars (`../`, `; rm -rf`, spaces, unicode), empty string handling
+- [ ] `cargo test` passes with all new tests
+- [ ] No existing code is modified beyond adding the module declaration in `lib.rs`
+
+## Files to Modify/Create
+- `src/output_log.rs` — New module containing `log_path_for_role()`, `ensure_log_parent()`, and `sanitize_for_filename()` functions, plus `#[cfg(test)] mod tests` with comprehensive unit tests
+- `src/lib.rs` — Add `pub mod output_log;` declaration
+
+## Dependencies
+- Requires: none (first feature, pure utility functions)
+- Blocks: retry attribution/append semantics, streaming byte preservation, timeout cleanup, conformance tests (all subsequent features will use these path utilities)
+
+
+## Current Diff
+
+```diff
+
+```
+
+## Review Feedback
+
+(none)
+
+mcp startup: no servers
+
+thinking
+**Preparing initial analysis**
+codex
+Implementing the first-pass feature exactly as scoped: I’ll inspect `src/lib.rs`, add the new `src/output_log.rs` module with the three utility functions plus unit tests, then run `cargo test`/`cargo check` to verify compilation and test success.
+
+thinking
+**Inspecting source file structure**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,200p' src/lib.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "rg --files src | sed -n '1,200p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+pub mod backend;
+pub mod cli;
+pub mod config;
+pub mod daemon;
+pub mod error;
+pub mod git;
+pub mod mcp;
+pub mod prd;
+pub mod project;
+pub mod prompts;
+pub mod util;
+pub mod validate;
+pub mod workflow;
+pub mod workspace;
+
+pub type Result<T> = std::result::Result<T, error::RalphError>;
+ succeeded in 50ms:
+src/workflow/orchestrator.rs
+src/workflow/mod.rs
+src/workflow/parser.rs
+src/util/hash.rs
+src/util/lock.rs
+src/util/mod.rs
+src/util/time.rs
+src/util/slug.rs
+src/git/commit.rs
+src/git/branch.rs
+src/git/mod.rs
+src/workspace/summary.rs
+src/workspace/active.rs
+src/workspace/mod.rs
+src/workspace/discovery.rs
+src/backend/mock.rs
+src/backend/tmux_backend.rs
+src/backend/codex.rs
+src/backend/tmux.rs
+src/backend/mod.rs
+
+thinking
+**Checking dependencies for testing**
+codex
+I found `src/lib.rs` and confirmed it only needs a single module declaration addition. Next I’m checking existing dependencies to write tests that match current project conventions (e.g., tempfile usage).
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,240p' Cargo.toml" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+[package]
+name = "ralph"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Multi-backend orchestration tool for structured AI development loops"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+libc = "0.2"
+nix = { version = "0.29", features = ["signal", "process"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2"
+
+thinking
+**Inspecting utility module styles**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,220p' src/util/slug.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,220p' src/util/time.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+pub fn slugify_feature_name(input: &str) -> String {
+    let mut raw = String::with_capacity(input.len());
+
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            raw.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_whitespace() || ch == '_' || ch == '-' {
+            raw.push('-');
+        }
+    }
+
+    let mut collapsed = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.chars() {
+        if ch == '-' {
+            if !last_dash {
+                collapsed.push('-');
+                last_dash = true;
+            }
+        } else {
+ succeeded in 51ms:
+use chrono::{DateTime, Utc};
+
+pub fn now_utc() -> DateTime<Utc> {
+    Utc::now()
+}
+
+pub fn now_iso8601() -> String {
+    now_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+pub fn format_timestamp_yyyymmddhhmmss(dt: DateTime<Utc>) -> String {
+    dt.format("%Y%m%d%H%M%S").to_string()
+}
+
+pub fn now_timestamp_yyyymmddhhmmss() -> String {
+    format_timestamp_yyyymmddhhmmss(now_utc())
+}
+
+thinking
+**Designing output logging module**
+codex
+I have enough context and am starting edits now: adding `src/output_log.rs` with deterministic path derivation, parent directory creation, filename sanitization, and unit tests for all specified edge cases, then wiring it in via `src/lib.rs`.
+file update
+A /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/src/output_log.rs
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+    let filename = format!("agent-output-{role}.log");
+    match loop_number {
+        Some(loop_number) => project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}"))
+            .join(filename),
+        None => project_dir.join(filename),
+    }
+}
+
+pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn sanitize_for_filename(label: &str) -> String {
+    let mut sanitized = String::with_capacity(label.len());
+    let mut last_was_underscore = false;
+
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            sanitized.push('_');
+            last_was_underscore = true;
+        }
+    }
+
+    sanitized.trim_matches('_').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[test]
+    fn derives_loop_scoped_log_path() {
+        let project_dir = Path::new("/tmp/project");
+        let path = log_path_for_role(project_dir, Some(7), "implementer");
+        assert_eq!(
+            path,
+            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
+        );
+    }
+
+    #[test]
+    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
+        let project_dir = Path::new("/tmp/project");
+        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
+        assert_eq!(
+            path,
+            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
+        );
+    }
+
+    #[test]
+    fn formats_loop_number_edges_with_three_digits() {
+        let project_dir = Path::new("/tmp/project");
+        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
+        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
+
+        assert_eq!(
+            loop_zero,
+            Path::new("/tmp/project/loops/000/agent-output-planner.log")
+        );
+        assert_eq!(
+            loop_max,
+            Path::new("/tmp/project/loops/999/agent-output-planner.log")
+        );
+    }
+
+    #[test]
+    fn creates_missing_parent_directories() {
+        let temp = tempdir().expect("tempdir");
+        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
+
+        ensure_log_parent(&log_path).expect("parent directories should be created");
+
+        assert!(
+            log_path
+                .parent()
+                .expect("parent")
+                .try_exists()
+                .expect("exists check"),
+            "parent path should exist after ensure_log_parent"
+        );
+    }
+
+    #[test]
+    fn sanitizes_unsafe_filename_characters() {
+        assert_eq!(sanitize_for_filename("../"), "");
+        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
+        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
+        assert_eq!(sanitize_for_filename("日本語"), "");
+    }
+
+    #[test]
+    fn sanitization_collapses_and_trims_underscores() {
+        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
+        assert_eq!(sanitize_for_filename("a////b"), "a_b");
+    }
+
+    #[test]
+    fn sanitization_handles_empty_input() {
+        assert_eq!(sanitize_for_filename(""), "");
+    }
+}
+apply_patch(auto_approved=true) exited 0 in 2ms:
+Success. Updated the following files:
+A src/output_log.rs
+file update:
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cbb41c5780e00d6256510dac432c9362069892
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+file update:
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cbb41c5780e00d6256510dac432c9362069892
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Noting need for lib update**
+file update
+M /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/src/lib.rs
+@@ -7,2 +7,3 @@
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+apply_patch(auto_approved=true) exited 0 in 3ms:
+Success. Updated the following files:
+M src/lib.rs
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cbb41c5780e00d6256510dac432c9362069892
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cbb41c5780e00d6256510dac432c9362069892
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Planning code formatting and tests**
+codex
+Edits are in place. I’m running the test/build verification now (`cargo test` first, then `cargo check` if needed) and will fix anything that fails before finalizing.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 exited 101 in 25.80s:
+   Compiling smallvec v1.15.1
+   Compiling hashbrown v0.16.1
+   Compiling autocfg v1.5.0
+   Compiling tracing-core v0.1.36
+   Compiling anstyle-parse v0.2.7
+   Compiling anstyle-query v1.1.5
+   Compiling scopeguard v1.2.0
+   Compiling anstyle v1.0.13
+   Compiling generic-array v0.14.7
+   Compiling linux-raw-sys v0.11.0
+   Compiling cfg_aliases v0.2.1
+   Compiling pin-project-lite v0.2.16
+   Compiling getrandom v0.3.4
+   Compiling colorchoice v1.0.4
+   Compiling zmij v1.0.19
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling num-traits v0.2.19
+   Compiling anstream v0.6.21
+   Compiling aho-corasick v1.1.4
+   Compiling nix v0.29.0
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cbb41c5780e00d6256510dac432c9362069892
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Adjusting underscore collapsing logic**
+codex
+`cargo test` found one failing unit test in the new sanitization logic: existing consecutive underscores weren’t collapsed. I’m adjusting `sanitize_for_filename` to collapse underscores regardless of source, then re-running the full test suite.
+file update
+M /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/src/output_log.rs
+@@ -29,3 +29,3 @@
+     for ch in label.chars() {
+-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
+             sanitized.push(ch);
+apply_patch(auto_approved=true) exited 0 in 3ms:
+Success. Updated the following files:
+M src/output_log.rs
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Planning test and build checks**
+codex
+I’ve patched the underscore-collapsing behavior. Running verification again now (`cargo test`, then `cargo check`) to ensure the feature is fully green.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 9.05s:
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.70s
+     Running unittests src/lib.rs (target/debug/deps/ralph-3b3d545b10a51b88)
+
+running 382 tests
+test backend::codex::tests::parse_codex_model_effort_no_suffix ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_high ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_low ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_xhigh ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_medium ... ok
+test backend::codex::tests::parse_codex_model_effort_unknown_suffix ... ok
+test backend::tests::parse_backend_spec_accepts_bare_name ... ok
+test backend::tests::parse_backend_spec_accepts_name_with_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_name ... ok
+test backend::tests::parse_backend_spec_rejects_missing_closing_paren ... ok
+test backend::tests::parse_backend_spec_rejects_missing_opening_paren ... ok
+test backend::tmux::tests::format_window_label_reviewer_role ... ok
+test backend::tmux::tests::format_window_label_basic ... ok
+test backend::tmux::tests::format_window_label_planner_role ... ok
+test backend::tmux::tests::format_window_label_long_values_truncated ... ok
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Running cargo check for build verification**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo check' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 8.54s:
+    Checking lock_api v0.4.14
+    Checking toml_write v0.1.2
+    Checking lazy_static v1.5.0
+    Checking tracing-core v0.1.36
+    Checking winnow v0.7.14
+    Checking clap_lex v0.7.7
+    Checking itoa v1.0.17
+    Checking sharded-slab v0.1.7
+    Checking num-traits v0.2.19
+    Checking anstream v0.6.21
+    Checking zmij v1.0.19
+    Checking thread_local v1.1.9
+    Checking iana-time-zone v0.1.65
+    Checking bytes v1.11.1
+    Checking cpufeatures v0.2.17
+    Checking clap_builder v4.5.57
+    Checking nu-ansi-term v0.50.3
+    Checking aho-corasick v1.1.4
+    Checking ryu v1.0.23
+    Checking env_home v0.1.0
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Preparing git diff inspection**
+codex
+All checks now pass (`cargo test` and `cargo check`). I’m doing a quick diff review to confirm scope stays limited to `src/output_log.rs` and module registration in `src/lib.rs` before I provide implementation notes.
+exec
+/run/current-system/sw/bin/bash -lc 'git diff -- src/lib.rs src/output_log.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc 'git status --short' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad..5b84083 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@ pub mod daemon;
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+ succeeded in 51ms:
+ M src/lib.rs
+?? .ralph/projects/task-enable-real-time-streaming-of-backe/
+?? .ralph/quick-prd/79829ffabea8/
+?? src/output_log.rs
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Checking untracked file contents**
+exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/output_log.rs | sed -n '1,260p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/lib.rs | sed -n '1,80p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 50ms:
+     1	use std::fs;
+     2	use std::io;
+     3	use std::path::{Path, PathBuf};
+     4	
+     5	pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+     6	    let filename = format!("agent-output-{role}.log");
+     7	    match loop_number {
+     8	        Some(loop_number) => project_dir
+     9	            .join("loops")
+    10	            .join(format!("{loop_number:03}"))
+    11	            .join(filename),
+    12	        None => project_dir.join(filename),
+    13	    }
+    14	}
+    15	
+    16	pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
+    17	    if let Some(parent) = path.parent() {
+    18	        if !parent.as_os_str().is_empty() {
+    19	            fs::create_dir_all(parent)?;
+    20	        }
+ succeeded in 51ms:
+     1	pub mod backend;
+     2	pub mod cli;
+     3	pub mod config;
+     4	pub mod daemon;
+     5	pub mod error;
+     6	pub mod git;
+     7	pub mod mcp;
+     8	pub mod output_log;
+     9	pub mod prd;
+    10	pub mod project;
+    11	pub mod prompts;
+    12	pub mod util;
+    13	pub mod validate;
+    14	pub mod workflow;
+    15	pub mod workspace;
+    16	
+    17	pub type Result<T> = std::result::Result<T, error::RalphError>;
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+
+thinking
+**Confirming no unintended modifications**
+codex
+# Implementation Notes
+
+## Decisions Made
+- Added new module `src/output_log.rs:1` with:
+  - `log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf` (`src/output_log.rs:5`)
+  - `ensure_log_parent(path: &Path) -> io::Result<()>` (`src/output_log.rs:16`)
+  - `sanitize_for_filename(label: &str) -> String` (`src/output_log.rs:25`)
+- Implemented deterministic path derivation exactly by loop number + role, with zero-padded loop directory (`{loop_number:03}`), and root-level path when `loop_number` is `None`.
+- Implemented sanitization to replace disallowed characters with `_`, collapse consecutive underscores, and trim leading/trailing underscores.
+- Added comprehensive unit tests in `src/output_log.rs:42` for loop paths, prompt-reviewer root path, loop edge cases (0/999), directory creation, unsafe input (`../`, `; rm -rf`, spaces, unicode), underscore collapsing, and empty input.
+- Registered the module in `src/lib.rs:8` via `pub mod output_log;`.
+
+## Spec Deviations
+- None.
+
+## Testing
+- Ran `cargo test` (full suite): passed.
+- Ran `cargo check`: passed.
+file update:
+diff --git a/src/lib.rs b/src/lib.rs
+index b55b9ad9d27abd916e06231d0f1e6dde75ae25ab..5b840834c9bf4ad8c17b7c7d80bede4105556cb2
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,6 +5,7 @@
+ pub mod error;
+ pub mod git;
+ pub mod mcp;
++pub mod output_log;
+ pub mod prd;
+ pub mod project;
+ pub mod prompts;
+diff --git a/src/output_log.rs b/src/output_log.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4baa98c654445edd8c48fc3eb15af4877054b825
+--- /dev/null
++++ b/src/output_log.rs
+@@ -0,0 +1,119 @@
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
++    let filename = format!("agent-output-{role}.log");
++    match loop_number {
++        Some(loop_number) => project_dir
++            .join("loops")
++            .join(format!("{loop_number:03}"))
++            .join(filename),
++        None => project_dir.join(filename),
++    }
++}
++
++pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent)?;
++        }
++    }
++    Ok(())
++}
++
++pub fn sanitize_for_filename(label: &str) -> String {
++    let mut sanitized = String::with_capacity(label.len());
++    let mut last_was_underscore = false;
++
++    for ch in label.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' {
++            sanitized.push(ch);
++            last_was_underscore = false;
++        } else if !last_was_underscore {
++            sanitized.push('_');
++            last_was_underscore = true;
++        }
++    }
++
++    sanitized.trim_matches('_').to_owned()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use std::path::Path;
++    use tempfile::tempdir;
++
++    #[test]
++    fn derives_loop_scoped_log_path() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, Some(7), "implementer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
++        );
++    }
++
++    #[test]
++    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
++        let project_dir = Path::new("/tmp/project");
++        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
++        assert_eq!(
++            path,
++            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
++        );
++    }
++
++    #[test]
++    fn formats_loop_number_edges_with_three_digits() {
++        let project_dir = Path::new("/tmp/project");
++        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
++        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
++
++        assert_eq!(
++            loop_zero,
++            Path::new("/tmp/project/loops/000/agent-output-planner.log")
++        );
++        assert_eq!(
++            loop_max,
++            Path::new("/tmp/project/loops/999/agent-output-planner.log")
++        );
++    }
++
++    #[test]
++    fn creates_missing_parent_directories() {
++        let temp = tempdir().expect("tempdir");
++        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
++
++        ensure_log_parent(&log_path).expect("parent directories should be created");
++
++        assert!(
++            log_path
++                .parent()
++                .expect("parent")
++                .try_exists()
++                .expect("exists check"),
++            "parent path should exist after ensure_log_parent"
++        );
++    }
++
++    #[test]
++    fn sanitizes_unsafe_filename_characters() {
++        assert_eq!(sanitize_for_filename("../"), "");
++        assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
++        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(sanitize_for_filename("日本語"), "");
++    }
++
++    #[test]
++    fn sanitization_collapses_and_trims_underscores() {
++        assert_eq!(sanitize_for_filename("___alpha___beta___"), "alpha_beta");
++        assert_eq!(sanitize_for_filename("a////b"), "a_b");
++    }
++
++    #[test]
++    fn sanitization_handles_empty_input() {
++        assert_eq!(sanitize_for_filename(""), "");
++    }
++}
+
+tokens used
+43,268
+

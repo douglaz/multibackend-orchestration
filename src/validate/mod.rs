@@ -21,6 +21,7 @@ mod tests_project;
 mod tests_prompt_review;
 mod tests_qa;
 mod tests_run;
+mod tests_streaming;
 mod tests_tail;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
@@ -88,6 +89,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_qa::tests());
     tests.extend(tests_commands::tests());
     tests.extend(tests_auto_init::tests());
+    tests.extend(tests_streaming::tests());
     tests.extend(tests_tail::tests());
     tests.extend(tests_daemon::tests());
     tests.extend(tests_e2e_conformance::tests());

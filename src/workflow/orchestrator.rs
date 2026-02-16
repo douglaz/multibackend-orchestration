@@ -22,6 +22,7 @@ use crate::git::commit::{
     ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
+use crate::output_log::LogWriter;
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
@@ -255,6 +256,7 @@ impl Orchestrator {
                 .await;
 
             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
+            let mut pr_log = LogWriter::open(&project_dir, None, "prompt-reviewer");
             let decision = execute_with_parse_retries(
                 pr_backend,
                 &registry,
@@ -263,6 +265,7 @@ impl Orchestrator {
                 &prompt_reviewer_prompt,
                 parse_prompt_reviewer_output,
                 &expected_format_template_for("prompt_reviewer", None),
+                &mut pr_log,
             )
             .await?;
 
@@ -381,6 +384,8 @@ impl Orchestrator {
                         backend = planner_backend.name(),
                         "invoking planner..."
                     );
+                    let mut planner_log =
+                        LogWriter::open(&project_dir, Some(loop_number), "planner");
                     let planner_decision = execute_with_parse_retries(
                         planner_backend,
                         &registry,
@@ -389,6 +394,7 @@ impl Orchestrator {
                         &planner_prompt,
                         parse_planner_output,
                         &expected_format_template_for("planner", None),
+                        &mut planner_log,
                     )
                     .await?;
                     debug!(loop = loop_number, "planner responded");
@@ -527,6 +533,8 @@ impl Orchestrator {
                             backend = implementer_backend.name(),
                             "invoking implementer..."
                         );
+                        let mut impl_log =
+                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -535,6 +543,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, None),
                             &expected_format_template_for("implementer-notes", None),
+                            &mut impl_log,
                         )
                         .await?;
                         debug!(loop = loop_number, "implementer responded");
@@ -630,6 +639,8 @@ impl Orchestrator {
                             iteration = iteration,
                             "invoking implementer for QA feedback response..."
                         );
+                        let mut impl_log =
+                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -638,6 +649,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
+                            &mut impl_log,
                         )
                         .await?;
 
@@ -736,6 +748,8 @@ impl Orchestrator {
                             iteration = iteration,
                             "invoking implementer for feedback response..."
                         );
+                        let mut impl_log =
+                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -744,6 +758,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
+                            &mut impl_log,
                         )
                         .await?;
 
@@ -898,6 +913,7 @@ impl Orchestrator {
                         iteration = state.phase_iteration,
                         "invoking QA..."
                     );
+                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), "qa");
                     let qa_decision = execute_with_parse_retries(
                         qa_backend,
                         &registry,
@@ -906,6 +922,7 @@ impl Orchestrator {
                         &qa_prompt,
                         parse_qa_output,
                         &expected_format_template_for("qa", None),
+                        &mut qa_log,
                     )
                     .await?;
                     debug!(loop = loop_number, "QA responded");
@@ -1092,6 +1109,8 @@ impl Orchestrator {
                             backend = reviewer_backend.name(),
                             "invoking reviewer..."
                         );
+                        let mut reviewer_log =
+                            LogWriter::open(&project_dir, Some(loop_number), "reviewer");
                         let reviewer_decision = execute_with_parse_retries(
                             reviewer_backend,
                             &registry,
@@ -1100,6 +1119,7 @@ impl Orchestrator {
                             &reviewer_prompt,
                             parse_reviewer_output,
                             &expected_format_template_for("reviewer", None),
+                            &mut reviewer_log,
                         )
                         .await?;
                         debug!(loop = loop_number, "reviewer responded");
@@ -1329,6 +1349,8 @@ impl Orchestrator {
                         backend = completer_backend.name(),
                         "invoking completer..."
                     );
+                    let mut completer_log =
+                        LogWriter::open(&project_dir, Some(loop_number), "completer");
                     let completer_decision: CompleterDecision = execute_with_parse_retries(
                         completer_backend,
                         &registry,
@@ -1337,6 +1359,7 @@ impl Orchestrator {
                         &completer_prompt,
                         parse_completer_output,
                         &expected_format_template_for("completer", None),
+                        &mut completer_log,
                     )
                     .await?;
                     debug!(loop = loop_number, "completer responded");
@@ -1421,6 +1444,8 @@ impl Orchestrator {
                                         backend = acceptance_qa_backend.name(),
                                         "invoking acceptance QA..."
                                     );
+                                    let mut acceptance_log =
+                                        LogWriter::open(&project_dir, Some(loop_number), "qa");
                                     let acceptance_decision = execute_with_parse_retries(
                                         acceptance_qa_backend,
                                         &registry,
@@ -1429,6 +1454,7 @@ impl Orchestrator {
                                         &acceptance_prompt,
                                         parse_qa_output,
                                         &expected_format_template_for("qa", None),
+                                        &mut acceptance_log,
                                     )
                                     .await?;
                                     debug!(
@@ -1880,6 +1906,20 @@ fn rollback_current_loop(
                 path = %loop_dir.display(),
                 error = %e,
                 "failed to remove artifact directory during rollback"
+            );
+        }
+    }
+
+    // Also remove the bare loop-number directory used by agent-output log files
+    // (e.g., loops/001/agent-output-planner.log).
+    let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
+    if log_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(&log_dir) {
+            warn!(
+                loop_number = loop_number,
+                path = %log_dir.display(),
+                error = %e,
+                "failed to remove agent-output log directory during rollback"
             );
         }
     }
@@ -2671,12 +2711,14 @@ async fn execute_with_parse_retries<T, F>(
     original_prompt: &str,
     parse_fn: F,
     expected_format: &str,
+    log_writer: &mut LogWriter,
 ) -> Result<T>
 where
     F: Fn(&str) -> Result<T>,
 {
     let first_output =
-        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
+        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
+            .await?;
 
     // If output is empty/near-empty, retry with the same backend before going to the
     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
@@ -2689,7 +2731,8 @@ where
             "backend returned empty/near-empty output, retrying with same backend"
         );
         let retry_output =
-            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
+            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
+                .await?;
         if retry_output.trim().len() > first_output.trim().len() {
             retry_output
         } else {
@@ -2733,9 +2776,14 @@ where
                 Respond ONLY with the corrected markdown. No explanation.\n",
             );
 
-            let second_output =
-                execute_with_timeout_retries(reformatter_backend, role, phase, &reformat_prompt)
-                    .await?;
+            let second_output = execute_with_timeout_retries(
+                reformatter_backend,
+                role,
+                phase,
+                &reformat_prompt,
+                log_writer,
+            )
+            .await?;
             if let Ok(parsed) = parse_fn(&second_output) {
                 return Ok(parsed);
             }
@@ -2751,7 +2799,8 @@ where
                 Include all required H2 sections.\n\n{original_prompt}",
             );
             let third_output =
-                execute_with_timeout_retries(backend, role, phase, &reminded_prompt).await?;
+                execute_with_timeout_retries(backend, role, phase, &reminded_prompt, log_writer)
+                    .await?;
             if let Ok(parsed) = parse_fn(&third_output) {
                 return Ok(parsed);
             }
@@ -2771,10 +2820,16 @@ async fn execute_with_timeout_retries(
     role: &str,
     phase: &str,
     prompt: &str,
+    log_writer: &mut LogWriter,
 ) -> Result<String> {
     for attempt in 1..=3_u8 {
-        match backend.execute(prompt).await {
-            Ok(output) => return Ok(output),
+        let is_fallback = log_writer.attempt() > 0;
+        log_writer.write_attempt_separator(backend.name(), is_fallback);
+
+        match backend.execute_with_log(prompt, Some(log_writer)).await {
+            Ok(output) => {
+                return Ok(output);
+            }
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
             }) => {

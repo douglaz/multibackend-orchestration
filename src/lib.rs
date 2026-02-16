@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod error;
 pub mod git;
 pub mod mcp;
+pub mod output_log;
 pub mod prd;
 pub mod project;
 pub mod prompts;

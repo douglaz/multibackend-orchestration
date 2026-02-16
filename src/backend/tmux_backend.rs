@@ -9,6 +9,7 @@ use tracing::debug;
 use super::tmux::{self, TmuxCommandRunner};
 use super::{persist_cli_output, Backend, CliBackend, SharedTmuxContext};
 use crate::error::RalphError;
+use crate::output_log::LogWriter;
 use crate::Result;
 
 static INVOCATION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -317,6 +318,18 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         }
 
         Ok(String::from_utf8_lossy(&output_bytes).to_string())
+    }
+
+    async fn execute_with_log(
+        &self,
+        prompt: &str,
+        mut log_writer: Option<&mut LogWriter>,
+    ) -> Result<String> {
+        let output = self.execute(prompt).await?;
+        if let Some(writer) = log_writer.as_deref_mut() {
+            writer.write_bytes(output.as_bytes());
+        }
+        Ok(output)
     }
 
     async fn health_check(&self) -> Result<()> {
