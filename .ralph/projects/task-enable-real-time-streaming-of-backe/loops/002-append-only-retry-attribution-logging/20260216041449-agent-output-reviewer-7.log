@@ -1,0 +1,2230 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: reviewer
+exit_status: 0
+
+=== STDOUT ===
+# Review: SUGGESTIONS
+
+## Required Changes
+1. **Conformance coverage for retry append behavior**: `streaming::retry_append_behavior` does not actually exercise any retry path, so it can pass without proving append-across-retries behavior.
+   - Current: `src/validate/tests_streaming.rs:23` runs a normal single loop and only checks for `attempt=1`/basic separator presence.
+   - Expected: Force at least one real retry/fallback (timeout retry and/or parse-retry/reformatter), then assert the same role log file contains multiple attempt separators (`attempt=1`, `attempt=2`, etc.) and appended content across attempts.
+   - Reference: Master Prompt `Test Requirements` (`retry_append_behavior`), Feature Spec acceptance criteria for retry/fallback append semantics.
+
+2. **Unit test gap for retry-path attempt numbering**: attempt numbering is only validated via direct `LogWriter` calls, not through actual retry control flow.
+   - Current: `src/output_log.rs:290` (`log_writer_attempt_counter_increments`) checks manual increments only; it does not validate numbering across timeout/parse retry branches in `src/workflow/orchestrator.rs:2671`.
+   - Expected: Add unit tests that drive retry paths (timeout retry and parse fallback) and verify separator attempt numbering and attribution across those paths.
+   - Reference: Feature Spec acceptance criterion: “Unit tests cover separator formatting, attempt numbering across retry paths, and log-writer failure resilience.”
+
+## Recommended Improvements
+1. Clarify and lock down `fallback` semantics with tests: `src/workflow/orchestrator.rs:2791` currently sets fallback based on `log_writer.attempt() > 0`, which marks second timeout retry as `fallback=true`; if that is intentional, encode it in tests/docs explicitly.
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c64a6-4654-73c0-8505-63f34d346981
+--------
+user
+You are a code reviewer ensuring implementations match specifications.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- The implementation diff
+- `<TS>-impl-notes.md`
+
+Review for:
+1. Spec compliance - does it meet all acceptance criteria?
+2. Code quality - is it clean, maintainable, secure?
+3. Consistency - does it follow project patterns?
+4. Scope fidelity - ignore orchestration runtime files under `.ralph/` and focus on product/code changes
+
+If acceptance criteria are already satisfied and no additional code change is required,
+return `# Review: APPROVED` with evidence instead of requesting re-implementation.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+Your output MUST be:
+
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] <criterion 1>
+- [x] <criterion 2>
+
+## Notes
+(optional)
+<approval rationale>
+
+## Commit Message
+(optional)
+<single-line commit message suggestion>
+
+---
+
+OR:
+
+# Review: SUGGESTIONS
+
+## Required Changes
+1. **<area>**: <what needs to change>
+   - Current: <what it does now>
+   - Expected: <what it should do>
+   - Reference: <spec or prompt section>
+
+## Recommended Improvements
+(optional)
+1. <suggestion>
+
+---
+
+## Context Provided
+
+### Master Prompt
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+### Feature Specification
+---
+artifact: spec
+loop: 2
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-xhigh)
+role: planner
+created_at: 2026-02-16T03:46:39Z
+---
+
+# Feature: Append-Only Retry Attribution Logging
+
+## Description
+Loop 1 added deterministic path and sanitization utilities, but execution paths still do not use them. This feature integrates append-only backend attempt logging into orchestrator execution so each role writes to one deterministic log file and every retry/fallback attempt is explicitly attributed with a stable separator.
+
+## Acceptance Criteria
+- [ ] Orchestrator uses canonical log roles for execution logging: `planner`, `implementer`, `qa`, `reviewer`, and `prompt-reviewer` (prompt review uses `loop_number = None`).
+- [ ] Every log path is derived exclusively through `log_path_for_role(project_dir, loop_number, role)`; no filename derivation from `loop_slug` or backend name.
+- [ ] Log files are opened in `create(true) + append(true)` mode and are never truncated.
+- [ ] Before each backend attempt, a separator is appended with: attempt number, sanitized backend label, fallback flag, and timestamp.
+- [ ] Timeout retries and parse-retry/reformatter fallback attempts append to the same file for the same `(loop_number, role)`.
+- [ ] Logging is best-effort: open/write/flush failures emit `tracing::warn!`, disable further log writes for that run, and do not change backend/orchestrator result semantics.
+- [ ] Unit tests cover separator formatting, attempt numbering across retry paths, and log-writer failure resilience.
+- [ ] Conformance tests include `retry_append_behavior` and `prompt_reviewer_path` and are registered in validate discovery.
+- [ ] `cargo test` passes and validate passes for the new streaming-log conformance cases.
+
+## Files to Modify/Create
+- `src/output_log.rs` - add append-mode log writer helpers (open, separator write, graceful disable-on-error) and unit tests.
+- `src/workflow/orchestrator.rs` - thread logging context through backend execution helpers and increment/log attempt metadata across all retry/fallback branches.
+- `src/validate/tests_streaming.rs` - add conformance tests for retry append behavior and prompt-reviewer root-level log path.
+- `src/validate/mod.rs` - register `tests_streaming::tests()`.
+
+## Dependencies
+- Requires: Deterministic Log Paths and Path Safety Utilities (Loop 1)
+- Blocks: Byte-preserving chunked streaming capture, timeout kill/reap cleanup, and remaining streaming conformance coverage (`mid_execution_visibility`, `timeout_cleanup`)
+
+---
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 2
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: implementer
+created_at: 2026-02-16T03:55:39Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- **LogWriter struct design**: Created a `LogWriter` struct in `output_log.rs` that encapsulates append-mode file handling with best-effort semantics. On any I/O failure (open, write, flush), it emits `tracing::warn!` and disables further writes by setting `self.file = None`. All subsequent writes silently no-op, ensuring backend execution is never affected by logging failures.
+- **Attempt tracking inside LogWriter**: The `LogWriter` maintains an internal `attempt` counter that auto-increments on each `write_attempt_separator()` call. This ensures consistent numbering across timeout retries and parse-retry/reformatter fallback attempts within the same `(loop_number, role)` execution.
+- **Fallback detection heuristic**: The `is_fallback` flag in `execute_with_timeout_retries` is determined by whether the LogWriter has already recorded at least one attempt (`log_writer.attempt() > 0`). The very first call to `execute_with_timeout_retries` within `execute_with_parse_retries` will have `attempt=0` and thus `is_fallback=false`; subsequent calls (reformatter, reminded prompt) will have `is_fallback=true`.
+- **Canonical log roles**: Used `"planner"`, `"implementer"`, `"qa"`, `"reviewer"`, and `"prompt-reviewer"` as log file role names, matching the spec. The completer role reuses the `"planner"` log file since it is conceptually an extension of the planning phase within the same loop.
+- **LogWriter instantiation at each call site**: Each `execute_with_parse_retries` call creates its own `LogWriter`. Because files are opened in append mode, multiple LogWriter instances for the same role within the same loop will append to the same file (e.g., QA retry iterations across different phase steps).
+- **Separator format**: Used a stable, machine-parseable format: `\n--- attempt=N backend=LABEL fallback=BOOL ts=TIMESTAMP ---\n`. Timestamps use RFC 3339 format via `chrono::Utc::now().to_rfc3339()`.
+
+## Spec Deviations
+- **Streaming semantics (byte preservation)**: The spec's master prompt mentions byte-preserving chunked streaming with `read_buf()`/`BytesMut`, but this is explicitly listed as a blocker for future loops (not part of Loop 2's acceptance criteria). Loop 2 focuses only on append-only retry attribution logging. The current implementation logs the final string output returned by `backend.execute()`.
+- **Timeout and process cleanup**: Similarly, the timeout kill/reap behavior and timeout footer writing are listed under the master prompt's future requirements but are not in Loop 2's acceptance criteria. The existing timeout retry logic is preserved unchanged.
+- **Acceptance QA log role**: The acceptance QA phase uses role `"qa"` for its log file, which means acceptance QA output appends to the same QA log file as the regular QA phase within the same loop. This is consistent with the spec's requirement that all attempts for the same `(loop_number, role)` append to the same file.
+
+## Testing
+- **Unit tests** (in `output_log.rs`):
+  - `separator_format_contains_required_fields` - verifies attempt, backend, fallback, and timestamp fields
+  - `separator_format_fallback_flag` - verifies fallback=true variant
+  - `log_writer_opens_and_appends` - end-to-end write/read with multiple attempts
+  - `log_writer_appends_across_instances` - verifies append mode across separate LogWriter lifetimes
+  - `log_writer_attempt_counter_increments` - verifies monotonic counter
+  - `log_writer_disabled_on_bad_path_continues_silently` - verifies graceful failure handling
+  - `log_writer_prompt_reviewer_uses_root_path` - verifies None loop_number produces project-root path
+- **Conformance tests** (in `tests_streaming.rs`, registered in `validate/mod.rs`):
+  - `streaming::retry_append_behavior` - runs a full loop and verifies planner and implementer log files exist with attempt separators
+  - `streaming::prompt_reviewer_path` - enables prompt review and verifies the log is at project root, not inside a loop directory
+- **Verification**: `cargo test` passes with 590 tests passing, 1 ignored, 0 failures.
+
+
+### Implementation Response (if reviewing iteration)
+
+
+### Implementation Diff
+diff --git a/src/output_log.rs b/src/output_log.rs
+index 4baa98c..611abd0 100644
+--- a/src/output_log.rs
++++ b/src/output_log.rs
+@@ -1,7 +1,10 @@
+-use std::fs;
+-use std::io;
++use std::fs::{self, File, OpenOptions};
++use std::io::{self, Write};
+ use std::path::{Path, PathBuf};
+ 
++use chrono::Utc;
++use tracing::warn;
++
+ pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+     let filename = format!("agent-output-{role}.log");
+     match loop_number {
+@@ -39,9 +42,113 @@ pub fn sanitize_for_filename(label: &str) -> String {
+     sanitized.trim_matches('_').to_owned()
+ }
+ 
++/// Formats a separator line for a backend attempt in the log file.
++pub fn format_attempt_separator(
++    attempt: u32,
++    backend_label: &str,
++    is_fallback: bool,
++    timestamp: &str,
++) -> String {
++    let sanitized = sanitize_for_filename(backend_label);
++    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
++    format!(
++        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
++    )
++}
++
++/// Best-effort append-mode log writer.
++///
++/// Opens the file in create+append mode. On any I/O failure (open, write, flush),
++/// logs a `tracing::warn!` and disables further writes for this writer instance.
++/// Failures never propagate to callers and do not affect backend/orchestrator
++/// result semantics.
++pub struct LogWriter {
++    file: Option<File>,
++    path: PathBuf,
++    attempt: u32,
++}
++
++impl LogWriter {
++    /// Open a log file for the given role in create+append mode.
++    /// Returns a writer that is always usable — if the open fails, the writer
++    /// is in a disabled state and all subsequent writes are silently skipped
++    /// after a single warning.
++    pub fn open(project_dir: &Path, loop_number: Option<u32>, role: &str) -> Self {
++        let path = log_path_for_role(project_dir, loop_number, role);
++        let file = match Self::try_open(&path) {
++            Ok(f) => Some(f),
++            Err(e) => {
++                warn!(
++                    path = %path.display(),
++                    error = %e,
++                    "failed to open log file; logging disabled for this run"
++                );
++                None
++            }
++        };
++        Self {
++            file,
++            path,
++            attempt: 0,
++        }
++    }
++
++    fn try_open(path: &Path) -> io::Result<File> {
++        ensure_log_parent(path)?;
++        OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(path)
++    }
++
++    /// Write an attempt separator before a backend execution.
++    /// Increments the internal attempt counter.
++    pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
++        self.attempt += 1;
++        let timestamp = Utc::now().to_rfc3339();
++        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
++        self.write_bytes(separator.as_bytes());
++    }
++
++    /// Append raw bytes to the log file.
++    pub fn write_bytes(&mut self, data: &[u8]) {
++        let Some(file) = self.file.as_mut() else {
++            return;
++        };
++        if let Err(e) = file.write_all(data).and_then(|_| file.flush()) {
++            warn!(
++                path = %self.path.display(),
++                error = %e,
++                "log write/flush failed; disabling further writes"
++            );
++            self.file = None;
++        }
++    }
++
++    /// Append a string to the log file.
++    pub fn write_str(&mut self, s: &str) {
++        self.write_bytes(s.as_bytes());
++    }
++
++    /// Returns the current attempt number.
++    pub fn attempt(&self) -> u32 {
++        self.attempt
++    }
++
++    /// Returns the log file path.
++    pub fn path(&self) -> &Path {
++        &self.path
++    }
++
++    /// Returns true if the writer is still active (not disabled by error).
++    pub fn is_active(&self) -> bool {
++        self.file.is_some()
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+-    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use super::*;
+     use std::path::Path;
+     use tempfile::tempdir;
+ 
+@@ -116,4 +223,98 @@ mod tests {
+     fn sanitization_handles_empty_input() {
+         assert_eq!(sanitize_for_filename(""), "");
+     }
++
++    #[test]
++    fn separator_format_contains_required_fields() {
++        let sep = format_attempt_separator(1, "claude(opus)", false, "2026-01-01T00:00:00Z");
++        assert!(sep.contains("attempt=1"));
++        assert!(sep.contains("backend=claude_opus"));
++        assert!(sep.contains("fallback=false"));
++        assert!(sep.contains("ts=2026-01-01T00:00:00Z"));
++        assert!(sep.starts_with('\n'));
++        assert!(sep.ends_with('\n'));
++    }
++
++    #[test]
++    fn separator_format_fallback_flag() {
++        let sep = format_attempt_separator(2, "codex(gpt-5)", true, "2026-01-01T00:00:00Z");
++        assert!(sep.contains("attempt=2"));
++        assert!(sep.contains("fallback=true"));
++    }
++
++    #[test]
++    fn log_writer_opens_and_appends() {
++        let temp = tempdir().expect("tempdir");
++        let project_dir = temp.path();
++
++        let mut writer = LogWriter::open(project_dir, Some(1), "planner");
++        assert!(writer.is_active());
++
++        writer.write_attempt_separator("claude(opus)", false);
++        writer.write_str("hello world");
++        writer.write_attempt_separator("codex(gpt-5)", true);
++        writer.write_str("retry output");
++
++        let content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(content.contains("attempt=1"));
++        assert!(content.contains("hello world"));
++        assert!(content.contains("attempt=2"));
++        assert!(content.contains("fallback=true"));
++        assert!(content.contains("retry output"));
++    }
++
++    #[test]
++    fn log_writer_appends_across_instances() {
++        let temp = tempdir().expect("tempdir");
++        let project_dir = temp.path();
++
++        {
++            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
++            w.write_attempt_separator("claude", false);
++            w.write_str("first run\n");
++        }
++        {
++            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
++            w.write_attempt_separator("codex", false);
++            w.write_str("second run\n");
++        }
++
++        let content = fs::read_to_string(
++            log_path_for_role(project_dir, Some(1), "implementer"),
++        )
++        .expect("read log");
++        assert!(content.contains("first run"));
++        assert!(content.contains("second run"));
++    }
++
++    #[test]
++    fn log_writer_attempt_counter_increments() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
++
++        assert_eq!(writer.attempt(), 0);
++        writer.write_attempt_separator("backend-a", false);
++        assert_eq!(writer.attempt(), 1);
++        writer.write_attempt_separator("backend-b", true);
++        assert_eq!(writer.attempt(), 2);
++    }
++
++    #[test]
++    fn log_writer_disabled_on_bad_path_continues_silently() {
++        // Open a writer against a path that can't be opened (device file as dir).
++        let writer = LogWriter::open(Path::new("/dev/null"), Some(1), "planner");
++        // /dev/null is a file, so creating /dev/null/loops/001/ will fail.
++        // The writer should be disabled but not panic.
++        assert!(!writer.is_active());
++    }
++
++    #[test]
++    fn log_writer_prompt_reviewer_uses_root_path() {
++        let temp = tempdir().expect("tempdir");
++        let writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
++        assert_eq!(
++            writer.path(),
++            temp.path().join("agent-output-prompt-reviewer.log")
++        );
++    }
+ }
+diff --git a/src/validate/mod.rs b/src/validate/mod.rs
+index 6220616..d4a3759 100644
+--- a/src/validate/mod.rs
++++ b/src/validate/mod.rs
+@@ -20,6 +20,7 @@ mod tests_project;
+ mod tests_prompt_review;
+ mod tests_qa;
+ mod tests_run;
++mod tests_streaming;
+ mod tests_tail;
+ 
+ pub use runner::{ConformanceTest, TestResult, TestRunner};
+@@ -87,6 +88,7 @@ fn register_tests() -> Vec<ConformanceTest> {
+     tests.extend(tests_qa::tests());
+     tests.extend(tests_commands::tests());
+     tests.extend(tests_auto_init::tests());
++    tests.extend(tests_streaming::tests());
+     tests.extend(tests_tail::tests());
+     tests.extend(tests_daemon::tests());
+     tests
+diff --git a/src/validate/tests_streaming.rs b/src/validate/tests_streaming.rs
+new file mode 100644
+index 0000000..0db23e6
+--- /dev/null
++++ b/src/validate/tests_streaming.rs
+@@ -0,0 +1,158 @@
++use super::*;
++
++use std::fs;
++
++use crate::validate::harness::RalphHarness;
++use crate::validate::mock_scripts::standard_mock_script;
++
++pub fn tests() -> Vec<ConformanceTest> {
++    vec![
++        ConformanceTest {
++            name: "streaming::retry_append_behavior",
++            func: retry_append_behavior,
++        },
++        ConformanceTest {
++            name: "streaming::prompt_reviewer_path",
++            func: prompt_reviewer_path,
++        },
++    ]
++}
++
++/// After a single loop run, the log file for the planner role should exist
++/// at the deterministic path and contain at least one attempt separator.
++fn retry_append_behavior(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-retry";
++        setup_with_standard_mock(h, project_id);
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed");
++
++        // Planner log path: .ralph/projects/<id>/loops/001/agent-output-planner.log
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++
++        assert!(
++            planner_log.exists(),
++            "planner log file should exist at {}",
++            planner_log.display()
++        );
++
++        let content = fs::read_to_string(&planner_log).expect("read planner log");
++
++        // Should contain at least one attempt separator
++        assert!(
++            content.contains("attempt=1"),
++            "planner log should contain attempt separator with attempt=1, got:\n{content}"
++        );
++        assert!(
++            content.contains("fallback=false"),
++            "first attempt should have fallback=false, got:\n{content}"
++        );
++        assert!(
++            content.contains("--- "),
++            "log should contain separator markers, got:\n{content}"
++        );
++
++        // Should also contain actual output (the feature spec)
++        assert!(
++            content.contains("Feature") || content.contains("feature"),
++            "planner log should contain backend output, got:\n{content}"
++        );
++
++        // Implementer log should also exist
++        let impl_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-implementer.log");
++        assert!(
++            impl_log.exists(),
++            "implementer log file should exist at {}",
++            impl_log.display()
++        );
++
++        let impl_content = fs::read_to_string(&impl_log).expect("read implementer log");
++        assert!(
++            impl_content.contains("attempt=1"),
++            "implementer log should contain attempt separator, got:\n{impl_content}"
++        );
++    })
++}
++
++/// The prompt-reviewer log should be written at the project root level
++/// (no loop subdirectory) with loop_number=None.
++fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-prompt-review";
++        setup_with_standard_mock(h, project_id);
++
++        // Enable prompt review and run
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "true"])
++            .expect("enable prompt review");
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed");
++
++        // Prompt reviewer log should be at project root, not in a loop dir
++        let pr_log = h
++            .project_dir(project_id)
++            .join("agent-output-prompt-reviewer.log");
++
++        assert!(
++            pr_log.exists(),
++            "prompt-reviewer log should exist at project root: {}",
++            pr_log.display()
++        );
++
++        let content = fs::read_to_string(&pr_log).expect("read prompt-reviewer log");
++        assert!(
++            content.contains("attempt=1"),
++            "prompt-reviewer log should contain attempt separator, got:\n{content}"
++        );
++
++        // It should NOT be inside any loop directory
++        let loops_dir = h.project_dir(project_id).join("loops");
++        if loops_dir.exists() {
++            for entry in fs::read_dir(&loops_dir).expect("read loops dir") {
++                let entry = entry.expect("dir entry");
++                if entry.file_type().expect("file type").is_dir() {
++                    let bad_path = entry.path().join("agent-output-prompt-reviewer.log");
++                    assert!(
++                        !bad_path.exists(),
++                        "prompt-reviewer log should NOT exist inside loop dir: {}",
++                        bad_path.display()
++                    );
++                }
++            }
++        }
++    })
++}
++
++fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
++    h.init_workspace().expect("init failed");
++    let script = h
++        .write_mock_script("standard-mock.sh", &standard_mock_script())
++        .expect("failed to write standard mock script");
++    h.setup_mock_backends(&script)
++        .expect("setup_mock_backends failed");
++    h.create_project(
++        project_id,
++        "Streaming Conformance Project",
++        "Streaming suite test prompt",
++    )
++    .expect("create_project failed");
++}
++
++fn run_case<F>(f: F) -> TestResult
++where
++    F: FnOnce(),
++{
++    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
++        Ok(()) => TestResult::Pass,
++        Err(e) => TestResult::Fail(panic_message(e)),
++    }
++}
+diff --git a/src/workflow/orchestrator.rs b/src/workflow/orchestrator.rs
+index 56cd7b8..a03df5c 100644
+--- a/src/workflow/orchestrator.rs
++++ b/src/workflow/orchestrator.rs
+@@ -38,6 +38,7 @@ use crate::prompts::templates::{
+     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+     render_template_with_fallback,
+ };
++use crate::output_log::LogWriter;
+ use crate::util::hash::sha256_hex;
+ use crate::util::lock::ProjectLock;
+ use crate::util::slug::slugify_feature_name;
+@@ -254,6 +255,7 @@ impl Orchestrator {
+                 .await;
+ 
+             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
++            let mut pr_log = LogWriter::open(&project_dir, None, "prompt-reviewer");
+             let decision = execute_with_parse_retries(
+                 pr_backend,
+                 &registry,
+@@ -262,6 +264,7 @@ impl Orchestrator {
+                 &prompt_reviewer_prompt,
+                 parse_prompt_reviewer_output,
+                 &expected_format_template_for("prompt_reviewer", None),
++                &mut pr_log,
+             )
+             .await?;
+ 
+@@ -379,6 +382,8 @@ impl Orchestrator {
+                         backend = planner_backend.name(),
+                         "invoking planner..."
+                     );
++                    let mut planner_log =
++                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                     let planner_decision = execute_with_parse_retries(
+                         planner_backend,
+                         &registry,
+@@ -387,6 +392,7 @@ impl Orchestrator {
+                         &planner_prompt,
+                         parse_planner_output,
+                         &expected_format_template_for("planner", None),
++                        &mut planner_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "planner responded");
+@@ -520,6 +526,8 @@ impl Orchestrator {
+                             backend = implementer_backend.name(),
+                             "invoking implementer..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -528,6 +536,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, None),
+                             &expected_format_template_for("implementer-notes", None),
++                            &mut impl_log,
+                         )
+                         .await?;
+                         debug!(loop = loop_number, "implementer responded");
+@@ -618,6 +627,8 @@ impl Orchestrator {
+                             iteration = iteration,
+                             "invoking implementer for QA feedback response..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -626,6 +637,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, Some(iteration)),
+                             &expected_format_template_for("implementer-response", Some(iteration)),
++                            &mut impl_log,
+                         )
+                         .await?;
+ 
+@@ -719,6 +731,8 @@ impl Orchestrator {
+                             iteration = iteration,
+                             "invoking implementer for feedback response..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -727,6 +741,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, Some(iteration)),
+                             &expected_format_template_for("implementer-response", Some(iteration)),
++                            &mut impl_log,
+                         )
+                         .await?;
+ 
+@@ -876,6 +891,7 @@ impl Orchestrator {
+                         iteration = state.phase_iteration,
+                         "invoking QA..."
+                     );
++                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), "qa");
+                     let qa_decision = execute_with_parse_retries(
+                         qa_backend,
+                         &registry,
+@@ -884,6 +900,7 @@ impl Orchestrator {
+                         &qa_prompt,
+                         parse_qa_output,
+                         &expected_format_template_for("qa", None),
++                        &mut qa_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "QA responded");
+@@ -1065,6 +1082,8 @@ impl Orchestrator {
+                             backend = reviewer_backend.name(),
+                             "invoking reviewer..."
+                         );
++                        let mut reviewer_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "reviewer");
+                         let reviewer_decision = execute_with_parse_retries(
+                             reviewer_backend,
+                             &registry,
+@@ -1073,6 +1092,7 @@ impl Orchestrator {
+                             &reviewer_prompt,
+                             parse_reviewer_output,
+                             &expected_format_template_for("reviewer", None),
++                            &mut reviewer_log,
+                         )
+                         .await?;
+                         debug!(loop = loop_number, "reviewer responded");
+@@ -1297,6 +1317,8 @@ impl Orchestrator {
+                         backend = completer_backend.name(),
+                         "invoking completer..."
+                     );
++                    let mut completer_log =
++                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                     let completer_decision: CompleterDecision = execute_with_parse_retries(
+                         completer_backend,
+                         &registry,
+@@ -1305,6 +1327,7 @@ impl Orchestrator {
+                         &completer_prompt,
+                         parse_completer_output,
+                         &expected_format_template_for("completer", None),
++                        &mut completer_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "completer responded");
+@@ -1384,6 +1407,8 @@ impl Orchestrator {
+                                         backend = acceptance_qa_backend.name(),
+                                         "invoking acceptance QA..."
+                                     );
++                                    let mut acceptance_log =
++                                        LogWriter::open(&project_dir, Some(loop_number), "qa");
+                                     let acceptance_decision = execute_with_parse_retries(
+                                         acceptance_qa_backend,
+                                         &registry,
+@@ -1392,6 +1417,7 @@ impl Orchestrator {
+                                         &acceptance_prompt,
+                                         parse_qa_output,
+                                         &expected_format_template_for("qa", None),
++                                        &mut acceptance_log,
+                                     )
+                                     .await?;
+                                     debug!(
+@@ -1847,6 +1873,22 @@ fn rollback_current_loop(
+         }
+     }
+ 
++    // Also remove the bare loop-number directory used by agent-output log files
++    // (e.g., loops/001/agent-output-planner.log).
++    let log_dir = project_dir
++        .join("loops")
++        .join(format!("{loop_number:03}"));
++    if log_dir.exists() {
++        if let Err(e) = fs::remove_dir_all(&log_dir) {
++            warn!(
++                loop_number = loop_number,
++                path = %log_dir.display(),
++                error = %e,
++                "failed to remove agent-output log directory during rollback"
++            );
++        }
++    }
++
+     state.remove_loop(loop_number);
+     state.current_loop = state.last_loop_number();
+     state.current_phase = Phase::Planning;
+@@ -2634,12 +2676,14 @@ async fn execute_with_parse_retries<T, F>(
+     original_prompt: &str,
+     parse_fn: F,
+     expected_format: &str,
++    log_writer: &mut LogWriter,
+ ) -> Result<T>
+ where
+     F: Fn(&str) -> Result<T>,
+ {
+     let first_output =
+-        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
++        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
++            .await?;
+ 
+     // If output is empty/near-empty, retry with the same backend before going to the
+     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
+@@ -2652,7 +2696,8 @@ where
+             "backend returned empty/near-empty output, retrying with same backend"
+         );
+         let retry_output =
+-            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
++            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
++                .await?;
+         if retry_output.trim().len() > first_output.trim().len() {
+             retry_output
+         } else {
+@@ -2696,9 +2741,14 @@ where
+                 Respond ONLY with the corrected markdown. No explanation.\n",
+             );
+ 
+-            let second_output =
+-                execute_with_timeout_retries(reformatter_backend, role, phase, &reformat_prompt)
+-                    .await?;
++            let second_output = execute_with_timeout_retries(
++                reformatter_backend,
++                role,
++                phase,
++                &reformat_prompt,
++                log_writer,
++            )
++            .await?;
+             if let Ok(parsed) = parse_fn(&second_output) {
+                 return Ok(parsed);
+             }
+@@ -2714,7 +2764,8 @@ where
+                 Include all required H2 sections.\n\n{original_prompt}",
+             );
+             let third_output =
+-                execute_with_timeout_retries(backend, role, phase, &reminded_prompt).await?;
++                execute_with_timeout_retries(backend, role, phase, &reminded_prompt, log_writer)
++                    .await?;
+             if let Ok(parsed) = parse_fn(&third_output) {
+                 return Ok(parsed);
+             }
+@@ -2734,10 +2785,17 @@ async fn execute_with_timeout_retries(
+     role: &str,
+     phase: &str,
+     prompt: &str,
++    log_writer: &mut LogWriter,
+ ) -> Result<String> {
+     for attempt in 1..=3_u8 {
++        let is_fallback = log_writer.attempt() > 0;
++        log_writer.write_attempt_separator(backend.name(), is_fallback);
++
+         match backend.execute(prompt).await {
+-            Ok(output) => return Ok(output),
++            Ok(output) => {
++                log_writer.write_str(&output);
++                return Ok(output);
++            }
+             Err(RalphError::BackendTimeout {
+                 backend: backend_name,
+             }) => {
+
+### Review History (prior iterations)
+
+
+
+## System Guardrails
+
+- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
+- Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop.
+- If criteria are already satisfied and no code change is required, return `# Review: APPROVED` with evidence.
+- Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues.
+
+## Master Prompt
+
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 2
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-xhigh)
+role: planner
+created_at: 2026-02-16T03:46:39Z
+---
+
+# Feature: Append-Only Retry Attribution Logging
+
+## Description
+Loop 1 added deterministic path and sanitization utilities, but execution paths still do not use them. This feature integrates append-only backend attempt logging into orchestrator execution so each role writes to one deterministic log file and every retry/fallback attempt is explicitly attributed with a stable separator.
+
+## Acceptance Criteria
+- [ ] Orchestrator uses canonical log roles for execution logging: `planner`, `implementer`, `qa`, `reviewer`, and `prompt-reviewer` (prompt review uses `loop_number = None`).
+- [ ] Every log path is derived exclusively through `log_path_for_role(project_dir, loop_number, role)`; no filename derivation from `loop_slug` or backend name.
+- [ ] Log files are opened in `create(true) + append(true)` mode and are never truncated.
+- [ ] Before each backend attempt, a separator is appended with: attempt number, sanitized backend label, fallback flag, and timestamp.
+- [ ] Timeout retries and parse-retry/reformatter fallback attempts append to the same file for the same `(loop_number, role)`.
+- [ ] Logging is best-effort: open/write/flush failures emit `tracing::warn!`, disable further log writes for that run, and do not change backend/orchestrator result semantics.
+- [ ] Unit tests cover separator formatting, attempt numbering across retry paths, and log-writer failure resilience.
+- [ ] Conformance tests include `retry_append_behavior` and `prompt_reviewer_path` and are registered in validate discovery.
+- [ ] `cargo test` passes and validate passes for the new streaming-log conformance cases.
+
+## Files to Modify/Create
+- `src/output_log.rs` - add append-mode log writer helpers (open, separator write, graceful disable-on-error) and unit tests.
+- `src/workflow/orchestrator.rs` - thread logging context through backend execution helpers and increment/log attempt metadata across all retry/fallback branches.
+- `src/validate/tests_streaming.rs` - add conformance tests for retry append behavior and prompt-reviewer root-level log path.
+- `src/validate/mod.rs` - register `tests_streaming::tests()`.
+
+## Dependencies
+- Requires: Deterministic Log Paths and Path Safety Utilities (Loop 1)
+- Blocks: Byte-preserving chunked streaming capture, timeout kill/reap cleanup, and remaining streaming conformance coverage (`mid_execution_visibility`, `timeout_cleanup`)
+
+---
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 2
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: implementer
+created_at: 2026-02-16T03:55:39Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- **LogWriter struct design**: Created a `LogWriter` struct in `output_log.rs` that encapsulates append-mode file handling with best-effort semantics. On any I/O failure (open, write, flush), it emits `tracing::warn!` and disables further writes by setting `self.file = None`. All subsequent writes silently no-op, ensuring backend execution is never affected by logging failures.
+- **Attempt tracking inside LogWriter**: The `LogWriter` maintains an internal `attempt` counter that auto-increments on each `write_attempt_separator()` call. This ensures consistent numbering across timeout retries and parse-retry/reformatter fallback attempts within the same `(loop_number, role)` execution.
+- **Fallback detection heuristic**: The `is_fallback` flag in `execute_with_timeout_retries` is determined by whether the LogWriter has already recorded at least one attempt (`log_writer.attempt() > 0`). The very first call to `execute_with_timeout_retries` within `execute_with_parse_retries` will have `attempt=0` and thus `is_fallback=false`; subsequent calls (reformatter, reminded prompt) will have `is_fallback=true`.
+- **Canonical log roles**: Used `"planner"`, `"implementer"`, `"qa"`, `"reviewer"`, and `"prompt-reviewer"` as log file role names, matching the spec. The completer role reuses the `"planner"` log file since it is conceptually an extension of the planning phase within the same loop.
+- **LogWriter instantiation at each call site**: Each `execute_with_parse_retries` call creates its own `LogWriter`. Because files are opened in append mode, multiple LogWriter instances for the same role within the same loop will append to the same file (e.g., QA retry iterations across different phase steps).
+- **Separator format**: Used a stable, machine-parseable format: `\n--- attempt=N backend=LABEL fallback=BOOL ts=TIMESTAMP ---\n`. Timestamps use RFC 3339 format via `chrono::Utc::now().to_rfc3339()`.
+
+## Spec Deviations
+- **Streaming semantics (byte preservation)**: The spec's master prompt mentions byte-preserving chunked streaming with `read_buf()`/`BytesMut`, but this is explicitly listed as a blocker for future loops (not part of Loop 2's acceptance criteria). Loop 2 focuses only on append-only retry attribution logging. The current implementation logs the final string output returned by `backend.execute()`.
+- **Timeout and process cleanup**: Similarly, the timeout kill/reap behavior and timeout footer writing are listed under the master prompt's future requirements but are not in Loop 2's acceptance criteria. The existing timeout retry logic is preserved unchanged.
+- **Acceptance QA log role**: The acceptance QA phase uses role `"qa"` for its log file, which means acceptance QA output appends to the same QA log file as the regular QA phase within the same loop. This is consistent with the spec's requirement that all attempts for the same `(loop_number, role)` append to the same file.
+
+## Testing
+- **Unit tests** (in `output_log.rs`):
+  - `separator_format_contains_required_fields` - verifies attempt, backend, fallback, and timestamp fields
+  - `separator_format_fallback_flag` - verifies fallback=true variant
+  - `log_writer_opens_and_appends` - end-to-end write/read with multiple attempts
+  - `log_writer_appends_across_instances` - verifies append mode across separate LogWriter lifetimes
+  - `log_writer_attempt_counter_increments` - verifies monotonic counter
+  - `log_writer_disabled_on_bad_path_continues_silently` - verifies graceful failure handling
+  - `log_writer_prompt_reviewer_uses_root_path` - verifies None loop_number produces project-root path
+- **Conformance tests** (in `tests_streaming.rs`, registered in `validate/mod.rs`):
+  - `streaming::retry_append_behavior` - runs a full loop and verifies planner and implementer log files exist with attempt separators
+  - `streaming::prompt_reviewer_path` - enables prompt review and verifies the log is at project root, not inside a loop directory
+- **Verification**: `cargo test` passes with 590 tests passing, 1 ignored, 0 failures.
+
+
+## Latest Implementation Response
+
+(none)
+
+## Current Diff
+
+```diff
+diff --git a/src/output_log.rs b/src/output_log.rs
+index 4baa98c..611abd0 100644
+--- a/src/output_log.rs
++++ b/src/output_log.rs
+@@ -1,7 +1,10 @@
+-use std::fs;
+-use std::io;
++use std::fs::{self, File, OpenOptions};
++use std::io::{self, Write};
+ use std::path::{Path, PathBuf};
+ 
++use chrono::Utc;
++use tracing::warn;
++
+ pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+     let filename = format!("agent-output-{role}.log");
+     match loop_number {
+@@ -39,9 +42,113 @@ pub fn sanitize_for_filename(label: &str) -> String {
+     sanitized.trim_matches('_').to_owned()
+ }
+ 
++/// Formats a separator line for a backend attempt in the log file.
++pub fn format_attempt_separator(
++    attempt: u32,
++    backend_label: &str,
++    is_fallback: bool,
++    timestamp: &str,
++) -> String {
++    let sanitized = sanitize_for_filename(backend_label);
++    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
++    format!(
++        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
++    )
++}
++
++/// Best-effort append-mode log writer.
++///
++/// Opens the file in create+append mode. On any I/O failure (open, write, flush),
++/// logs a `tracing::warn!` and disables further writes for this writer instance.
++/// Failures never propagate to callers and do not affect backend/orchestrator
++/// result semantics.
++pub struct LogWriter {
++    file: Option<File>,
++    path: PathBuf,
++    attempt: u32,
++}
++
++impl LogWriter {
++    /// Open a log file for the given role in create+append mode.
++    /// Returns a writer that is always usable — if the open fails, the writer
++    /// is in a disabled state and all subsequent writes are silently skipped
++    /// after a single warning.
++    pub fn open(project_dir: &Path, loop_number: Option<u32>, role: &str) -> Self {
++        let path = log_path_for_role(project_dir, loop_number, role);
++        let file = match Self::try_open(&path) {
++            Ok(f) => Some(f),
++            Err(e) => {
++                warn!(
++                    path = %path.display(),
++                    error = %e,
++                    "failed to open log file; logging disabled for this run"
++                );
++                None
++            }
++        };
++        Self {
++            file,
++            path,
++            attempt: 0,
++        }
++    }
++
++    fn try_open(path: &Path) -> io::Result<File> {
++        ensure_log_parent(path)?;
++        OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(path)
++    }
++
++    /// Write an attempt separator before a backend execution.
++    /// Increments the internal attempt counter.
++    pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
++        self.attempt += 1;
++        let timestamp = Utc::now().to_rfc3339();
++        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
++        self.write_bytes(separator.as_bytes());
++    }
++
++    /// Append raw bytes to the log file.
++    pub fn write_bytes(&mut self, data: &[u8]) {
++        let Some(file) = self.file.as_mut() else {
++            return;
++        };
++        if let Err(e) = file.write_all(data).and_then(|_| file.flush()) {
++            warn!(
++                path = %self.path.display(),
++                error = %e,
++                "log write/flush failed; disabling further writes"
++            );
++            self.file = None;
++        }
++    }
++
++    /// Append a string to the log file.
++    pub fn write_str(&mut self, s: &str) {
++        self.write_bytes(s.as_bytes());
++    }
++
++    /// Returns the current attempt number.
++    pub fn attempt(&self) -> u32 {
++        self.attempt
++    }
++
++    /// Returns the log file path.
++    pub fn path(&self) -> &Path {
++        &self.path
++    }
++
++    /// Returns true if the writer is still active (not disabled by error).
++    pub fn is_active(&self) -> bool {
++        self.file.is_some()
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+-    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
++    use super::*;
+     use std::path::Path;
+     use tempfile::tempdir;
+ 
+@@ -116,4 +223,98 @@ mod tests {
+     fn sanitization_handles_empty_input() {
+         assert_eq!(sanitize_for_filename(""), "");
+     }
++
++    #[test]
++    fn separator_format_contains_required_fields() {
++        let sep = format_attempt_separator(1, "claude(opus)", false, "2026-01-01T00:00:00Z");
++        assert!(sep.contains("attempt=1"));
++        assert!(sep.contains("backend=claude_opus"));
++        assert!(sep.contains("fallback=false"));
++        assert!(sep.contains("ts=2026-01-01T00:00:00Z"));
++        assert!(sep.starts_with('\n'));
++        assert!(sep.ends_with('\n'));
++    }
++
++    #[test]
++    fn separator_format_fallback_flag() {
++        let sep = format_attempt_separator(2, "codex(gpt-5)", true, "2026-01-01T00:00:00Z");
++        assert!(sep.contains("attempt=2"));
++        assert!(sep.contains("fallback=true"));
++    }
++
++    #[test]
++    fn log_writer_opens_and_appends() {
++        let temp = tempdir().expect("tempdir");
++        let project_dir = temp.path();
++
++        let mut writer = LogWriter::open(project_dir, Some(1), "planner");
++        assert!(writer.is_active());
++
++        writer.write_attempt_separator("claude(opus)", false);
++        writer.write_str("hello world");
++        writer.write_attempt_separator("codex(gpt-5)", true);
++        writer.write_str("retry output");
++
++        let content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(content.contains("attempt=1"));
++        assert!(content.contains("hello world"));
++        assert!(content.contains("attempt=2"));
++        assert!(content.contains("fallback=true"));
++        assert!(content.contains("retry output"));
++    }
++
++    #[test]
++    fn log_writer_appends_across_instances() {
++        let temp = tempdir().expect("tempdir");
++        let project_dir = temp.path();
++
++        {
++            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
++            w.write_attempt_separator("claude", false);
++            w.write_str("first run\n");
++        }
++        {
++            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
++            w.write_attempt_separator("codex", false);
++            w.write_str("second run\n");
++        }
++
++        let content = fs::read_to_string(
++            log_path_for_role(project_dir, Some(1), "implementer"),
++        )
++        .expect("read log");
++        assert!(content.contains("first run"));
++        assert!(content.contains("second run"));
++    }
++
++    #[test]
++    fn log_writer_attempt_counter_increments() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
++
++        assert_eq!(writer.attempt(), 0);
++        writer.write_attempt_separator("backend-a", false);
++        assert_eq!(writer.attempt(), 1);
++        writer.write_attempt_separator("backend-b", true);
++        assert_eq!(writer.attempt(), 2);
++    }
++
++    #[test]
++    fn log_writer_disabled_on_bad_path_continues_silently() {
++        // Open a writer against a path that can't be opened (device file as dir).
++        let writer = LogWriter::open(Path::new("/dev/null"), Some(1), "planner");
++        // /dev/null is a file, so creating /dev/null/loops/001/ will fail.
++        // The writer should be disabled but not panic.
++        assert!(!writer.is_active());
++    }
++
++    #[test]
++    fn log_writer_prompt_reviewer_uses_root_path() {
++        let temp = tempdir().expect("tempdir");
++        let writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
++        assert_eq!(
++            writer.path(),
++            temp.path().join("agent-output-prompt-reviewer.log")
++        );
++    }
+ }
+diff --git a/src/validate/mod.rs b/src/validate/mod.rs
+index 6220616..d4a3759 100644
+--- a/src/validate/mod.rs
++++ b/src/validate/mod.rs
+@@ -20,6 +20,7 @@ mod tests_project;
+ mod tests_prompt_review;
+ mod tests_qa;
+ mod tests_run;
++mod tests_streaming;
+ mod tests_tail;
+ 
+ pub use runner::{ConformanceTest, TestResult, TestRunner};
+@@ -87,6 +88,7 @@ fn register_tests() -> Vec<ConformanceTest> {
+     tests.extend(tests_qa::tests());
+     tests.extend(tests_commands::tests());
+     tests.extend(tests_auto_init::tests());
++    tests.extend(tests_streaming::tests());
+     tests.extend(tests_tail::tests());
+     tests.extend(tests_daemon::tests());
+     tests
+diff --git a/src/validate/tests_streaming.rs b/src/validate/tests_streaming.rs
+new file mode 100644
+index 0000000..0db23e6
+--- /dev/null
++++ b/src/validate/tests_streaming.rs
+@@ -0,0 +1,158 @@
++use super::*;
++
++use std::fs;
++
++use crate::validate::harness::RalphHarness;
++use crate::validate::mock_scripts::standard_mock_script;
++
++pub fn tests() -> Vec<ConformanceTest> {
++    vec![
++        ConformanceTest {
++            name: "streaming::retry_append_behavior",
++            func: retry_append_behavior,
++        },
++        ConformanceTest {
++            name: "streaming::prompt_reviewer_path",
++            func: prompt_reviewer_path,
++        },
++    ]
++}
++
++/// After a single loop run, the log file for the planner role should exist
++/// at the deterministic path and contain at least one attempt separator.
++fn retry_append_behavior(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-retry";
++        setup_with_standard_mock(h, project_id);
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed");
++
++        // Planner log path: .ralph/projects/<id>/loops/001/agent-output-planner.log
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++
++        assert!(
++            planner_log.exists(),
++            "planner log file should exist at {}",
++            planner_log.display()
++        );
++
++        let content = fs::read_to_string(&planner_log).expect("read planner log");
++
++        // Should contain at least one attempt separator
++        assert!(
++            content.contains("attempt=1"),
++            "planner log should contain attempt separator with attempt=1, got:\n{content}"
++        );
++        assert!(
++            content.contains("fallback=false"),
++            "first attempt should have fallback=false, got:\n{content}"
++        );
++        assert!(
++            content.contains("--- "),
++            "log should contain separator markers, got:\n{content}"
++        );
++
++        // Should also contain actual output (the feature spec)
++        assert!(
++            content.contains("Feature") || content.contains("feature"),
++            "planner log should contain backend output, got:\n{content}"
++        );
++
++        // Implementer log should also exist
++        let impl_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-implementer.log");
++        assert!(
++            impl_log.exists(),
++            "implementer log file should exist at {}",
++            impl_log.display()
++        );
++
++        let impl_content = fs::read_to_string(&impl_log).expect("read implementer log");
++        assert!(
++            impl_content.contains("attempt=1"),
++            "implementer log should contain attempt separator, got:\n{impl_content}"
++        );
++    })
++}
++
++/// The prompt-reviewer log should be written at the project root level
++/// (no loop subdirectory) with loop_number=None.
++fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-prompt-review";
++        setup_with_standard_mock(h, project_id);
++
++        // Enable prompt review and run
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "true"])
++            .expect("enable prompt review");
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed");
++
++        // Prompt reviewer log should be at project root, not in a loop dir
++        let pr_log = h
++            .project_dir(project_id)
++            .join("agent-output-prompt-reviewer.log");
++
++        assert!(
++            pr_log.exists(),
++            "prompt-reviewer log should exist at project root: {}",
++            pr_log.display()
++        );
++
++        let content = fs::read_to_string(&pr_log).expect("read prompt-reviewer log");
++        assert!(
++            content.contains("attempt=1"),
++            "prompt-reviewer log should contain attempt separator, got:\n{content}"
++        );
++
++        // It should NOT be inside any loop directory
++        let loops_dir = h.project_dir(project_id).join("loops");
++        if loops_dir.exists() {
++            for entry in fs::read_dir(&loops_dir).expect("read loops dir") {
++                let entry = entry.expect("dir entry");
++                if entry.file_type().expect("file type").is_dir() {
++                    let bad_path = entry.path().join("agent-output-prompt-reviewer.log");
++                    assert!(
++                        !bad_path.exists(),
++                        "prompt-reviewer log should NOT exist inside loop dir: {}",
++                        bad_path.display()
++                    );
++                }
++            }
++        }
++    })
++}
++
++fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
++    h.init_workspace().expect("init failed");
++    let script = h
++        .write_mock_script("standard-mock.sh", &standard_mock_script())
++        .expect("failed to write standard mock script");
++    h.setup_mock_backends(&script)
++        .expect("setup_mock_backends failed");
++    h.create_project(
++        project_id,
++        "Streaming Conformance Project",
++        "Streaming suite test prompt",
++    )
++    .expect("create_project failed");
++}
++
++fn run_case<F>(f: F) -> TestResult
++where
++    F: FnOnce(),
++{
++    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
++        Ok(()) => TestResult::Pass,
++        Err(e) => TestResult::Fail(panic_message(e)),
++    }
++}
+diff --git a/src/workflow/orchestrator.rs b/src/workflow/orchestrator.rs
+index 56cd7b8..a03df5c 100644
+--- a/src/workflow/orchestrator.rs
++++ b/src/workflow/orchestrator.rs
+@@ -38,6 +38,7 @@ use crate::prompts::templates::{
+     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+     render_template_with_fallback,
+ };
++use crate::output_log::LogWriter;
+ use crate::util::hash::sha256_hex;
+ use crate::util::lock::ProjectLock;
+ use crate::util::slug::slugify_feature_name;
+@@ -254,6 +255,7 @@ impl Orchestrator {
+                 .await;
+ 
+             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
++            let mut pr_log = LogWriter::open(&project_dir, None, "prompt-reviewer");
+             let decision = execute_with_parse_retries(
+                 pr_backend,
+                 &registry,
+@@ -262,6 +264,7 @@ impl Orchestrator {
+                 &prompt_reviewer_prompt,
+                 parse_prompt_reviewer_output,
+                 &expected_format_template_for("prompt_reviewer", None),
++                &mut pr_log,
+             )
+             .await?;
+ 
+@@ -379,6 +382,8 @@ impl Orchestrator {
+                         backend = planner_backend.name(),
+                         "invoking planner..."
+                     );
++                    let mut planner_log =
++                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                     let planner_decision = execute_with_parse_retries(
+                         planner_backend,
+                         &registry,
+@@ -387,6 +392,7 @@ impl Orchestrator {
+                         &planner_prompt,
+                         parse_planner_output,
+                         &expected_format_template_for("planner", None),
++                        &mut planner_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "planner responded");
+@@ -520,6 +526,8 @@ impl Orchestrator {
+                             backend = implementer_backend.name(),
+                             "invoking implementer..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -528,6 +536,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, None),
+                             &expected_format_template_for("implementer-notes", None),
++                            &mut impl_log,
+                         )
+                         .await?;
+                         debug!(loop = loop_number, "implementer responded");
+@@ -618,6 +627,8 @@ impl Orchestrator {
+                             iteration = iteration,
+                             "invoking implementer for QA feedback response..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -626,6 +637,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, Some(iteration)),
+                             &expected_format_template_for("implementer-response", Some(iteration)),
++                            &mut impl_log,
+                         )
+                         .await?;
+ 
+@@ -719,6 +731,8 @@ impl Orchestrator {
+                             iteration = iteration,
+                             "invoking implementer for feedback response..."
+                         );
++                        let mut impl_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                         let decision = execute_with_parse_retries(
+                             implementer_backend,
+                             &registry,
+@@ -727,6 +741,7 @@ impl Orchestrator {
+                             &impl_prompt,
+                             |raw| parse_implementer_output(raw, Some(iteration)),
+                             &expected_format_template_for("implementer-response", Some(iteration)),
++                            &mut impl_log,
+                         )
+                         .await?;
+ 
+@@ -876,6 +891,7 @@ impl Orchestrator {
+                         iteration = state.phase_iteration,
+                         "invoking QA..."
+                     );
++                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), "qa");
+                     let qa_decision = execute_with_parse_retries(
+                         qa_backend,
+                         &registry,
+@@ -884,6 +900,7 @@ impl Orchestrator {
+                         &qa_prompt,
+                         parse_qa_output,
+                         &expected_format_template_for("qa", None),
++                        &mut qa_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "QA responded");
+@@ -1065,6 +1082,8 @@ impl Orchestrator {
+                             backend = reviewer_backend.name(),
+                             "invoking reviewer..."
+                         );
++                        let mut reviewer_log =
++                            LogWriter::open(&project_dir, Some(loop_number), "reviewer");
+                         let reviewer_decision = execute_with_parse_retries(
+                             reviewer_backend,
+                             &registry,
+@@ -1073,6 +1092,7 @@ impl Orchestrator {
+                             &reviewer_prompt,
+                             parse_reviewer_output,
+                             &expected_format_template_for("reviewer", None),
++                            &mut reviewer_log,
+                         )
+                         .await?;
+                         debug!(loop = loop_number, "reviewer responded");
+@@ -1297,6 +1317,8 @@ impl Orchestrator {
+                         backend = completer_backend.name(),
+                         "invoking completer..."
+                     );
++                    let mut completer_log =
++                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                     let completer_decision: CompleterDecision = execute_with_parse_retries(
+                         completer_backend,
+                         &registry,
+@@ -1305,6 +1327,7 @@ impl Orchestrator {
+                         &completer_prompt,
+                         parse_completer_output,
+                         &expected_format_template_for("completer", None),
++                        &mut completer_log,
+                     )
+                     .await?;
+                     debug!(loop = loop_number, "completer responded");
+@@ -1384,6 +1407,8 @@ impl Orchestrator {
+                                         backend = acceptance_qa_backend.name(),
+                                         "invoking acceptance QA..."
+                                     );
++                                    let mut acceptance_log =
++                                        LogWriter::open(&project_dir, Some(loop_number), "qa");
+                                     let acceptance_decision = execute_with_parse_retries(
+                                         acceptance_qa_backend,
+                                         &registry,
+@@ -1392,6 +1417,7 @@ impl Orchestrator {
+                                         &acceptance_prompt,
+                                         parse_qa_output,
+                                         &expected_format_template_for("qa", None),
++                                        &mut acceptance_log,
+                                     )
+                                     .await?;
+                                     debug!(
+@@ -1847,6 +1873,22 @@ fn rollback_current_loop(
+         }
+     }
+ 
++    // Also remove the bare loop-number directory used by agent-output log files
++    // (e.g., loops/001/agent-output-planner.log).
++    let log_dir = project_dir
++        .join("loops")
++        .join(format!("{loop_number:03}"));
++    if log_dir.exists() {
++        if let Err(e) = fs::remove_dir_all(&log_dir) {
++            warn!(
++                loop_number = loop_number,
++                path = %log_dir.display(),
++                error = %e,
++                "failed to remove agent-output log directory during rollback"
++            );
++        }
++    }
++
+     state.remove_loop(loop_number);
+     state.current_loop = state.last_loop_number();
+     state.current_phase = Phase::Planning;
+@@ -2634,12 +2676,14 @@ async fn execute_with_parse_retries<T, F>(
+     original_prompt: &str,
+     parse_fn: F,
+     expected_format: &str,
++    log_writer: &mut LogWriter,
+ ) -> Result<T>
+ where
+     F: Fn(&str) -> Result<T>,
+ {
+     let first_output =
+-        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
++        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
++            .await?;
+ 
+     // If output is empty/near-empty, retry with the same backend before going to the
+     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
+@@ -2652,7 +2696,8 @@ where
+             "backend returned empty/near-empty output, retrying with same backend"
+         );
+         let retry_output =
+-            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt).await?;
++            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
++                .await?;
+         if retry_output.trim().len() > first_output.trim().len() {
+             retry_output
+         } else {
+@@ -2696,9 +2741,14 @@ where
+                 Respond ONLY with the corrected markdown. No explanation.\n",
+             );
+ 
+-            let second_output =
+-                execute_with_timeout_retries(reformatter_backend, role, phase, &reformat_prompt)
+-                    .await?;
++            let second_output = execute_with_timeout_retries(
++                reformatter_backend,
++                role,
++                phase,
++                &reformat_prompt,
++                log_writer,
++            )
++            .await?;
+             if let Ok(parsed) = parse_fn(&second_output) {
+                 return Ok(parsed);
+             }
+@@ -2714,7 +2764,8 @@ where
+                 Include all required H2 sections.\n\n{original_prompt}",
+             );
+             let third_output =
+-                execute_with_timeout_retries(backend, role, phase, &reminded_prompt).await?;
++                execute_with_timeout_retries(backend, role, phase, &reminded_prompt, log_writer)
++                    .await?;
+             if let Ok(parsed) = parse_fn(&third_output) {
+                 return Ok(parsed);
+             }
+@@ -2734,10 +2785,17 @@ async fn execute_with_timeout_retries(
+     role: &str,
+     phase: &str,
+     prompt: &str,
++    log_writer: &mut LogWriter,
+ ) -> Result<String> {
+     for attempt in 1..=3_u8 {
++        let is_fallback = log_writer.attempt() > 0;
++        log_writer.write_attempt_separator(backend.name(), is_fallback);
++
+         match backend.execute(prompt).await {
+-            Ok(output) => return Ok(output),
++            Ok(output) => {
++                log_writer.write_str(&output);
++                return Ok(output);
++            }
+             Err(RalphError::BackendTimeout {
+                 backend: backend_name,
+             }) => {
+```
+
+mcp startup: no servers
+
+thinking
+**Acknowledging review task and planning**
+codex
+Reviewing the provided spec against the diff now, focusing first on acceptance criteria coverage and then on concrete regressions or missing tests. I’ll inspect `orchestrator`, `output_log`, and validate registration to confirm behavior rather than relying on notes.
+
+thinking
+**Planning parallel file inspection**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"execute_with_parse_retries\\(|execute_with_timeout_retries\\(|LogWriter::open\\(|log_path_for_role\\(|sanitize_for_filename\\(\" src/workflow/orchestrator.rs src/output_log.rs src/validate/mod.rs src/validate/tests_streaming.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "git diff -- src/output_log.rs src/workflow/orchestrator.rs src/validate/mod.rs src/validate/tests_streaming.rs | sed -n '1,260p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/workflow/orchestrator.rs:258:            let mut pr_log = LogWriter::open(&project_dir, None, "prompt-reviewer");
+src/workflow/orchestrator.rs:259:            let decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:386:                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+src/workflow/orchestrator.rs:387:                    let planner_decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:530:                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+src/workflow/orchestrator.rs:531:                        let decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:631:                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+src/workflow/orchestrator.rs:632:                        let decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:735:                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+src/workflow/orchestrator.rs:736:                        let decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:894:                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), "qa");
+src/workflow/orchestrator.rs:895:                    let qa_decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:1086:                            LogWriter::open(&project_dir, Some(loop_number), "reviewer");
+src/workflow/orchestrator.rs:1087:                        let reviewer_decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:1321:                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+src/workflow/orchestrator.rs:1322:                    let completer_decision: CompleterDecision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:1411:                                        LogWriter::open(&project_dir, Some(loop_number), "qa");
+src/workflow/orchestrator.rs:1412:                                    let acceptance_decision = execute_with_parse_retries(
+src/workflow/orchestrator.rs:2685:        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
+src/workflow/orchestrator.rs:2699:            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
+ succeeded in 51ms:
+
+
+thinking
+**Verifying file content versus diffs**
+codex
+I’m now checking the current file contents directly to verify whether there are hidden gaps beyond the shown diff (especially retry behavior and canonical role mapping).
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,260p' src/output_log.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "sed -n '2600,2880p' src/workflow/orchestrator.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "sed -n '220,460p' src/workflow/orchestrator.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,220p' src/validate/tests_streaming.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use tracing::warn;
+
+pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+    let filename = format!("agent-output-{role}.log");
+    match loop_number {
+        Some(loop_number) => project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}"))
+            .join(filename),
+        None => project_dir.join(filename),
+    }
+}
+
+pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+ succeeded in 51ms:
+# Feature: <name>\n\
+## Description\n\
+## Acceptance Criteria\n\
+## Files to Modify/Create\n\
+## Dependencies\n\
+\n\
+OR\n\
+\n\
+# Project Completion Request\n\
+## Rationale\n\
+## Summary of Work\n\
+## Remaining Items"
+            .to_owned(),
+        "implementer-notes" => "\
+# Implementation Notes\n\
+## Decisions Made\n\
+## Spec Deviations\n\
+## Testing"
+            .to_owned(),
+        "implementer-response" => {
+ succeeded in 50ms:
+
+        // Skip-flag handling: mark completed immediately so future resumes also skip.
+        if options.skip_prompt_review && !state.prompt_review_completed {
+            info!("--skip-prompt-review: marking prompt review as completed");
+            state.prompt_review_completed = true;
+            persist_state(&project_dir, &state)?;
+        }
+
+        // Execute prompt review if all gates pass.
+        if !state.prompt_review_completed
+            && effective.workflow.prompt_review_enabled
+            && !options.skip_prompt_review
+            && state.loops.is_empty()
+            && state.completion_attempts.is_empty()
+        {
+            info!("running prompt review...");
+
+            let prompt_path = project_dir.join(&state.prompt_file);
+            let prompt_content = fs::read_to_string(&prompt_path).map_err(|e| {
+                RalphError::Orchestration(format!(
+ succeeded in 50ms:
+use super::*;
+
+use std::fs;
+
+use crate::validate::harness::RalphHarness;
+use crate::validate::mock_scripts::standard_mock_script;
+
+pub fn tests() -> Vec<ConformanceTest> {
+    vec![
+        ConformanceTest {
+            name: "streaming::retry_append_behavior",
+            func: retry_append_behavior,
+        },
+        ConformanceTest {
+            name: "streaming::prompt_reviewer_path",
+            func: prompt_reviewer_path,
+        },
+    ]
+}
+
+
+thinking
+**Planning to retrieve truncated tests**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '260,360p' src/output_log.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+        assert!(content.contains("hello world"));
+        assert!(content.contains("attempt=2"));
+        assert!(content.contains("fallback=true"));
+        assert!(content.contains("retry output"));
+    }
+
+    #[test]
+    fn log_writer_appends_across_instances() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+
+        {
+            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
+            w.write_attempt_separator("claude", false);
+            w.write_str("first run\n");
+        }
+        {
+            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
+            w.write_attempt_separator("codex", false);
+            w.write_str("second run\n");
+
+thinking
+**Clarifying retry and fallback semantics**
+codex
+I’ve confirmed the new logging plumbing is present; next I’m checking for any remaining non-canonical filename derivation or missing retry attribution checks across the rest of the codebase before finalizing findings.
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,160p' src/validate/mod.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "rg -n \"agent-output|log_path_for_role|loop_slug\" src | sed -n '1,260p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "rg -n \"mid_execution_visibility|timeout_cleanup|retry_append_behavior|prompt_reviewer_path\" src/validate | sed -n '1,260p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+use std::any::Any;
+use std::path::PathBuf;
+
+use clap::Args;
+
+use crate::error::RalphError;
+use crate::Result;
+
+pub mod assertions;
+pub mod harness;
+pub mod mock_scripts;
+pub mod runner;
+
+mod tests_auto_init;
+mod tests_commands;
+mod tests_daemon;
+mod tests_init;
+mod tests_mcp;
+mod tests_project;
+mod tests_prompt_review;
+ succeeded in 51ms:
+src/workflow/orchestrator.rs:410:                                    loop_slug: &slug,
+src/workflow/orchestrator.rs:442:                                    loop_slug: "completion",
+src/workflow/orchestrator.rs:469:                        loop_slug,
+src/workflow/orchestrator.rs:507:                            &loop_slug,
+src/workflow/orchestrator.rs:556:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:607:                            &loop_slug,
+src/workflow/orchestrator.rs:660:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:702:                            feedback_rel_path(&project_dir, loop_number, &loop_slug, iteration)?;
+src/workflow/orchestrator.rs:711:                            &loop_slug,
+src/workflow/orchestrator.rs:764:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:805:                        loop_slug,
+src/workflow/orchestrator.rs:872:                        &loop_slug,
+src/workflow/orchestrator.rs:917:                                    loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:959:                                    loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:1001:                        loop_slug,
+src/workflow/orchestrator.rs:1050:                                &loop_slug,
+src/workflow/orchestrator.rs:1063:                            &loop_slug,
+src/workflow/orchestrator.rs:1113:                                        loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:1140:                                        loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:1181:                    let (loop_number, loop_slug, feature_name, approval_rel) = {
+ succeeded in 50ms:
+src/validate/tests_streaming.rs:11:            name: "streaming::retry_append_behavior",
+src/validate/tests_streaming.rs:12:            func: retry_append_behavior,
+src/validate/tests_streaming.rs:15:            name: "streaming::prompt_reviewer_path",
+src/validate/tests_streaming.rs:16:            func: prompt_reviewer_path,
+src/validate/tests_streaming.rs:23:fn retry_append_behavior(h: &RalphHarness) -> TestResult {
+src/validate/tests_streaming.rs:88:fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
+
+thinking
+**Checking orchestrator call consistency**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"execute_with_parse_retries\\(\" src/workflow/orchestrator.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+259:            let decision = execute_with_parse_retries(
+387:                    let planner_decision = execute_with_parse_retries(
+531:                        let decision = execute_with_parse_retries(
+632:                        let decision = execute_with_parse_retries(
+736:                        let decision = execute_with_parse_retries(
+895:                    let qa_decision = execute_with_parse_retries(
+1087:                        let reviewer_decision = execute_with_parse_retries(
+1322:                    let completer_decision: CompleterDecision = execute_with_parse_retries(
+1412:                                    let acceptance_decision = execute_with_parse_retries(
+
+thinking
+**Analyzing retry and logging semantics**
+codex
+I’ve identified a likely compliance gap in test coverage, and I’m running targeted tests next to ensure there isn’t a hidden functional regression before I finalize the verdict.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test -q output_log::tests::separator_format_contains_required_fields output_log::tests::log_writer_opens_and_appends validate::tests_streaming::tests -- --nocapture' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 exited 1 in 51ms:
+error: unexpected argument 'output_log::tests::log_writer_opens_and_appends' found
+
+Usage: cargo test [OPTIONS] [TESTNAME] [-- [ARGS]...]
+
+For more information, try '--help'.
+
+thinking
+**Testing individual patterns separately**
+codex
+The first test command used invalid argument syntax; I’m rerunning with valid Cargo filters to verify the updated unit and conformance modules.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test -q validate::tests_streaming:: -- --nocapture' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc 'cargo test -q output_log::tests:: -- --nocapture' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 50ms:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 389 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+ succeeded in 51ms:
+
+running 14 tests
+..............
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 375 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+thinking
+**Testing specific streaming behavior**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test -q "streaming::retry_append_behavior" -- --nocapture' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 389 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+thinking
+**Analyzing logging retry mechanisms**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"\\.execute\\(\" src/workflow/orchestrator.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 50ms:
+2794:        match backend.execute(prompt).await {
+
+thinking
+**Evaluating conformance test gaps**
+codex
+I found one concrete mismatch with the spec: the new `retry_append_behavior` conformance test does not actually exercise a retry path, so it can pass without validating append-across-retries behavior. I’m pulling exact line references now for a precise change request.
+exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/validate/tests_streaming.rs | sed -n '1,190p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/output_log.rs | sed -n '220,350p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/workflow/orchestrator.rs | sed -n '2670,2835p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 50ms:
+     1	use super::*;
+     2	
+     3	use std::fs;
+     4	
+     5	use crate::validate::harness::RalphHarness;
+     6	use crate::validate::mock_scripts::standard_mock_script;
+     7	
+     8	pub fn tests() -> Vec<ConformanceTest> {
+     9	    vec![
+    10	        ConformanceTest {
+    11	            name: "streaming::retry_append_behavior",
+    12	            func: retry_append_behavior,
+    13	        },
+    14	        ConformanceTest {
+    15	            name: "streaming::prompt_reviewer_path",
+    16	            func: prompt_reviewer_path,
+    17	        },
+    18	    ]
+    19	}
+    20	
+ succeeded in 51ms:
+   220	    }
+   221	
+   222	    #[test]
+   223	    fn sanitization_handles_empty_input() {
+   224	        assert_eq!(sanitize_for_filename(""), "");
+   225	    }
+   226	
+   227	    #[test]
+   228	    fn separator_format_contains_required_fields() {
+   229	        let sep = format_attempt_separator(1, "claude(opus)", false, "2026-01-01T00:00:00Z");
+   230	        assert!(sep.contains("attempt=1"));
+   231	        assert!(sep.contains("backend=claude_opus"));
+   232	        assert!(sep.contains("fallback=false"));
+   233	        assert!(sep.contains("ts=2026-01-01T00:00:00Z"));
+   234	        assert!(sep.starts_with('\n'));
+   235	        assert!(sep.ends_with('\n'));
+   236	    }
+   237	
+   238	    #[test]
+   239	    fn separator_format_fallback_flag() {
+ succeeded in 51ms:
+  2670	
+  2671	async fn execute_with_parse_retries<T, F>(
+  2672	    backend: Arc<dyn Backend>,
+  2673	    registry: &BackendRegistry,
+  2674	    role: &str,
+  2675	    phase: &str,
+  2676	    original_prompt: &str,
+  2677	    parse_fn: F,
+  2678	    expected_format: &str,
+  2679	    log_writer: &mut LogWriter,
+  2680	) -> Result<T>
+  2681	where
+  2682	    F: Fn(&str) -> Result<T>,
+  2683	{
+  2684	    let first_output =
+  2685	        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
+  2686	            .await?;
+  2687	
+  2688	    // If output is empty/near-empty, retry with the same backend before going to the
+  2689	    // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
+
+thinking
+**Verifying streaming tests execution**
+codex
+I’m running the actual `validate` harness for `streaming` to verify that the newly registered conformance tests execute, since `cargo test` filtering alone doesn’t exercise them.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo run -q -- validate --bin target/debug/ralph --filter streaming' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 260ms:
+test streaming::retry_append_behavior ... ok
+test streaming::prompt_reviewer_path ... ok
+test result: ok. 2 passed; 0 failed; 0 skipped
+
+thinking
+**Running comprehensive tests**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test -q' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 4.42s:
+........
+test result: ok. 388 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.03s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 35 tests
+...................................
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 20 tests
+....................
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+
+
+running 20 tests
+
+thinking
+**Formulating detailed review suggestions**
+codex
+# Review: SUGGESTIONS
+
+## Required Changes
+1. **Conformance coverage for retry append behavior**: `streaming::retry_append_behavior` does not actually exercise any retry path, so it can pass without proving append-across-retries behavior.
+   - Current: `src/validate/tests_streaming.rs:23` runs a normal single loop and only checks for `attempt=1`/basic separator presence.
+   - Expected: Force at least one real retry/fallback (timeout retry and/or parse-retry/reformatter), then assert the same role log file contains multiple attempt separators (`attempt=1`, `attempt=2`, etc.) and appended content across attempts.
+   - Reference: Master Prompt `Test Requirements` (`retry_append_behavior`), Feature Spec acceptance criteria for retry/fallback append semantics.
+
+2. **Unit test gap for retry-path attempt numbering**: attempt numbering is only validated via direct `LogWriter` calls, not through actual retry control flow.
+   - Current: `src/output_log.rs:290` (`log_writer_attempt_counter_increments`) checks manual increments only; it does not validate numbering across timeout/parse retry branches in `src/workflow/orchestrator.rs:2671`.
+   - Expected: Add unit tests that drive retry paths (timeout retry and parse fallback) and verify separator attempt numbering and attribution across those paths.
+   - Reference: Feature Spec acceptance criterion: “Unit tests cover separator formatting, attempt numbering across retry paths, and log-writer failure resilience.”
+
+## Recommended Improvements
+1. Clarify and lock down `fallback` semantics with tests: `src/workflow/orchestrator.rs:2791` currently sets fallback based on `log_writer.attempt() > 0`, which marks second timeout retry as `fallback=true`; if that is intentional, encode it in tests/docs explicitly.
+tokens used
+54,610
+

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 pub fn standard_mock_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
@@ -1005,6 +1007,186 @@ case "$1" in
 esac
 "###
     .to_owned()
+}
+
+/// Mock script that returns unparseable planner output on the first call,
+/// triggering the parse-retry/reformatter path. Uses a counter file to
+/// track invocations so the second call returns valid output.
+/// All other roles respond identically to `standard_mock_script()`.
+pub fn planner_parse_fail_then_pass_mock_script(counter_file: &Path) -> String {
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  COUNTER_FILE="{counter}"
+  COUNT="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$COUNTER_FILE"
+  if [ "$COUNT" -le 1 ]; then
+    # First call: return unparseable output (no valid H1)
+    echo "This is not a valid planner response."
+    echo "It has no H1 heading and will fail parsing."
+  else
+    if [ "${{RALPH_COMPLETE:-no}}" = "yes" ]; then
+      cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+    else
+      cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+    fi
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [ "${{RALPH_COMPLETE:-no}}" = "yes" ]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+elif echo "$INPUT" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+  # Reformatter/parse-retry: return valid planner output
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif echo "$INPUT" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+  # Format reminder retry: return valid planner output
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###,
+        counter = counter_file.to_string_lossy()
+    )
 }
 
 pub fn always_reject_review_script() -> String {

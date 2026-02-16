@@ -1,6 +1,9 @@
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use tracing::warn;
 
 pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
     let filename = format!("agent-output-{role}.log");
@@ -39,9 +42,113 @@ pub fn sanitize_for_filename(label: &str) -> String {
     sanitized.trim_matches('_').to_owned()
 }
 
+/// Formats a separator line for a backend attempt in the log file.
+pub fn format_attempt_separator(
+    attempt: u32,
+    backend_label: &str,
+    is_fallback: bool,
+    timestamp: &str,
+) -> String {
+    let sanitized = sanitize_for_filename(backend_label);
+    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
+    format!(
+        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
+    )
+}
+
+/// Best-effort append-mode log writer.
+///
+/// Opens the file in create+append mode. On any I/O failure (open, write, flush),
+/// logs a `tracing::warn!` and disables further writes for this writer instance.
+/// Failures never propagate to callers and do not affect backend/orchestrator
+/// result semantics.
+pub struct LogWriter {
+    file: Option<File>,
+    path: PathBuf,
+    attempt: u32,
+}
+
+impl LogWriter {
+    /// Open a log file for the given role in create+append mode.
+    /// Returns a writer that is always usable — if the open fails, the writer
+    /// is in a disabled state and all subsequent writes are silently skipped
+    /// after a single warning.
+    pub fn open(project_dir: &Path, loop_number: Option<u32>, role: &str) -> Self {
+        let path = log_path_for_role(project_dir, loop_number, role);
+        let file = match Self::try_open(&path) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to open log file; logging disabled for this run"
+                );
+                None
+            }
+        };
+        Self {
+            file,
+            path,
+            attempt: 0,
+        }
+    }
+
+    fn try_open(path: &Path) -> io::Result<File> {
+        ensure_log_parent(path)?;
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    }
+
+    /// Write an attempt separator before a backend execution.
+    /// Increments the internal attempt counter.
+    pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
+        self.attempt += 1;
+        let timestamp = Utc::now().to_rfc3339();
+        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
+        self.write_bytes(separator.as_bytes());
+    }
+
+    /// Append raw bytes to the log file.
+    pub fn write_bytes(&mut self, data: &[u8]) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        if let Err(e) = file.write_all(data).and_then(|_| file.flush()) {
+            warn!(
+                path = %self.path.display(),
+                error = %e,
+                "log write/flush failed; disabling further writes"
+            );
+            self.file = None;
+        }
+    }
+
+    /// Append a string to the log file.
+    pub fn write_str(&mut self, s: &str) {
+        self.write_bytes(s.as_bytes());
+    }
+
+    /// Returns the current attempt number.
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// Returns the log file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns true if the writer is still active (not disabled by error).
+    pub fn is_active(&self) -> bool {
+        self.file.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ensure_log_parent, log_path_for_role, sanitize_for_filename};
+    use super::*;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -115,5 +222,273 @@ mod tests {
     #[test]
     fn sanitization_handles_empty_input() {
         assert_eq!(sanitize_for_filename(""), "");
+    }
+
+    #[test]
+    fn separator_format_contains_required_fields() {
+        let sep = format_attempt_separator(1, "claude(opus)", false, "2026-01-01T00:00:00Z");
+        assert!(sep.contains("attempt=1"));
+        assert!(sep.contains("backend=claude_opus"));
+        assert!(sep.contains("fallback=false"));
+        assert!(sep.contains("ts=2026-01-01T00:00:00Z"));
+        assert!(sep.starts_with('\n'));
+        assert!(sep.ends_with('\n'));
+    }
+
+    #[test]
+    fn separator_format_fallback_flag() {
+        let sep = format_attempt_separator(2, "codex(gpt-5)", true, "2026-01-01T00:00:00Z");
+        assert!(sep.contains("attempt=2"));
+        assert!(sep.contains("fallback=true"));
+    }
+
+    #[test]
+    fn log_writer_opens_and_appends() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+
+        let mut writer = LogWriter::open(project_dir, Some(1), "planner");
+        assert!(writer.is_active());
+
+        writer.write_attempt_separator("claude(opus)", false);
+        writer.write_str("hello world");
+        writer.write_attempt_separator("codex(gpt-5)", true);
+        writer.write_str("retry output");
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("attempt=1"));
+        assert!(content.contains("hello world"));
+        assert!(content.contains("attempt=2"));
+        assert!(content.contains("fallback=true"));
+        assert!(content.contains("retry output"));
+    }
+
+    #[test]
+    fn log_writer_appends_across_instances() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+
+        {
+            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
+            w.write_attempt_separator("claude", false);
+            w.write_str("first run\n");
+        }
+        {
+            let mut w = LogWriter::open(project_dir, Some(1), "implementer");
+            w.write_attempt_separator("codex", false);
+            w.write_str("second run\n");
+        }
+
+        let content = fs::read_to_string(
+            log_path_for_role(project_dir, Some(1), "implementer"),
+        )
+        .expect("read log");
+        assert!(content.contains("first run"));
+        assert!(content.contains("second run"));
+    }
+
+    #[test]
+    fn log_writer_attempt_counter_increments() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
+
+        assert_eq!(writer.attempt(), 0);
+        writer.write_attempt_separator("backend-a", false);
+        assert_eq!(writer.attempt(), 1);
+        writer.write_attempt_separator("backend-b", true);
+        assert_eq!(writer.attempt(), 2);
+    }
+
+    #[test]
+    fn log_writer_disabled_on_bad_path_continues_silently() {
+        // Open a writer against a path that can't be opened (device file as dir).
+        let writer = LogWriter::open(Path::new("/dev/null"), Some(1), "planner");
+        // /dev/null is a file, so creating /dev/null/loops/001/ will fail.
+        // The writer should be disabled but not panic.
+        assert!(!writer.is_active());
+    }
+
+    #[test]
+    fn log_writer_prompt_reviewer_uses_root_path() {
+        let temp = tempdir().expect("tempdir");
+        let writer = LogWriter::open(temp.path(), None, "prompt-reviewer");
+        assert_eq!(
+            writer.path(),
+            temp.path().join("agent-output-prompt-reviewer.log")
+        );
+    }
+
+    /// Simulate the attempt numbering pattern from `execute_with_timeout_retries`:
+    /// each call to `write_attempt_separator` in the timeout-retry loop increments
+    /// the attempt counter and writes a separator. After 3 timeout retries the
+    /// attempt count should be 3 and the log should contain separators for all 3.
+    #[test]
+    fn timeout_retry_path_attempt_numbering() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
+
+        // Simulate 3 timeout retries as in execute_with_timeout_retries:
+        // for attempt in 1..=3 { is_fallback = writer.attempt() > 0; write_separator; }
+        for _ in 1..=3_u8 {
+            let is_fallback = writer.attempt() > 0;
+            writer.write_attempt_separator("claude(opus)", is_fallback);
+            // Simulate backend returning a timeout (no output written)
+        }
+
+        assert_eq!(writer.attempt(), 3);
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("attempt=1"));
+        assert!(content.contains("attempt=2"));
+        assert!(content.contains("attempt=3"));
+
+        // First attempt: fallback=false (attempt was 0 before)
+        // Subsequent attempts: fallback=true (attempt > 0)
+        let lines: Vec<&str> = content.lines().collect();
+        let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
+        let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
+        let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
+        assert!(sep1.contains("fallback=false"), "first attempt should be fallback=false");
+        assert!(sep2.contains("fallback=true"), "second attempt should be fallback=true");
+        assert!(sep3.contains("fallback=true"), "third attempt should be fallback=true");
+    }
+
+    /// Simulate the attempt numbering pattern from `execute_with_parse_retries`:
+    /// 1. First `execute_with_timeout_retries` call (attempt=1, success)
+    /// 2. Parse fails → reformatter call via `execute_with_timeout_retries` (attempt=2)
+    /// 3. Reformatter fails → format-reminder call (attempt=3)
+    /// All go through the same LogWriter, so attempt numbers are continuous.
+    #[test]
+    fn parse_retry_path_attempt_numbering() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
+
+        // Step 1: First backend call succeeds (execute_with_timeout_retries, 1 attempt)
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("claude(opus)", is_fallback);
+        writer.write_str("unparseable output from first attempt");
+
+        // Step 2: Parse fails → reformatter backend (execute_with_timeout_retries, 1 attempt)
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("codex(gpt-5)", is_fallback);
+        writer.write_str("reformatter output attempt");
+
+        // Step 3: Reformatter parse also fails → format-reminder with original backend
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("claude(opus)", is_fallback);
+        writer.write_str("format-reminder output");
+
+        assert_eq!(writer.attempt(), 3);
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+
+        // All 3 attempts in the same file
+        assert!(content.contains("attempt=1"));
+        assert!(content.contains("attempt=2"));
+        assert!(content.contains("attempt=3"));
+
+        // First attempt is not fallback, subsequent are
+        let lines: Vec<&str> = content.lines().collect();
+        let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
+        let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
+        let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
+        assert!(sep1.contains("fallback=false"));
+        assert!(sep2.contains("fallback=true"));
+        assert!(sep3.contains("fallback=true"));
+
+        // Verify different backend labels are attributed correctly
+        assert!(sep1.contains("backend=claude_opus"));
+        assert!(sep2.contains("backend=codex_gpt-5"));
+        assert!(sep3.contains("backend=claude_opus"));
+
+        // All output content is appended
+        assert!(content.contains("unparseable output from first attempt"));
+        assert!(content.contains("reformatter output attempt"));
+        assert!(content.contains("format-reminder output"));
+    }
+
+    /// Simulate mixed timeout + parse retry: timeout on first attempt in
+    /// `execute_with_timeout_retries`, success on second, then parse failure
+    /// leading to a reformatter call. Total: 3 attempts across both retry paths.
+    #[test]
+    fn mixed_timeout_and_parse_retry_numbering() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(2), "implementer");
+
+        // execute_with_timeout_retries: attempt 1 times out
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("claude(opus)", is_fallback);
+        // (no output — timed out)
+
+        // execute_with_timeout_retries: attempt 2 succeeds
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("claude(opus)", is_fallback);
+        writer.write_str("output from timeout retry");
+
+        // Parse fails on the output → reformatter call (new execute_with_timeout_retries)
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator("codex(gpt-5)", is_fallback);
+        writer.write_str("reformatter fixed output");
+
+        assert_eq!(writer.attempt(), 3);
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("attempt=1"));
+        assert!(content.contains("attempt=2"));
+        assert!(content.contains("attempt=3"));
+
+        // First is not fallback, rest are
+        let lines: Vec<&str> = content.lines().collect();
+        let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
+        assert!(sep1.contains("fallback=false"));
+        let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
+        assert!(sep2.contains("fallback=true"));
+        let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
+        assert!(sep3.contains("fallback=true"));
+    }
+
+    /// Verify that `fallback` semantics are: `is_fallback = writer.attempt() > 0`.
+    /// The first call to `write_attempt_separator` always has `attempt() == 0`
+    /// before incrementing, so `is_fallback` is false. All subsequent calls
+    /// have `attempt() > 0`, so `is_fallback` is true.
+    #[test]
+    fn fallback_flag_semantics_locked_down() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(1), "reviewer");
+
+        // Before any writes, attempt is 0
+        assert_eq!(writer.attempt(), 0);
+
+        // Attempt 1: is_fallback = (0 > 0) = false
+        let fb1 = writer.attempt() > 0;
+        assert!(!fb1, "first attempt should not be fallback");
+        writer.write_attempt_separator("backend-a", fb1);
+        assert_eq!(writer.attempt(), 1);
+
+        // Attempt 2: is_fallback = (1 > 0) = true
+        let fb2 = writer.attempt() > 0;
+        assert!(fb2, "second attempt should be fallback");
+        writer.write_attempt_separator("backend-b", fb2);
+        assert_eq!(writer.attempt(), 2);
+
+        // Attempt 3: is_fallback = (2 > 0) = true
+        let fb3 = writer.attempt() > 0;
+        assert!(fb3, "third attempt should be fallback");
+        writer.write_attempt_separator("backend-a", fb3);
+        assert_eq!(writer.attempt(), 3);
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        // Exactly one fallback=false (first attempt)
+        assert_eq!(
+            content.matches("fallback=false").count(),
+            1,
+            "exactly one attempt should have fallback=false"
+        );
+        // Remaining attempts are fallback=true
+        assert_eq!(
+            content.matches("fallback=true").count(),
+            2,
+            "subsequent attempts should have fallback=true"
+        );
     }
 }

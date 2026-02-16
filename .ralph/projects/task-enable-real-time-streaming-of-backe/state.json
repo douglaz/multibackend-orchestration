@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "3809feb9bb116eadf8ff187079543b3fbecd6bf786d66e8d2331c8abdf054486",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "deterministic-log-paths-and-path-safety-utilities",
       "feature_name": "Deterministic Log Paths and Path Safety Utilities",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -39,8 +39,51 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "002d28e186763e6808259bc6489a1ec1e9fe71fa",
       "started_at": "2026-02-16T03:37:12.973414767Z",
+      "completed_at": "2026-02-16T03:43:12.086186560Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "append-only-retry-attribution-logging",
+      "feature_name": "Append-Only Retry Attribution Logging",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-append-only-retry-attribution-logging/20260216034639-spec.md",
+        "impl_notes": "loops/002-append-only-retry-attribution-logging/20260216035539-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-append-only-retry-attribution-logging/20260216041449-review-001-feedback.md",
+            "response": "loops/002-append-only-retry-attribution-logging/20260216042018-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-append-only-retry-attribution-logging/20260216042223-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/002-append-only-retry-attribution-logging/20260216040345-qa-001-fail.md",
+            "implementer_response": "loops/002-append-only-retry-attribution-logging/20260216040541-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/002-append-only-retry-attribution-logging/20260216041224-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T03:46:39.119629608Z",
       "completed_at": null
     }
   ],
