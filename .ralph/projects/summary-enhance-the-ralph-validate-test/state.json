@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "d15441dea2abff4e868d741f36b4a82a003486f8f25c1624453e7496e36264a7",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -54,7 +54,7 @@
       "slug": "qareview-rollback-failure-semantics-and-impl",
       "feature_name": "QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -76,8 +76,45 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "af9b7e5b7983aa84e2eea760d8b107a2b8ad5cf8",
       "started_at": "2026-02-16T02:43:44.475207150Z",
+      "completed_at": "2026-02-16T02:57:36.333224268Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "pr-metadata-verification-reformatter-semantics",
+      "feature_name": "PR Metadata Verification, Reformatter Semantics Coverage, and E2E Documentation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-pr-metadata-verification-reformatter-semantics/20260216025944-spec.md",
+        "impl_notes": "loops/003-pr-metadata-verification-reformatter-semantics/20260216031933-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-pr-metadata-verification-reformatter-semantics/20260216035002-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/003-pr-metadata-verification-reformatter-semantics/20260216033048-qa-001-fail.md",
+            "implementer_response": "loops/003-pr-metadata-verification-reformatter-semantics/20260216034053-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/003-pr-metadata-verification-reformatter-semantics/20260216034928-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T02:59:44.177196449Z",
       "completed_at": null
     }
   ],
