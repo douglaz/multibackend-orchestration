@@ -271,8 +271,7 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
     run_case(|| {
         // Use a daemon harness so repo_root matches the data-dir layout
         // (data_dir/acme/widgets/) that daemon start expects.
-        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
-            .expect("daemon harness");
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
         let auto_backend = dh
             .write_mock_script("auto-mock.sh", &auto_mock_script())

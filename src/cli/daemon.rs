@@ -203,9 +203,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     let mut join_set = tokio::task::JoinSet::new();
 
     for (store, config) in repo_configs {
-        join_set.spawn(async move {
-            crate::daemon::runtime::run(&store, &config).await
-        });
+        join_set.spawn(async move { crate::daemon::runtime::run(&store, &config).await });
     }
 
     // Wait for tasks; first error triggers abort_all

@@ -3,7 +3,11 @@ use std::time::Duration;
 use crate::backend::CliBackend;
 use crate::config::GlobalConfig;
 
-pub fn backend_from_config(config: &GlobalConfig, model: Option<&str>) -> CliBackend {
+pub fn backend_from_config(
+    config: &GlobalConfig,
+    model: Option<&str>,
+    role: Option<&str>,
+) -> CliBackend {
     let backend = &config.backends.claude;
     let mut args = backend.args.clone();
     let name = if let Some(model_name) = model {
@@ -13,11 +17,16 @@ pub fn backend_from_config(config: &GlobalConfig, model: Option<&str>) -> CliBac
         "claude".to_owned()
     };
 
+    let timeout = match role {
+        Some(r) => backend.timeout_for_role(r),
+        None => Duration::from_secs(backend.timeout_seconds),
+    };
+
     CliBackend::new(
         &name,
         backend.command.clone(),
         args,
-        Duration::from_secs(backend.timeout_seconds),
+        timeout,
         backend.env.clone(),
     )
 }

@@ -328,9 +328,9 @@ impl CliBackend {
             })?;
 
         let stderr_backend = self.name.clone();
-        let stderr_log_file: Option<std::fs::File> = log_writer.as_ref().and_then(|w| {
-            std::fs::OpenOptions::new().append(true).open(w.path()).ok()
-        });
+        let stderr_log_file: Option<std::fs::File> = log_writer
+            .as_ref()
+            .and_then(|w| std::fs::OpenOptions::new().append(true).open(w.path()).ok());
         let stderr_handle = tokio::spawn(async move {
             let mut log_file = stderr_log_file;
             let mut captured = Vec::new();
@@ -484,12 +484,12 @@ impl BackendRegistry {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
         let shared_ctx = SharedTmuxContext::default();
 
-        let claude_backend = claude::backend_from_config(config, None);
+        let claude_backend = claude::backend_from_config(config, None, None);
         backends.insert(
             "claude".to_owned(),
             backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
-        let codex_backend = codex::backend_from_config(config, None);
+        let codex_backend = codex::backend_from_config(config, None, None);
         backends.insert(
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
@@ -515,15 +515,34 @@ impl BackendRegistry {
     }
 
     pub fn get_or_create_for_spec(&mut self, spec: &str) -> Result<Arc<dyn Backend>> {
+        self.get_or_create_inner(spec, None)
+    }
+
+    pub fn get_or_create_for_role(
+        &mut self,
+        spec: &str,
+        role: &str,
+    ) -> Result<Arc<dyn Backend>> {
+        self.get_or_create_inner(spec, Some(role))
+    }
+
+    fn get_or_create_inner(
+        &mut self,
+        spec: &str,
+        role: Option<&str>,
+    ) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
-        let cache_key = backend_spec_key(&parsed);
+        let cache_key = match role {
+            Some(r) => format!("{}:{r}", backend_spec_key(&parsed)),
+            None => backend_spec_key(&parsed),
+        };
 
         if let Some(backend) = self.backends.get(&cache_key) {
             return Ok(backend.clone());
         }
 
         let backend = backend_with_optional_tmux(
-            self.create_cli_backend_for_spec(&parsed)?,
+            self.create_cli_backend_for_spec(&parsed, role)?,
             &self.tmux,
             self.tmux_context.clone(),
         );
@@ -581,6 +600,14 @@ impl BackendRegistry {
             Some(m) => format!("{}({m})", parsed.name),
             None => base_backend.to_owned(),
         }
+    }
+
+    pub fn timeout_for_role(&self, backend_spec: &str, role: &str) -> Duration {
+        parse_backend_spec(backend_spec)
+            .ok()
+            .and_then(|parsed| self.config.backend_config(&parsed.name))
+            .map(|config| config.timeout_for_role(role))
+            .unwrap_or_else(|| Duration::from_secs(7200))
     }
 
     pub fn assign_feature_backends(
@@ -680,11 +707,15 @@ impl BackendRegistry {
         Ok(())
     }
 
-    fn create_cli_backend_for_spec(&self, spec: &BackendSpec) -> Result<CliBackend> {
+    fn create_cli_backend_for_spec(
+        &self,
+        spec: &BackendSpec,
+        role: Option<&str>,
+    ) -> Result<CliBackend> {
         let model = spec.model.as_deref();
         match spec.name.as_str() {
-            "claude" => Ok(claude::backend_from_config(&self.config, model)),
-            "codex" => Ok(codex::backend_from_config(&self.config, model)),
+            "claude" => Ok(claude::backend_from_config(&self.config, model, role)),
+            "codex" => Ok(codex::backend_from_config(&self.config, model, role)),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for spec lookup: {}",
                 backend_spec_key(spec)
@@ -727,7 +758,11 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend};
+    use super::{
+        parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig, BackendSpec,
+        CliBackend,
+    };
+    use crate::config::GlobalConfig;
     use crate::error::RalphError;
     use crate::output_log::LogWriter;
 
@@ -773,6 +808,48 @@ mod tests {
     #[test]
     fn parse_backend_spec_rejects_missing_opening_paren() {
         assert!(parse_backend_spec("claudeopus)").is_err());
+    }
+
+    fn tmux_disabled() -> BackendRegistryTmuxConfig {
+        BackendRegistryTmuxConfig {
+            enabled: false,
+            session_name: "ralph".to_owned(),
+            window_keep_seconds: 5,
+        }
+    }
+
+    #[test]
+    fn backend_registry_timeout_for_role_uses_backend_role_override_for_bare_and_modeled_specs() {
+        let mut config = GlobalConfig::default();
+        config.backends.claude.timeout_seconds = 123;
+        config.backends.claude.role_timeouts.planner = Some(45);
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+
+        assert_eq!(registry.timeout_for_role("claude", "planner").as_secs(), 45);
+        assert_eq!(
+            registry
+                .timeout_for_role("claude(opus)", "planner")
+                .as_secs(),
+            45
+        );
+        assert_eq!(registry.timeout_for_role("claude", "qa").as_secs(), 123);
+    }
+
+    #[test]
+    fn backend_registry_timeout_for_role_falls_back_to_default_for_unknown_or_invalid_spec() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+
+        assert_eq!(
+            registry
+                .timeout_for_role("unknown(opus)", "planner")
+                .as_secs(),
+            7200
+        );
+        assert_eq!(
+            registry.timeout_for_role("claude(", "planner").as_secs(),
+            7200
+        );
     }
 
     fn write_executable_script(

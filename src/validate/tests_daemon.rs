@@ -561,7 +561,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
@@ -826,11 +832,7 @@ fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
 
         // Verify that daemon start fails when --repo is missing (validation error)
         let no_repo = dh
-            .ralph([
-                "daemon",
-                "start",
-                "--single-iteration",
-            ])
+            .ralph(["daemon", "start", "--single-iteration"])
             .expect("daemon start should execute");
         assert_exit_code(&no_repo, 2);
 
@@ -840,7 +842,13 @@ fn start_validates_inputs_and_workspace(h: &RalphHarness) -> TestResult {
 
         let with_repo = dh
             .daemon_env(
-                ["daemon", "start", "--single-iteration", "--repo", "octo/demo"],
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "octo/demo",
+                ],
                 &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
@@ -6692,8 +6700,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
         dh.init_workspace().expect("init failed");
 
         // Disable auto-rebase
-        dh.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
-            .expect("set auto_rebase_enabled failed");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_auto_rebase_enabled",
+            "false",
+        ])
+        .expect("set auto_rebase_enabled failed");
 
         // Seed a completed task with a PR URL
         write_tasks(
@@ -7050,7 +7063,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
         let mock_git = dh
-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .write_mock_script(
+                "git",
+                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
+            )
             .expect("write mock git");
         let mock_git_dir = mock_git
             .parent()
@@ -7139,7 +7155,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
 
         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
         let mock_git = dh
-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
+            .write_mock_script(
+                "git",
+                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
+            )
             .expect("write mock git");
         let mock_git_dir = mock_git
             .parent()
@@ -7375,8 +7394,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
         dh.init_workspace().expect("init failed");
 
         // Set max_rebases_per_cycle to 1 via config
-        dh.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
-            .expect("set max_rebases_per_cycle failed");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_max_rebases_per_cycle",
+            "1",
+        ])
+        .expect("set max_rebases_per_cycle failed");
 
         // Create 3 tasks with PRs
         write_tasks(
@@ -7468,8 +7492,13 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
         dh.init_workspace().expect("init failed");
 
         // Use a very large interval to ensure skip regardless of clock skew
-        dh.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
-            .expect("set rebase_interval_seconds failed");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_rebase_interval_seconds",
+            "999999",
+        ])
+        .expect("set rebase_interval_seconds failed");
 
         // Dynamically compute a "just now" timestamp so test never becomes stale
         let recent_timestamp =
@@ -7576,7 +7605,11 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
         dh.init_workspace().expect("init failed");
 
         // Write tasks without last_rebase_at / last_rebase_head_sha fields
-        let tasks_path = dh.repo_root.join(".ralph").join("daemon").join("tasks.json");
+        let tasks_path = dh
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("tasks.json");
         if let Some(parent) = tasks_path.parent() {
             fs::create_dir_all(parent).expect("create daemon dir");
         }
@@ -7638,11 +7671,8 @@ fn daemon_start_bootstraps_empty_dir(h: &RalphHarness) -> TestResult {
         let data_dir = temp.path().join("fresh-data");
         let data_dir_str = data_dir.to_string_lossy().into_owned();
 
-        let gh_path = write_mock_gh(
-            h,
-            &mock_scripts::daemon_mock_gh_clone_script(),
-        )
-        .expect("write mock gh");
+        let gh_path =
+            write_mock_gh(h, &mock_scripts::daemon_mock_gh_clone_script()).expect("write mock gh");
 
         let ralph_path = write_daemon_mock_ralph(h).expect("write mock ralph");
 
@@ -7753,11 +7783,8 @@ fn daemon_start_clone_failure_propagates(h: &RalphHarness) -> TestResult {
         let data_dir = temp.path().join("clone-fail");
         let data_dir_str = data_dir.to_string_lossy().into_owned();
 
-        let gh_path = write_mock_gh(
-            h,
-            &mock_scripts::daemon_mock_gh_clone_script(),
-        )
-        .expect("write mock gh");
+        let gh_path =
+            write_mock_gh(h, &mock_scripts::daemon_mock_gh_clone_script()).expect("write mock gh");
 
         let output = h
             .ralph_env(
@@ -7799,10 +7826,10 @@ fn daemon_status_multi_repo(h: &RalphHarness) -> TestResult {
         let temp = tempfile::tempdir().expect("temp dir");
 
         // Set up two repos under data-dir
-        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
-            .expect("daemon harness 1");
-        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
-            .expect("daemon harness 2");
+        let dh1 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness 1");
+        let dh2 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets").expect("daemon harness 2");
 
         // Initialize workspaces
         dh1.init_workspace().expect("init 1");
@@ -7851,10 +7878,7 @@ fn daemon_status_multi_repo(h: &RalphHarness) -> TestResult {
 
         let combined_str = combined_data.to_string_lossy().into_owned();
         let output = h
-            .ralph_env(
-                ["daemon", "status", "--data-dir", &combined_str],
-                &[],
-            )
+            .ralph_env(["daemon", "status", "--data-dir", &combined_str], &[])
             .expect("daemon status should execute");
         assert_exit_code(&output, 0);
 
@@ -7877,10 +7901,10 @@ fn daemon_abort_cross_repo(h: &RalphHarness) -> TestResult {
         let temp = tempfile::tempdir().expect("temp dir");
         let combined_data = temp.path().join("combined");
 
-        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
-            .expect("daemon harness 1");
-        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
-            .expect("daemon harness 2");
+        let dh1 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness 1");
+        let dh2 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets").expect("daemon harness 2");
 
         dh1.init_workspace().expect("init 1");
         dh2.init_workspace().expect("init 2");
@@ -7966,10 +7990,10 @@ fn daemon_abort_ambiguous_bare_number(h: &RalphHarness) -> TestResult {
         let temp = tempfile::tempdir().expect("temp dir");
         let combined_data = temp.path().join("combined");
 
-        let dh1 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
-            .expect("daemon harness 1");
-        let dh2 = RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets")
-            .expect("daemon harness 2");
+        let dh1 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness 1");
+        let dh2 =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "gadgets").expect("daemon harness 2");
 
         dh1.init_workspace().expect("init 1");
         dh2.init_workspace().expect("init 2");
@@ -8010,10 +8034,7 @@ fn daemon_abort_ambiguous_bare_number(h: &RalphHarness) -> TestResult {
 
         let combined_str = combined_data.to_string_lossy().into_owned();
         let output = h
-            .ralph_env(
-                ["daemon", "abort", "--data-dir", &combined_str, "42"],
-                &[],
-            )
+            .ralph_env(["daemon", "abort", "--data-dir", &combined_str, "42"], &[])
             .expect("daemon abort should execute");
 
         assert_exit_code(&output, 2);

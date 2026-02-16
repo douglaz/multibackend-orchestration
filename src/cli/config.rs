@@ -432,6 +432,14 @@ fn set_global_value(
         "backends.codex.timeout_seconds" => {
             config.backends.codex.timeout_seconds = parse_u64(raw_value, key)?;
         }
+        _ if key.starts_with("backends.claude.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.claude.role_timeouts.");
+            set_role_timeout(&mut config.backends.claude.role_timeouts, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.codex.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.codex.role_timeouts.");
+            set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
+        }
         "backends.claude.args" => config.backends.claude.args = parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = parse_string_list(raw_value)?,
         _ if key.starts_with("backends.claude.models.") => {
@@ -683,6 +691,31 @@ fn set_backend_model(
     Ok(())
 }
 
+fn set_role_timeout(
+    role_timeouts: &mut crate::config::global::RoleTimeouts,
+    role: &str,
+    raw_value: &str,
+) -> Result<()> {
+    let parse_key = format!("backends.<backend>.role_timeouts.{role}");
+    let value = parse_optional_u64(raw_value, &parse_key)?;
+    match role {
+        "planner" => role_timeouts.planner = value,
+        "implementer" => role_timeouts.implementer = value,
+        "reviewer" => role_timeouts.reviewer = value,
+        "qa" => role_timeouts.qa = value,
+        "completer" => role_timeouts.completer = value,
+        "acceptance_qa" => role_timeouts.acceptance_qa = value,
+        "reformatter" => role_timeouts.reformatter = value,
+        "prompt_reviewer" => role_timeouts.prompt_reviewer = value,
+        _ => {
+            return Err(RalphError::Validation(format!(
+                "unknown backend timeout role: {role}"
+            )))
+        }
+    }
+    Ok(())
+}
+
 fn parse_string_list(raw: &str) -> Result<Vec<String>> {
     if raw.trim().starts_with('[') {
         let value: Value = serde_json::from_str(raw).map_err(|_| {
@@ -806,5 +839,25 @@ mod tests {
     #[test]
     fn resolve_config_alias_maps_qa_backend() {
         assert_eq!(resolve_config_alias("qa_backend"), "workflow.qa_backend");
+    }
+
+    #[test]
+    fn set_role_timeout_sets_and_clears_supported_role() {
+        let mut role_timeouts = crate::config::global::RoleTimeouts::default();
+        set_role_timeout(&mut role_timeouts, "acceptance_qa", "42")
+            .expect("acceptance_qa timeout should set");
+        assert_eq!(role_timeouts.acceptance_qa, Some(42));
+
+        set_role_timeout(&mut role_timeouts, "acceptance_qa", "null")
+            .expect("acceptance_qa timeout should clear");
+        assert_eq!(role_timeouts.acceptance_qa, None);
+    }
+
+    #[test]
+    fn set_role_timeout_rejects_unknown_role() {
+        let mut role_timeouts = crate::config::global::RoleTimeouts::default();
+        let err = set_role_timeout(&mut role_timeouts, "bogus", "42")
+            .expect_err("unknown timeout role should fail");
+        assert!(err.to_string().contains("unknown backend timeout role"));
     }
 }
