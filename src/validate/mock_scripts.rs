@@ -403,6 +403,17 @@ case "${1:-}" in
     ;;
   repo)
     case "${2:-}" in
+      clone)
+        target_dir="$4"
+        mkdir -p "$target_dir"
+        git init "$target_dir" --quiet 2>/dev/null
+        git -C "$target_dir" config user.email "mock@test"
+        git -C "$target_dir" config user.name "MockClone"
+        touch "$target_dir/.gitkeep"
+        git -C "$target_dir" add .gitkeep
+        git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        exit 0
+        ;;
       view) printf 'acme/widgets\n'; exit 0 ;;
     esac
     ;;

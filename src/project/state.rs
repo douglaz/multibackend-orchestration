@@ -48,8 +48,8 @@ pub enum Phase {
 pub enum ProjectStatus {
     Pending,
     InProgress,
-    Failed,
     Completed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

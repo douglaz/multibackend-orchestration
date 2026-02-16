@@ -256,7 +256,7 @@ impl Orchestrator {
                 .await;
 
             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
-            let mut pr_log = LogWriter::open(&project_dir, None, "prompt-reviewer");
+            let mut pr_log = LogWriter::open(&project_dir, None, None, "prompt-reviewer");
             let decision = execute_with_parse_retries(
                 pr_backend,
                 &registry,
@@ -311,6 +311,7 @@ impl Orchestrator {
         let mut completed_feature_loops = 0_u32;
         let mut logs: Vec<String> = Vec::new();
 
+        let result: Result<OrchestrationResult> = async {
         for _ in 0..MAX_PHASE_STEPS_PER_RUN {
             let prompt_path = project_dir.join(&state.prompt_file);
             let prompt_content = if prompt_path.exists() {
@@ -385,7 +386,7 @@ impl Orchestrator {
                         "invoking planner..."
                     );
                     let mut planner_log =
-                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                        LogWriter::open(&project_dir, Some(loop_number), None, "planner");
                     let planner_decision = execute_with_parse_retries(
                         planner_backend,
                         &registry,
@@ -534,7 +535,7 @@ impl Orchestrator {
                             "invoking implementer..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -640,7 +641,7 @@ impl Orchestrator {
                             "invoking implementer for QA feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -749,7 +750,7 @@ impl Orchestrator {
                             "invoking implementer for feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), "implementer");
+                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
                         let decision = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
@@ -913,7 +914,7 @@ impl Orchestrator {
                         iteration = state.phase_iteration,
                         "invoking QA..."
                     );
-                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), "qa");
+                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "qa");
                     let qa_decision = execute_with_parse_retries(
                         qa_backend,
                         &registry,
@@ -1110,7 +1111,7 @@ impl Orchestrator {
                             "invoking reviewer..."
                         );
                         let mut reviewer_log =
-                            LogWriter::open(&project_dir, Some(loop_number), "reviewer");
+                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "reviewer");
                         let reviewer_decision = execute_with_parse_retries(
                             reviewer_backend,
                             &registry,
@@ -1350,7 +1351,7 @@ impl Orchestrator {
                         "invoking completer..."
                     );
                     let mut completer_log =
-                        LogWriter::open(&project_dir, Some(loop_number), "completer");
+                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "completer");
                     let completer_decision: CompleterDecision = execute_with_parse_retries(
                         completer_backend,
                         &registry,
@@ -1445,7 +1446,7 @@ impl Orchestrator {
                                         "invoking acceptance QA..."
                                     );
                                     let mut acceptance_log =
-                                        LogWriter::open(&project_dir, Some(loop_number), "qa");
+                                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "qa");
                                     let acceptance_decision = execute_with_parse_retries(
                                         acceptance_qa_backend,
                                         &registry,
@@ -1719,7 +1720,38 @@ impl Orchestrator {
         Err(RalphError::Orchestration(format!(
             "run exceeded maximum phase transitions ({MAX_PHASE_STEPS_PER_RUN}); aborting"
         )))
+        }.await;
+
+        // Mark the project as failed while we still hold the lock.
+        if let Err(ref err) = result {
+            if is_terminal_orchestration_error(err) {
+                if let Ok(mut st) = load_project_state(&project_dir) {
+                    if st.status != ProjectStatus::Completed {
+                        st.status = ProjectStatus::Failed;
+                        let _ = save_project_state(&project_dir, &st);
+                    }
+                }
+            }
+        }
+
+        result
     }
+}
+
+/// Returns `true` for error variants that indicate the orchestration loop hit
+/// a terminal failure (as opposed to setup/validation issues or transient IO
+/// errors).  Used to decide whether to mark the project as `Failed`.
+fn is_terminal_orchestration_error(err: &RalphError) -> bool {
+    matches!(
+        err,
+        RalphError::BackendTimeoutExhausted { .. }
+            | RalphError::ParseRetriesExhausted { .. }
+            | RalphError::ReviewIterationLimitExceeded { .. }
+            | RalphError::QaIterationLimitExceeded { .. }
+            | RalphError::BackendCommandFailed { .. }
+            | RalphError::Orchestration(_)
+            | RalphError::GitConflict { .. }
+    )
 }
 
 #[derive(Debug, Clone)]

@@ -269,13 +269,17 @@ fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
 
 fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        h.init_workspace().expect("init failed");
-        let auto_backend = h
+        // Use a daemon harness so repo_root matches the data-dir layout
+        // (data_dir/acme/widgets/) that daemon start expects.
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        let auto_backend = dh
             .write_mock_script("auto-mock.sh", &auto_mock_script())
             .expect("failed to write auto mock backend");
-        h.setup_mock_backends_stable(&auto_backend)
+        dh.setup_mock_backends_stable(&auto_backend)
             .expect("setup_mock_backends_stable failed");
-        h.ralph_ok([
+        dh.ralph_ok([
             "config",
             "set",
             "workspace.daemon_refinement_enabled",
@@ -283,7 +287,7 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
         ])
         .expect("config set workspace.daemon_refinement_enabled failed");
 
-        let gh_script = h
+        let gh_script = dh
             .write_mock_script("gh", &e2e_mock_gh_logging_script())
             .expect("failed to write e2e gh script");
         let gh_dir = gh_script
@@ -295,14 +299,14 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
             std::env::var("PATH").unwrap_or_default()
         );
 
-        let delegate_ralph_script = h
+        let delegate_ralph_script = dh
             .write_mock_script(
                 "daemon-ralph-e2e-delegate.sh",
-                &e2e_mock_ralph_script(&h.ralph_bin),
+                &e2e_mock_ralph_script(&dh.ralph_bin),
             )
             .expect("failed to write daemon e2e delegate script");
         let delegate_ralph_bin = delegate_ralph_script.to_string_lossy().into_owned();
-        let daemon_ralph_script = h
+        let daemon_ralph_script = dh
             .write_mock_script(
                 "daemon-ralph-e2e-auto.sh",
                 &format!(
@@ -331,7 +335,7 @@ git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock ch
         let task_id = "acme-widgets-901";
         let issue_number = 901_u32;
         write_tasks(
-            h,
+            &dh,
             vec![task_json(
                 task_id,
                 "pending",
@@ -342,7 +346,7 @@ git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock ch
         )
         .expect("write_tasks failed");
 
-        let gh_log_path = h.temp_dir.path().join("gh-pr-create-e2e.log");
+        let gh_log_path = dh.temp_dir.path().join("gh-pr-create-e2e.log");
         let gh_log_str = gh_log_path.to_string_lossy().into_owned();
         let env_vars = [
             ("PATH", path_env.as_str()),
@@ -350,8 +354,8 @@ git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock ch
             ("RALPH_E2E_GH_LOG", gh_log_str.as_str()),
         ];
 
-        let output = h
-            .ralph_env(
+        let output = dh
+            .daemon_env(
                 [
                     "daemon",
                     "start",
@@ -369,7 +373,7 @@ git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock ch
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let tasks_snapshot = load_tasks(h)
+        let tasks_snapshot = load_tasks(&dh)
             .map(|tasks| serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".to_owned()))
             .unwrap_or_else(|err| format!("load_tasks error: {err}"));
         assert!(
@@ -424,7 +428,7 @@ git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock ch
             "expected resolved project reference (not unavailable), got:\n{body}"
         );
 
-        let tasks = load_tasks(h).expect("load_tasks failed");
+        let tasks = load_tasks(&dh).expect("load_tasks failed");
         let task = tasks
             .iter()
             .find(|t| t["task_id"] == task_id)

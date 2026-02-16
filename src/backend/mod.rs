@@ -809,7 +809,7 @@ printf 'progress 20%%\rpartial-line'
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
+        let mut writer = LogWriter::open(temp.path(), Some(1), None, "planner");
         let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
             .await
             .expect("backend should succeed");
@@ -844,7 +844,7 @@ sleep 30
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(2), "implementer");
+        let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         match result {
             Err(RalphError::BackendTimeout { backend }) => assert_eq!(backend, "timeout-test"),

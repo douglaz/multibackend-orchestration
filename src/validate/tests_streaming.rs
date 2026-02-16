@@ -116,11 +116,12 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         );
 
         // Implementer log should also exist (after planner succeeded on retry)
-        let impl_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-implementer.log");
+        // The implementer log is in the slug-prefixed loop directory (e.g., 001-feature/)
+        let loop_dir = h
+            .loop_dir(project_id, 1)
+            .expect("loop_dir should succeed")
+            .expect("loop directory should exist");
+        let impl_log = loop_dir.join("agent-output-implementer.log");
         assert!(
             impl_log.exists(),
             "implementer log file should exist at {}",

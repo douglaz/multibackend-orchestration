@@ -225,24 +225,24 @@ fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
             .collect::<Vec<_>>();
         let agent_output = names
             .iter()
-            .filter(|name| name.contains("-agent-output-") && name.ends_with(".log"))
+            .filter(|name| name.contains("agent-output-") && name.ends_with(".log"))
             .collect::<Vec<_>>();
 
         assert!(
             !agent_output.is_empty(),
-            "expected at least one agent-output log artifact in loop directory"
+            "expected at least one agent-output log artifact in loop directory; found: {names:?}"
         );
         assert!(
             agent_output
                 .iter()
-                .any(|name| name.contains("-agent-output-implementer-")),
-            "expected implementer agent-output artifact"
+                .any(|name| name.contains("agent-output-implementer")),
+            "expected implementer agent-output artifact; found: {agent_output:?}"
         );
         assert!(
             agent_output
                 .iter()
-                .any(|name| name.contains("-agent-output-reviewer-")),
-            "expected reviewer agent-output artifact"
+                .any(|name| name.contains("agent-output-reviewer")),
+            "expected reviewer agent-output artifact; found: {agent_output:?}"
         );
     })
 }
