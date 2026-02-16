@@ -1,0 +1,48 @@
+{
+  "project_id": "task-enable-real-time-streaming-of-backe",
+  "project_name": "# Task: Enable Real-Time Streaming of Backend Output to Log ",
+  "created_at": "2026-02-16T03:34:03.448206641Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "3809feb9bb116eadf8ff187079543b3fbecd6bf786d66e8d2331c8abdf054486",
+  "prompt_hash_at_loop_start": "3809feb9bb116eadf8ff187079543b3fbecd6bf786d66e8d2331c8abdf054486",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "deterministic-log-paths-and-path-safety-utilities",
+      "feature_name": "Deterministic Log Paths and Path Safety Utilities",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-deterministic-log-paths-and-path-safety-utilities/20260216033712-spec.md",
+        "impl_notes": "loops/001-deterministic-log-paths-and-path-safety-utilities/20260216033901-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-deterministic-log-paths-and-path-safety-utilities/20260216034312-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-deterministic-log-paths-and-path-safety-utilities/20260216034247-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T03:37:12.973414767Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}

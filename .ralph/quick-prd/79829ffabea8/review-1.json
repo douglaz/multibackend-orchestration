@@ -1,0 +1,29 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Feasibility / Path Derivation",
+      "feedback": "The proposed `log_path` formula depends on `loop_slug`, but `loop_slug` is not available at all invocation points (notably initial Planning and prompt-review phases). The spec needs a deterministic path strategy for pre-slug executions."
+    },
+    {
+      "area": "Correctness / Retry Attribution",
+      "feedback": "`execute_with_parse_retries` can switch backends (reformatter path), but the spec sets one precomputed `log_path` in shared context before the first call. This can misattribute output, overwrite logs, or mix attempts unexpectedly. Define whether logs are per role, per backend, or per attempt, and make pathing consistent with retry behavior."
+    },
+    {
+      "area": "Streaming Semantics",
+      "feedback": "The line-by-line approach does not guarantee real-time visibility for output without newline terminators (partial lines/progress updates), and it can normalize output (newline/CR handling), violating the requirement that returned stdout is unchanged. The spec should require byte/chunk-preserving accumulation and streaming semantics."
+    },
+    {
+      "area": "Timeout and Process Cleanup",
+      "feedback": "Timeout handling is underspecified for manual streaming. The spec must require explicit child termination and completion handling on timeout (`kill` + `wait`) plus defined log finalization for timeout cases, or orphaned processes/logging inconsistencies can occur."
+    },
+    {
+      "area": "File Path Safety and I/O Policy",
+      "feedback": "Using raw backend spec text in filenames (including model names) risks invalid or unintended paths (e.g., `/` in model identifiers). Add sanitization rules. Also specify policy for log write failures (fail execution vs best-effort continue) to avoid undefined runtime behavior."
+    },
+    {
+      "area": "Test Coverage Completeness",
+      "feedback": "Current tests largely validate end-state files, not true streaming behavior during execution. Missing cases include mid-execution visibility, retry/reformatter log routing, timeout cleanup guarantees, and path collision behavior. Per project guidelines, this feature should also include conformance coverage under `src/validate/`, not only unit/integration tests."
+    }
+  ]
+}
