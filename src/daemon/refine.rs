@@ -41,8 +41,8 @@ fn create_backend(backend_spec: &str, global_config: &GlobalConfig) -> Result<Cl
     let spec = parse_backend_spec(backend_spec)?;
     let model = spec.model.as_deref();
     match spec.name.as_str() {
-        "claude" => Ok(claude::backend_from_config(global_config, model)),
-        "codex" => Ok(codex::backend_from_config(global_config, model)),
+        "claude" => Ok(claude::backend_from_config(global_config, model, None)),
+        "codex" => Ok(codex::backend_from_config(global_config, model, None)),
         _ => Err(RalphError::Validation(format!(
             "unknown refinement backend: {backend_spec}"
         ))),

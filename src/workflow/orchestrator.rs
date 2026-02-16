@@ -245,7 +245,7 @@ impl Orchestrator {
             let prompt_reviewer_prompt = build_prompt_reviewer_prompt(&effective, &prompt_content)?;
 
             let pr_backend_spec = &effective.workflow.prompt_review_backend;
-            let pr_backend = registry.get_or_create_for_spec(pr_backend_spec)?;
+            let pr_backend = registry.get_or_create_for_role(pr_backend_spec, "prompt_reviewer")?;
 
             registry
                 .set_tmux_context(TmuxExecutionContext {
@@ -265,6 +265,7 @@ impl Orchestrator {
                 &prompt_reviewer_prompt,
                 parse_prompt_reviewer_output,
                 &expected_format_template_for("prompt_reviewer", None),
+                registry.timeout_for_role(pr_backend_spec, "prompt_reviewer").as_secs(),
                 &mut pr_log,
             )
             .await?;
@@ -360,7 +361,7 @@ impl Orchestrator {
                     )?;
 
                     let planner_backend =
-                        registry.get_or_create_for_spec(&feature_backends.planner)?;
+                        registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
                     let planner_prompt = build_planner_prompt(
                         &effective,
@@ -395,6 +396,7 @@ impl Orchestrator {
                         &planner_prompt,
                         parse_planner_output,
                         &expected_format_template_for("planner", None),
+                        registry.timeout_for_role(&feature_backends.planner, "planner").as_secs(),
                         &mut planner_log,
                     )
                     .await?;
@@ -495,7 +497,7 @@ impl Orchestrator {
                     };
 
                     let implementer_backend =
-                        registry.get_or_create_for_spec(&implementer_backend_name)?;
+                        registry.get_or_create_for_role(&implementer_backend_name, "implementer")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
                     let git_diff = current_git_diff(&self.workspace.root)?;
@@ -544,6 +546,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, None),
                             &expected_format_template_for("implementer-notes", None),
+                            registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
                         )
                         .await?;
@@ -650,6 +653,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
+                            registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
                         )
                         .await?;
@@ -759,6 +763,7 @@ impl Orchestrator {
                             &impl_prompt,
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
+                            registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
                         )
                         .await?;
@@ -869,7 +874,7 @@ impl Orchestrator {
                         });
                     }
 
-                    let qa_backend = registry.get_or_create_for_spec(&qa_backend_name)?;
+                    let qa_backend = registry.get_or_create_for_role(&qa_backend_name, "qa")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
                     let impl_notes_rel = impl_notes_rel.ok_or_else(|| {
@@ -923,6 +928,7 @@ impl Orchestrator {
                         &qa_prompt,
                         parse_qa_output,
                         &expected_format_template_for("qa", None),
+                        registry.timeout_for_role(&qa_backend_name, "qa").as_secs(),
                         &mut qa_log,
                     )
                     .await?;
@@ -1053,7 +1059,7 @@ impl Orchestrator {
                             Some((loop_number, effective.workflow.max_review_iterations));
                     } else {
                         let reviewer_backend =
-                            registry.get_or_create_for_spec(&reviewer_backend_name)?;
+                            registry.get_or_create_for_role(&reviewer_backend_name, "reviewer")?;
 
                         let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
                         let impl_notes_rel = impl_notes_rel.ok_or_else(|| {
@@ -1120,6 +1126,7 @@ impl Orchestrator {
                             &reviewer_prompt,
                             parse_reviewer_output,
                             &expected_format_template_for("reviewer", None),
+                            registry.timeout_for_role(&reviewer_backend_name, "reviewer").as_secs(),
                             &mut reviewer_log,
                         )
                         .await?;
@@ -1317,7 +1324,7 @@ impl Orchestrator {
                     };
 
                     let completer_backend =
-                        registry.get_or_create_for_spec(&completer_backend_name)?;
+                        registry.get_or_create_for_role(&completer_backend_name, "completer")?;
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
@@ -1360,6 +1367,7 @@ impl Orchestrator {
                         &completer_prompt,
                         parse_completer_output,
                         &expected_format_template_for("completer", None),
+                        registry.timeout_for_role(&completer_backend_name, "completer").as_secs(),
                         &mut completer_log,
                     )
                     .await?;
@@ -1418,7 +1426,7 @@ impl Orchestrator {
 
                                 for acceptance_qa_backend_name in &acceptance_backends {
                                     let acceptance_qa_backend = registry
-                                        .get_or_create_for_spec(acceptance_qa_backend_name)?;
+                                        .get_or_create_for_role(acceptance_qa_backend_name, "acceptance_qa")?;
                                     let acceptance_prompt = build_acceptance_prompt(
                                         &state_snapshot_json,
                                         &prompt_content,
@@ -1455,6 +1463,7 @@ impl Orchestrator {
                                         &acceptance_prompt,
                                         parse_qa_output,
                                         &expected_format_template_for("qa", None),
+                                        registry.timeout_for_role(acceptance_qa_backend_name, "acceptance_qa").as_secs(),
                                         &mut acceptance_log,
                                     )
                                     .await?;
@@ -2743,14 +2752,21 @@ async fn execute_with_parse_retries<T, F>(
     original_prompt: &str,
     parse_fn: F,
     expected_format: &str,
+    timeout_secs: u64,
     log_writer: &mut LogWriter,
 ) -> Result<T>
 where
     F: Fn(&str) -> Result<T>,
 {
-    let first_output =
-        execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
-            .await?;
+    let first_output = execute_with_timeout_retries(
+        backend.clone(),
+        role,
+        phase,
+        original_prompt,
+        timeout_secs,
+        log_writer,
+    )
+    .await?;
 
     // If output is empty/near-empty, retry with the same backend before going to the
     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
@@ -2762,9 +2778,15 @@ where
             output_len = first_output.len(),
             "backend returned empty/near-empty output, retrying with same backend"
         );
-        let retry_output =
-            execute_with_timeout_retries(backend.clone(), role, phase, original_prompt, log_writer)
-                .await?;
+        let retry_output = execute_with_timeout_retries(
+            backend.clone(),
+            role,
+            phase,
+            original_prompt,
+            timeout_secs,
+            log_writer,
+        )
+        .await?;
         if retry_output.trim().len() > first_output.trim().len() {
             retry_output
         } else {
@@ -2787,6 +2809,9 @@ where
                 .get(&reformatter_spec)
                 .unwrap_or_else(|| backend.clone());
             let reformatter_name = reformatter_backend.name().to_owned();
+            let reformatter_timeout_secs = registry
+                .timeout_for_role(&reformatter_spec, "reformatter")
+                .as_secs();
 
             warn!(
                 role = role,
@@ -2813,6 +2838,7 @@ where
                 role,
                 phase,
                 &reformat_prompt,
+                reformatter_timeout_secs,
                 log_writer,
             )
             .await?;
@@ -2830,9 +2856,15 @@ where
                 No preamble. No commentary before the H1. No YAML frontmatter. \
                 Include all required H2 sections.\n\n{original_prompt}",
             );
-            let third_output =
-                execute_with_timeout_retries(backend, role, phase, &reminded_prompt, log_writer)
-                    .await?;
+            let third_output = execute_with_timeout_retries(
+                backend,
+                role,
+                phase,
+                &reminded_prompt,
+                timeout_secs,
+                log_writer,
+            )
+            .await?;
             if let Ok(parsed) = parse_fn(&third_output) {
                 return Ok(parsed);
             }
@@ -2852,6 +2884,7 @@ async fn execute_with_timeout_retries(
     role: &str,
     phase: &str,
     prompt: &str,
+    timeout_secs: u64,
     log_writer: &mut LogWriter,
 ) -> Result<String> {
     for attempt in 1..=3_u8 {
@@ -2875,7 +2908,7 @@ async fn execute_with_timeout_retries(
                         backend: backend_name,
                         phase: phase.to_owned(),
                         role: role.to_owned(),
-                        timeout_secs: 0,
+                        timeout_secs,
                         attempts: attempt,
                     });
                 }

@@ -23,7 +23,11 @@ pub fn parse_codex_model_effort(model_name: &str) -> (&str, Option<&str>) {
     (model_name, None)
 }
 
-pub fn backend_from_config(config: &GlobalConfig, model: Option<&str>) -> CliBackend {
+pub fn backend_from_config(
+    config: &GlobalConfig,
+    model: Option<&str>,
+    role: Option<&str>,
+) -> CliBackend {
     let backend = &config.backends.codex;
     let mut args = backend.args.clone();
     let name = if let Some(model_name) = model {
@@ -43,11 +47,16 @@ pub fn backend_from_config(config: &GlobalConfig, model: Option<&str>) -> CliBac
         "codex".to_owned()
     };
 
+    let timeout = match role {
+        Some(r) => backend.timeout_for_role(r),
+        None => Duration::from_secs(backend.timeout_seconds),
+    };
+
     CliBackend::new(
         &name,
         backend.command.clone(),
         args,
-        Duration::from_secs(backend.timeout_seconds),
+        timeout,
         backend.env.clone(),
     )
 }

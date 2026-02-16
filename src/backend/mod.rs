@@ -484,12 +484,12 @@ impl BackendRegistry {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
         let shared_ctx = SharedTmuxContext::default();
 
-        let claude_backend = claude::backend_from_config(config, None);
+        let claude_backend = claude::backend_from_config(config, None, None);
         backends.insert(
             "claude".to_owned(),
             backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
-        let codex_backend = codex::backend_from_config(config, None);
+        let codex_backend = codex::backend_from_config(config, None, None);
         backends.insert(
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
@@ -515,15 +515,34 @@ impl BackendRegistry {
     }
 
     pub fn get_or_create_for_spec(&mut self, spec: &str) -> Result<Arc<dyn Backend>> {
+        self.get_or_create_inner(spec, None)
+    }
+
+    pub fn get_or_create_for_role(
+        &mut self,
+        spec: &str,
+        role: &str,
+    ) -> Result<Arc<dyn Backend>> {
+        self.get_or_create_inner(spec, Some(role))
+    }
+
+    fn get_or_create_inner(
+        &mut self,
+        spec: &str,
+        role: Option<&str>,
+    ) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
-        let cache_key = backend_spec_key(&parsed);
+        let cache_key = match role {
+            Some(r) => format!("{}:{r}", backend_spec_key(&parsed)),
+            None => backend_spec_key(&parsed),
+        };
 
         if let Some(backend) = self.backends.get(&cache_key) {
             return Ok(backend.clone());
         }
 
         let backend = backend_with_optional_tmux(
-            self.create_cli_backend_for_spec(&parsed)?,
+            self.create_cli_backend_for_spec(&parsed, role)?,
             &self.tmux,
             self.tmux_context.clone(),
         );
@@ -688,11 +707,15 @@ impl BackendRegistry {
         Ok(())
     }
 
-    fn create_cli_backend_for_spec(&self, spec: &BackendSpec) -> Result<CliBackend> {
+    fn create_cli_backend_for_spec(
+        &self,
+        spec: &BackendSpec,
+        role: Option<&str>,
+    ) -> Result<CliBackend> {
         let model = spec.model.as_deref();
         match spec.name.as_str() {
-            "claude" => Ok(claude::backend_from_config(&self.config, model)),
-            "codex" => Ok(codex::backend_from_config(&self.config, model)),
+            "claude" => Ok(claude::backend_from_config(&self.config, model, role)),
+            "codex" => Ok(codex::backend_from_config(&self.config, model, role)),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for spec lookup: {}",
                 backend_spec_key(spec)
