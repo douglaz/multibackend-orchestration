@@ -187,6 +187,7 @@ fn project_status_label(status: &crate::project::state::ProjectStatus) -> &'stat
     match status {
         crate::project::state::ProjectStatus::Pending => "pending",
         crate::project::state::ProjectStatus::InProgress => "in_progress",
+        crate::project::state::ProjectStatus::Failed => "failed",
         crate::project::state::ProjectStatus::Completed => "completed",
     }
 }

@@ -1,3 +1,9 @@
+use std::path::Path;
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub fn standard_mock_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
@@ -303,6 +309,91 @@ else
   echo "unrecognized prompt" >&2
   exit 1
 fi
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script for validate E2E tests that always delegates to the
+/// provided absolute `ralph` binary path and executes `auto`.
+///
+/// This avoids recursive PATH-based resolution and ensures the delegated
+/// executable is exactly the caller-provided binary.
+pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+    let absolute = ralph_bin
+        .canonicalize()
+        .unwrap_or_else(|_| ralph_bin.to_path_buf());
+    let quoted = shell_single_quote(&absolute.to_string_lossy());
+    format!(
+        "#!/bin/sh\n\
+set -eu\n\
+exec {quoted} auto \"$@\"\n"
+    )
+}
+
+/// Mock `gh` script for validate E2E tests that captures full `gh pr create`
+/// arguments and `--body-file` contents to a log file.
+///
+/// Set `RALPH_E2E_GH_LOG` to control the output path.
+pub fn e2e_mock_gh_logging_script() -> String {
+    r###"#!/bin/sh
+set -eu
+
+log_path="${RALPH_E2E_GH_LOG:-${TMPDIR:-/tmp}/ralph-e2e-gh.log}"
+
+if [ $# -ge 2 ] && [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  : > "$log_path"
+
+  idx=0
+  for arg in "$@"; do
+    printf 'arg[%s]=%s\n' "$idx" "$arg" >> "$log_path"
+    idx=$((idx + 1))
+  done
+
+  body_file=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--body-file" ]; then
+      body_file="$arg"
+      break
+    fi
+    prev="$arg"
+  done
+
+  if [ -n "$body_file" ] && [ -f "$body_file" ]; then
+    printf 'body_file=%s\n' "$body_file" >> "$log_path"
+    printf 'body_begin\n' >> "$log_path"
+    cat "$body_file" >> "$log_path"
+    printf '\nbody_end\n' >> "$log_path"
+  fi
+
+  printf 'https://github.com/mock/repo/pull/123\n'
+  exit 0
+fi
+
+case "${1:-}" in
+  issue)
+    case "${2:-}" in
+      list) printf '[]'; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "${2:-}" in
+      list) printf '' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "${2:-}" in
+      view) printf 'acme/widgets\n'; exit 0 ;;
+    esac
+    ;;
+esac
+
+echo "mock gh: unhandled command: $*" >&2
+exit 1
 "###
     .to_owned()
 }
