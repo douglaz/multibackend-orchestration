@@ -7,18 +7,22 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
+use bytes::BytesMut;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
+use crate::output_log::LogWriter;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
 use crate::Result;
 
@@ -29,6 +33,14 @@ use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
     async fn execute(&self, prompt: &str) -> Result<String>;
+    async fn execute_with_log(
+        &self,
+        prompt: &str,
+        mut log_writer: Option<&mut LogWriter>,
+    ) -> Result<String> {
+        let _ = log_writer.as_deref_mut();
+        self.execute(prompt).await
+    }
     async fn health_check(&self) -> Result<()>;
 }
 
@@ -139,15 +151,44 @@ impl CliBackend {
     pub fn timeout(&self) -> Duration {
         self.timeout
     }
-}
 
-#[async_trait]
-impl Backend for CliBackend {
-    fn name(&self) -> &str {
-        &self.name
+    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
+        if let Err(err) = child.kill().await {
+            if err.kind() != ErrorKind::InvalidInput {
+                warn!(
+                    backend = %self.name,
+                    error = %err,
+                    "failed to kill child process during cleanup"
+                );
+            }
+        }
+        if let Err(err) = child.wait().await {
+            warn!(
+                backend = %self.name,
+                error = %err,
+                "failed waiting for child process during cleanup"
+            );
+        }
     }
 
-    async fn execute(&self, prompt: &str) -> Result<String> {
+    async fn collect_stderr(
+        &self,
+        handle: tokio::task::JoinHandle<Result<Vec<u8>>>,
+    ) -> Result<Vec<u8>> {
+        match handle.await {
+            Ok(result) => result,
+            Err(err) => Err(RalphError::BackendCommandFailed {
+                backend: self.name.clone(),
+                details: format!("stderr reader task failed: {err}"),
+            }),
+        }
+    }
+
+    async fn execute_streaming(
+        &self,
+        prompt: &str,
+        mut log_writer: Option<&mut LogWriter>,
+    ) -> Result<String> {
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
         cmd.args(&self.args)
@@ -176,24 +217,121 @@ impl Backend for CliBackend {
             })?;
         }
 
-        let output = timeout(self.timeout, child.wait_with_output())
-            .await
-            .map_err(|_| RalphError::BackendTimeout {
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
-            })?
-            .map_err(|err| RalphError::BackendCommandFailed {
+                details: "child stdout pipe unavailable".to_owned(),
+            })?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
-                details: err.to_string(),
+                details: "child stderr pipe unavailable".to_owned(),
             })?;
 
-        if !output.status.success() {
-            return Err(RalphError::BackendCommandFailed {
-                backend: self.name.clone(),
-                details: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
+        let stderr_backend = self.name.clone();
+        let stderr_handle = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            let mut chunk = BytesMut::with_capacity(4096);
+            loop {
+                chunk.clear();
+                match stderr.read_buf(&mut chunk).await {
+                    Ok(0) => return Ok(captured),
+                    Ok(_) => captured.extend_from_slice(chunk.as_ref()),
+                    Err(err) => {
+                        return Err(RalphError::BackendCommandFailed {
+                            backend: stderr_backend.clone(),
+                            details: format!("failed to read stderr: {err}"),
+                        });
+                    }
+                }
+            }
+        });
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let execution_result = timeout(self.timeout, async {
+            let mut captured_stdout = Vec::new();
+            let mut chunk = BytesMut::with_capacity(8192);
+            loop {
+                chunk.clear();
+                let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
+                    RalphError::BackendCommandFailed {
+                        backend: self.name.clone(),
+                        details: format!("failed to read stdout: {err}"),
+                    }
+                })?;
+                if read == 0 {
+                    break;
+                }
+                let bytes = chunk.as_ref();
+                captured_stdout.extend_from_slice(bytes);
+                if let Some(writer) = log_writer.as_deref_mut() {
+                    writer.write_bytes(bytes);
+                }
+            }
+
+            let status = child
+                .wait()
+                .await
+                .map_err(|err| RalphError::BackendCommandFailed {
+                    backend: self.name.clone(),
+                    details: format!("failed waiting for child process: {err}"),
+                })?;
+
+            Ok::<(std::process::ExitStatus, Vec<u8>), RalphError>((status, captured_stdout))
+        })
+        .await;
+
+        match execution_result {
+            Ok(Ok((status, captured_stdout))) => {
+                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
+
+                if !status.success() {
+                    return Err(RalphError::BackendCommandFailed {
+                        backend: self.name.clone(),
+                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+                    });
+                }
+
+                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
+            }
+            Ok(Err(err)) => {
+                self.kill_and_reap_child(&mut child).await;
+                let _ = self.collect_stderr(stderr_handle).await;
+                Err(err)
+            }
+            Err(_) => {
+                self.kill_and_reap_child(&mut child).await;
+                let _ = self.collect_stderr(stderr_handle).await;
+                if let Some(writer) = log_writer.as_deref_mut() {
+                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
+                }
+                Err(RalphError::BackendTimeout {
+                    backend: self.name.clone(),
+                })
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for CliBackend {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn execute(&self, prompt: &str) -> Result<String> {
+        self.execute_streaming(prompt, None).await
+    }
+
+    async fn execute_with_log(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+    ) -> Result<String> {
+        self.execute_streaming(prompt, log_writer).await
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -476,7 +614,16 @@ fn backend_with_optional_tmux(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_backend_spec, BackendSpec};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+
+    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend};
+    use crate::error::RalphError;
+    use crate::output_log::LogWriter;
 
     #[test]
     fn parse_backend_spec_accepts_bare_name() {
@@ -520,5 +667,96 @@ mod tests {
     #[test]
     fn parse_backend_spec_rejects_missing_opening_paren() {
         assert!(parse_backend_spec("claudeopus)").is_err());
+    }
+
+    fn write_executable_script(
+        dir: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write script");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod script");
+        path
+    }
+
+    #[tokio::test]
+    async fn cli_backend_streaming_preserves_exact_bytes_in_log() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = write_executable_script(
+            temp.path(),
+            "emit-bytes.sh",
+            r#"#!/bin/sh
+printf 'progress 10%%\r'
+sleep 0.05
+printf 'progress 20%%\rpartial-line'
+"#,
+        );
+
+        let backend = CliBackend::new(
+            "streaming-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(2),
+            BTreeMap::new(),
+        );
+
+        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
+        let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
+            .await
+            .expect("backend should succeed");
+
+        assert_eq!(output, "progress 10%\rprogress 20%\rpartial-line");
+        let logged = fs::read(writer.path()).expect("read log bytes");
+        assert_eq!(logged, b"progress 10%\rprogress 20%\rpartial-line");
+    }
+
+    #[tokio::test]
+    async fn cli_backend_timeout_kills_and_reaps_child_and_writes_footer() {
+        let temp = tempdir().expect("tempdir");
+        let pid_file = temp.path().join("child.pid");
+        let script_path = write_executable_script(
+            temp.path(),
+            "hang-after-output.sh",
+            &format!(
+                r#"#!/bin/sh
+echo $$ > "{pid_file}"
+printf 'partial-timeout-output'
+sleep 30
+"#,
+                pid_file = pid_file.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "timeout-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_millis(150),
+            BTreeMap::new(),
+        );
+
+        let mut writer = LogWriter::open(temp.path(), Some(2), "implementer");
+        let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
+        match result {
+            Err(RalphError::BackendTimeout { backend }) => assert_eq!(backend, "timeout-test"),
+            other => panic!("expected BackendTimeout, got: {other:?}"),
+        }
+
+        let log_content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(log_content.contains("partial-timeout-output"));
+        assert!(log_content.contains("--- timeout ts="));
+
+        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
+        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
+
+        let kill_rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(kill_rc, -1, "child pid should not be alive");
+        let os_err = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("raw os error should exist");
+        assert_eq!(os_err, libc::ESRCH, "child pid should be fully reaped");
     }
 }

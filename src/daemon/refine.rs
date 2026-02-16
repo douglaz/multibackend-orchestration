@@ -229,9 +229,8 @@ mod tests {
     #[test]
     fn parse_refined_output_rejects_overlong_title() {
         let title = "a".repeat(MAX_TITLE_LENGTH + 1);
-        let input = format!(
-            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
-        );
+        let input =
+            format!("TITLE: {title}\n---\nThis is a sufficiently long body for refinement output.");
         let err = parse_refined_output(&input).unwrap_err();
         assert!(err.to_string().contains("title too long"));
     }

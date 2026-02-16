@@ -36,7 +36,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     // Check if the branch already exists (e.g. from a previous failed run
     // where the worktree was cleaned up but the branch was not).
     let branch_exists = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch_name}"),
+        ])
         .current_dir(repo_root)
         .output()
         .map(|o| o.status.success())
@@ -45,12 +49,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     let output = if branch_exists {
         // Reuse existing branch
         Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                &wt_path.to_string_lossy(),
-                &branch_name,
-            ])
+            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
             .current_dir(repo_root)
             .output()
     } else {

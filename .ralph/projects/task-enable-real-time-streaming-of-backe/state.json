@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "3809feb9bb116eadf8ff187079543b3fbecd6bf786d66e8d2331c8abdf054486",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -48,7 +48,7 @@
       "slug": "append-only-retry-attribution-logging",
       "feature_name": "Append-Only Retry Attribution Logging",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -82,8 +82,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "3f1a12b3fdc812568bf204ebc701a948315cf334",
       "started_at": "2026-02-16T03:46:39.119629608Z",
+      "completed_at": "2026-02-16T04:22:23.568986284Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "byte-preserving-streaming-capture-with-timeout",
+      "feature_name": "Byte-Preserving Streaming Capture with Timeout Cleanup",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-byte-preserving-streaming-capture-with-timeout/20260216042530-spec.md",
+        "impl_notes": "loops/003-byte-preserving-streaming-capture-with-timeout/20260216043447-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-byte-preserving-streaming-capture-with-timeout/20260216045312-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-byte-preserving-streaming-capture-with-timeout/20260216045157-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T04:25:30.154759414Z",
       "completed_at": null
     }
   ],

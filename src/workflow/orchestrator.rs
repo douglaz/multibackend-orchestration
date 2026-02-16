@@ -22,6 +22,7 @@ use crate::git::commit::{
     ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
+use crate::output_log::LogWriter;
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
@@ -38,7 +39,6 @@ use crate::prompts::templates::{
     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
     render_template_with_fallback,
 };
-use crate::output_log::LogWriter;
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::util::slug::slugify_feature_name;
@@ -1875,9 +1875,7 @@ fn rollback_current_loop(
 
     // Also remove the bare loop-number directory used by agent-output log files
     // (e.g., loops/001/agent-output-planner.log).
-    let log_dir = project_dir
-        .join("loops")
-        .join(format!("{loop_number:03}"));
+    let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
     if log_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&log_dir) {
             warn!(
@@ -2791,9 +2789,8 @@ async fn execute_with_timeout_retries(
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
 
-        match backend.execute(prompt).await {
+        match backend.execute_with_log(prompt, Some(log_writer)).await {
             Ok(output) => {
-                log_writer.write_str(&output);
                 return Ok(output);
             }
             Err(RalphError::BackendTimeout {

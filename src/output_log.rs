@@ -50,10 +50,17 @@ pub fn format_attempt_separator(
     timestamp: &str,
 ) -> String {
     let sanitized = sanitize_for_filename(backend_label);
-    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
-    format!(
-        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
-    )
+    let fallback_flag = if is_fallback {
+        "fallback=true"
+    } else {
+        "fallback=false"
+    };
+    format!("\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n")
+}
+
+/// Formats a timeout footer line appended when backend execution times out.
+pub fn format_timeout_footer(timestamp: &str) -> String {
+    format!("\n--- timeout ts={timestamp} ---\n")
 }
 
 /// Best-effort append-mode log writer.
@@ -95,10 +102,7 @@ impl LogWriter {
 
     fn try_open(path: &Path) -> io::Result<File> {
         ensure_log_parent(path)?;
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
+        OpenOptions::new().create(true).append(true).open(path)
     }
 
     /// Write an attempt separator before a backend execution.
@@ -106,8 +110,15 @@ impl LogWriter {
     pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
         self.attempt += 1;
         let timestamp = Utc::now().to_rfc3339();
-        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
+        let separator =
+            format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
         self.write_bytes(separator.as_bytes());
+    }
+
+    /// Append a timeout footer line with the provided timestamp.
+    pub fn write_timeout_footer(&mut self, timestamp: &str) {
+        let footer = format_timeout_footer(timestamp);
+        self.write_bytes(footer.as_bytes());
     }
 
     /// Append raw bytes to the log file.
@@ -209,7 +220,10 @@ mod tests {
     fn sanitizes_unsafe_filename_characters() {
         assert_eq!(sanitize_for_filename("../"), "");
         assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
-        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
+        assert_eq!(
+            sanitize_for_filename("backend label with spaces"),
+            "backend_label_with_spaces"
+        );
         assert_eq!(sanitize_for_filename("日本語"), "");
     }
 
@@ -243,6 +257,12 @@ mod tests {
     }
 
     #[test]
+    fn timeout_footer_format_contains_timestamp() {
+        let footer = format_timeout_footer("2026-01-01T00:00:00Z");
+        assert_eq!(footer, "\n--- timeout ts=2026-01-01T00:00:00Z ---\n");
+    }
+
+    #[test]
     fn log_writer_opens_and_appends() {
         let temp = tempdir().expect("tempdir");
         let project_dir = temp.path();
@@ -264,6 +284,32 @@ mod tests {
     }
 
     #[test]
+    fn log_writer_preserves_cr_and_partial_line_bytes() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(9), "planner");
+
+        writer.write_bytes(b"progress 10%\r");
+        writer.write_bytes(b"progress 20%\r");
+        writer.write_bytes(b"partial-line");
+
+        let bytes = fs::read(writer.path()).expect("read log bytes");
+        assert_eq!(bytes, b"progress 10%\rprogress 20%\rpartial-line");
+    }
+
+    #[test]
+    fn log_writer_timeout_footer_appends() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), Some(3), "implementer");
+
+        writer.write_bytes(b"partial output");
+        writer.write_timeout_footer("2026-01-01T00:00:00Z");
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("partial output"));
+        assert!(content.contains("--- timeout ts=2026-01-01T00:00:00Z ---"));
+    }
+
+    #[test]
     fn log_writer_appends_across_instances() {
         let temp = tempdir().expect("tempdir");
         let project_dir = temp.path();
@@ -279,10 +325,8 @@ mod tests {
             w.write_str("second run\n");
         }
 
-        let content = fs::read_to_string(
-            log_path_for_role(project_dir, Some(1), "implementer"),
-        )
-        .expect("read log");
+        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), "implementer"))
+            .expect("read log");
         assert!(content.contains("first run"));
         assert!(content.contains("second run"));
     }
@@ -348,9 +392,18 @@ mod tests {
         let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
         let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
         let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
-        assert!(sep1.contains("fallback=false"), "first attempt should be fallback=false");
-        assert!(sep2.contains("fallback=true"), "second attempt should be fallback=true");
-        assert!(sep3.contains("fallback=true"), "third attempt should be fallback=true");
+        assert!(
+            sep1.contains("fallback=false"),
+            "first attempt should be fallback=false"
+        );
+        assert!(
+            sep2.contains("fallback=true"),
+            "second attempt should be fallback=true"
+        );
+        assert!(
+            sep3.contains("fallback=true"),
+            "third attempt should be fallback=true"
+        );
     }
 
     /// Simulate the attempt numbering pattern from `execute_with_parse_retries`:

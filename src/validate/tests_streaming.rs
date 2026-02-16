@@ -1,10 +1,15 @@
 use super::*;
 
 use std::fs;
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
+use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    planner_parse_fail_then_pass_mock_script, standard_mock_script,
+    planner_parse_fail_then_pass_mock_script, slow_streaming_planner_mock_script,
+    standard_mock_script, timeout_hanging_planner_mock_script,
 };
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -16,6 +21,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "streaming::prompt_reviewer_path",
             func: prompt_reviewer_path,
+        },
+        ConformanceTest {
+            name: "streaming::mid_execution_visibility",
+            func: mid_execution_visibility,
+        },
+        ConformanceTest {
+            name: "streaming::timeout_cleanup",
+            func: timeout_cleanup,
         },
     ]
 }
@@ -96,7 +109,9 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
 
         // Should also contain actual output content from the successful attempt
         assert!(
-            content.contains("Feature") || content.contains("feature") || content.contains("not a valid"),
+            content.contains("Feature")
+                || content.contains("feature")
+                || content.contains("not a valid"),
             "planner log should contain backend output, got:\n{content}"
         );
 
@@ -166,6 +181,144 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
                 }
             }
         }
+    })
+}
+
+/// Verify planner output is visible in the log while backend execution is
+/// still in progress (chunked streaming, not post-hoc write).
+fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "streaming-mid-visibility";
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script("slow-streaming.sh", &slow_streaming_planner_mock_script())
+            .expect("failed to write slow streaming mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        h.create_project(
+            project_id,
+            "Streaming Mid-Execution Visibility",
+            "Streaming visibility test prompt",
+        )
+        .expect("create_project failed");
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+
+        let mut child = Command::new(&h.ralph_bin)
+            .args(["run", "--loops", "1"])
+            .current_dir(&h.repo_root)
+            .spawn()
+            .expect("spawn ralph run");
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut observed_size = 0_u64;
+        let mut observed_while_running = false;
+
+        while Instant::now() < deadline {
+            if let Ok(meta) = fs::metadata(&planner_log) {
+                observed_size = meta.len();
+                if observed_size > 0 {
+                    let status = child.try_wait().expect("try_wait should succeed");
+                    if status.is_none() {
+                        observed_while_running = true;
+                        break;
+                    }
+                }
+            }
+
+            if child.try_wait().expect("try_wait should succeed").is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            observed_while_running,
+            "expected planner log bytes while run process was still active; observed_size={observed_size}"
+        );
+
+        let output = child.wait_with_output().expect("wait_with_output");
+        assert_exit_code(&output, 0);
+
+        let final_size = fs::metadata(&planner_log)
+            .expect("planner log metadata after completion")
+            .len();
+        assert!(
+            final_size > observed_size,
+            "planner log should grow after initial streamed bytes; initial={observed_size} final={final_size}"
+        );
+    })
+}
+
+/// Verify timeout behavior: partial output is preserved, timeout footer exists,
+/// and the hanging planner child process is dead after retries.
+fn timeout_cleanup(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "streaming-timeout-cleanup";
+        let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "timeout-hanging.sh",
+                &timeout_hanging_planner_mock_script(&pid_file),
+            )
+            .expect("failed to write timeout mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Streaming Timeout Cleanup",
+            "Streaming timeout cleanup prompt",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 1);
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        assert!(
+            content.contains("planner-partial-before-timeout"),
+            "planner log should contain partial output before timeout, got:\n{content}"
+        );
+        assert!(
+            content.contains("--- timeout ts="),
+            "planner log should contain timeout footer, got:\n{content}"
+        );
+
+        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
+        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
+        let kill_rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(kill_rc, -1, "timed-out planner process should be dead");
+        let os_err = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("raw os error should be present");
+        assert_eq!(
+            os_err,
+            libc::ESRCH,
+            "timed-out planner process should be fully reaped"
+        );
     })
 }
 

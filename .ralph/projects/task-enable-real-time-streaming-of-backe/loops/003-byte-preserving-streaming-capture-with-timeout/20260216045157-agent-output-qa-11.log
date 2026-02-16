@@ -1,0 +1,4692 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: PASS
+
+## Manual Testing
+- Built and used real binary in isolated repos with mock backends:
+  - `./result/bin/ralph init`, `./result/bin/ralph config set ...`, `./result/bin/ralph project new ...`, `./result/bin/ralph run --loops 1`.
+- Retry + append + deterministic paths + prompt reviewer path (repo: `/tmp/qa-streaming-A-8KJZdx`):
+  - `RUN_RC=0`.
+  - `find ... -name 'agent-output-*.log'` showed:
+    - `.ralph/projects/qa-stream-a/agent-output-prompt-reviewer.log`
+    - `.ralph/projects/qa-stream-a/loops/001/agent-output-{planner,implementer,qa,reviewer}.log`
+  - `grep '^--- attempt=' .../agent-output-planner.log` showed multiple attempts in one file:
+    - `attempt=1 ... fallback=false ...`
+    - `attempt=2 ... fallback=true ...`
+  - `od -An -tx1 -N 140 .../agent-output-planner.log` contained `0d` byte (`... 31 30 25 0d 70 ...`) proving raw `\r` preserved.
+- Mid-execution visibility (repo: `/tmp/qa-streaming-B-9nec4b`):
+  - Ran `ralph run --loops 1` in background and polled log size.
+  - Observed while process still alive: `OBSERVED_WHILE_RUNNING=1`, `OBSERVED_SIZE=127`, `FINAL_SIZE=351`, `RUN_RC=0`.
+- Timeout cleanup (repo: `/tmp/qa-streaming-C-6dL9C3`):
+  - `RUN_RC=1`.
+  - stderr: `backend timeout retries exhausted for claude(opus) during planning after 3 attempts`.
+  - Planner log tail included partial output plus timeout footer each attempt:
+    - `planner-partial-before-timeout`
+    - `--- timeout ts=... ---`
+  - Child PID check after run: `KILL_ZERO_RC=1`, `PROC_ALIVE=no`.
+- CLI edge case:
+  - `./result/bin/ralph project new --id edge-case --name "Edge Case"` returned `RC=2` with `error: invalid input: provide exactly one of --prompt or --from`.
+
+## Automated Tests
+- `cargo build`: pass.
+- `cargo check`: pass.
+- `cargo test`: pass (`397 passed; 0 failed; 1 ignored` in lib tests; all integration suites passed, including new streaming unit tests).
+- `nix build -L`: pass (release build + check phase + conformance run; ended with `test result: ok. 188 passed; 0 failed; 0 skipped`).
+- `./result/bin/ralph validate --bin ./result/bin/ralph --filter streaming`: pass (`4 passed; 0 failed`).
+- `./result/bin/ralph validate --bin ./result/bin/ralph`: pass (`188 passed; 0 failed; 0 skipped`).
+
+## Acceptance Criteria Verification
+- [x] `read_buf()` streaming instead of `wait_with_output()` in backend path: verified by code check `rg -n "read_buf|wait_with_output" src/backend/mod.rs` (shows `read_buf`; no `wait_with_output` in backend module).
+- [x] Raw bytes preserved in capture/log: manual hexdump from planner log in scenario A includes literal `0d` (`\r`) and partial-line bytes.
+- [x] Chunk writes go to log in real time: scenario B observed planner log non-zero while `ralph run` still running (`OBSERVED_WHILE_RUNNING=1`).
+- [x] Final lossy conversion behavior preserved: code check shows `String::from_utf8_lossy` on accumulated output at return path (`src/backend/mod.rs`).
+- [x] Backend API accepts optional log writer: code check shows `execute_with_log(...)` and orchestrator uses it.
+- [x] Timeout does explicit kill + wait: code check shows `child.kill().await` and `child.wait().await`; manual PID dead after timeout run.
+- [x] Timeout footer written before timeout error: scenario C planner log contains `--- timeout ts=... ---`.
+- [x] Fatal timeout keeps partial output: scenario C planner log contains `planner-partial-before-timeout` before footer.
+- [x] No zombie child after timeout: scenario C `kill -0` failed and `/proc/<pid>` absent (`PROC_ALIVE=no`).
+- [x] Retry flow appends in one file with attribution separators: scenario A planner log has attempt 1 and 2 separators in same file with backend/fallback/timestamp.
+- [x] Deterministic role-based filenames (no loop slug/backend in filename): manual file listing shows `agent-output-{role}.log`; code search shows log path helper `log_path_for_role(project_dir, loop_number, role)`.
+- [x] Prompt reviewer root-level path when `loop_number` absent: scenario A has `.ralph/projects/qa-stream-a/agent-output-prompt-reviewer.log`.
+- [x] `tests_streaming` conformance registration: `rg` shows `mod tests_streaming;` and `tests.extend(tests_streaming::tests());`.
+- [x] Required conformance tests present and passing: validate list/run showed `streaming::mid_execution_visibility` and `streaming::timeout_cleanup` passing.
+- [x] `cargo test` passes: confirmed.
+- [x] `cargo check` passes with no new warnings: confirmed.
+- [x] Validate suite passes including new streaming tests: confirmed (`188/188` pass).
+- [x] No log filename derivation from `loop_slug`: code search for log path usage points to `src/output_log.rs` helper; loop slug appears in artifact paths, not log filename derivation.
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c64ba-c379-7851-9704-c65cfa459e9d
+--------
+user
+You are a QA engineer validating an implementation against its specification.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- `<TS>-impl-notes.md`
+- The current implementation diff
+
+Your PRIMARY job is manual, hands-on testing — exercise the actual product as a real user would. Automated test suites are a secondary confirmation, not a substitute for real verification.
+
+Your job is to:
+1. **Build the project** so you have a working artifact (e.g. `cargo build`, `npm run build`, `nix build`, etc.)
+2. **Manually test the implemented feature end-to-end** by actually using it:
+   - For CLI tools: run the built binary with real arguments, inspect stdout/stderr, check exit codes, test edge cases (missing args, bad input, help flags, etc.)
+   - For APIs: make real HTTP requests (e.g. `curl`, `wget`) against a running server, verify response bodies, status codes, headers
+   - For libraries: write and execute small ad-hoc scripts that import and exercise the new functionality
+   - For UI changes: launch the application and interact with it, verify visual/behavioral correctness
+3. **Verify each acceptance criterion from the spec individually** with a concrete manual test — do not just assume passing unit tests means the criterion is satisfied
+4. **Run automated test suites** (e.g. `cargo test`, `npm test`) as a secondary check to catch regressions
+5. Report concrete commands executed, their actual output, and your interpretation
+6. Do NOT edit any source files — only run checks and report findings
+
+IMPORTANT: A QA pass requires evidence of REAL usage, not just "all tests passed." If the spec says "ralph init creates a config file," you must actually run `ralph init` in a temp directory and verify the file exists with correct contents. If the spec says "the API returns 404 for missing resources," you must actually curl that endpoint and show the 404 response.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If all checks pass:
+
+# QA: PASS
+
+## Manual Testing
+- <what you tested manually, the commands you ran, and what you observed>
+- <another manual test with actual output snippets>
+
+## Automated Tests
+- <command 1>: <result summary>
+- <command 2>: <result summary>
+
+## Acceptance Criteria Verification
+- [ ] <criterion 1>: <how you verified it manually, with evidence>
+- [ ] <criterion 2>: <how you verified it manually, with evidence>
+
+---
+
+If any checks fail:
+
+# QA: FAIL
+
+## Failures
+1. <what failed and how — include the actual command, expected output, and actual output>
+2. <another failure if applicable>
+
+## Suggested Fixes
+1. <concrete fix suggestion tied to a failure>
+2. <another fix if applicable>
+
+---
+
+## Context Provided
+
+### Master Prompt
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+### Feature Specification
+---
+artifact: spec
+loop: 3
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T04:25:30Z
+---
+
+Now I have a complete picture. Let me formulate the next feature spec.
+
+**Completed loops:**
+- **Loop 1**: Deterministic log paths + `sanitize_for_filename()` + `ensure_log_parent()` 
+- **Loop 2**: Append-only `LogWriter`, retry attribution separators, orchestrator integration, `retry_append_behavior` and `prompt_reviewer_path` conformance tests
+
+**Remaining requirements (from the master prompt):**
+1. **Streaming semantics (byte preservation)** - Replace `child.wait_with_output()` with chunk-based `read_buf()`, stream raw bytes to log and in-memory buffer, `String::from_utf8_lossy` only at the end
+2. **Timeout and process cleanup** - `child.kill()` + `child.wait()` on timeout, timeout footer in log, same for fatal I/O errors, no zombies
+3. **Conformance tests**: `mid_execution_visibility` and `timeout_cleanup` still missing
+4. **Unit tests**: CR/partial-line preservation, child kill/reap verification
+
+Items 1 and 2 are tightly coupled — both require restructuring `CliBackend::execute` to hold the child process handle, stream incrementally, and handle timeout/cleanup properly. They should be implemented together as the next feature, along with the remaining conformance and unit tests. This gives us a natural Loop 3 that completes the project.
+
+# Feature: Byte-Preserving Streaming Capture with Timeout Cleanup
+
+## Description
+Replace the monolithic `child.wait_with_output()` execution in `CliBackend` with incremental chunk-based streaming that preserves raw bytes, writes them to the `LogWriter` in real-time, and properly kills/reaps child processes on timeout or fatal I/O errors. This is the final functional feature that addresses prompt requirements 3 (Streaming semantics) and 4 (Timeout and process cleanup), and adds the remaining conformance tests (`mid_execution_visibility`, `timeout_cleanup`) plus required unit tests.
+
+Currently, `CliBackend::execute` calls `child.wait_with_output()` wrapped in `tokio::time::timeout`. This has three problems: (a) no bytes are visible until the process exits, (b) on timeout the child is dropped without explicit `kill()`+`wait()`, leaving potential zombies, and (c) `String::from_utf8_lossy` is applied to the entire buffer rather than only at the final return point. The `LogWriter` already supports `write_bytes(&[u8])` from Loop 2 but is only called post-hoc in the orchestrator.
+
+This feature restructures execution to: spawn the child, take the stdout handle, loop with `tokio::io::AsyncReadExt::read_buf` into a `BytesMut` buffer reading chunks as they arrive, append each chunk to both an in-memory `Vec<u8>` accumulator and the `LogWriter` sink, apply `String::from_utf8_lossy` only once at the end when returning the final `Result<String>`, and on timeout (or fatal stream I/O error) explicitly call `child.kill()` then `child.wait()` before writing a timeout footer to the log and returning `BackendTimeout`.
+
+## Acceptance Criteria
+- [ ] `CliBackend::execute` (or a new internal streaming method it delegates to) uses `child.stdout.take()` with `AsyncReadExt::read_buf` into a `BytesMut` chunk buffer instead of `child.wait_with_output()`.
+- [ ] Raw bytes (including `\r`, partial lines, binary data) are appended to an in-memory `Vec<u8>` accumulator as each chunk arrives — no per-chunk string conversion.
+- [ ] Each chunk of raw bytes is simultaneously written to the `LogWriter` via `write_bytes()` as it is read, enabling real-time log visibility.
+- [ ] `String::from_utf8_lossy()` is called exactly once on the accumulated `Vec<u8>` only at the final return point of successful execution.
+- [ ] The `Backend` trait or `CliBackend::execute` signature is extended to accept an optional `&mut LogWriter` (or equivalent mechanism) so the backend can stream bytes to the log during execution.
+- [ ] On timeout: `child.kill().await` followed by `child.wait().await` is called explicitly before returning the error.
+- [ ] On timeout: a footer line (e.g., `\n--- timeout ts=<ISO8601> ---\n`) is written to the `LogWriter` before returning `BackendTimeout`.
+- [ ] On fatal stdout read I/O error: the same `kill()`+`wait()` cleanup is applied to the child process.
+- [ ] Any partial output captured before timeout/error is still written to the log (the in-memory buffer up to that point).
+- [ ] No zombie child processes remain after timeout or I/O error paths — verified by `child.wait()` completing.
+- [ ] `execute_with_timeout_retries` passes the `LogWriter` through to the backend execution so streaming writes occur during execution, not after.
+- [ ] The existing `LogWriter` best-effort failure policy is preserved: if log writes fail during streaming, a `tracing::warn!` is emitted, further writes are disabled, but execution continues unaffected.
+- [ ] Unit tests cover: (a) CR and partial-line byte preservation through chunked reads, (b) exact byte-match between process-emitted bytes and captured buffer, (c) `child.kill()`+`child.wait()` is called on timeout, (d) timeout footer appears in log output.
+- [ ] Conformance test `streaming::mid_execution_visibility` is added: spawns a slow-output mock script, checks that the log file grows while the process is still running.
+- [ ] Conformance test `streaming::timeout_cleanup` is added: spawns a hanging mock script with a short timeout, verifies timeout footer in log, partial output preserved, and child process is dead.
+- [ ] All conformance tests registered in `src/validate/mod.rs` (existing registration of `tests_streaming` covers this).
+- [ ] `cargo test` passes including all new and existing tests.
+- [ ] `cargo check` has no new warnings.
+
+## Files to Modify/Create
+- `src/backend/mod.rs` — Restructure `CliBackend::execute` to use chunk-based streaming with `BytesMut`/`read_buf`, add explicit `kill()`+`wait()` on timeout/error, accept optional `LogWriter` for real-time byte streaming. Add `bytes` crate import if not already present.
+- `src/output_log.rs` — Add `write_timeout_footer(timestamp)` helper method to `LogWriter` that writes the timeout separator line. Add unit tests for byte-preservation through chunked writes and timeout footer formatting.
+- `src/workflow/orchestrator.rs` — Update `execute_with_timeout_retries` to pass `&mut LogWriter` into the backend execution call instead of writing output post-hoc. Remove post-execution `log_writer.write_str(&output)` call since streaming handles it.
+- `src/validate/tests_streaming.rs` — Add `mid_execution_visibility` and `timeout_cleanup` conformance tests.
+- `src/validate/mock_scripts.rs` — Add mock scripts for slow-output (prints lines with delays) and hanging process (sleeps indefinitely after partial output) scenarios if not already present.
+- `Cargo.toml` — Add `bytes` crate dependency if not already present (for `BytesMut`).
+
+## Dependencies
+- Requires: Deterministic Log Paths (Loop 1), Append-Only Retry Attribution Logging (Loop 2)
+- Blocks: none (this is the final functional feature; after this, all prompt requirements are satisfied)
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 3
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T04:34:47Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added a log-aware backend API path via `Backend::execute_with_log(prompt, Option<&mut LogWriter>)` so retries can stream directly to logs without breaking existing `execute()` callers (`src/backend/mod.rs:33`, `src/workflow/orchestrator.rs:2792`).
+- Refactored `CliBackend` execution to chunked byte streaming using `read_buf` + `BytesMut`, writing raw bytes to both in-memory buffer and `LogWriter` as chunks arrive, and only doing `String::from_utf8_lossy` at successful return (`src/backend/mod.rs:187`, `src/backend/mod.rs:298`).
+- Implemented explicit timeout/error cleanup with `kill()` + `wait()` and timeout footer logging (`src/backend/mod.rs:155`, `src/backend/mod.rs:305`, `src/output_log.rs:61`, `src/output_log.rs:118`).
+- Updated orchestrator retry flow to pass `LogWriter` into backend execution and removed post-hoc output append (`src/workflow/orchestrator.rs:2792`).
+- Added timeout footer helpers and byte-preservation tests in logging module (`src/output_log.rs:61`, `src/output_log.rs:259`, `src/output_log.rs:287`, `src/output_log.rs:300`).
+- Added unit tests for exact byte preservation and timeout kill/reap verification (`src/backend/mod.rs:685`, `src/backend/mod.rs:716`).
+- Added streaming conformance tests `mid_execution_visibility` and `timeout_cleanup`, plus dedicated mock scripts (`src/validate/tests_streaming.rs:25`, `src/validate/tests_streaming.rs:187`, `src/validate/tests_streaming.rs:258`, `src/validate/mock_scripts.rs:1290`, `src/validate/mock_scripts.rs:1406`).
+- Added direct `bytes` dependency (`Cargo.toml:10`).
+
+## Spec Deviations
+- None.
+
+## Testing
+- `cargo test` (pass)
+- `cargo check` (pass)
+- `target/debug/ralph validate --bin target/debug/ralph --filter streaming` (pass)
+
+
+### Implementation Diff
+diff --git a/Cargo.lock b/Cargo.lock
+index 124fa47..ac514bd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -530,6 +530,7 @@ name = "ralph"
+ version = "0.1.0"
+ dependencies = [
+  "async-trait",
++ "bytes",
+  "chrono",
+  "clap",
+  "fs2",
+diff --git a/Cargo.toml b/Cargo.toml
+index be13d4a..7adefd3 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,6 +7,7 @@ description = "Multi-backend orchestration tool for structured AI development lo
+ 
+ [dependencies]
+ async-trait = "0.1"
++bytes = "1"
+ chrono = { version = "0.4", features = ["clock", "serde"] }
+ clap = { version = "4", features = ["derive"] }
+ fs2 = "0.4"
+diff --git a/src/backend/mod.rs b/src/backend/mod.rs
+index 8fd1f6f..5a0ac61 100644
+--- a/src/backend/mod.rs
++++ b/src/backend/mod.rs
+@@ -7,18 +7,22 @@ pub mod tmux_backend;
+ pub use mock::MockBackend;
+ 
+ use std::collections::{BTreeMap, BTreeSet, HashMap};
++use std::io::ErrorKind;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+ use async_trait::async_trait;
+-use tokio::io::AsyncWriteExt;
++use bytes::BytesMut;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
+ use tokio::process::Command;
+ use tokio::sync::Mutex;
+ use tokio::time::timeout;
++use tracing::warn;
+ 
+ use crate::config::GlobalConfig;
+ use crate::error::RalphError;
++use crate::output_log::LogWriter;
+ use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
+ use crate::Result;
+ 
+@@ -29,6 +33,14 @@ use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
+ pub trait Backend: Send + Sync {
+     fn name(&self) -> &str;
+     async fn execute(&self, prompt: &str) -> Result<String>;
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        let _ = log_writer.as_deref_mut();
++        self.execute(prompt).await
++    }
+     async fn health_check(&self) -> Result<()>;
+ }
+ 
+@@ -139,15 +151,44 @@ impl CliBackend {
+     pub fn timeout(&self) -> Duration {
+         self.timeout
+     }
+-}
+ 
+-#[async_trait]
+-impl Backend for CliBackend {
+-    fn name(&self) -> &str {
+-        &self.name
++    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
++        if let Err(err) = child.kill().await {
++            if err.kind() != ErrorKind::InvalidInput {
++                warn!(
++                    backend = %self.name,
++                    error = %err,
++                    "failed to kill child process during cleanup"
++                );
++            }
++        }
++        if let Err(err) = child.wait().await {
++            warn!(
++                backend = %self.name,
++                error = %err,
++                "failed waiting for child process during cleanup"
++            );
++        }
+     }
+ 
+-    async fn execute(&self, prompt: &str) -> Result<String> {
++    async fn collect_stderr(
++        &self,
++        handle: tokio::task::JoinHandle<Result<Vec<u8>>>,
++    ) -> Result<Vec<u8>> {
++        match handle.await {
++            Ok(result) => result,
++            Err(err) => Err(RalphError::BackendCommandFailed {
++                backend: self.name.clone(),
++                details: format!("stderr reader task failed: {err}"),
++            }),
++        }
++    }
++
++    async fn execute_streaming(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
+         let resolved_command = self.resolved_command_path();
+         let mut cmd = Command::new(&resolved_command);
+         cmd.args(&self.args)
+@@ -176,24 +217,121 @@ impl Backend for CliBackend {
+             })?;
+         }
+ 
+-        let output = timeout(self.timeout, child.wait_with_output())
+-            .await
+-            .map_err(|_| RalphError::BackendTimeout {
++        let mut stdout = child
++            .stdout
++            .take()
++            .ok_or_else(|| RalphError::BackendCommandFailed {
+                 backend: self.name.clone(),
+-            })?
+-            .map_err(|err| RalphError::BackendCommandFailed {
++                details: "child stdout pipe unavailable".to_owned(),
++            })?;
++        let mut stderr = child
++            .stderr
++            .take()
++            .ok_or_else(|| RalphError::BackendCommandFailed {
+                 backend: self.name.clone(),
+-                details: err.to_string(),
++                details: "child stderr pipe unavailable".to_owned(),
+             })?;
+ 
+-        if !output.status.success() {
+-            return Err(RalphError::BackendCommandFailed {
+-                backend: self.name.clone(),
+-                details: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+-            });
++        let stderr_backend = self.name.clone();
++        let stderr_handle = tokio::spawn(async move {
++            let mut captured = Vec::new();
++            let mut chunk = BytesMut::with_capacity(4096);
++            loop {
++                chunk.clear();
++                match stderr.read_buf(&mut chunk).await {
++                    Ok(0) => return Ok(captured),
++                    Ok(_) => captured.extend_from_slice(chunk.as_ref()),
++                    Err(err) => {
++                        return Err(RalphError::BackendCommandFailed {
++                            backend: stderr_backend.clone(),
++                            details: format!("failed to read stderr: {err}"),
++                        });
++                    }
++                }
++            }
++        });
++
++        let execution_result = timeout(self.timeout, async {
++            let mut captured_stdout = Vec::new();
++            let mut chunk = BytesMut::with_capacity(8192);
++            loop {
++                chunk.clear();
++                let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
++                    RalphError::BackendCommandFailed {
++                        backend: self.name.clone(),
++                        details: format!("failed to read stdout: {err}"),
++                    }
++                })?;
++                if read == 0 {
++                    break;
++                }
++                let bytes = chunk.as_ref();
++                captured_stdout.extend_from_slice(bytes);
++                if let Some(writer) = log_writer.as_deref_mut() {
++                    writer.write_bytes(bytes);
++                }
++            }
++
++            let status = child
++                .wait()
++                .await
++                .map_err(|err| RalphError::BackendCommandFailed {
++                    backend: self.name.clone(),
++                    details: format!("failed waiting for child process: {err}"),
++                })?;
++
++            Ok::<(std::process::ExitStatus, Vec<u8>), RalphError>((status, captured_stdout))
++        })
++        .await;
++
++        match execution_result {
++            Ok(Ok((status, captured_stdout))) => {
++                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
++
++                if !status.success() {
++                    return Err(RalphError::BackendCommandFailed {
++                        backend: self.name.clone(),
++                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
++                    });
++                }
++
++                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
++            }
++            Ok(Err(err)) => {
++                self.kill_and_reap_child(&mut child).await;
++                let _ = self.collect_stderr(stderr_handle).await;
++                Err(err)
++            }
++            Err(_) => {
++                self.kill_and_reap_child(&mut child).await;
++                let _ = self.collect_stderr(stderr_handle).await;
++                if let Some(writer) = log_writer.as_deref_mut() {
++                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
++                }
++                Err(RalphError::BackendTimeout {
++                    backend: self.name.clone(),
++                })
++            }
+         }
++    }
++}
++
++#[async_trait]
++impl Backend for CliBackend {
++    fn name(&self) -> &str {
++        &self.name
++    }
+ 
+-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
++    async fn execute(&self, prompt: &str) -> Result<String> {
++        self.execute_streaming(prompt, None).await
++    }
++
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        self.execute_streaming(prompt, log_writer).await
+     }
+ 
+     async fn health_check(&self) -> Result<()> {
+@@ -476,7 +614,16 @@ fn backend_with_optional_tmux(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{parse_backend_spec, BackendSpec};
++    use std::collections::BTreeMap;
++    use std::fs;
++    use std::os::unix::fs::PermissionsExt;
++    use std::time::Duration;
++
++    use tempfile::tempdir;
++
++    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend};
++    use crate::error::RalphError;
++    use crate::output_log::LogWriter;
+ 
+     #[test]
+     fn parse_backend_spec_accepts_bare_name() {
+@@ -521,4 +668,95 @@ mod tests {
+     fn parse_backend_spec_rejects_missing_opening_paren() {
+         assert!(parse_backend_spec("claudeopus)").is_err());
+     }
++
++    fn write_executable_script(
++        dir: &std::path::Path,
++        name: &str,
++        body: &str,
++    ) -> std::path::PathBuf {
++        let path = dir.join(name);
++        fs::write(&path, body).expect("write script");
++        let mut perms = fs::metadata(&path).expect("metadata").permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&path, perms).expect("chmod script");
++        path
++    }
++
++    #[tokio::test]
++    async fn cli_backend_streaming_preserves_exact_bytes_in_log() {
++        let temp = tempdir().expect("tempdir");
++        let script_path = write_executable_script(
++            temp.path(),
++            "emit-bytes.sh",
++            r#"#!/bin/sh
++printf 'progress 10%%\r'
++sleep 0.05
++printf 'progress 20%%\rpartial-line'
++"#,
++        );
++
++        let backend = CliBackend::new(
++            "streaming-test",
++            script_path.to_string_lossy().to_string(),
++            vec![],
++            Duration::from_secs(2),
++            BTreeMap::new(),
++        );
++
++        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
++        let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
++            .await
++            .expect("backend should succeed");
++
++        assert_eq!(output, "progress 10%\rprogress 20%\rpartial-line");
++        let logged = fs::read(writer.path()).expect("read log bytes");
++        assert_eq!(logged, b"progress 10%\rprogress 20%\rpartial-line");
++    }
++
++    #[tokio::test]
++    async fn cli_backend_timeout_kills_and_reaps_child_and_writes_footer() {
++        let temp = tempdir().expect("tempdir");
++        let pid_file = temp.path().join("child.pid");
++        let script_path = write_executable_script(
++            temp.path(),
++            "hang-after-output.sh",
++            &format!(
++                r#"#!/bin/sh
++echo $$ > "{pid_file}"
++printf 'partial-timeout-output'
++sleep 30
++"#,
++                pid_file = pid_file.display()
++            ),
++        );
++
++        let backend = CliBackend::new(
++            "timeout-test",
++            script_path.to_string_lossy().to_string(),
++            vec![],
++            Duration::from_millis(150),
++            BTreeMap::new(),
++        );
++
++        let mut writer = LogWriter::open(temp.path(), Some(2), "implementer");
++        let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
++        match result {
++            Err(RalphError::BackendTimeout { backend }) => assert_eq!(backend, "timeout-test"),
++            other => panic!("expected BackendTimeout, got: {other:?}"),
++        }
++
++        let log_content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(log_content.contains("partial-timeout-output"));
++        assert!(log_content.contains("--- timeout ts="));
++
++        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
++        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
++
++        let kill_rc = unsafe { libc::kill(pid, 0) };
++        assert_eq!(kill_rc, -1, "child pid should not be alive");
++        let os_err = std::io::Error::last_os_error()
++            .raw_os_error()
++            .expect("raw os error should exist");
++        assert_eq!(os_err, libc::ESRCH, "child pid should be fully reaped");
++    }
+ }
+diff --git a/src/backend/tmux_backend.rs b/src/backend/tmux_backend.rs
+index 5d613a0..8397b75 100644
+--- a/src/backend/tmux_backend.rs
++++ b/src/backend/tmux_backend.rs
+@@ -9,6 +9,7 @@ use tracing::debug;
+ use super::tmux::{self, TmuxCommandRunner};
+ use super::{Backend, CliBackend, SharedTmuxContext};
+ use crate::error::RalphError;
++use crate::output_log::LogWriter;
+ use crate::Result;
+ 
+ static INVOCATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+@@ -284,6 +285,18 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
+         Ok(output)
+     }
+ 
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        let output = self.execute(prompt).await?;
++        if let Some(writer) = log_writer.as_deref_mut() {
++            writer.write_bytes(output.as_bytes());
++        }
++        Ok(output)
++    }
++
+     async fn health_check(&self) -> Result<()> {
+         // Validate tmux is available
+         tmux::check_tmux_available()?;
+diff --git a/src/cli/daemon.rs b/src/cli/daemon.rs
+index 2e14235..6d6e068 100644
+--- a/src/cli/daemon.rs
++++ b/src/cli/daemon.rs
+@@ -225,14 +225,12 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+ fn preflight_check_gh() -> Result<()> {
+     match Command::new("gh").arg("--version").output() {
+         Ok(_) => Ok(()),
+-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+-            Err(RalphError::Validation(
+-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
++            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+                  post comments, and create PRs. Install it from https://cli.github.com/ \
+                  or run inside `nix develop`."
+-                    .to_owned(),
+-            ))
+-        }
++                .to_owned(),
++        )),
+         Err(err) => Err(RalphError::Validation(format!(
+             "gh (GitHub CLI) check failed: {err}"
+         ))),
+diff --git a/src/daemon/github.rs b/src/daemon/github.rs
+index da3f7ed..85d6cba 100644
+--- a/src/daemon/github.rs
++++ b/src/daemon/github.rs
+@@ -239,9 +239,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
+         ])
+         .output()
+         .map_err(|err| {
+-            RalphError::Orchestration(format!(
+-                "failed to run gh issue edit --title: {err}"
+-            ))
++            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
+         })?;
+ 
+     if !output.status.success() {
+@@ -477,11 +475,7 @@ pub fn create_pr_with_body_file(
+ }
+ 
+ /// Edit an existing PR by URL using `--body-file` for large body content.
+-pub fn edit_pr(
+-    pr_url: &str,
+-    title: &str,
+-    body_file: &std::path::Path,
+-) -> Result<()> {
++pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
+     let body_file_str = body_file.to_string_lossy();
+     let output = Command::new("gh")
+         .args([
+@@ -796,7 +790,10 @@ mod tests {
+ 
+     use tempfile::tempdir;
+ 
+-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
++    use super::{
++        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
++        PrMergeStatus,
++    };
+ 
+     #[test]
+     fn gh_issue_deserialization_supports_body_present() {
+diff --git a/src/daemon/refine.rs b/src/daemon/refine.rs
+index 3c06d47..1146e7b 100644
+--- a/src/daemon/refine.rs
++++ b/src/daemon/refine.rs
+@@ -229,9 +229,8 @@ mod tests {
+     #[test]
+     fn parse_refined_output_rejects_overlong_title() {
+         let title = "a".repeat(MAX_TITLE_LENGTH + 1);
+-        let input = format!(
+-            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
+-        );
++        let input =
++            format!("TITLE: {title}\n---\nThis is a sufficiently long body for refinement output.");
+         let err = parse_refined_output(&input).unwrap_err();
+         assert!(err.to_string().contains("title too long"));
+     }
+diff --git a/src/daemon/runtime.rs b/src/daemon/runtime.rs
+index 6ec4550..34ac0f3 100644
+--- a/src/daemon/runtime.rs
++++ b/src/daemon/runtime.rs
+@@ -964,10 +964,7 @@ async fn complete_task(
+             }
+         }
+         if let Err(err) = handle_pr_flow(store, config, &task).await {
+-            eprintln!(
+-                "warning: PR flow failed for {}: {err}",
+-                task.task_id
+-            );
++            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
+         }
+     }
+ 
+@@ -1040,7 +1037,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
+     }
+ }
+ 
+-
+ // =============================================================================
+ // Auto-Rebase Phase
+ // =============================================================================
+@@ -1077,17 +1073,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+     for task in &all_tasks {
+         // Explicit skip reasons for missing PR URL / branch
+         if task.pr_url.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no PR URL",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
+             continue;
+         }
+         if task.branch.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no task branch",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
+             continue;
+         }
+         if rebase_count >= config.max_rebases_per_cycle {
+@@ -1132,10 +1122,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+         let merge_info = {
+             let owner = task.owner.clone();
+             let repo = task.repo.clone();
+-            match spawn_blocking_op(move || {
+-                github::query_pr_merge_info(&owner, &repo, pr_number)
+-            })
+-            .await
++            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
++                .await
+             {
+                 Ok(info) => info,
+                 Err(err) => {
+@@ -1266,19 +1254,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+                     continue;
+                 }
+ 
+-                eprintln!(
+-                    "auto-rebase: failure for {}: {err_msg}",
+-                    task.task_id
+-                );
++                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
+ 
+                 // Post failure comment on PR (deduplicated by head_sha)
+                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
+ 
+                 if should_post {
+-                    let marker = format!(
+-                        "<!-- ralph:rebase:{}:failed:{} -->",
+-                        task.task_id, head_sha
+-                    );
++                    let marker =
++                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
+                     let body = format!(
+                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
+                         task.task_id, head_sha
+@@ -1507,7 +1490,11 @@ pub(crate) fn build_pr_body(
+ /// 5. Check for existing PR via `find_existing_pr`.
+ /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
+ /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
+-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
++async fn handle_pr_flow(
++    store: &TaskStore,
++    _config: &DaemonRuntimeConfig,
++    task: &DaemonTask,
++) -> Result<()> {
+     let workspace_root = store
+         .path()
+         .parent()
+@@ -1528,10 +1515,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+         match spawn_blocking_op(move || github::has_diff(&wt)).await {
+             Ok(v) => v,
+             Err(err) => {
+-                eprintln!(
+-                    "warning: failed to check diff for {}: {err}",
+-                    task.task_id
+-                );
++                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
+                 return Ok(());
+             }
+         }
+@@ -1657,9 +1641,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+     let title = task
+         .refined_title
+         .clone()
+-        .or_else(|| {
+-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
+-        })
++        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
+         .unwrap_or(title);
+ 
+     match existing_pr_url {
+@@ -1797,11 +1779,9 @@ mod tests {
+         assert!(body.contains("Closes #42"));
+         assert!(body.contains("Diff stat unavailable."));
+         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
+-        assert!(
+-            body.contains(
+-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+-            )
+-        );
++        assert!(body.contains(
++            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
++        ));
+     }
+ 
+     #[test]
+diff --git a/src/daemon/worktree.rs b/src/daemon/worktree.rs
+index c4e8698..dce7d30 100644
+--- a/src/daemon/worktree.rs
++++ b/src/daemon/worktree.rs
+@@ -36,7 +36,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     // Check if the branch already exists (e.g. from a previous failed run
+     // where the worktree was cleaned up but the branch was not).
+     let branch_exists = Command::new("git")
+-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
++        .args([
++            "rev-parse",
++            "--verify",
++            &format!("refs/heads/{branch_name}"),
++        ])
+         .current_dir(repo_root)
+         .output()
+         .map(|o| o.status.success())
+@@ -45,12 +49,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     let output = if branch_exists {
+         // Reuse existing branch
+         Command::new("git")
+-            .args([
+-                "worktree",
+-                "add",
+-                &wt_path.to_string_lossy(),
+-                &branch_name,
+-            ])
++            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
+             .current_dir(repo_root)
+             .output()
+     } else {
+diff --git a/src/output_log.rs b/src/output_log.rs
+index e024abb..ae6c206 100644
+--- a/src/output_log.rs
++++ b/src/output_log.rs
+@@ -50,10 +50,17 @@ pub fn format_attempt_separator(
+     timestamp: &str,
+ ) -> String {
+     let sanitized = sanitize_for_filename(backend_label);
+-    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
+-    format!(
+-        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
+-    )
++    let fallback_flag = if is_fallback {
++        "fallback=true"
++    } else {
++        "fallback=false"
++    };
++    format!("\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n")
++}
++
++/// Formats a timeout footer line appended when backend execution times out.
++pub fn format_timeout_footer(timestamp: &str) -> String {
++    format!("\n--- timeout ts={timestamp} ---\n")
+ }
+ 
+ /// Best-effort append-mode log writer.
+@@ -95,10 +102,7 @@ impl LogWriter {
+ 
+     fn try_open(path: &Path) -> io::Result<File> {
+         ensure_log_parent(path)?;
+-        OpenOptions::new()
+-            .create(true)
+-            .append(true)
+-            .open(path)
++        OpenOptions::new().create(true).append(true).open(path)
+     }
+ 
+     /// Write an attempt separator before a backend execution.
+@@ -106,10 +110,17 @@ impl LogWriter {
+     pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
+         self.attempt += 1;
+         let timestamp = Utc::now().to_rfc3339();
+-        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
++        let separator =
++            format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
+         self.write_bytes(separator.as_bytes());
+     }
+ 
++    /// Append a timeout footer line with the provided timestamp.
++    pub fn write_timeout_footer(&mut self, timestamp: &str) {
++        let footer = format_timeout_footer(timestamp);
++        self.write_bytes(footer.as_bytes());
++    }
++
+     /// Append raw bytes to the log file.
+     pub fn write_bytes(&mut self, data: &[u8]) {
+         let Some(file) = self.file.as_mut() else {
+@@ -209,7 +220,10 @@ mod tests {
+     fn sanitizes_unsafe_filename_characters() {
+         assert_eq!(sanitize_for_filename("../"), "");
+         assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
+-        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(
++            sanitize_for_filename("backend label with spaces"),
++            "backend_label_with_spaces"
++        );
+         assert_eq!(sanitize_for_filename("日本語"), "");
+     }
+ 
+@@ -242,6 +256,12 @@ mod tests {
+         assert!(sep.contains("fallback=true"));
+     }
+ 
++    #[test]
++    fn timeout_footer_format_contains_timestamp() {
++        let footer = format_timeout_footer("2026-01-01T00:00:00Z");
++        assert_eq!(footer, "\n--- timeout ts=2026-01-01T00:00:00Z ---\n");
++    }
++
+     #[test]
+     fn log_writer_opens_and_appends() {
+         let temp = tempdir().expect("tempdir");
+@@ -263,6 +283,32 @@ mod tests {
+         assert!(content.contains("retry output"));
+     }
+ 
++    #[test]
++    fn log_writer_preserves_cr_and_partial_line_bytes() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), Some(9), "planner");
++
++        writer.write_bytes(b"progress 10%\r");
++        writer.write_bytes(b"progress 20%\r");
++        writer.write_bytes(b"partial-line");
++
++        let bytes = fs::read(writer.path()).expect("read log bytes");
++        assert_eq!(bytes, b"progress 10%\rprogress 20%\rpartial-line");
++    }
++
++    #[test]
++    fn log_writer_timeout_footer_appends() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), Some(3), "implementer");
++
++        writer.write_bytes(b"partial output");
++        writer.write_timeout_footer("2026-01-01T00:00:00Z");
++
++        let content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(content.contains("partial output"));
++        assert!(content.contains("--- timeout ts=2026-01-01T00:00:00Z ---"));
++    }
++
+     #[test]
+     fn log_writer_appends_across_instances() {
+         let temp = tempdir().expect("tempdir");
+@@ -279,10 +325,8 @@ mod tests {
+             w.write_str("second run\n");
+         }
+ 
+-        let content = fs::read_to_string(
+-            log_path_for_role(project_dir, Some(1), "implementer"),
+-        )
+-        .expect("read log");
++        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), "implementer"))
++            .expect("read log");
+         assert!(content.contains("first run"));
+         assert!(content.contains("second run"));
+     }
+@@ -348,9 +392,18 @@ mod tests {
+         let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
+         let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
+         let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
+-        assert!(sep1.contains("fallback=false"), "first attempt should be fallback=false");
+-        assert!(sep2.contains("fallback=true"), "second attempt should be fallback=true");
+-        assert!(sep3.contains("fallback=true"), "third attempt should be fallback=true");
++        assert!(
++            sep1.contains("fallback=false"),
++            "first attempt should be fallback=false"
++        );
++        assert!(
++            sep2.contains("fallback=true"),
++            "second attempt should be fallback=true"
++        );
++        assert!(
++            sep3.contains("fallback=true"),
++            "third attempt should be fallback=true"
++        );
+     }
+ 
+     /// Simulate the attempt numbering pattern from `execute_with_parse_retries`:
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index b8ff533..ab882e9 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1286,3 +1286,200 @@ fi
+ "###
+     .to_owned()
+ }
++
++/// Mock script that streams planner output in delayed chunks so conformance
++/// tests can verify log growth before process completion.
++pub fn slow_streaming_planner_mock_script() -> String {
++    r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  printf '# Feature: Slow Streaming Feature\n'
++  sleep 1
++  cat <<'EOF'
++
++## Description
++Planner output emitted in delayed chunks.
++
++## Acceptance Criteria
++- [ ] mock file exists
++
++## Files to Modify/Create
++- `mock_file.txt` - created by implementer
++
++## Dependencies
++- Requires: none
++- Blocks: none
++EOF
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
++    cat <<'EOF'
++# Implementation Response (Iteration 1)
++
++## Changes Made
++1. Addressed reviewer feedback in the mock implementation.
++
++## Could Not Address
++- None
++EOF
++  else
++    cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++  fi
++  echo "implemented" > mock_file.txt
++  git add mock_file.txt
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Looks good.
++
++## Commit Message
++feat: apply mock implementation
++EOF
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
++    cat <<'EOF'
++# Verdict: COMPLETE
++
++The project satisfies all requirements:
++- Mock requirement: satisfied
++EOF
++  else
++    cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++  fi
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###
++    .to_owned()
++}
++
++/// Mock script that emits partial planner output then hangs; used to verify
++/// timeout cleanup and log footer behavior.
++pub fn timeout_hanging_planner_mock_script(pid_file: &Path) -> String {
++    format!(
++        r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  echo $$ > "{pid_file}"
++  printf 'planner-partial-before-timeout'
++  sleep 30
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Looks good.
++
++## Commit Message
++feat: apply mock implementation
++EOF
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###,
++        pid_file = pid_file.to_string_lossy()
++    )
++}
+diff --git a/src/validate/tests_commands.rs b/src/validate/tests_commands.rs
+index 281f3f5..81d7d2b 100644
+--- a/src/validate/tests_commands.rs
++++ b/src/validate/tests_commands.rs
+@@ -2,8 +2,7 @@ use super::*;
+ 
+ use crate::validate::assertions::{
+     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
+-    assert_stdout_eq,
+-    git_head_commit, git_tag_commit,
++    assert_stdout_eq, git_head_commit, git_tag_commit,
+ };
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::standard_mock_script;
+@@ -489,7 +488,10 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
+         );
+         let version_part = &stdout["ralph ".len()..];
+         assert!(
+-            version_part.chars().next().map_or(false, |c| c.is_ascii_digit()),
++            version_part
++                .chars()
++                .next()
++                .map_or(false, |c| c.is_ascii_digit()),
+             "expected semver version after 'ralph ', got: {stdout}"
+         );
+     })
+diff --git a/src/validate/tests_daemon.rs b/src/validate/tests_daemon.rs
+index d7d11ba..abbdeb9 100644
+--- a/src/validate/tests_daemon.rs
++++ b/src/validate/tests_daemon.rs
+@@ -486,7 +486,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
+         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+         let output = h
+             .ralph_env(
+-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
++                [
++                    "daemon",
++                    "start",
++                    "--single-iteration",
++                    "--repo",
++                    "acme/widgets",
++                ],
+                 &[("PATH", &gh_path)],
+             )
+             .expect("daemon start should execute");
+@@ -2254,7 +2260,8 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
+                     None,
+                 );
+                 t["project_id"] = json!(project_id);
+-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
++                t["raw_idea"] =
++                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                 t
+             }],
+         )
+@@ -3362,7 +3369,10 @@ exit 0
+ 
+         // The spawned child should have received the refined prompt
+         let idea = fs::read_to_string(&idea_log).expect("read idea log");
+-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
++        assert_eq!(
++            idea,
++            "Refined: implement the feature with proper error handling and tests."
++        );
+     })
+ }
+ 
+@@ -4707,8 +4717,7 @@ exit 1
+             .find(|t| t["task_id"] == "acme-widgets-301")
+             .unwrap();
+         assert!(
+-            task.get("refined_title").is_none()
+-                || task["refined_title"].is_null(),
++            task.get("refined_title").is_none() || task["refined_title"].is_null(),
+             "refined_title should not be set when refinement is disabled"
+         );
+     })
+@@ -5035,10 +5044,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // Check that the comment body includes the bold title
+-        assert!(
+-            comment_log.exists(),
+-            "comment should have been posted"
+-        );
++        assert!(comment_log.exists(), "comment should have been posted");
+         let log = fs::read_to_string(&comment_log).expect("read comment log");
+         assert!(
+             log.contains("**Bold comment title test**"),
+@@ -5068,7 +5074,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(wt.exists(), "worktree directory should exist");
+ 
+         // Verify branch exists
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should exist after create_worktree"
+@@ -5079,7 +5088,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(!wt.exists(), "worktree directory should be removed");
+ 
+         // Branch should still exist
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should survive worktree removal"
+@@ -5106,12 +5118,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
+         // Create a tracked file, commit it, then modify it (dirty tracked)
+         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
+         git(&wt, &["add", "tracked.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "add tracked",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "add tracked",
++            ],
++        );
+         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
+ 
+         // Create an untracked file (like SPEC.md from codex side-effect)
+@@ -5165,12 +5186,21 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
+         // Add a tracked file, commit, then modify (simulates prior run's changes)
+         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
+         git(&wt, &["add", "src.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "prior run",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "prior run",
++            ],
++        );
+         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
+ 
+         // Add an untracked file (simulates codex side-effect)
+@@ -5470,10 +5500,7 @@ exit 1
+         let stderr = String::from_utf8_lossy(&output.stderr);
+ 
+         // pr edit was attempted
+-        assert!(
+-            pr_edit_log.exists(),
+-            "pr edit should have been attempted"
+-        );
++        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
+ 
+         // pr create should NOT have been called (no fallthrough on edit failure)
+         assert!(
+@@ -5613,10 +5640,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // pr create should have been called
+-        assert!(
+-            pr_create_log.exists(),
+-            "pr create should have been called"
+-        );
++        assert!(pr_create_log.exists(), "pr create should have been called");
+ 
+         // Body file should have been captured and contain structured content
+         assert!(
+@@ -5811,8 +5835,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Disable auto-rebase
+-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+-            .expect("set auto_rebase_enabled failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_auto_rebase_enabled",
++            "false",
++        ])
++        .expect("set auto_rebase_enabled failed");
+ 
+         // Seed a completed task with a PR URL
+         write_tasks(
+@@ -6163,7 +6192,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6251,7 +6283,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6468,7 +6503,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
+         );
+ 
+         // The second task should NOT have been attempted (break after first failure)
+-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
++        let second_attempt_count = stderr
++            .matches("auto-rebase: rebasing acme-widgets-110")
++            .count();
+         assert_eq!(
+             second_attempt_count, 0,
+             "second task should not be attempted after gh pr view failure"
+@@ -6482,8 +6519,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Set max_rebases_per_cycle to 1 via config
+-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+-            .expect("set max_rebases_per_cycle failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_max_rebases_per_cycle",
++            "1",
++        ])
++        .expect("set max_rebases_per_cycle failed");
+ 
+         // Create 3 tasks with PRs
+         write_tasks(
+@@ -6574,11 +6616,17 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Use a very large interval to ensure skip regardless of clock skew
+-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+-            .expect("set rebase_interval_seconds failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_rebase_interval_seconds",
++            "999999",
++        ])
++        .expect("set rebase_interval_seconds failed");
+ 
+         // Dynamically compute a "just now" timestamp so test never becomes stale
+-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
++        let recent_timestamp =
++            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+ 
+         write_tasks(
+             h,
+@@ -6719,7 +6767,10 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
+         let tasks = load_tasks(h).expect("load_tasks failed");
+         assert_eq!(tasks.len(), 1);
+         assert!(
+-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
++            tasks[0]
++                .get("last_rebase_at")
++                .map(|v| v.is_null())
++                .unwrap_or(true),
+             "last_rebase_at should be null/missing"
+         );
+     })
+diff --git a/src/validate/tests_streaming.rs b/src/validate/tests_streaming.rs
+index b7684ff..4f368e9 100644
+--- a/src/validate/tests_streaming.rs
++++ b/src/validate/tests_streaming.rs
+@@ -1,10 +1,15 @@
+ use super::*;
+ 
+ use std::fs;
++use std::process::Command;
++use std::thread;
++use std::time::{Duration, Instant};
+ 
++use crate::validate::assertions::assert_exit_code;
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::{
+-    planner_parse_fail_then_pass_mock_script, standard_mock_script,
++    planner_parse_fail_then_pass_mock_script, slow_streaming_planner_mock_script,
++    standard_mock_script, timeout_hanging_planner_mock_script,
+ };
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+@@ -17,6 +22,14 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "streaming::prompt_reviewer_path",
+             func: prompt_reviewer_path,
+         },
++        ConformanceTest {
++            name: "streaming::mid_execution_visibility",
++            func: mid_execution_visibility,
++        },
++        ConformanceTest {
++            name: "streaming::timeout_cleanup",
++            func: timeout_cleanup,
++        },
+     ]
+ }
+ 
+@@ -96,7 +109,9 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
+ 
+         // Should also contain actual output content from the successful attempt
+         assert!(
+-            content.contains("Feature") || content.contains("feature") || content.contains("not a valid"),
++            content.contains("Feature")
++                || content.contains("feature")
++                || content.contains("not a valid"),
+             "planner log should contain backend output, got:\n{content}"
+         );
+ 
+@@ -169,6 +184,144 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++/// Verify planner output is visible in the log while backend execution is
++/// still in progress (chunked streaming, not post-hoc write).
++fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-mid-visibility";
++
++        h.init_workspace().expect("init failed");
++        let script = h
++            .write_mock_script("slow-streaming.sh", &slow_streaming_planner_mock_script())
++            .expect("failed to write slow streaming mock script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++        h.create_project(
++            project_id,
++            "Streaming Mid-Execution Visibility",
++            "Streaming visibility test prompt",
++        )
++        .expect("create_project failed");
++
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++
++        let mut child = Command::new(&h.ralph_bin)
++            .args(["run", "--loops", "1"])
++            .current_dir(&h.repo_root)
++            .spawn()
++            .expect("spawn ralph run");
++
++        let deadline = Instant::now() + Duration::from_secs(8);
++        let mut observed_size = 0_u64;
++        let mut observed_while_running = false;
++
++        while Instant::now() < deadline {
++            if let Ok(meta) = fs::metadata(&planner_log) {
++                observed_size = meta.len();
++                if observed_size > 0 {
++                    let status = child.try_wait().expect("try_wait should succeed");
++                    if status.is_none() {
++                        observed_while_running = true;
++                        break;
++                    }
++                }
++            }
++
++            if child.try_wait().expect("try_wait should succeed").is_some() {
++                break;
++            }
++            thread::sleep(Duration::from_millis(50));
++        }
++
++        assert!(
++            observed_while_running,
++            "expected planner log bytes while run process was still active; observed_size={observed_size}"
++        );
++
++        let output = child.wait_with_output().expect("wait_with_output");
++        assert_exit_code(&output, 0);
++
++        let final_size = fs::metadata(&planner_log)
++            .expect("planner log metadata after completion")
++            .len();
++        assert!(
++            final_size > observed_size,
++            "planner log should grow after initial streamed bytes; initial={observed_size} final={final_size}"
++        );
++    })
++}
++
++/// Verify timeout behavior: partial output is preserved, timeout footer exists,
++/// and the hanging planner child process is dead after retries.
++fn timeout_cleanup(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-timeout-cleanup";
++        let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
++
++        h.init_workspace().expect("init failed");
++        let script = h
++            .write_mock_script(
++                "timeout-hanging.sh",
++                &timeout_hanging_planner_mock_script(&pid_file),
++            )
++            .expect("failed to write timeout mock script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
++            .expect("set claude timeout");
++        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
++            .expect("set codex timeout");
++        h.create_project(
++            project_id,
++            "Streaming Timeout Cleanup",
++            "Streaming timeout cleanup prompt",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_exit_code(&output, 1);
++
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++        assert!(
++            planner_log.exists(),
++            "planner log should exist at {}",
++            planner_log.display()
++        );
++        let content = fs::read_to_string(&planner_log).expect("read planner log");
++        assert!(
++            content.contains("planner-partial-before-timeout"),
++            "planner log should contain partial output before timeout, got:\n{content}"
++        );
++        assert!(
++            content.contains("--- timeout ts="),
++            "planner log should contain timeout footer, got:\n{content}"
++        );
++
++        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
++        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
++        let kill_rc = unsafe { libc::kill(pid, 0) };
++        assert_eq!(kill_rc, -1, "timed-out planner process should be dead");
++        let os_err = std::io::Error::last_os_error()
++            .raw_os_error()
++            .expect("raw os error should be present");
++        assert_eq!(
++            os_err,
++            libc::ESRCH,
++            "timed-out planner process should be fully reaped"
++        );
++    })
++}
++
+ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
+     h.init_workspace().expect("init failed");
+     let script = h
+diff --git a/src/workflow/orchestrator.rs b/src/workflow/orchestrator.rs
+index a03df5c..b2079de 100644
+--- a/src/workflow/orchestrator.rs
++++ b/src/workflow/orchestrator.rs
+@@ -22,6 +22,7 @@ use crate::git::commit::{
+     ORCHESTRATION_STATE_PATH_PREFIX,
+ };
+ use crate::git::{is_git_repo, run_git};
++use crate::output_log::LogWriter;
+ use crate::project::artifacts::{
+     artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
+     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+@@ -38,7 +39,6 @@ use crate::prompts::templates::{
+     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+     render_template_with_fallback,
+ };
+-use crate::output_log::LogWriter;
+ use crate::util::hash::sha256_hex;
+ use crate::util::lock::ProjectLock;
+ use crate::util::slug::slugify_feature_name;
+@@ -1875,9 +1875,7 @@ fn rollback_current_loop(
+ 
+     // Also remove the bare loop-number directory used by agent-output log files
+     // (e.g., loops/001/agent-output-planner.log).
+-    let log_dir = project_dir
+-        .join("loops")
+-        .join(format!("{loop_number:03}"));
++    let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
+     if log_dir.exists() {
+         if let Err(e) = fs::remove_dir_all(&log_dir) {
+             warn!(
+@@ -2791,9 +2789,8 @@ async fn execute_with_timeout_retries(
+         let is_fallback = log_writer.attempt() > 0;
+         log_writer.write_attempt_separator(backend.name(), is_fallback);
+ 
+-        match backend.execute(prompt).await {
++        match backend.execute_with_log(prompt, Some(log_writer)).await {
+             Ok(output) => {
+-                log_writer.write_str(&output);
+                 return Ok(output);
+             }
+             Err(RalphError::BackendTimeout {
+
+### Prior QA History
+
+
+
+## System Guardrails
+
+- Run all available build, test, and check commands.
+- Report concrete commands and their output.
+- Do NOT edit any source files — only run checks and report findings.
+- If all acceptance criteria pass, return `# QA: PASS` with evidence.
+- If any check fails, return `# QA: FAIL` with specific failure details and suggested fixes.
+
+## Master Prompt
+
+### Goal
+Implement deterministic, append-only backend output logging across orchestration roles, with byte-preserving streaming, reliable timeout cleanup, and complete conformance coverage.
+
+### Scope
+Update backend execution/streaming paths used by planner, implementer, QA, reviewer, prompt-reviewer, and parse-retry fallback flows. Add unit and conformance tests.
+
+### Required Behavior
+
+1. **Deterministic log paths**
+- Add one helper that derives log path from `(project_dir, loop_number, role)`.
+- If `loop_number` exists:  
+  `{project_dir}/loops/{loop_number:03}/agent-output-{role}.log`
+- If `loop_number` is absent and role is `prompt-reviewer`:  
+  `{project_dir}/agent-output-prompt-reviewer.log`
+- Do not use `loop_slug` or backend name in filenames.
+- Ensure parent dirs exist before open.
+
+2. **Retry attribution and append semantics**
+- Open log files in create+append mode.
+- All attempts for the same `(loop_number, role)` must append to the same file.
+- Before each attempt, append a stable separator containing:
+  - attempt number
+  - backend label (sanitized)
+  - fallback flag
+  - timestamp
+- No overwrite behavior.
+
+3. **Streaming semantics (byte preservation)**
+- Replace line-based reads with chunk-based `read_buf()` (e.g., `BytesMut`).
+- Preserve exact bytes (`\r`, partial lines, progress output).
+- Append raw bytes to in-memory buffer and log sink as received.
+- Keep existing final conversion behavior (`String::from_utf8_lossy()` only at the end).
+- Acceptance: captured bytes match process-emitted bytes for each stream.
+
+4. **Timeout and process cleanup**
+- On timeout: explicitly call `child.kill()` then `child.wait()`.
+- Apply same cleanup for fatal stream I/O error paths.
+- Write timeout footer to log before returning timeout error.
+- Return existing timeout error type (`BackendTimeout`).
+- Ensure no zombie child remains.
+
+5. **Path safety and logging failure policy**
+- Add `sanitize_for_filename()` for backend labels used in headers/separators.
+- Log filenames remain role-derived safe ASCII.
+- Log I/O is best-effort:
+  - on open/write/flush failure: `tracing::warn!`
+  - disable further log writes for that run
+  - continue execution without changing backend result semantics
+
+### Test Requirements
+
+1. **Conformance tests**
+- Add `src/validate/tests_streaming.rs`.
+- Register in `src/validate/mod.rs`.
+- Include at least:
+  - `mid_execution_visibility` (log grows while process is running)
+  - `retry_append_behavior` (single file append across retries with separators)
+  - `timeout_cleanup` (timeout footer + partial output + process dead)
+  - `prompt_reviewer_path` (root-level prompt-reviewer log path)
+
+2. **Unit tests**
+- CR/partial-line preservation with chunked reads.
+- `sanitize_for_filename()` behavior for unsafe chars.
+- Log write/open failure resilience (warn + continue).
+- Child kill/reap verification on timeout/error path.
+
+### Non-Goals
+- No change to artifact naming, loop slug generation, backend selection policy, or CLI flags.
+- No behavioral changes beyond logging and stream-capture correctness.
+
+### Acceptance Criteria
+- `cargo test` passes.
+- Validate suite passes including new streaming tests.
+- No code path derives log filenames from `loop_slug`.
+- Retries/fallbacks are attributable in a single append-only file per `(loop_number, role)`.
+- Timeout paths always kill and reap child processes.
+- Stream capture preserves raw bytes prior to final lossy string conversion.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 3
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T04:25:30Z
+---
+
+Now I have a complete picture. Let me formulate the next feature spec.
+
+**Completed loops:**
+- **Loop 1**: Deterministic log paths + `sanitize_for_filename()` + `ensure_log_parent()` 
+- **Loop 2**: Append-only `LogWriter`, retry attribution separators, orchestrator integration, `retry_append_behavior` and `prompt_reviewer_path` conformance tests
+
+**Remaining requirements (from the master prompt):**
+1. **Streaming semantics (byte preservation)** - Replace `child.wait_with_output()` with chunk-based `read_buf()`, stream raw bytes to log and in-memory buffer, `String::from_utf8_lossy` only at the end
+2. **Timeout and process cleanup** - `child.kill()` + `child.wait()` on timeout, timeout footer in log, same for fatal I/O errors, no zombies
+3. **Conformance tests**: `mid_execution_visibility` and `timeout_cleanup` still missing
+4. **Unit tests**: CR/partial-line preservation, child kill/reap verification
+
+Items 1 and 2 are tightly coupled — both require restructuring `CliBackend::execute` to hold the child process handle, stream incrementally, and handle timeout/cleanup properly. They should be implemented together as the next feature, along with the remaining conformance and unit tests. This gives us a natural Loop 3 that completes the project.
+
+# Feature: Byte-Preserving Streaming Capture with Timeout Cleanup
+
+## Description
+Replace the monolithic `child.wait_with_output()` execution in `CliBackend` with incremental chunk-based streaming that preserves raw bytes, writes them to the `LogWriter` in real-time, and properly kills/reaps child processes on timeout or fatal I/O errors. This is the final functional feature that addresses prompt requirements 3 (Streaming semantics) and 4 (Timeout and process cleanup), and adds the remaining conformance tests (`mid_execution_visibility`, `timeout_cleanup`) plus required unit tests.
+
+Currently, `CliBackend::execute` calls `child.wait_with_output()` wrapped in `tokio::time::timeout`. This has three problems: (a) no bytes are visible until the process exits, (b) on timeout the child is dropped without explicit `kill()`+`wait()`, leaving potential zombies, and (c) `String::from_utf8_lossy` is applied to the entire buffer rather than only at the final return point. The `LogWriter` already supports `write_bytes(&[u8])` from Loop 2 but is only called post-hoc in the orchestrator.
+
+This feature restructures execution to: spawn the child, take the stdout handle, loop with `tokio::io::AsyncReadExt::read_buf` into a `BytesMut` buffer reading chunks as they arrive, append each chunk to both an in-memory `Vec<u8>` accumulator and the `LogWriter` sink, apply `String::from_utf8_lossy` only once at the end when returning the final `Result<String>`, and on timeout (or fatal stream I/O error) explicitly call `child.kill()` then `child.wait()` before writing a timeout footer to the log and returning `BackendTimeout`.
+
+## Acceptance Criteria
+- [ ] `CliBackend::execute` (or a new internal streaming method it delegates to) uses `child.stdout.take()` with `AsyncReadExt::read_buf` into a `BytesMut` chunk buffer instead of `child.wait_with_output()`.
+- [ ] Raw bytes (including `\r`, partial lines, binary data) are appended to an in-memory `Vec<u8>` accumulator as each chunk arrives — no per-chunk string conversion.
+- [ ] Each chunk of raw bytes is simultaneously written to the `LogWriter` via `write_bytes()` as it is read, enabling real-time log visibility.
+- [ ] `String::from_utf8_lossy()` is called exactly once on the accumulated `Vec<u8>` only at the final return point of successful execution.
+- [ ] The `Backend` trait or `CliBackend::execute` signature is extended to accept an optional `&mut LogWriter` (or equivalent mechanism) so the backend can stream bytes to the log during execution.
+- [ ] On timeout: `child.kill().await` followed by `child.wait().await` is called explicitly before returning the error.
+- [ ] On timeout: a footer line (e.g., `\n--- timeout ts=<ISO8601> ---\n`) is written to the `LogWriter` before returning `BackendTimeout`.
+- [ ] On fatal stdout read I/O error: the same `kill()`+`wait()` cleanup is applied to the child process.
+- [ ] Any partial output captured before timeout/error is still written to the log (the in-memory buffer up to that point).
+- [ ] No zombie child processes remain after timeout or I/O error paths — verified by `child.wait()` completing.
+- [ ] `execute_with_timeout_retries` passes the `LogWriter` through to the backend execution so streaming writes occur during execution, not after.
+- [ ] The existing `LogWriter` best-effort failure policy is preserved: if log writes fail during streaming, a `tracing::warn!` is emitted, further writes are disabled, but execution continues unaffected.
+- [ ] Unit tests cover: (a) CR and partial-line byte preservation through chunked reads, (b) exact byte-match between process-emitted bytes and captured buffer, (c) `child.kill()`+`child.wait()` is called on timeout, (d) timeout footer appears in log output.
+- [ ] Conformance test `streaming::mid_execution_visibility` is added: spawns a slow-output mock script, checks that the log file grows while the process is still running.
+- [ ] Conformance test `streaming::timeout_cleanup` is added: spawns a hanging mock script with a short timeout, verifies timeout footer in log, partial output preserved, and child process is dead.
+- [ ] All conformance tests registered in `src/validate/mod.rs` (existing registration of `tests_streaming` covers this).
+- [ ] `cargo test` passes including all new and existing tests.
+- [ ] `cargo check` has no new warnings.
+
+## Files to Modify/Create
+- `src/backend/mod.rs` — Restructure `CliBackend::execute` to use chunk-based streaming with `BytesMut`/`read_buf`, add explicit `kill()`+`wait()` on timeout/error, accept optional `LogWriter` for real-time byte streaming. Add `bytes` crate import if not already present.
+- `src/output_log.rs` — Add `write_timeout_footer(timestamp)` helper method to `LogWriter` that writes the timeout separator line. Add unit tests for byte-preservation through chunked writes and timeout footer formatting.
+- `src/workflow/orchestrator.rs` — Update `execute_with_timeout_retries` to pass `&mut LogWriter` into the backend execution call instead of writing output post-hoc. Remove post-execution `log_writer.write_str(&output)` call since streaming handles it.
+- `src/validate/tests_streaming.rs` — Add `mid_execution_visibility` and `timeout_cleanup` conformance tests.
+- `src/validate/mock_scripts.rs` — Add mock scripts for slow-output (prints lines with delays) and hanging process (sleeps indefinitely after partial output) scenarios if not already present.
+- `Cargo.toml` — Add `bytes` crate dependency if not already present (for `BytesMut`).
+
+## Dependencies
+- Requires: Deterministic Log Paths (Loop 1), Append-Only Retry Attribution Logging (Loop 2)
+- Blocks: none (this is the final functional feature; after this, all prompt requirements are satisfied)
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 3
+project: task-enable-real-time-streaming-of-backe
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T04:34:47Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added a log-aware backend API path via `Backend::execute_with_log(prompt, Option<&mut LogWriter>)` so retries can stream directly to logs without breaking existing `execute()` callers (`src/backend/mod.rs:33`, `src/workflow/orchestrator.rs:2792`).
+- Refactored `CliBackend` execution to chunked byte streaming using `read_buf` + `BytesMut`, writing raw bytes to both in-memory buffer and `LogWriter` as chunks arrive, and only doing `String::from_utf8_lossy` at successful return (`src/backend/mod.rs:187`, `src/backend/mod.rs:298`).
+- Implemented explicit timeout/error cleanup with `kill()` + `wait()` and timeout footer logging (`src/backend/mod.rs:155`, `src/backend/mod.rs:305`, `src/output_log.rs:61`, `src/output_log.rs:118`).
+- Updated orchestrator retry flow to pass `LogWriter` into backend execution and removed post-hoc output append (`src/workflow/orchestrator.rs:2792`).
+- Added timeout footer helpers and byte-preservation tests in logging module (`src/output_log.rs:61`, `src/output_log.rs:259`, `src/output_log.rs:287`, `src/output_log.rs:300`).
+- Added unit tests for exact byte preservation and timeout kill/reap verification (`src/backend/mod.rs:685`, `src/backend/mod.rs:716`).
+- Added streaming conformance tests `mid_execution_visibility` and `timeout_cleanup`, plus dedicated mock scripts (`src/validate/tests_streaming.rs:25`, `src/validate/tests_streaming.rs:187`, `src/validate/tests_streaming.rs:258`, `src/validate/mock_scripts.rs:1290`, `src/validate/mock_scripts.rs:1406`).
+- Added direct `bytes` dependency (`Cargo.toml:10`).
+
+## Spec Deviations
+- None.
+
+## Testing
+- `cargo test` (pass)
+- `cargo check` (pass)
+- `target/debug/ralph validate --bin target/debug/ralph --filter streaming` (pass)
+
+
+## Current Diff
+
+```diff
+diff --git a/Cargo.lock b/Cargo.lock
+index 124fa47..ac514bd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -530,6 +530,7 @@ name = "ralph"
+ version = "0.1.0"
+ dependencies = [
+  "async-trait",
++ "bytes",
+  "chrono",
+  "clap",
+  "fs2",
+diff --git a/Cargo.toml b/Cargo.toml
+index be13d4a..7adefd3 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,6 +7,7 @@ description = "Multi-backend orchestration tool for structured AI development lo
+ 
+ [dependencies]
+ async-trait = "0.1"
++bytes = "1"
+ chrono = { version = "0.4", features = ["clock", "serde"] }
+ clap = { version = "4", features = ["derive"] }
+ fs2 = "0.4"
+diff --git a/src/backend/mod.rs b/src/backend/mod.rs
+index 8fd1f6f..5a0ac61 100644
+--- a/src/backend/mod.rs
++++ b/src/backend/mod.rs
+@@ -7,18 +7,22 @@ pub mod tmux_backend;
+ pub use mock::MockBackend;
+ 
+ use std::collections::{BTreeMap, BTreeSet, HashMap};
++use std::io::ErrorKind;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+ use async_trait::async_trait;
+-use tokio::io::AsyncWriteExt;
++use bytes::BytesMut;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
+ use tokio::process::Command;
+ use tokio::sync::Mutex;
+ use tokio::time::timeout;
++use tracing::warn;
+ 
+ use crate::config::GlobalConfig;
+ use crate::error::RalphError;
++use crate::output_log::LogWriter;
+ use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
+ use crate::Result;
+ 
+@@ -29,6 +33,14 @@ use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
+ pub trait Backend: Send + Sync {
+     fn name(&self) -> &str;
+     async fn execute(&self, prompt: &str) -> Result<String>;
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        let _ = log_writer.as_deref_mut();
++        self.execute(prompt).await
++    }
+     async fn health_check(&self) -> Result<()>;
+ }
+ 
+@@ -139,15 +151,44 @@ impl CliBackend {
+     pub fn timeout(&self) -> Duration {
+         self.timeout
+     }
+-}
+ 
+-#[async_trait]
+-impl Backend for CliBackend {
+-    fn name(&self) -> &str {
+-        &self.name
++    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
++        if let Err(err) = child.kill().await {
++            if err.kind() != ErrorKind::InvalidInput {
++                warn!(
++                    backend = %self.name,
++                    error = %err,
++                    "failed to kill child process during cleanup"
++                );
++            }
++        }
++        if let Err(err) = child.wait().await {
++            warn!(
++                backend = %self.name,
++                error = %err,
++                "failed waiting for child process during cleanup"
++            );
++        }
+     }
+ 
+-    async fn execute(&self, prompt: &str) -> Result<String> {
++    async fn collect_stderr(
++        &self,
++        handle: tokio::task::JoinHandle<Result<Vec<u8>>>,
++    ) -> Result<Vec<u8>> {
++        match handle.await {
++            Ok(result) => result,
++            Err(err) => Err(RalphError::BackendCommandFailed {
++                backend: self.name.clone(),
++                details: format!("stderr reader task failed: {err}"),
++            }),
++        }
++    }
++
++    async fn execute_streaming(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
+         let resolved_command = self.resolved_command_path();
+         let mut cmd = Command::new(&resolved_command);
+         cmd.args(&self.args)
+@@ -176,24 +217,121 @@ impl Backend for CliBackend {
+             })?;
+         }
+ 
+-        let output = timeout(self.timeout, child.wait_with_output())
+-            .await
+-            .map_err(|_| RalphError::BackendTimeout {
++        let mut stdout = child
++            .stdout
++            .take()
++            .ok_or_else(|| RalphError::BackendCommandFailed {
+                 backend: self.name.clone(),
+-            })?
+-            .map_err(|err| RalphError::BackendCommandFailed {
++                details: "child stdout pipe unavailable".to_owned(),
++            })?;
++        let mut stderr = child
++            .stderr
++            .take()
++            .ok_or_else(|| RalphError::BackendCommandFailed {
+                 backend: self.name.clone(),
+-                details: err.to_string(),
++                details: "child stderr pipe unavailable".to_owned(),
+             })?;
+ 
+-        if !output.status.success() {
+-            return Err(RalphError::BackendCommandFailed {
+-                backend: self.name.clone(),
+-                details: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+-            });
++        let stderr_backend = self.name.clone();
++        let stderr_handle = tokio::spawn(async move {
++            let mut captured = Vec::new();
++            let mut chunk = BytesMut::with_capacity(4096);
++            loop {
++                chunk.clear();
++                match stderr.read_buf(&mut chunk).await {
++                    Ok(0) => return Ok(captured),
++                    Ok(_) => captured.extend_from_slice(chunk.as_ref()),
++                    Err(err) => {
++                        return Err(RalphError::BackendCommandFailed {
++                            backend: stderr_backend.clone(),
++                            details: format!("failed to read stderr: {err}"),
++                        });
++                    }
++                }
++            }
++        });
++
++        let execution_result = timeout(self.timeout, async {
++            let mut captured_stdout = Vec::new();
++            let mut chunk = BytesMut::with_capacity(8192);
++            loop {
++                chunk.clear();
++                let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
++                    RalphError::BackendCommandFailed {
++                        backend: self.name.clone(),
++                        details: format!("failed to read stdout: {err}"),
++                    }
++                })?;
++                if read == 0 {
++                    break;
++                }
++                let bytes = chunk.as_ref();
++                captured_stdout.extend_from_slice(bytes);
++                if let Some(writer) = log_writer.as_deref_mut() {
++                    writer.write_bytes(bytes);
++                }
++            }
++
++            let status = child
++                .wait()
++                .await
++                .map_err(|err| RalphError::BackendCommandFailed {
++                    backend: self.name.clone(),
++                    details: format!("failed waiting for child process: {err}"),
++                })?;
++
++            Ok::<(std::process::ExitStatus, Vec<u8>), RalphError>((status, captured_stdout))
++        })
++        .await;
++
++        match execution_result {
++            Ok(Ok((status, captured_stdout))) => {
++                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
++
++                if !status.success() {
++                    return Err(RalphError::BackendCommandFailed {
++                        backend: self.name.clone(),
++                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
++                    });
++                }
++
++                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
++            }
++            Ok(Err(err)) => {
++                self.kill_and_reap_child(&mut child).await;
++                let _ = self.collect_stderr(stderr_handle).await;
++                Err(err)
++            }
++            Err(_) => {
++                self.kill_and_reap_child(&mut child).await;
++                let _ = self.collect_stderr(stderr_handle).await;
++                if let Some(writer) = log_writer.as_deref_mut() {
++                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
++                }
++                Err(RalphError::BackendTimeout {
++                    backend: self.name.clone(),
++                })
++            }
+         }
++    }
++}
++
++#[async_trait]
++impl Backend for CliBackend {
++    fn name(&self) -> &str {
++        &self.name
++    }
+ 
+-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
++    async fn execute(&self, prompt: &str) -> Result<String> {
++        self.execute_streaming(prompt, None).await
++    }
++
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        self.execute_streaming(prompt, log_writer).await
+     }
+ 
+     async fn health_check(&self) -> Result<()> {
+@@ -476,7 +614,16 @@ fn backend_with_optional_tmux(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{parse_backend_spec, BackendSpec};
++    use std::collections::BTreeMap;
++    use std::fs;
++    use std::os::unix::fs::PermissionsExt;
++    use std::time::Duration;
++
++    use tempfile::tempdir;
++
++    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend};
++    use crate::error::RalphError;
++    use crate::output_log::LogWriter;
+ 
+     #[test]
+     fn parse_backend_spec_accepts_bare_name() {
+@@ -521,4 +668,95 @@ mod tests {
+     fn parse_backend_spec_rejects_missing_opening_paren() {
+         assert!(parse_backend_spec("claudeopus)").is_err());
+     }
++
++    fn write_executable_script(
++        dir: &std::path::Path,
++        name: &str,
++        body: &str,
++    ) -> std::path::PathBuf {
++        let path = dir.join(name);
++        fs::write(&path, body).expect("write script");
++        let mut perms = fs::metadata(&path).expect("metadata").permissions();
++        perms.set_mode(0o755);
++        fs::set_permissions(&path, perms).expect("chmod script");
++        path
++    }
++
++    #[tokio::test]
++    async fn cli_backend_streaming_preserves_exact_bytes_in_log() {
++        let temp = tempdir().expect("tempdir");
++        let script_path = write_executable_script(
++            temp.path(),
++            "emit-bytes.sh",
++            r#"#!/bin/sh
++printf 'progress 10%%\r'
++sleep 0.05
++printf 'progress 20%%\rpartial-line'
++"#,
++        );
++
++        let backend = CliBackend::new(
++            "streaming-test",
++            script_path.to_string_lossy().to_string(),
++            vec![],
++            Duration::from_secs(2),
++            BTreeMap::new(),
++        );
++
++        let mut writer = LogWriter::open(temp.path(), Some(1), "planner");
++        let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
++            .await
++            .expect("backend should succeed");
++
++        assert_eq!(output, "progress 10%\rprogress 20%\rpartial-line");
++        let logged = fs::read(writer.path()).expect("read log bytes");
++        assert_eq!(logged, b"progress 10%\rprogress 20%\rpartial-line");
++    }
++
++    #[tokio::test]
++    async fn cli_backend_timeout_kills_and_reaps_child_and_writes_footer() {
++        let temp = tempdir().expect("tempdir");
++        let pid_file = temp.path().join("child.pid");
++        let script_path = write_executable_script(
++            temp.path(),
++            "hang-after-output.sh",
++            &format!(
++                r#"#!/bin/sh
++echo $$ > "{pid_file}"
++printf 'partial-timeout-output'
++sleep 30
++"#,
++                pid_file = pid_file.display()
++            ),
++        );
++
++        let backend = CliBackend::new(
++            "timeout-test",
++            script_path.to_string_lossy().to_string(),
++            vec![],
++            Duration::from_millis(150),
++            BTreeMap::new(),
++        );
++
++        let mut writer = LogWriter::open(temp.path(), Some(2), "implementer");
++        let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
++        match result {
++            Err(RalphError::BackendTimeout { backend }) => assert_eq!(backend, "timeout-test"),
++            other => panic!("expected BackendTimeout, got: {other:?}"),
++        }
++
++        let log_content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(log_content.contains("partial-timeout-output"));
++        assert!(log_content.contains("--- timeout ts="));
++
++        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
++        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
++
++        let kill_rc = unsafe { libc::kill(pid, 0) };
++        assert_eq!(kill_rc, -1, "child pid should not be alive");
++        let os_err = std::io::Error::last_os_error()
++            .raw_os_error()
++            .expect("raw os error should exist");
++        assert_eq!(os_err, libc::ESRCH, "child pid should be fully reaped");
++    }
+ }
+diff --git a/src/backend/tmux_backend.rs b/src/backend/tmux_backend.rs
+index 5d613a0..8397b75 100644
+--- a/src/backend/tmux_backend.rs
++++ b/src/backend/tmux_backend.rs
+@@ -9,6 +9,7 @@ use tracing::debug;
+ use super::tmux::{self, TmuxCommandRunner};
+ use super::{Backend, CliBackend, SharedTmuxContext};
+ use crate::error::RalphError;
++use crate::output_log::LogWriter;
+ use crate::Result;
+ 
+ static INVOCATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+@@ -284,6 +285,18 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
+         Ok(output)
+     }
+ 
++    async fn execute_with_log(
++        &self,
++        prompt: &str,
++        mut log_writer: Option<&mut LogWriter>,
++    ) -> Result<String> {
++        let output = self.execute(prompt).await?;
++        if let Some(writer) = log_writer.as_deref_mut() {
++            writer.write_bytes(output.as_bytes());
++        }
++        Ok(output)
++    }
++
+     async fn health_check(&self) -> Result<()> {
+         // Validate tmux is available
+         tmux::check_tmux_available()?;
+diff --git a/src/cli/daemon.rs b/src/cli/daemon.rs
+index 2e14235..6d6e068 100644
+--- a/src/cli/daemon.rs
++++ b/src/cli/daemon.rs
+@@ -225,14 +225,12 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+ fn preflight_check_gh() -> Result<()> {
+     match Command::new("gh").arg("--version").output() {
+         Ok(_) => Ok(()),
+-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+-            Err(RalphError::Validation(
+-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
++            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+                  post comments, and create PRs. Install it from https://cli.github.com/ \
+                  or run inside `nix develop`."
+-                    .to_owned(),
+-            ))
+-        }
++                .to_owned(),
++        )),
+         Err(err) => Err(RalphError::Validation(format!(
+             "gh (GitHub CLI) check failed: {err}"
+         ))),
+diff --git a/src/daemon/github.rs b/src/daemon/github.rs
+index da3f7ed..85d6cba 100644
+--- a/src/daemon/github.rs
++++ b/src/daemon/github.rs
+@@ -239,9 +239,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
+         ])
+         .output()
+         .map_err(|err| {
+-            RalphError::Orchestration(format!(
+-                "failed to run gh issue edit --title: {err}"
+-            ))
++            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
+         })?;
+ 
+     if !output.status.success() {
+@@ -477,11 +475,7 @@ pub fn create_pr_with_body_file(
+ }
+ 
+ /// Edit an existing PR by URL using `--body-file` for large body content.
+-pub fn edit_pr(
+-    pr_url: &str,
+-    title: &str,
+-    body_file: &std::path::Path,
+-) -> Result<()> {
++pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
+     let body_file_str = body_file.to_string_lossy();
+     let output = Command::new("gh")
+         .args([
+@@ -796,7 +790,10 @@ mod tests {
+ 
+     use tempfile::tempdir;
+ 
+-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
++    use super::{
++        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
++        PrMergeStatus,
++    };
+ 
+     #[test]
+     fn gh_issue_deserialization_supports_body_present() {
+diff --git a/src/daemon/refine.rs b/src/daemon/refine.rs
+index 3c06d47..1146e7b 100644
+--- a/src/daemon/refine.rs
++++ b/src/daemon/refine.rs
+@@ -229,9 +229,8 @@ mod tests {
+     #[test]
+     fn parse_refined_output_rejects_overlong_title() {
+         let title = "a".repeat(MAX_TITLE_LENGTH + 1);
+-        let input = format!(
+-            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
+-        );
++        let input =
++            format!("TITLE: {title}\n---\nThis is a sufficiently long body for refinement output.");
+         let err = parse_refined_output(&input).unwrap_err();
+         assert!(err.to_string().contains("title too long"));
+     }
+diff --git a/src/daemon/runtime.rs b/src/daemon/runtime.rs
+index 6ec4550..34ac0f3 100644
+--- a/src/daemon/runtime.rs
++++ b/src/daemon/runtime.rs
+@@ -964,10 +964,7 @@ async fn complete_task(
+             }
+         }
+         if let Err(err) = handle_pr_flow(store, config, &task).await {
+-            eprintln!(
+-                "warning: PR flow failed for {}: {err}",
+-                task.task_id
+-            );
++            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
+         }
+     }
+ 
+@@ -1040,7 +1037,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
+     }
+ }
+ 
+-
+ // =============================================================================
+ // Auto-Rebase Phase
+ // =============================================================================
+@@ -1077,17 +1073,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+     for task in &all_tasks {
+         // Explicit skip reasons for missing PR URL / branch
+         if task.pr_url.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no PR URL",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
+             continue;
+         }
+         if task.branch.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no task branch",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
+             continue;
+         }
+         if rebase_count >= config.max_rebases_per_cycle {
+@@ -1132,10 +1122,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+         let merge_info = {
+             let owner = task.owner.clone();
+             let repo = task.repo.clone();
+-            match spawn_blocking_op(move || {
+-                github::query_pr_merge_info(&owner, &repo, pr_number)
+-            })
+-            .await
++            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
++                .await
+             {
+                 Ok(info) => info,
+                 Err(err) => {
+@@ -1266,19 +1254,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+                     continue;
+                 }
+ 
+-                eprintln!(
+-                    "auto-rebase: failure for {}: {err_msg}",
+-                    task.task_id
+-                );
++                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
+ 
+                 // Post failure comment on PR (deduplicated by head_sha)
+                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
+ 
+                 if should_post {
+-                    let marker = format!(
+-                        "<!-- ralph:rebase:{}:failed:{} -->",
+-                        task.task_id, head_sha
+-                    );
++                    let marker =
++                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
+                     let body = format!(
+                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
+                         task.task_id, head_sha
+@@ -1507,7 +1490,11 @@ pub(crate) fn build_pr_body(
+ /// 5. Check for existing PR via `find_existing_pr`.
+ /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
+ /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
+-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
++async fn handle_pr_flow(
++    store: &TaskStore,
++    _config: &DaemonRuntimeConfig,
++    task: &DaemonTask,
++) -> Result<()> {
+     let workspace_root = store
+         .path()
+         .parent()
+@@ -1528,10 +1515,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+         match spawn_blocking_op(move || github::has_diff(&wt)).await {
+             Ok(v) => v,
+             Err(err) => {
+-                eprintln!(
+-                    "warning: failed to check diff for {}: {err}",
+-                    task.task_id
+-                );
++                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
+                 return Ok(());
+             }
+         }
+@@ -1657,9 +1641,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+     let title = task
+         .refined_title
+         .clone()
+-        .or_else(|| {
+-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
+-        })
++        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
+         .unwrap_or(title);
+ 
+     match existing_pr_url {
+@@ -1797,11 +1779,9 @@ mod tests {
+         assert!(body.contains("Closes #42"));
+         assert!(body.contains("Diff stat unavailable."));
+         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
+-        assert!(
+-            body.contains(
+-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+-            )
+-        );
++        assert!(body.contains(
++            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
++        ));
+     }
+ 
+     #[test]
+diff --git a/src/daemon/worktree.rs b/src/daemon/worktree.rs
+index c4e8698..dce7d30 100644
+--- a/src/daemon/worktree.rs
++++ b/src/daemon/worktree.rs
+@@ -36,7 +36,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     // Check if the branch already exists (e.g. from a previous failed run
+     // where the worktree was cleaned up but the branch was not).
+     let branch_exists = Command::new("git")
+-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
++        .args([
++            "rev-parse",
++            "--verify",
++            &format!("refs/heads/{branch_name}"),
++        ])
+         .current_dir(repo_root)
+         .output()
+         .map(|o| o.status.success())
+@@ -45,12 +49,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     let output = if branch_exists {
+         // Reuse existing branch
+         Command::new("git")
+-            .args([
+-                "worktree",
+-                "add",
+-                &wt_path.to_string_lossy(),
+-                &branch_name,
+-            ])
++            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
+             .current_dir(repo_root)
+             .output()
+     } else {
+diff --git a/src/output_log.rs b/src/output_log.rs
+index e024abb..ae6c206 100644
+--- a/src/output_log.rs
++++ b/src/output_log.rs
+@@ -50,10 +50,17 @@ pub fn format_attempt_separator(
+     timestamp: &str,
+ ) -> String {
+     let sanitized = sanitize_for_filename(backend_label);
+-    let fallback_flag = if is_fallback { "fallback=true" } else { "fallback=false" };
+-    format!(
+-        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n"
+-    )
++    let fallback_flag = if is_fallback {
++        "fallback=true"
++    } else {
++        "fallback=false"
++    };
++    format!("\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n")
++}
++
++/// Formats a timeout footer line appended when backend execution times out.
++pub fn format_timeout_footer(timestamp: &str) -> String {
++    format!("\n--- timeout ts={timestamp} ---\n")
+ }
+ 
+ /// Best-effort append-mode log writer.
+@@ -95,10 +102,7 @@ impl LogWriter {
+ 
+     fn try_open(path: &Path) -> io::Result<File> {
+         ensure_log_parent(path)?;
+-        OpenOptions::new()
+-            .create(true)
+-            .append(true)
+-            .open(path)
++        OpenOptions::new().create(true).append(true).open(path)
+     }
+ 
+     /// Write an attempt separator before a backend execution.
+@@ -106,10 +110,17 @@ impl LogWriter {
+     pub fn write_attempt_separator(&mut self, backend_label: &str, is_fallback: bool) {
+         self.attempt += 1;
+         let timestamp = Utc::now().to_rfc3339();
+-        let separator = format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
++        let separator =
++            format_attempt_separator(self.attempt, backend_label, is_fallback, &timestamp);
+         self.write_bytes(separator.as_bytes());
+     }
+ 
++    /// Append a timeout footer line with the provided timestamp.
++    pub fn write_timeout_footer(&mut self, timestamp: &str) {
++        let footer = format_timeout_footer(timestamp);
++        self.write_bytes(footer.as_bytes());
++    }
++
+     /// Append raw bytes to the log file.
+     pub fn write_bytes(&mut self, data: &[u8]) {
+         let Some(file) = self.file.as_mut() else {
+@@ -209,7 +220,10 @@ mod tests {
+     fn sanitizes_unsafe_filename_characters() {
+         assert_eq!(sanitize_for_filename("../"), "");
+         assert_eq!(sanitize_for_filename("; rm -rf"), "rm_-rf");
+-        assert_eq!(sanitize_for_filename("backend label with spaces"), "backend_label_with_spaces");
++        assert_eq!(
++            sanitize_for_filename("backend label with spaces"),
++            "backend_label_with_spaces"
++        );
+         assert_eq!(sanitize_for_filename("日本語"), "");
+     }
+ 
+@@ -242,6 +256,12 @@ mod tests {
+         assert!(sep.contains("fallback=true"));
+     }
+ 
++    #[test]
++    fn timeout_footer_format_contains_timestamp() {
++        let footer = format_timeout_footer("2026-01-01T00:00:00Z");
++        assert_eq!(footer, "\n--- timeout ts=2026-01-01T00:00:00Z ---\n");
++    }
++
+     #[test]
+     fn log_writer_opens_and_appends() {
+         let temp = tempdir().expect("tempdir");
+@@ -263,6 +283,32 @@ mod tests {
+         assert!(content.contains("retry output"));
+     }
+ 
++    #[test]
++    fn log_writer_preserves_cr_and_partial_line_bytes() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), Some(9), "planner");
++
++        writer.write_bytes(b"progress 10%\r");
++        writer.write_bytes(b"progress 20%\r");
++        writer.write_bytes(b"partial-line");
++
++        let bytes = fs::read(writer.path()).expect("read log bytes");
++        assert_eq!(bytes, b"progress 10%\rprogress 20%\rpartial-line");
++    }
++
++    #[test]
++    fn log_writer_timeout_footer_appends() {
++        let temp = tempdir().expect("tempdir");
++        let mut writer = LogWriter::open(temp.path(), Some(3), "implementer");
++
++        writer.write_bytes(b"partial output");
++        writer.write_timeout_footer("2026-01-01T00:00:00Z");
++
++        let content = fs::read_to_string(writer.path()).expect("read log");
++        assert!(content.contains("partial output"));
++        assert!(content.contains("--- timeout ts=2026-01-01T00:00:00Z ---"));
++    }
++
+     #[test]
+     fn log_writer_appends_across_instances() {
+         let temp = tempdir().expect("tempdir");
+@@ -279,10 +325,8 @@ mod tests {
+             w.write_str("second run\n");
+         }
+ 
+-        let content = fs::read_to_string(
+-            log_path_for_role(project_dir, Some(1), "implementer"),
+-        )
+-        .expect("read log");
++        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), "implementer"))
++            .expect("read log");
+         assert!(content.contains("first run"));
+         assert!(content.contains("second run"));
+     }
+@@ -348,9 +392,18 @@ mod tests {
+         let sep1 = lines.iter().find(|l| l.contains("attempt=1")).unwrap();
+         let sep2 = lines.iter().find(|l| l.contains("attempt=2")).unwrap();
+         let sep3 = lines.iter().find(|l| l.contains("attempt=3")).unwrap();
+-        assert!(sep1.contains("fallback=false"), "first attempt should be fallback=false");
+-        assert!(sep2.contains("fallback=true"), "second attempt should be fallback=true");
+-        assert!(sep3.contains("fallback=true"), "third attempt should be fallback=true");
++        assert!(
++            sep1.contains("fallback=false"),
++            "first attempt should be fallback=false"
++        );
++        assert!(
++            sep2.contains("fallback=true"),
++            "second attempt should be fallback=true"
++        );
++        assert!(
++            sep3.contains("fallback=true"),
++            "third attempt should be fallback=true"
++        );
+     }
+ 
+     /// Simulate the attempt numbering pattern from `execute_with_parse_retries`:
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index b8ff533..ab882e9 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1286,3 +1286,200 @@ fi
+ "###
+     .to_owned()
+ }
++
++/// Mock script that streams planner output in delayed chunks so conformance
++/// tests can verify log growth before process completion.
++pub fn slow_streaming_planner_mock_script() -> String {
++    r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  printf '# Feature: Slow Streaming Feature\n'
++  sleep 1
++  cat <<'EOF'
++
++## Description
++Planner output emitted in delayed chunks.
++
++## Acceptance Criteria
++- [ ] mock file exists
++
++## Files to Modify/Create
++- `mock_file.txt` - created by implementer
++
++## Dependencies
++- Requires: none
++- Blocks: none
++EOF
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
++    cat <<'EOF'
++# Implementation Response (Iteration 1)
++
++## Changes Made
++1. Addressed reviewer feedback in the mock implementation.
++
++## Could Not Address
++- None
++EOF
++  else
++    cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++  fi
++  echo "implemented" > mock_file.txt
++  git add mock_file.txt
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Looks good.
++
++## Commit Message
++feat: apply mock implementation
++EOF
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
++    cat <<'EOF'
++# Verdict: COMPLETE
++
++The project satisfies all requirements:
++- Mock requirement: satisfied
++EOF
++  else
++    cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++  fi
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###
++    .to_owned()
++}
++
++/// Mock script that emits partial planner output then hangs; used to verify
++/// timeout cleanup and log footer behavior.
++pub fn timeout_hanging_planner_mock_script(pid_file: &Path) -> String {
++    format!(
++        r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  echo $$ > "{pid_file}"
++  printf 'planner-partial-before-timeout'
++  sleep 30
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Looks good.
++
++## Commit Message
++feat: apply mock implementation
++EOF
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###,
++        pid_file = pid_file.to_string_lossy()
++    )
++}
+diff --git a/src/validate/tests_commands.rs b/src/validate/tests_commands.rs
+index 281f3f5..81d7d2b 100644
+--- a/src/validate/tests_commands.rs
++++ b/src/validate/tests_commands.rs
+@@ -2,8 +2,7 @@ use super::*;
+ 
+ use crate::validate::assertions::{
+     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
+-    assert_stdout_eq,
+-    git_head_commit, git_tag_commit,
++    assert_stdout_eq, git_head_commit, git_tag_commit,
+ };
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::standard_mock_script;
+@@ -489,7 +488,10 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
+         );
+         let version_part = &stdout["ralph ".len()..];
+         assert!(
+-            version_part.chars().next().map_or(false, |c| c.is_ascii_digit()),
++            version_part
++                .chars()
++                .next()
++                .map_or(false, |c| c.is_ascii_digit()),
+             "expected semver version after 'ralph ', got: {stdout}"
+         );
+     })
+diff --git a/src/validate/tests_daemon.rs b/src/validate/tests_daemon.rs
+index d7d11ba..abbdeb9 100644
+--- a/src/validate/tests_daemon.rs
++++ b/src/validate/tests_daemon.rs
+@@ -486,7 +486,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
+         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+         let output = h
+             .ralph_env(
+-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
++                [
++                    "daemon",
++                    "start",
++                    "--single-iteration",
++                    "--repo",
++                    "acme/widgets",
++                ],
+                 &[("PATH", &gh_path)],
+             )
+             .expect("daemon start should execute");
+@@ -2254,7 +2260,8 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
+                     None,
+                 );
+                 t["project_id"] = json!(project_id);
+-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
++                t["raw_idea"] =
++                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                 t
+             }],
+         )
+@@ -3362,7 +3369,10 @@ exit 0
+ 
+         // The spawned child should have received the refined prompt
+         let idea = fs::read_to_string(&idea_log).expect("read idea log");
+-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
++        assert_eq!(
++            idea,
++            "Refined: implement the feature with proper error handling and tests."
++        );
+     })
+ }
+ 
+@@ -4707,8 +4717,7 @@ exit 1
+             .find(|t| t["task_id"] == "acme-widgets-301")
+             .unwrap();
+         assert!(
+-            task.get("refined_title").is_none()
+-                || task["refined_title"].is_null(),
++            task.get("refined_title").is_none() || task["refined_title"].is_null(),
+             "refined_title should not be set when refinement is disabled"
+         );
+     })
+@@ -5035,10 +5044,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // Check that the comment body includes the bold title
+-        assert!(
+-            comment_log.exists(),
+-            "comment should have been posted"
+-        );
++        assert!(comment_log.exists(), "comment should have been posted");
+         let log = fs::read_to_string(&comment_log).expect("read comment log");
+         assert!(
+             log.contains("**Bold comment title test**"),
+@@ -5068,7 +5074,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(wt.exists(), "worktree directory should exist");
+ 
+         // Verify branch exists
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should exist after create_worktree"
+@@ -5079,7 +5088,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(!wt.exists(), "worktree directory should be removed");
+ 
+         // Branch should still exist
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should survive worktree removal"
+@@ -5106,12 +5118,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
+         // Create a tracked file, commit it, then modify it (dirty tracked)
+         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
+         git(&wt, &["add", "tracked.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "add tracked",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "add tracked",
++            ],
++        );
+         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
+ 
+         // Create an untracked file (like SPEC.md from codex side-effect)
+@@ -5165,12 +5186,21 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
+         // Add a tracked file, commit, then modify (simulates prior run's changes)
+         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
+         git(&wt, &["add", "src.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "prior run",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "prior run",
++            ],
++        );
+         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
+ 
+         // Add an untracked file (simulates codex side-effect)
+@@ -5470,10 +5500,7 @@ exit 1
+         let stderr = String::from_utf8_lossy(&output.stderr);
+ 
+         // pr edit was attempted
+-        assert!(
+-            pr_edit_log.exists(),
+-            "pr edit should have been attempted"
+-        );
++        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
+ 
+         // pr create should NOT have been called (no fallthrough on edit failure)
+         assert!(
+@@ -5613,10 +5640,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // pr create should have been called
+-        assert!(
+-            pr_create_log.exists(),
+-            "pr create should have been called"
+-        );
++        assert!(pr_create_log.exists(), "pr create should have been called");
+ 
+         // Body file should have been captured and contain structured content
+         assert!(
+@@ -5811,8 +5835,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Disable auto-rebase
+-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+-            .expect("set auto_rebase_enabled failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_auto_rebase_enabled",
++            "false",
++        ])
++        .expect("set auto_rebase_enabled failed");
+ 
+         // Seed a completed task with a PR URL
+         write_tasks(
+@@ -6163,7 +6192,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6251,7 +6283,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6468,7 +6503,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
+         );
+ 
+         // The second task should NOT have been attempted (break after first failure)
+-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
++        let second_attempt_count = stderr
++            .matches("auto-rebase: rebasing acme-widgets-110")
++            .count();
+         assert_eq!(
+             second_attempt_count, 0,
+             "second task should not be attempted after gh pr view failure"
+@@ -6482,8 +6519,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Set max_rebases_per_cycle to 1 via config
+-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+-            .expect("set max_rebases_per_cycle failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_max_rebases_per_cycle",
++            "1",
++        ])
++        .expect("set max_rebases_per_cycle failed");
+ 
+         // Create 3 tasks with PRs
+         write_tasks(
+@@ -6574,11 +6616,17 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Use a very large interval to ensure skip regardless of clock skew
+-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+-            .expect("set rebase_interval_seconds failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_rebase_interval_seconds",
++            "999999",
++        ])
++        .expect("set rebase_interval_seconds failed");
+ 
+         // Dynamically compute a "just now" timestamp so test never becomes stale
+-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
++        let recent_timestamp =
++            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+ 
+         write_tasks(
+             h,
+@@ -6719,7 +6767,10 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
+         let tasks = load_tasks(h).expect("load_tasks failed");
+         assert_eq!(tasks.len(), 1);
+         assert!(
+-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
++            tasks[0]
++                .get("last_rebase_at")
++                .map(|v| v.is_null())
++                .unwrap_or(true),
+             "last_rebase_at should be null/missing"
+         );
+     })
+diff --git a/src/validate/tests_streaming.rs b/src/validate/tests_streaming.rs
+index b7684ff..4f368e9 100644
+--- a/src/validate/tests_streaming.rs
++++ b/src/validate/tests_streaming.rs
+@@ -1,10 +1,15 @@
+ use super::*;
+ 
+ use std::fs;
++use std::process::Command;
++use std::thread;
++use std::time::{Duration, Instant};
+ 
++use crate::validate::assertions::assert_exit_code;
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::{
+-    planner_parse_fail_then_pass_mock_script, standard_mock_script,
++    planner_parse_fail_then_pass_mock_script, slow_streaming_planner_mock_script,
++    standard_mock_script, timeout_hanging_planner_mock_script,
+ };
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+@@ -17,6 +22,14 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "streaming::prompt_reviewer_path",
+             func: prompt_reviewer_path,
+         },
++        ConformanceTest {
++            name: "streaming::mid_execution_visibility",
++            func: mid_execution_visibility,
++        },
++        ConformanceTest {
++            name: "streaming::timeout_cleanup",
++            func: timeout_cleanup,
++        },
+     ]
+ }
+ 
+@@ -96,7 +109,9 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
+ 
+         // Should also contain actual output content from the successful attempt
+         assert!(
+-            content.contains("Feature") || content.contains("feature") || content.contains("not a valid"),
++            content.contains("Feature")
++                || content.contains("feature")
++                || content.contains("not a valid"),
+             "planner log should contain backend output, got:\n{content}"
+         );
+ 
+@@ -169,6 +184,144 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++/// Verify planner output is visible in the log while backend execution is
++/// still in progress (chunked streaming, not post-hoc write).
++fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-mid-visibility";
++
++        h.init_workspace().expect("init failed");
++        let script = h
++            .write_mock_script("slow-streaming.sh", &slow_streaming_planner_mock_script())
++            .expect("failed to write slow streaming mock script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++        h.create_project(
++            project_id,
++            "Streaming Mid-Execution Visibility",
++            "Streaming visibility test prompt",
++        )
++        .expect("create_project failed");
++
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++
++        let mut child = Command::new(&h.ralph_bin)
++            .args(["run", "--loops", "1"])
++            .current_dir(&h.repo_root)
++            .spawn()
++            .expect("spawn ralph run");
++
++        let deadline = Instant::now() + Duration::from_secs(8);
++        let mut observed_size = 0_u64;
++        let mut observed_while_running = false;
++
++        while Instant::now() < deadline {
++            if let Ok(meta) = fs::metadata(&planner_log) {
++                observed_size = meta.len();
++                if observed_size > 0 {
++                    let status = child.try_wait().expect("try_wait should succeed");
++                    if status.is_none() {
++                        observed_while_running = true;
++                        break;
++                    }
++                }
++            }
++
++            if child.try_wait().expect("try_wait should succeed").is_some() {
++                break;
++            }
++            thread::sleep(Duration::from_millis(50));
++        }
++
++        assert!(
++            observed_while_running,
++            "expected planner log bytes while run process was still active; observed_size={observed_size}"
++        );
++
++        let output = child.wait_with_output().expect("wait_with_output");
++        assert_exit_code(&output, 0);
++
++        let final_size = fs::metadata(&planner_log)
++            .expect("planner log metadata after completion")
++            .len();
++        assert!(
++            final_size > observed_size,
++            "planner log should grow after initial streamed bytes; initial={observed_size} final={final_size}"
++        );
++    })
++}
++
++/// Verify timeout behavior: partial output is preserved, timeout footer exists,
++/// and the hanging planner child process is dead after retries.
++fn timeout_cleanup(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "streaming-timeout-cleanup";
++        let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
++
++        h.init_workspace().expect("init failed");
++        let script = h
++            .write_mock_script(
++                "timeout-hanging.sh",
++                &timeout_hanging_planner_mock_script(&pid_file),
++            )
++            .expect("failed to write timeout mock script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
++            .expect("set claude timeout");
++        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
++            .expect("set codex timeout");
++        h.create_project(
++            project_id,
++            "Streaming Timeout Cleanup",
++            "Streaming timeout cleanup prompt",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_exit_code(&output, 1);
++
++        let planner_log = h
++            .project_dir(project_id)
++            .join("loops")
++            .join("001")
++            .join("agent-output-planner.log");
++        assert!(
++            planner_log.exists(),
++            "planner log should exist at {}",
++            planner_log.display()
++        );
++        let content = fs::read_to_string(&planner_log).expect("read planner log");
++        assert!(
++            content.contains("planner-partial-before-timeout"),
++            "planner log should contain partial output before timeout, got:\n{content}"
++        );
++        assert!(
++            content.contains("--- timeout ts="),
++            "planner log should contain timeout footer, got:\n{content}"
++        );
++
++        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
++        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
++        let kill_rc = unsafe { libc::kill(pid, 0) };
++        assert_eq!(kill_rc, -1, "timed-out planner process should be dead");
++        let os_err = std::io::Error::last_os_error()
++            .raw_os_error()
++            .expect("raw os error should be present");
++        assert_eq!(
++            os_err,
++            libc::ESRCH,
++            "timed-out planner process should be fully reaped"
++        );
++    })
++}
++
+ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
+     h.init_workspace().expect("init failed");
+     let script = h
+diff --git a/src/workflow/orchestrator.rs b/src/workflow/orchestrator.rs
+index a03df5c..b2079de 100644
+--- a/src/workflow/orchestrator.rs
++++ b/src/workflow/orchestrator.rs
+@@ -22,6 +22,7 @@ use crate::git::commit::{
+     ORCHESTRATION_STATE_PATH_PREFIX,
+ };
+ use crate::git::{is_git_repo, run_git};
++use crate::output_log::LogWriter;
+ use crate::project::artifacts::{
+     artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
+     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+@@ -38,7 +39,6 @@ use crate::prompts::templates::{
+     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+     render_template_with_fallback,
+ };
+-use crate::output_log::LogWriter;
+ use crate::util::hash::sha256_hex;
+ use crate::util::lock::ProjectLock;
+ use crate::util::slug::slugify_feature_name;
+@@ -1875,9 +1875,7 @@ fn rollback_current_loop(
+ 
+     // Also remove the bare loop-number directory used by agent-output log files
+     // (e.g., loops/001/agent-output-planner.log).
+-    let log_dir = project_dir
+-        .join("loops")
+-        .join(format!("{loop_number:03}"));
++    let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
+     if log_dir.exists() {
+         if let Err(e) = fs::remove_dir_all(&log_dir) {
+             warn!(
+@@ -2791,9 +2789,8 @@ async fn execute_with_timeout_retries(
+         let is_fallback = log_writer.attempt() > 0;
+         log_writer.write_attempt_separator(backend.name(), is_fallback);
+ 
+-        match backend.execute(prompt).await {
++        match backend.execute_with_log(prompt, Some(log_writer)).await {
+             Ok(output) => {
+-                log_writer.write_str(&output);
+                 return Ok(output);
+             }
+             Err(RalphError::BackendTimeout {
+```
+
+## Prior QA History
+
+(none)
+
+mcp startup: no servers
+
+thinking
+**Preparing for manual QA execution**
+codex
+I’m going to validate this as a hands-on QA pass: build the binary, manually exercise the new streaming/timeout logging behaviors through real `ralph` runs, then run the automated suites (`cargo test`, validate) as secondary confirmation. I’ll capture exact commands, outputs, and map each acceptance criterion to concrete evidence.
+
+thinking
+**Inspecting repo state and artifacts**
+exec
+/run/current-system/sw/bin/bash -lc "rg --files | rg 'prompt\\.md|spec\\.md|impl-notes\\.md|tests_streaming\\.rs|output_log\\.rs|backend/mod\\.rs|workflow/orchestrator\\.rs'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc 'pwd && ls -la && git status --short' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+validate-prompt.md
+src/workflow/orchestrator.rs
+src/backend/mod.rs
+src/validate/tests_streaming.rs
+src/output_log.rs
+ succeeded in 51ms:
+/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+total 296
+drwxr-xr-x  6 root root  4096 Feb 16 03:40 .
+drwxr-xr-x  7 root root  4096 Feb 16 04:08 ..
+-rw-r--r--  1 root root   112 Feb 16 03:18 .git
+-rw-r--r--  1 root root   104 Feb 16 03:18 .gitignore
+drwxr-xr-x  6 root root  4096 Feb 16 03:18 .ralph
+-rw-r--r--  1 root root  3803 Feb 16 03:18 AGENTS.md
+-rw-r--r--  1 root root 31903 Feb 16 04:29 Cargo.lock
+-rw-r--r--  1 root root   708 Feb 16 04:28 Cargo.toml
+-rw-r--r--  1 root root 14140 Feb 16 03:18 PLAN-qa-phase.md
+-rw-r--r--  1 root root  7880 Feb 16 03:18 PLAN-qa-validate.md
+-rw-r--r--  1 root root 38293 Feb 16 03:18 PLAN.md
+-rw-r--r--  1 root root 48099 Feb 16 03:18 PRD.md
+-rw-r--r--  1 root root  4609 Feb 16 03:18 PROMPT-auto-branch-sync.md
+-rw-r--r--  1 root root  7103 Feb 16 03:18 PROMPT-codex-reasoning-effort.md
+-rw-r--r--  1 root root  5701 Feb 16 03:18 PROMPT-explicit-models.md
+-rw-r--r--  1 root root  6212 Feb 16 03:18 PROMPT-per-role-models.md
+-rw-r--r--  1 root root 16482 Feb 16 03:18 PROMPT-prd-pipeline.md
+-rw-r--r--  1 root root  3196 Feb 16 03:18 PROMPT-reformatter.md
+
+thinking
+**Deciding to continue despite dirty workspace**
+codex
+I confirmed the workspace is dirty with the implementation changes present. Next I’m building the project artifact first, then I’ll run manual CLI scenarios in a fresh temp workspace to verify streaming visibility, retry append behavior, prompt-reviewer path, and timeout cleanup directly.
+
+thinking
+**Running quick build check**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo build' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+
+thinking
+**Running nix build to verify**
+codex
+`cargo build` succeeded and produced a usable dev binary. I’m now running the project’s documented check/build pipeline (`cargo check`, `cargo test`, `nix build`) and then I’ll execute manual end-to-end CLI tests against the built binary.
+exec
+/run/current-system/sw/bin/bash -lc 'cargo check' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+
+thinking
+**Acknowledging lengthy test duration**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo test' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 32.46s:
+test backend::tmux_backend::tests::execute_success_returns_output ... ok
+test backend::tmux_backend::tests::execute_nonzero_exit_returns_error ... ok
+test backend::tmux_backend::tests::execute_genuine_timeout_returns_backend_timeout ... ok
+test backend::tmux_backend::tests::execute_window_disappeared_returns_actionable_error ... ok
+test backend::tmux_backend::tests::temp_files_cleaned_up_on_success ... ok
+test backend::tmux_backend::tests::kill_window_called_on_nonzero_exit ... ok
+test backend::tmux_backend::tests::temp_files_cleaned_up_on_failure ... ok
+test daemon::process::tests::test_terminate_spawned_process_group ... ok
+test backend::tests::cli_backend_timeout_kills_and_reaps_child_and_writes_footer ... ok
+
+test result: ok. 397 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 30.01s
+
+     Running unittests src/main.rs (target/debug/deps/ralph-cfb794f2c675c59c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/backend.rs (target/debug/deps/backend-7608b7348a1a3595)
+
+
+thinking
+**Polling ongoing test session**
+codex
+`cargo test` is still running; unit and integration suites are passing so far, including the new streaming and timeout unit tests. I’m waiting for the full run to complete and will then execute conformance + manual CLI checks.
+
+thinking
+**Confirming successful tests**
+codex
+`cargo test` completed cleanly (all suites passed, including the new streaming unit tests). Next I’m running `nix build -L`, then `ralph validate` (full + streaming filter), and then targeted manual CLI runs with real mock backends to verify each acceptance criterion with direct evidence.
+exec
+/run/current-system/sw/bin/bash -lc 'nix build -L' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+thinking
+**Completing build session polling**
+codex
+`nix build -L` is still executing because it runs a full release build plus conformance tests inside the derivation. I’m polling until completion, then I’ll run additional direct manual CLI probes outside nix for explicit end-to-end evidence.
+
+thinking
+**Handling potential output hang**
+ succeeded in 3m 15s:
+these 2 derivations will be built:
+  /nix/store/yp9ri525r56bilb4jpiz45pq3b5pl0w9-cargo-vendor-dir.drv
+  /nix/store/mf9j7j35qdv31armjr98zfl0p88cy8n5-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv
+building '/nix/store/yp9ri525r56bilb4jpiz45pq3b5pl0w9-cargo-vendor-dir.drv'...
+building '/nix/store/mf9j7j35qdv31armjr98zfl0p88cy8n5-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv'...
+ralph-static-x86_64-unknown-linux-musl> Running phase: unpackPhase
+ralph-static-x86_64-unknown-linux-musl> unpacking source archive /nix/store/9k3yclbbli7g05x6vln8fv0cq10j769n-jynrcb7d37w2dr97710gbfnh0ar6p57q-source
+ralph-static-x86_64-unknown-linux-musl> source root is jynrcb7d37w2dr97710gbfnh0ar6p57q-source
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: patchPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Validating consistency between /build/jynrcb7d37w2dr97710gbfnh0ar6p57q-source/Cargo.lock and /build/cargo-vendor-dir/Cargo.lock
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: configurePhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: buildPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoBuildHook
+ralph-static-x86_64-unknown-linux-musl> cargoBuildHook flags: -j 16 --target x86_64-unknown-linux-musl --offline --profile release
+
+thinking
+**Designing manual test workflows**
+codex
+Build/check/test pipeline is green, including conformance inside `nix build`. I’m now switching to explicit manual QA runs with the built binary (`./result/bin/ralph`) in fresh temp repos and mock backends so we can verify behavior by observing real logs, process state, exit codes, and file paths directly.
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"fn setup_mock_backends|config set backends\\.claude\\.command|project new|run --loops|backends\\.claude\\.timeout_seconds\" src/validate/harness.rs src/validate/tests_*.rs src/cli -g '*.rs'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph --help && ./result/bin/ralph project --help && ./result/bin/ralph config --help' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 50ms:
+src/validate/tests_commands.rs:138:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_commands.rs:160:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_commands.rs:185:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_commands.rs:212:            .expect("ralph run --loops 2 should succeed");
+src/validate/tests_commands.rs:296:            .expect("ralph run --loops 2 should succeed");
+src/validate/tests_run.rs:91:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_run.rs:127:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_run.rs:170:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_run.rs:198:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_run.rs:213:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_run.rs:242:            .expect("ralph run --loops 2 should succeed");
+src/validate/tests_run.rs:462:            .expect("ralph run --loops 2 should succeed");
+src/validate/tests_run.rs:491:            .expect("ralph run --loops 1 should execute");
+src/validate/tests_tail.rs:34:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_tail.rs:50:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_tail.rs:98:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_prompt_review.rs:77:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_prompt_review.rs:268:            .expect("ralph run --loops 1 should succeed");
+src/validate/tests_prompt_review.rs:286:            .expect("ralph run --loops 1 should succeed after migration");
+src/validate/tests_prompt_review.rs:360:            .expect("ralph run --loops 1 should succeed");
+ succeeded in 51ms:
+AI backend orchestration tool
+
+Usage: ralph <COMMAND>
+
+Commands:
+  init       
+  project    
+  mcp        
+  run        
+  prd        
+  quick-prd  
+  auto       
+  validate   
+  status     
+  history    
+  tail       
+  rollback   
+  config     
+  daemon     
+  help       Print this message or the help of the given subcommand(s)
+
+thinking
+**Inspecting harness setup functions**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '170,260p' src/validate/harness.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+        assert!(
+            !path.exists(),
+            "index.json should not exist at {}",
+            path.display()
+        );
+    }
+
+    pub fn init_workspace(&self) -> Result<()> {
+        self.ralph_ok(["init"])?;
+        Ok(())
+    }
+
+    pub fn write_mock_script(&self, name: &str, content: &str) -> Result<PathBuf> {
+        let path = self.temp_dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, content)?;
+
+        let mut perms = fs::metadata(&path)?.permissions();
+
+thinking
+**Inspecting project creation methods**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"fn create_project|ralph_ok\\(\\[\\\"project\\\", \\\"new\\\"|--prompt\" src/validate/harness.rs src/validate/tests_*.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/validate/harness.rs:266:    pub fn create_project(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
+src/validate/harness.rs:277:            "--prompt".to_owned(),
+src/validate/tests_project.rs:186:                "--prompt".to_owned(),
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '260,310p' src/validate/harness.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+            "backends.codex.command".to_owned(),
+            codex,
+        ])?;
+        Ok(())
+    }
+
+    pub fn create_project(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
+        let prompt_path = self.temp_dir.path().join(format!("{id}-prompt.md"));
+        fs::write(&prompt_path, prompt)?;
+
+        self.ralph_ok(vec![
+            "project".to_owned(),
+            "new".to_owned(),
+            "--id".to_owned(),
+            id.to_owned(),
+            "--name".to_owned(),
+            name.to_owned(),
+            "--prompt".to_owned(),
+            prompt_path.to_string_lossy().into_owned(),
+        ])?;
+
+thinking
+**Planning manual CLI tests**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"planner_parse_fail_then_pass_mock_script|slow_streaming_planner_mock_script|timeout_hanging_planner_mock_script\" src/validate/mock_scripts.rs && sed -n '1180,1345p' src/validate/mock_scripts.rs && sed -n '1345,1455p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+1016:pub fn planner_parse_fail_then_pass_mock_script(counter_file: &Path) -> String {
+1292:pub fn slow_streaming_planner_mock_script() -> String {
+1408:pub fn timeout_hanging_planner_mock_script(pid_file: &Path) -> String {
+- Requires: none
+- Blocks: none
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###,
+        counter = counter_file.to_string_lossy()
+    )
+}
+
+pub fn always_reject_review_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+thinking
+**Extracting missing script section**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1008,1185p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+"###
+    .to_owned()
+}
+
+/// Mock script that returns unparseable planner output on the first call,
+/// triggering the parse-retry/reformatter path. Uses a counter file to
+/// track invocations so the second call returns valid output.
+/// All other roles respond identically to `standard_mock_script()`.
+pub fn planner_parse_fail_then_pass_mock_script(counter_file: &Path) -> String {
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  COUNTER_FILE="{counter}"
+  COUNT="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$COUNTER_FILE"
+
+thinking
+**Planning comprehensive manual streaming tests**
+codex
+I have enough context and binaries ready. I’m executing this manual QA plan next:
+
+1. Create isolated temp repo/workspace using `./result/bin/ralph init`, configure mock backends, and run one loop.
+2. Manual scenario A (retry + append + deterministic paths + prompt reviewer path):
+- force a planner parse retry with a mock backend
+- verify a single `agent-output-planner.log` is append-only across attempts
+- verify separators include attempt/backend/fallback/timestamp
+- verify filenames are role-derived (no loop slug/backend names), and prompt-reviewer log is root-level
+- verify raw bytes include `\r` and partial lines in the log
+3. Manual scenario B (mid-execution visibility):
+- run a slow-streaming planner in background
+- check planner log grows before process exits
+4. Manual scenario C (timeout cleanup):
+- run hanging planner with short timeout
+- verify timeout footer + partial output in log
+- verify exit code and that child PID is no longer alive
+5. Run automated checks as secondary evidence:
+- `./result/bin/ralph validate --bin ./result/bin/ralph --filter streaming`
+- `./result/bin/ralph validate --bin ./result/bin/ralph`
+- summarize with pass/fail against each acceptance criterion.
+
+I’m starting scenario A now.
+
+thinking
+**Creating and running test scenario script**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/result/bin/ralph"
+QA_A="$(mktemp -d /tmp/qa-streaming-A-XXXXXX)"
+echo "QA_A=$QA_A"
+cd "$QA_A"
+git init -q
+git config user.name "QA"
+git config user.email "qa@example.com"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+
+"$RALPH_BIN" init
+
+COUNTER_FILE="$QA_A/planner-counter.txt"
+cat > "$QA_A/mock-retry-cr.sh" <<'"'EOF'
+#"'!/usr/bin/env bash
+set -euo pipefail
+INPUT="$(cat)"
+COUNTER_FILE="__COUNTER_FILE__"
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  COUNT="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$COUNTER_FILE"
+  if [ "$COUNT" -le 1 ]; then
+    printf '"'progress 10%%\\rpartial-line'
+  else
+    cat <<'EOT'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by manual QA.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- "'`mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOT
+  fi
+elif echo "$INPUT" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+  cat <<'"'EOT'
+# Feature: Demo Feature
+
+## Description
+Reformatted planner output after parse retry.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- "'`mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOT
+elif echo "$INPUT" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+  cat <<'"'EOT'
+# Feature: Demo Feature
+
+## Description
+Formatter retry output.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- "'`mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOT
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  cat <<'"'EOT'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOT
+  echo \"implemented\" > mock_file.txt
+  git add mock_file.txt
+elif echo \""'$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'"'EOT'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'"'EOT'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'"'EOT'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOT
+elif echo \""'$INPUT" | grep -q "You are a project completion validator."; then
+  cat <<'"'EOT'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOT
+else
+  echo \"unrecognized prompt\" >&2
+  exit 1
+fi
+EOF
+sed -i \"s|__COUNTER_FILE__|"'$COUNTER_FILE|g" "$QA_A/mock-retry-cr.sh"
+chmod +x "$QA_A/mock-retry-cr.sh"
+
+"$RALPH_BIN" config set backends.claude.command "$QA_A/mock-retry-cr.sh"
+"$RALPH_BIN" config set backends.codex.command "$QA_A/mock-retry-cr.sh"
+
+cat > "$QA_A/prompt.md" <<'"'EOF'
+Manual QA prompt for retry/append/path verification.
+EOF
+\""'$RALPH_BIN" project new --id qa-stream-a --name "QA Streaming A" --prompt "$QA_A/prompt.md"
+
+set +e
+"$RALPH_BIN" run --loops 1 > "$QA_A/run.out" 2> "$QA_A/run.err"
+RC=$?
+set -e
+echo "RUN_RC=$RC"
+
+PROJECT_DIR="$QA_A/.ralph/projects/qa-stream-a"
+echo "PROJECT_DIR=$PROJECT_DIR"
+
+echo "--- run stderr (tail) ---"
+tail -n 20 "$QA_A/run.err" || true
+
+echo "--- agent log files ---"
+find "$PROJECT_DIR" -type f -name '"'agent-output-*.log' | sort
+
+echo \"--- planner log separators ---\"
+grep -n '"'^--- attempt='"' \""'$PROJECT_DIR/loops/001/agent-output-planner.log" || true
+
+echo "--- planner log hexdump (first 96 bytes) ---"
+od -An -tx1 -N 96 "$PROJECT_DIR/loops/001/agent-output-planner.log"
+
+echo "--- prompt reviewer log exists? ---"
+ls -l "$PROJECT_DIR/agent-output-prompt-reviewer.log"
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 exited 1 in 51ms:
+QA_A=/tmp/qa-streaming-A-8KJZdx
+initialized workspace at .ralph
+updated global config: backends.claude.command
+updated global config: backends.codex.command
+project created
+RUN_RC=2
+PROJECT_DIR=/tmp/qa-streaming-A-8KJZdx/.ralph/projects/qa-stream-a
+--- run stderr (tail) ---
+error: invalid input: cannot start a new loop with uncommitted changes outside `.ralph/`.
+commit/stash/discard those paths first:
+- mock-retry-cr.sh
+- prompt.md
+- run.err
+- run.out
+--- agent log files ---
+/tmp/qa-streaming-A-8KJZdx/.ralph/projects/qa-stream-a/agent-output-prompt-reviewer.log
+--- planner log separators ---
+grep: /tmp/qa-streaming-A-8KJZdx/.ralph/projects/qa-stream-a/loops/001/agent-output-planner.log: No such file or directory
+--- planner log hexdump (first 96 bytes) ---
+od: /tmp/qa-streaming-A-8KJZdx/.ralph/projects/qa-stream-a/loops/001/agent-output-planner.log: No such file or directory
+
+thinking
+**Resolving dirty repo from output redirection**
+codex
+I hit a real CLI guardrail during manual run: `ralph run` refused to start because the repo had uncommitted files (including my mock script and redirected output files). I’m rerunning after committing setup files and redirecting stdout/stderr outside the repo so we can exercise the feature path correctly.
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+QA_A="/tmp/qa-streaming-A-8KJZdx"
+RALPH_BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/result/bin/ralph"
+cd "$QA_A"
+rm -f run.out run.err
+# Commit mock assets so working tree is clean for ralph run
+git add mock-retry-cr.sh prompt.md
+git commit -q -m "add manual QA mock backend"
+
+OUT_FILE="$(mktemp /tmp/qa-streaming-A-run-out-XXXXXX)"
+ERR_FILE="$(mktemp /tmp/qa-streaming-A-run-err-XXXXXX)"
+set +e
+"$RALPH_BIN" run --loops 1 > "$OUT_FILE" 2> "$ERR_FILE"
+RC=$?
+set -e
+echo "RUN_RC=$RC"
+echo "OUT_FILE=$OUT_FILE"
+echo "ERR_FILE=$ERR_FILE"
+
+echo "--- run stdout tail ---"
+tail -n 20 "$OUT_FILE" || true
+
+echo "--- run stderr tail ---"
+tail -n 20 "$ERR_FILE" || true
+
+PROJECT_DIR="$QA_A/.ralph/projects/qa-stream-a"
+echo "PROJECT_DIR=$PROJECT_DIR"
+echo "--- agent log files ---"
+find "$PROJECT_DIR" -type f -name '"'agent-output-*.log' | sort
+
+echo \"--- planner log separators ---\"
+grep -n '"'^--- attempt='"' \""'$PROJECT_DIR/loops/001/agent-output-planner.log" || true
+
+echo "--- planner log head ---"
+sed -n '"'1,40p' \""'$PROJECT_DIR/loops/001/agent-output-planner.log"
+
+echo "--- planner log hexdump (first 140 bytes) ---"
+od -An -tx1 -N 140 "$PROJECT_DIR/loops/001/agent-output-planner.log"
+
+echo "--- prompt reviewer log exists? ---"
+ls -l "$PROJECT_DIR/agent-output-prompt-reviewer.log"
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+RUN_RC=0
+OUT_FILE=/tmp/qa-streaming-A-run-out-DZLymO
+ERR_FILE=/tmp/qa-streaming-A-run-err-4F57V6
+--- run stdout tail ---
+ INFO ralph::workflow::orchestrator: checking backend availability...
+ INFO ralph::workflow::orchestrator: starting planning phase loop=1
+ INFO ralph::workflow::orchestrator: invoking planner... loop=1 backend="claude(opus)"
+ WARN ralph::workflow::orchestrator: parse failed, requesting reformat via codex(gpt-5.3-codex-medium) (attempt 1/3) role="planner" backend=codex(gpt-5.3-codex-medium) error=parse error: planner output is missing a top-level H1
+ INFO ralph::workflow::orchestrator: planner created feature spec loop=1 feature=Demo Feature
+ INFO ralph::workflow::orchestrator: starting implementing phase loop=1
+ INFO ralph::workflow::orchestrator: invoking implementer... loop=1 backend="codex(gpt-5.3-codex-high)"
+ INFO ralph::workflow::orchestrator: starting QA phase loop=1 iteration=1
+ INFO ralph::workflow::orchestrator: invoking QA... loop=1 backend="codex(gpt-5.3-codex-high)" iteration=1
+ INFO ralph::workflow::orchestrator: QA passed loop=1
+ INFO ralph::workflow::orchestrator: starting review phase loop=1 iteration=1
+ INFO ralph::workflow::orchestrator: invoking reviewer... loop=1 backend="claude(opus)"
+ INFO ralph::workflow::orchestrator: reviewer approved changes loop=1
+ INFO ralph::workflow::orchestrator: starting commit phase loop=1
+loop 1: planner created feature spec
+loop 1: implementer wrote impl-notes
+
+thinking
+**Creating script for mid-run log check**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/result/bin/ralph"
+QA_B="$(mktemp -d /tmp/qa-streaming-B-XXXXXX)"
+echo "QA_B=$QA_B"
+cd "$QA_B"
+git init -q
+git config user.name "QA"
+git config user.email "qa@example.com"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+
+"$RALPH_BIN" init
+
+cat > "$QA_B/slow-streaming.sh" <<'"'EOF'
+#"'!/usr/bin/env bash
+set -euo pipefail
+INPUT="$(cat)"
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  printf '"'# Feature: Slow Streaming Feature\\n'
+  sleep 2
+  cat <<'EOT'
+
+## Description
+Planner output emitted in delayed chunks.
+
+## Acceptance Criteria
+- [ ] mock file exists
+
+## Files to Modify/Create
+- "'`mock_file.txt` - created by implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOT
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  cat <<'"'EOT'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOT
+  echo \"implemented\" > mock_file.txt
+  git add mock_file.txt
+elif echo \""'$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'"'EOT'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'"'EOT'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'"'EOT'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOT
+elif echo \""'$INPUT" | grep -q "You are a project completion validator."; then
+  cat <<'"'EOT'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOT
+else
+  echo \"unrecognized prompt\" >&2
+  exit 1
+fi
+EOF
+chmod +x \""'$QA_B/slow-streaming.sh"
+
+"$RALPH_BIN" config set backends.claude.command "$QA_B/slow-streaming.sh"
+"$RALPH_BIN" config set backends.codex.command "$QA_B/slow-streaming.sh"
+
+cat > "$QA_B/prompt.md" <<'"'EOF'
+Manual QA prompt for mid-execution visibility.
+EOF
+\""'$RALPH_BIN" project new --id qa-stream-b --name "QA Streaming B" --prompt "$QA_B/prompt.md"
+
+git add slow-streaming.sh prompt.md
+git commit -q -m "add slow streaming mock"
+
+OUT_FILE="$(mktemp /tmp/qa-streaming-B-run-out-XXXXXX)"
+ERR_FILE="$(mktemp /tmp/qa-streaming-B-run-err-XXXXXX)"
+"$RALPH_BIN" run --loops 1 > "$OUT_FILE" 2> "$ERR_FILE" &
+RUN_PID=$!
+PLANNER_LOG="$QA_B/.ralph/projects/qa-stream-b/loops/001/agent-output-planner.log"
+DEADLINE=$((SECONDS + 12))
+OBSERVED_WHILE_RUNNING=0
+OBSERVED_SIZE=0
+while [ "$SECONDS" -lt "$DEADLINE" ]; do
+  if [ -f "$PLANNER_LOG" ]; then
+    SIZE=$(wc -c < "$PLANNER_LOG")
+    OBSERVED_SIZE=$SIZE
+    if [ "$SIZE" -gt 0 ] && kill -0 "$RUN_PID" 2>/dev/null; then
+      OBSERVED_WHILE_RUNNING=1
+      break
+    fi
+  fi
+  if ! kill -0 "$RUN_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
+wait "$RUN_PID"
+RC=$?
+FINAL_SIZE=$(wc -c < "$PLANNER_LOG")
+
+echo "RUN_RC=$RC"
+echo "OBSERVED_WHILE_RUNNING=$OBSERVED_WHILE_RUNNING"
+echo "OBSERVED_SIZE=$OBSERVED_SIZE"
+echo "FINAL_SIZE=$FINAL_SIZE"
+echo "OUT_FILE=$OUT_FILE"
+echo "ERR_FILE=$ERR_FILE"
+echo "--- run stdout tail ---"
+tail -n 10 "$OUT_FILE" || true
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 2.04s:
+RUN_RC=0
+OBSERVED_WHILE_RUNNING=1
+OBSERVED_SIZE=127
+FINAL_SIZE=351
+OUT_FILE=/tmp/qa-streaming-B-run-out-IW59F1
+ERR_FILE=/tmp/qa-streaming-B-run-err-k6CBrV
+--- run stdout tail ---
+ INFO ralph::workflow::orchestrator: starting review phase loop=1 iteration=1
+ INFO ralph::workflow::orchestrator: invoking reviewer... loop=1 backend="claude(opus)"
+ INFO ralph::workflow::orchestrator: reviewer approved changes loop=1
+ INFO ralph::workflow::orchestrator: starting commit phase loop=1
+loop 1: planner created feature spec
+loop 1: implementer wrote impl-notes
+loop 1: QA passed, proceeding to review
+loop 1: reviewer approved changes
+loop 1: reviewer suggested commit message 'feat: apply mock implementation'
+loop 1: committed and tagged (ralph/qa-stream-b/loop-1)
+
+thinking
+**Implementing timeout cleanup script**
+codex
+Scenario A/B manual checks succeeded. I’m now running the timeout scenario to verify real timeout behavior: partial output persistence, timeout footer emission, non-zero exit, and dead/reaped child PID after `ralph run` returns.
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/result/bin/ralph"
+QA_C="$(mktemp -d /tmp/qa-streaming-C-XXXXXX)"
+echo "QA_C=$QA_C"
+cd "$QA_C"
+git init -q
+git config user.name "QA"
+git config user.email "qa@example.com"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+
+"$RALPH_BIN" init
+
+PID_FILE="$QA_C/timeout-child.pid"
+cat > "$QA_C/timeout-hanging.sh" <<'"'EOF'
+#"'!/usr/bin/env bash
+set -euo pipefail
+INPUT="$(cat)"
+PID_FILE="__PID_FILE__"
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  echo $$ > "$PID_FILE"
+  printf '"'planner-partial-before-timeout'
+  sleep 30
+elif echo \""'$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  cat <<'"'EOT'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOT
+elif echo \""'$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'"'EOT'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'"'EOT'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOT
+elif echo \""'$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'"'EOT'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOT
+else
+  echo \"unrecognized prompt\" >&2
+  exit 1
+fi
+EOF
+sed -i \"s|__PID_FILE__|"'$PID_FILE|g" "$QA_C/timeout-hanging.sh"
+chmod +x "$QA_C/timeout-hanging.sh"
+
+"$RALPH_BIN" config set backends.claude.command "$QA_C/timeout-hanging.sh"
+"$RALPH_BIN" config set backends.codex.command "$QA_C/timeout-hanging.sh"
+"$RALPH_BIN" config set backends.claude.timeout_seconds 1
+"$RALPH_BIN" config set backends.codex.timeout_seconds 1
+
+cat > "$QA_C/prompt.md" <<'"'EOF'
+Manual QA prompt for timeout cleanup.
+EOF
+\""'$RALPH_BIN" project new --id qa-stream-c --name "QA Streaming C" --prompt "$QA_C/prompt.md"
+
+git add timeout-hanging.sh prompt.md
+git commit -q -m "add timeout hanging mock"
+
+OUT_FILE="$(mktemp /tmp/qa-streaming-C-run-out-XXXXXX)"
+ERR_FILE="$(mktemp /tmp/qa-streaming-C-run-err-XXXXXX)"
+set +e
+"$RALPH_BIN" run --loops 1 > "$OUT_FILE" 2> "$ERR_FILE"
+RC=$?
+set -e
+PROJECT_DIR="$QA_C/.ralph/projects/qa-stream-c"
+PLANNER_LOG="$PROJECT_DIR/loops/001/agent-output-planner.log"
+PID="$(cat "$PID_FILE")"
+
+set +e
+kill -0 "$PID" 2>/dev/null
+KILL_ZERO_RC=$?
+set -e
+
+if [ -d "/proc/$PID" ]; then
+  PROC_ALIVE=yes
+else
+  PROC_ALIVE=no
+fi
+
+echo "RUN_RC=$RC"
+echo "PID=$PID"
+echo "KILL_ZERO_RC=$KILL_ZERO_RC"
+echo "PROC_ALIVE=$PROC_ALIVE"
+echo "OUT_FILE=$OUT_FILE"
+echo "ERR_FILE=$ERR_FILE"
+echo "PLANNER_LOG=$PLANNER_LOG"
+echo "--- run stdout tail ---"
+tail -n 15 "$OUT_FILE" || true
+echo "--- run stderr tail ---"
+tail -n 15 "$ERR_FILE" || true
+echo "--- planner log tail ---"
+tail -n 30 "$PLANNER_LOG" || true
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+thinking
+**Observing command timeout behavior**
+
+thinking
+**Assessing command hang suspicion**
+ succeeded in 1m 33s:
+RUN_RC=1
+PID=2955865
+KILL_ZERO_RC=1
+PROC_ALIVE=no
+OUT_FILE=/tmp/qa-streaming-C-run-out-agP4Tj
+ERR_FILE=/tmp/qa-streaming-C-run-err-WMDcQC
+PLANNER_LOG=/tmp/qa-streaming-C-6dL9C3/.ralph/projects/qa-stream-c/loops/001/agent-output-planner.log
+--- run stdout tail ---
+ INFO ralph::workflow::orchestrator: checking backend availability...
+ INFO ralph::workflow::orchestrator: running prompt review...
+ INFO ralph::workflow::orchestrator: invoking prompt reviewer... backend="codex(gpt-5.3-codex-xhigh)"
+ INFO ralph::workflow::orchestrator: prompt review completed; prompt file updated
+ INFO ralph::workflow::orchestrator: starting planning phase loop=1
+ INFO ralph::workflow::orchestrator: invoking planner... loop=1 backend="claude(opus)"
+ WARN ralph::workflow::orchestrator: backend timeout, retrying... role="planner" backend=claude(opus) attempt=1 backoff_secs=1
+ WARN ralph::workflow::orchestrator: backend timeout, retrying... role="planner" backend=claude(opus) attempt=2 backoff_secs=2
+ WARN ralph::workflow::orchestrator: backend timeout, retries exhausted role="planner" backend=claude(opus)
+--- run stderr tail ---
+error: backend timeout retries exhausted for claude(opus) during planning after 3 attempts
+--- planner log tail ---
+
+thinking
+**Investigating timeout discrepancies**
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter streaming' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+thinking
+**Polling session status**
+ succeeded in 1m 34s:
+test streaming::prompt_reviewer_path ... ok
+ INFO ralph::workflow::orchestrator: checking backend availability...
+ INFO ralph::workflow::orchestrator: running prompt review...
+ INFO ralph::workflow::orchestrator: invoking prompt reviewer... backend="codex(gpt-5.3-codex-xhigh)"
+ INFO ralph::workflow::orchestrator: prompt review completed; prompt file updated
+ INFO ralph::workflow::orchestrator: starting planning phase loop=1
+ INFO ralph::workflow::orchestrator: invoking planner... loop=1 backend="claude(opus)"
+ INFO ralph::workflow::orchestrator: planner created feature spec loop=1 feature=Slow Streaming Feature
+ INFO ralph::workflow::orchestrator: starting implementing phase loop=1
+ INFO ralph::workflow::orchestrator: invoking implementer... loop=1 backend="codex(gpt-5.3-codex-high)"
+ INFO ralph::workflow::orchestrator: starting QA phase loop=1 iteration=1
+ INFO ralph::workflow::orchestrator: invoking QA... loop=1 backend="codex(gpt-5.3-codex-high)" iteration=1
+ INFO ralph::workflow::orchestrator: QA passed loop=1
+ INFO ralph::workflow::orchestrator: starting review phase loop=1 iteration=1
+ INFO ralph::workflow::orchestrator: invoking reviewer... loop=1 backend="claude(opus)"
+ INFO ralph::workflow::orchestrator: reviewer approved changes loop=1
+ INFO ralph::workflow::orchestrator: starting commit phase loop=1
+loop 1: planner created feature spec
+loop 1: implementer wrote impl-notes
+loop 1: QA passed, proceeding to review
+
+thinking
+**Running full validation**
+codex
+Targeted streaming conformance passed. I’m running the full `ralph validate` suite now as the regression backstop required by the acceptance criteria.
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27
+thinking
+**Designing completion polling**
+
+thinking
+**Continuing periodic check**
+codex
+Full conformance is still running and progressing; I’m waiting for final completion status, then I’ll do one final acceptance-criteria evidence sweep before delivering the QA verdict.
+ succeeded in 5m 33s:
+test mcp::malformed_json_returns_parse_error ... ok
+test mcp::tool_project_list_empty ... ok
+test mcp::tool_project_list_with_projects ... ok
+test mcp::tool_project_show_returns_state ... ok
+test mcp::tool_project_new_creates_project ... ok
+test mcp::tool_status_shows_project_info ... ok
+test mcp::tool_history_empty_project ... ok
+test mcp::tool_tail_empty_project ... ok
+test mcp::tool_config_show_global ... ok
+test mcp::tool_config_show_project ... ok
+test mcp::tool_unknown_returns_error ... ok
+test mcp::tool_project_new_missing_id ... ok
+test mcp::tool_project_new_missing_prompt_source ... ok
+test mcp::tool_project_new_mutual_exclusion ... ok
+test mcp::tool_config_show_mutual_exclusion ... ok
+test mcp::tool_status_no_project ... ok
+test project::new_creates_state ... ok
+test project::new_copies_prompt ... ok
+test project::new_activates_project ... ok
+test project::new_creates_branch ... ok
+
+thinking
+**Verifying log filename derivation**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "loop_slug|log_path_for_role|agent-output-" src/output_log.rs src/workflow/orchestrator.rs src/backend/mod.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/output_log.rs:8:pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+src/output_log.rs:9:    let filename = format!("agent-output-{role}.log");
+src/output_log.rs:84:        let path = log_path_for_role(project_dir, loop_number, role);
+src/output_log.rs:169:        let path = log_path_for_role(project_dir, Some(7), "implementer");
+src/output_log.rs:172:            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
+src/output_log.rs:179:        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
+src/output_log.rs:182:            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
+src/output_log.rs:189:        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
+src/output_log.rs:190:        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
+src/output_log.rs:194:            Path::new("/tmp/project/loops/000/agent-output-planner.log")
+src/output_log.rs:198:            Path::new("/tmp/project/loops/999/agent-output-planner.log")
+src/output_log.rs:205:        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
+src/output_log.rs:328:        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), "implementer"))
+src/output_log.rs:361:            temp.path().join("agent-output-prompt-reviewer.log")
+src/workflow/orchestrator.rs:410:                                    loop_slug: &slug,
+src/workflow/orchestrator.rs:442:                                    loop_slug: "completion",
+src/workflow/orchestrator.rs:469:                        loop_slug,
+src/workflow/orchestrator.rs:507:                            &loop_slug,
+src/workflow/orchestrator.rs:556:                                loop_slug: &loop_slug,
+src/workflow/orchestrator.rs:607:                            &loop_slug,
+
+thinking
+**Testing CLI edge cases**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27/result/bin/ralph"
+cd /tmp/qa-streaming-A-8KJZdx
+set +e
+OUT=$($RALPH_BIN project new --id edge-case --name "Edge Case" 2>&1)
+RC=$?
+set -e
+echo "RC=$RC"
+echo "$OUT"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+RC=2
+error: invalid input: provide exactly one of --prompt or --from
+
+thinking
+**Planning manual verification steps**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"read_buf|wait_with_output|from_utf8_lossy|execute_with_log|kill\\(|child\\.wait\\(|write_timeout_footer\" src/backend/mod.rs src/workflow/orchestrator.rs src/output_log.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/backend/mod.rs:36:    async fn execute_with_log(
+src/backend/mod.rs:156:        if let Err(err) = child.kill().await {
+src/backend/mod.rs:165:        if let Err(err) = child.wait().await {
+src/backend/mod.rs:241:                match stderr.read_buf(&mut chunk).await {
+src/backend/mod.rs:259:                let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
+src/backend/mod.rs:294:                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+src/backend/mod.rs:298:                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
+src/backend/mod.rs:309:                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
+src/backend/mod.rs:329:    async fn execute_with_log(
+src/backend/mod.rs:707:        let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
+src/backend/mod.rs:742:        let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
+src/backend/mod.rs:755:        let kill_rc = unsafe { libc::kill(pid, 0) };
+src/workflow/orchestrator.rs:2792:        match backend.execute_with_log(prompt, Some(log_writer)).await {
+src/output_log.rs:119:    pub fn write_timeout_footer(&mut self, timestamp: &str) {
+src/output_log.rs:305:        writer.write_timeout_footer("2026-01-01T00:00:00Z");
+
+thinking
+**Searching for specific function usage**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"wait_with_output\\(\" src | head" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/daemon/process.rs:179:                let output = child.wait_with_output().map_err(|err| {
+src/validate/harness.rs:101:        let output = child.wait_with_output()?;
+src/validate/tests_streaming.rs:245:        let output = child.wait_with_output().expect("wait_with_output");
+
+thinking
+**Investigating log filename derivation**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"log_path_for_role\\(\" src" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+src/output_log.rs:8:pub fn log_path_for_role(project_dir: &Path, loop_number: Option<u32>, role: &str) -> PathBuf {
+src/output_log.rs:84:        let path = log_path_for_role(project_dir, loop_number, role);
+src/output_log.rs:169:        let path = log_path_for_role(project_dir, Some(7), "implementer");
+src/output_log.rs:179:        let path = log_path_for_role(project_dir, None, "prompt-reviewer");
+src/output_log.rs:189:        let loop_zero = log_path_for_role(project_dir, Some(0), "planner");
+src/output_log.rs:190:        let loop_max = log_path_for_role(project_dir, Some(999), "planner");
+src/output_log.rs:328:        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), "implementer"))
+
+thinking
+**Verifying test registration**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"mod tests_streaming|tests_streaming::tests\\(\\)\" src/validate/mod.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+23:mod tests_streaming;
+91:    tests.extend(tests_streaming::tests());
+
+thinking
+**Verifying new streaming tests**
+exec
+/run/current-system/sw/bin/bash -lc "./result/bin/ralph validate --bin ./result/bin/ralph --list | rg '"'^streaming::'"'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 exited 1 in 51ms:
+
+
+thinking
+**Inspecting list head format**
+codex
+I’m doing a final quick registration check for the new conformance cases; the first grep pattern missed due formatting, so I’m listing and matching again to capture the exact test names in output.
+exec
+/run/current-system/sw/bin/bash -lc "./result/bin/ralph validate --bin ./result/bin/ralph --list | sed -n '1,220p' | rg 'streaming::|tests'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-27 succeeded in 51ms:
+running 188 tests
+test streaming::retry_append_behavior
+test streaming::prompt_reviewer_path
+test streaming::mid_execution_visibility
+test streaming::timeout_cleanup
+
+thinking
+**Planning detailed QA report**
+codex
+# QA: PASS
+
+## Manual Testing
+- Built and used real binary in isolated repos with mock backends:
+  - `./result/bin/ralph init`, `./result/bin/ralph config set ...`, `./result/bin/ralph project new ...`, `./result/bin/ralph run --loops 1`.
+- Retry + append + deterministic paths + prompt reviewer path (repo: `/tmp/qa-streaming-A-8KJZdx`):
+  - `RUN_RC=0`.
+  - `find ... -name 'agent-output-*.log'` showed:
+    - `.ralph/projects/qa-stream-a/agent-output-prompt-reviewer.log`
+    - `.ralph/projects/qa-stream-a/loops/001/agent-output-{planner,implementer,qa,reviewer}.log`
+  - `grep '^--- attempt=' .../agent-output-planner.log` showed multiple attempts in one file:
+    - `attempt=1 ... fallback=false ...`
+    - `attempt=2 ... fallback=true ...`
+  - `od -An -tx1 -N 140 .../agent-output-planner.log` contained `0d` byte (`... 31 30 25 0d 70 ...`) proving raw `\r` preserved.
+- Mid-execution visibility (repo: `/tmp/qa-streaming-B-9nec4b`):
+  - Ran `ralph run --loops 1` in background and polled log size.
+  - Observed while process still alive: `OBSERVED_WHILE_RUNNING=1`, `OBSERVED_SIZE=127`, `FINAL_SIZE=351`, `RUN_RC=0`.
+- Timeout cleanup (repo: `/tmp/qa-streaming-C-6dL9C3`):
+  - `RUN_RC=1`.
+  - stderr: `backend timeout retries exhausted for claude(opus) during planning after 3 attempts`.
+  - Planner log tail included partial output plus timeout footer each attempt:
+    - `planner-partial-before-timeout`
+    - `--- timeout ts=... ---`
+  - Child PID check after run: `KILL_ZERO_RC=1`, `PROC_ALIVE=no`.
+- CLI edge case:
+  - `./result/bin/ralph project new --id edge-case --name "Edge Case"` returned `RC=2` with `error: invalid input: provide exactly one of --prompt or --from`.
+
+## Automated Tests
+- `cargo build`: pass.
+- `cargo check`: pass.
+- `cargo test`: pass (`397 passed; 0 failed; 1 ignored` in lib tests; all integration suites passed, including new streaming unit tests).
+- `nix build -L`: pass (release build + check phase + conformance run; ended with `test result: ok. 188 passed; 0 failed; 0 skipped`).
+- `./result/bin/ralph validate --bin ./result/bin/ralph --filter streaming`: pass (`4 passed; 0 failed`).
+- `./result/bin/ralph validate --bin ./result/bin/ralph`: pass (`188 passed; 0 failed; 0 skipped`).
+
+## Acceptance Criteria Verification
+- [x] `read_buf()` streaming instead of `wait_with_output()` in backend path: verified by code check `rg -n "read_buf|wait_with_output" src/backend/mod.rs` (shows `read_buf`; no `wait_with_output` in backend module).
+- [x] Raw bytes preserved in capture/log: manual hexdump from planner log in scenario A includes literal `0d` (`\r`) and partial-line bytes.
+- [x] Chunk writes go to log in real time: scenario B observed planner log non-zero while `ralph run` still running (`OBSERVED_WHILE_RUNNING=1`).
+- [x] Final lossy conversion behavior preserved: code check shows `String::from_utf8_lossy` on accumulated output at return path (`src/backend/mod.rs`).
+- [x] Backend API accepts optional log writer: code check shows `execute_with_log(...)` and orchestrator uses it.
+- [x] Timeout does explicit kill + wait: code check shows `child.kill().await` and `child.wait().await`; manual PID dead after timeout run.
+- [x] Timeout footer written before timeout error: scenario C planner log contains `--- timeout ts=... ---`.
+- [x] Fatal timeout keeps partial output: scenario C planner log contains `planner-partial-before-timeout` before footer.
+- [x] No zombie child after timeout: scenario C `kill -0` failed and `/proc/<pid>` absent (`PROC_ALIVE=no`).
+- [x] Retry flow appends in one file with attribution separators: scenario A planner log has attempt 1 and 2 separators in same file with backend/fallback/timestamp.
+- [x] Deterministic role-based filenames (no loop slug/backend in filename): manual file listing shows `agent-output-{role}.log`; code search shows log path helper `log_path_for_role(project_dir, loop_number, role)`.
+- [x] Prompt reviewer root-level path when `loop_number` absent: scenario A has `.ralph/projects/qa-stream-a/agent-output-prompt-reviewer.log`.
+- [x] `tests_streaming` conformance registration: `rg` shows `mod tests_streaming;` and `tests.extend(tests_streaming::tests());`.
+- [x] Required conformance tests present and passing: validate list/run showed `streaming::mid_execution_visibility` and `streaming::timeout_cleanup` passing.
+- [x] `cargo test` passes: confirmed.
+- [x] `cargo check` passes with no new warnings: confirmed.
+- [x] Validate suite passes including new streaming tests: confirmed (`188/188` pass).
+- [x] No log filename derivation from `loop_slug`: code search for log path usage points to `src/output_log.rs` helper; loop slug appears in artifact paths, not log filename derivation.
+tokens used
+133,036
+
