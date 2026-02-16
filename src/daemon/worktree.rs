@@ -39,6 +39,20 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
 
     prune_worktrees(repo_root, task_id);
 
+    if let Err(err) = sync_remote_master(repo_root, task_id) {
+        eprintln!(
+            "warning: failed to sync origin master for task {task_id}; using local base ref: {err}"
+        );
+    }
+
+    let base_ref = if revision_exists(repo_root, "origin/master")? {
+        "origin/master"
+    } else if revision_exists(repo_root, "master")? {
+        "master"
+    } else {
+        "HEAD"
+    };
+
     // Check if the branch already exists (e.g. from a previous failed run
     // where the worktree was cleaned up but the branch was not).
     let branch_exists = Command::new("git")
@@ -67,7 +81,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
                 "-b",
                 &branch_name,
                 &wt_path.to_string_lossy(),
-                "HEAD",
+                base_ref,
             ])
             .current_dir(repo_root)
             .output()
@@ -89,6 +103,40 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     copy_workspace_config(workspace_root, &wt_path);
 
     Ok(wt_path)
+}
+
+fn sync_remote_master(repo_root: &Path, task_id: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["fetch", "origin", "master"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to fetch origin master for {task_id}: {err}"))
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(RalphError::Orchestration(format!(
+        "git fetch origin master failed for {task_id}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn revision_exists(repo_root: &Path, revision: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", revision])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to check git revision {revision} in {}: {err}",
+                repo_root.display()
+            ))
+        })?;
+
+    Ok(output.status.success())
 }
 
 /// Copy essential workspace config files from the main `.ralph/` into a
