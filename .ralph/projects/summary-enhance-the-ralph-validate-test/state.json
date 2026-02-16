@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "d15441dea2abff4e868d741f36b4a82a003486f8f25c1624453e7496e36264a7",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "backend-timeout-conformance-and-mock-script",
       "feature_name": "Backend Timeout Conformance and Mock Script Foundations",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -45,8 +45,39 @@
         ],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "80806afadb0aa5428ad807c469fab10b4fa81b3f",
       "started_at": "2026-02-16T02:11:08.324512944Z",
+      "completed_at": "2026-02-16T02:39:30.878399339Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "qareview-rollback-failure-semantics-and-impl",
+      "feature_name": "QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-qareview-rollback-failure-semantics-and-impl/20260216024344-spec.md",
+        "impl_notes": "loops/002-qareview-rollback-failure-semantics-and-impl/20260216024847-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/002-qareview-rollback-failure-semantics-and-impl/20260216025736-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-qareview-rollback-failure-semantics-and-impl/20260216025622-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T02:43:44.475207150Z",
       "completed_at": null
     }
   ],

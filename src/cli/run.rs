@@ -37,7 +37,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            if matches!(err, RalphError::BackendTimeoutExhausted { .. }) {
+            if matches!(
+                err,
+                RalphError::BackendTimeoutExhausted { .. }
+                    | RalphError::QaIterationLimitExceeded { .. }
+                    | RalphError::ReviewIterationLimitExceeded { .. }
+            ) {
                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
             }
             Err(err)

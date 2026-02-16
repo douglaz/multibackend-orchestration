@@ -1258,6 +1258,132 @@ esac
     .to_owned()
 }
 
+/// Mock script whose reviewer rejects on the first iteration and approves on
+/// the second. This produces exactly one review-feedback cycle, generating
+/// `*-impl-response-001.md` before final approval.
+pub fn review_feedback_once_then_approve_script(review_counter: &std::path::Path) -> String {
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+REVIEW_COUNTER="{review_counter}"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  cat <<'EOF'
+# Feature: Feedback Feature
+
+## Description
+Mock feature used by impl-response conformance tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback: tightened mock validation.
+
+## Could Not Address
+- None
+
+## Pending Changes (Pre-Commit)
+- Updated mock_file.txt with validated content
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  RCOUNT="$(cat "$REVIEW_COUNTER" 2>/dev/null || echo 0)"
+  RCOUNT=$((RCOUNT + 1))
+  echo "$RCOUNT" > "$REVIEW_COUNTER"
+  if [ "$RCOUNT" -le 1 ]; then
+    cat <<'EOF'
+# Review: SUGGESTIONS
+
+## Required Changes
+1. Tighten mock validation behavior.
+EOF
+  else
+    cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Feedback addressed.
+
+## Commit Message
+feat: apply mock implementation after review feedback
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###,
+        review_counter = review_counter.to_string_lossy(),
+    )
+}
+
 pub fn always_reject_review_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
