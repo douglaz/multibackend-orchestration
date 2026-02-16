@@ -190,7 +190,7 @@ Nothing.
 EOF
 # --- Standard orchestration prompts ---
 elif echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
-  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" && "${RALPH_E2E_FORCE_FEATURE:-no}" != "yes" ]]; then
     cat <<'EOF'
 # Project Completion Request
 
@@ -326,6 +326,9 @@ pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
     format!(
         "#!/bin/sh\n\
 set -eu\n\
+if [ \"${{1:-}}\" = \"auto\" ]; then\n\
+  shift\n\
+fi\n\
 exec {quoted} auto \"$@\"\n"
     )
 }
@@ -375,7 +378,20 @@ case "${1:-}" in
     case "${2:-}" in
       list) printf '[]'; exit 0 ;;
       edit) exit 0 ;;
-      view) printf '' ; exit 0 ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{"title":"","body":"E2E issue context from mock gh."}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
       comment) exit 0 ;;
     esac
     ;;
@@ -394,6 +410,51 @@ esac
 
 echo "mock gh: unhandled command: $*" >&2
 exit 1
+"###
+    .to_owned()
+}
+
+/// Mock backend script that consumes stdin and exits non-zero.
+///
+/// Optional logging:
+/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
+/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
+pub fn nonzero_exit_backend_script() -> String {
+    r###"#!/bin/sh
+set -eu
+
+cat >/dev/null
+if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
+  printf '%s:nonzero\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" >> "${RALPH_VALIDATE_BACKEND_LOG}"
+fi
+echo "intentional backend failure" >&2
+exit 17
+"###
+    .to_owned()
+}
+
+/// Mock backend script that consumes stdin and returns empty output with exit 0.
+///
+/// Optional logging:
+/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
+/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
+pub fn empty_output_backend_script() -> String {
+    r###"#!/bin/sh
+set -eu
+
+input="$(cat)"
+if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
+  kind="normal"
+  if printf '%s' "$input" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+    kind="reformatter_prompt"
+  elif printf '%s' "$input" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+    kind="format_reminder"
+  fi
+  printf '%s:%s\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" "$kind" >> "${RALPH_VALIDATE_BACKEND_LOG}"
+fi
+
+# Intentionally produce no stdout so orchestrator exercises empty-output handling.
+exit 0
 "###
     .to_owned()
 }

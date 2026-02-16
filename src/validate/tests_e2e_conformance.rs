@@ -1,17 +1,33 @@
 use super::*;
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::{e2e_mock_gh_logging_script, e2e_mock_ralph_script};
-use serde_json::json;
+use crate::validate::mock_scripts::{
+    auto_mock_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
+    empty_output_backend_script, nonzero_exit_backend_script,
+};
+use serde_json::{json, Value};
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
         ConformanceTest {
             name: "e2e_conformance::backend_timeout_exhausted_fails_task",
             func: backend_timeout_exhausted_fails_task,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::backend_command_failed_no_reformatter",
+            func: backend_command_failed_no_reformatter,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::empty_output_retries_then_reformatter",
+            func: empty_output_retries_then_reformatter,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::pr_metadata_verification",
+            func: pr_metadata_verification,
         },
         ConformanceTest {
             name: "e2e_conformance::e2e_mock_ralph_script_delegates_to_auto",
@@ -76,6 +92,351 @@ fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
             state["status"],
             json!("failed"),
             "project should be marked failed after backend timeout"
+        );
+    })
+}
+
+fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "e2e-backend-command-failed";
+        h.init_workspace().expect("init failed");
+
+        let claude_script = h
+            .write_mock_script("backend-nonzero.sh", &nonzero_exit_backend_script())
+            .expect("failed to write nonzero backend script");
+
+        let codex_log = h.temp_dir.path().join("reformatter-should-not-run.log");
+        let codex_log_str = codex_log.to_string_lossy().into_owned();
+        let codex_script = h
+            .write_mock_script(
+                "reformatter-should-not-run.sh",
+                &format!(
+                    "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf 'unexpected reformatter call\\n' >> \"{codex_log_str}\"\nexit 0\n"
+                ),
+            )
+            .expect("failed to write codex marker script");
+        h.setup_separate_mock_backends(&claude_script, &codex_script)
+            .expect("setup_separate_mock_backends failed");
+
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        h.create_project(
+            project_id,
+            "Backend Command Failed Project",
+            "Backend command failure reformatter boundary test prompt",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit for backend non-zero command failure"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.to_lowercase().contains("backend command failed"),
+            "expected backend command failure in stderr, got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("requesting reformat via"),
+            "backend command failure must not trigger reformatter fallback, got:\n{stderr}"
+        );
+        assert!(
+            !codex_log.exists(),
+            "reformatter backend should not run on BackendCommandFailed"
+        );
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_eq!(
+            state["status"],
+            json!("failed"),
+            "project should be marked failed after BackendCommandFailed"
+        );
+    })
+}
+
+fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "e2e-empty-output";
+        h.init_workspace().expect("init failed");
+
+        let claude_script = h
+            .write_mock_script("backend-empty-output.sh", &empty_output_backend_script())
+            .expect("failed to write empty-output backend script");
+        let codex_script = h
+            .write_mock_script(
+                "backend-reformatter-nonzero.sh",
+                &nonzero_exit_backend_script(),
+            )
+            .expect("failed to write nonzero reformatter backend script");
+        h.setup_separate_mock_backends(&claude_script, &codex_script)
+            .expect("setup_separate_mock_backends failed");
+
+        let call_log = h.temp_dir.path().join("backend-call-order.log");
+        let call_log_str = call_log.to_string_lossy().into_owned();
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.env.RALPH_VALIDATE_BACKEND_LOG",
+            &call_log_str,
+        ])
+        .expect("config set claude log path failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.env.RALPH_VALIDATE_BACKEND_LABEL",
+            "claude",
+        ])
+        .expect("config set claude label failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.codex.env.RALPH_VALIDATE_BACKEND_LOG",
+            &call_log_str,
+        ])
+        .expect("config set codex log path failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.codex.env.RALPH_VALIDATE_BACKEND_LABEL",
+            "codex",
+        ])
+        .expect("config set codex label failed");
+
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        h.create_project(
+            project_id,
+            "Empty Output Retry Project",
+            "Empty backend output should retry and then attempt reformatter",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit after empty output and failed reformatter attempt"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.to_lowercase().contains("backend command failed"),
+            "expected backend command failure after reformatter attempt, got:\n{stderr}"
+        );
+
+        let call_lines = fs::read_to_string(&call_log)
+            .expect("failed to read backend call log")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert!(
+            call_lines.len() >= 3,
+            "expected at least 3 backend invocations, got {} lines:\n{}",
+            call_lines.len(),
+            call_lines.join("\n")
+        );
+        assert!(
+            call_lines[0].starts_with("claude:"),
+            "first invocation should be claude primary backend, got: {}",
+            call_lines[0]
+        );
+        assert!(
+            call_lines[1].starts_with("claude:"),
+            "second invocation should be same-backend retry, got: {}",
+            call_lines[1]
+        );
+        assert!(
+            call_lines.iter().any(|line| line.starts_with("codex:")),
+            "expected reformatter backend invocation after same-backend retry, got lines:\n{}",
+            call_lines.join("\n")
+        );
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_eq!(
+            state["status"],
+            json!("failed"),
+            "project should be marked failed when parse-repair path ultimately fails"
+        );
+    })
+}
+
+fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        let auto_backend = h
+            .write_mock_script("auto-mock.sh", &auto_mock_script())
+            .expect("failed to write auto mock backend");
+        h.setup_mock_backends_stable(&auto_backend)
+            .expect("setup_mock_backends_stable failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("config set workspace.daemon_refinement_enabled failed");
+
+        let gh_script = h
+            .write_mock_script("gh", &e2e_mock_gh_logging_script())
+            .expect("failed to write e2e gh script");
+        let gh_dir = gh_script
+            .parent()
+            .expect("mock gh script should have parent directory");
+        let path_env = format!(
+            "{}:{}",
+            gh_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let delegate_ralph_script = h
+            .write_mock_script(
+                "daemon-ralph-e2e-delegate.sh",
+                &e2e_mock_ralph_script(&h.ralph_bin),
+            )
+            .expect("failed to write daemon e2e delegate script");
+        let delegate_ralph_bin = delegate_ralph_script.to_string_lossy().into_owned();
+        let daemon_ralph_script = h
+            .write_mock_script(
+                "daemon-ralph-e2e-auto.sh",
+                &format!(
+                    r#"#!/bin/sh
+set -eu
+
+"{delegate_ralph_bin}" "$@" --dry-run
+
+bare_dir="$(pwd)/../_bare_remote.git"
+if [ ! -d "$bare_dir" ]; then
+  git init --bare "$bare_dir" --quiet 2>/dev/null
+fi
+git remote remove origin 2>/dev/null || true
+git remote add origin "$bare_dir"
+
+git checkout -B ralph/mock-project-branch 2>/dev/null
+echo "mock change for pr metadata" > ralph_daemon_change.txt
+git add ralph_daemon_change.txt
+git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
+"#
+                ),
+            )
+            .expect("failed to write daemon e2e auto wrapper script");
+        let daemon_ralph_bin = daemon_ralph_script.to_string_lossy().into_owned();
+
+        let task_id = "acme-widgets-901";
+        let issue_number = 901_u32;
+        write_tasks(
+            h,
+            vec![task_json(
+                task_id,
+                "pending",
+                issue_number,
+                "acme",
+                "widgets",
+            )],
+        )
+        .expect("write_tasks failed");
+
+        let gh_log_path = h.temp_dir.path().join("gh-pr-create-e2e.log");
+        let gh_log_str = gh_log_path.to_string_lossy().into_owned();
+        let env_vars = [
+            ("PATH", path_env.as_str()),
+            ("RALPH_DAEMON_BIN", daemon_ralph_bin.as_str()),
+            ("RALPH_E2E_GH_LOG", gh_log_str.as_str()),
+        ];
+
+        let output = h
+            .ralph_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &env_vars,
+            )
+            .expect("daemon start should execute");
+        assert_eq!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected daemon start single iteration to succeed; stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let tasks_snapshot = load_tasks(h)
+            .map(|tasks| serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".to_owned()))
+            .unwrap_or_else(|err| format!("load_tasks error: {err}"));
+        assert!(
+            gh_log_path.exists(),
+            "expected gh pr create invocation log\nstdout:\n{}\nstderr:\n{}\ntasks:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            tasks_snapshot
+        );
+        let log_content = fs::read_to_string(&gh_log_path).expect("failed to read gh log");
+        let args = parse_logged_args(&log_content);
+
+        let title = arg_value(&args, "--title").expect("missing --title argument in gh log");
+        assert!(
+            title.starts_with("ralph:"),
+            "expected --title value to begin with 'ralph:', got: {title}"
+        );
+
+        let head = arg_value(&args, "--head").expect("missing --head argument in gh log");
+        assert!(
+            !head.trim().is_empty(),
+            "expected non-empty --head value, got: {head:?}"
+        );
+
+        let repo = arg_value(&args, "--repo").expect("missing --repo argument in gh log");
+        assert_eq!(
+            repo, "acme/widgets",
+            "expected --repo acme/widgets in gh log"
+        );
+
+        assert!(
+            args.iter().any(|arg| arg == "--body-file"),
+            "expected --body-file flag in gh pr create args, got:\n{}",
+            args.join(" ")
+        );
+
+        let body = extract_logged_body(&log_content).expect("missing logged --body-file content");
+        assert!(
+            body.contains(&format!("Closes #{issue_number}")),
+            "expected body to contain issue closure line, got:\n{body}"
+        );
+        assert!(
+            body.contains("## Diff Stat"),
+            "expected body to contain diff stat section, got:\n{body}"
+        );
+        assert!(
+            body.contains("Project Ref: `"),
+            "expected body to contain project reference footer, got:\n{body}"
+        );
+        assert!(
+            !body.contains("Project Ref: unavailable"),
+            "expected resolved project reference (not unavailable), got:\n{body}"
+        );
+
+        let tasks = load_tasks(h).expect("load_tasks failed");
+        let task = tasks
+            .iter()
+            .find(|t| t["task_id"] == task_id)
+            .expect("task should exist");
+        assert_eq!(
+            task["state"],
+            json!("completed"),
+            "expected task to complete in e2e PR metadata flow"
+        );
+        assert!(
+            task["pr_url"].as_str().is_some(),
+            "expected pr_url to be populated after gh pr create"
         );
     })
 }
@@ -193,6 +554,66 @@ sleep 30
 echo "unreachable"
 "#
     .to_owned()
+}
+
+fn parse_logged_args(log_content: &str) -> Vec<String> {
+    log_content
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("arg[")?;
+            let (_, value) = rest.split_once("]=")?;
+            Some(value.to_owned())
+        })
+        .collect()
+}
+
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|window| window[0] == flag)
+        .map(|window| window[1].as_str())
+}
+
+fn extract_logged_body(log_content: &str) -> Option<String> {
+    let marker = "body_begin\n";
+    let start = log_content.find(marker)? + marker.len();
+    let tail = &log_content[start..];
+    let end = tail.find("\nbody_end")?;
+    Some(tail[..end].to_owned())
+}
+
+fn write_tasks(h: &RalphHarness, tasks: Vec<Value>) -> crate::Result<()> {
+    let path = tasks_path(h);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&tasks)?)?;
+    Ok(())
+}
+
+fn load_tasks(h: &RalphHarness) -> crate::Result<Vec<Value>> {
+    let raw = fs::read_to_string(tasks_path(h))?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+fn tasks_path(h: &RalphHarness) -> PathBuf {
+    h.repo_root.join(".ralph").join("daemon").join("tasks.json")
+}
+
+fn task_json(task_id: &str, state: &str, issue_number: u32, owner: &str, repo: &str) -> Value {
+    json!({
+        "task_id": task_id,
+        "state": state,
+        "issue_number": issue_number,
+        "owner": owner,
+        "repo": repo,
+        "project_id": null,
+        "child_pid": null,
+        "child_pgid": null,
+        "branch": null,
+        "pr_url": null,
+        "created_at": "2026-02-16T00:00:00Z",
+        "updated_at": "2026-02-16T00:00:00Z"
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult

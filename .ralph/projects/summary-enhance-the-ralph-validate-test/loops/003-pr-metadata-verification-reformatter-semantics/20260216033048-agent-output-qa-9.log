@@ -1,0 +1,3887 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: FAIL
+
+## Failures
+1. `pr_metadata_verification` does not follow the spec’s required real-`ralph auto` path.
+   - Command: `sed -n '270,315p' src/validate/tests_e2e_conformance.rs`
+   - Expected: use of `e2e_mock_ralph_script(&h.ralph_bin)` / real `ralph auto` execution path (per normative rule #1).
+   - Actual: test wires `daemon_mock_ralph_with_branch_switch_script()`:
+     ```rust
+     &daemon_mock_ralph_with_branch_switch_script(),
+     ```
+   - Result: normative requirement “happy-path tests for `ralph auto` must use `auto_mock_script()` through real `ralph auto`” is not met by this test.
+
+2. `docs/validate-e2e.md` contains a mapping claim that does not match the implementation.
+   - Command: `sed -n '6,13p' docs/validate-e2e.md`
+   - Actual docs text says `pr_metadata_verification` is “daemon-dispatched real `ralph auto` with `auto_mock_script()` backends”.
+   - Command: `rg -n 'pr_metadata_verification|daemon_mock_ralph_with_branch_switch_script' src/validate/tests_e2e_conformance.rs`
+   - Actual implementation shows `pr_metadata_verification` uses `daemon_mock_ralph_with_branch_switch_script`, not real `ralph auto` via `auto_mock_script()`.
+
+## Suggested Fixes
+1. Update `pr_metadata_verification` in `src/validate/tests_e2e_conformance.rs` to execute the real auto path (use `e2e_mock_ralph_script(&h.ralph_bin)` or equivalent direct `ralph auto` invocation) and ensure `auto_mock_script()` semantics are exercised.
+2. Update `docs/validate-e2e.md` mapping text to exactly reflect actual test behavior after the code fix (or, if keeping current behavior, remove the “real `ralph auto` with `auto_mock_script()`” claim).
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c6475-e594-7c53-a02f-caaba243041f
+--------
+user
+You are a QA engineer validating an implementation against its specification.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- `<TS>-impl-notes.md`
+- The current implementation diff
+
+Your PRIMARY job is manual, hands-on testing — exercise the actual product as a real user would. Automated test suites are a secondary confirmation, not a substitute for real verification.
+
+Your job is to:
+1. **Build the project** so you have a working artifact (e.g. `cargo build`, `npm run build`, `nix build`, etc.)
+2. **Manually test the implemented feature end-to-end** by actually using it:
+   - For CLI tools: run the built binary with real arguments, inspect stdout/stderr, check exit codes, test edge cases (missing args, bad input, help flags, etc.)
+   - For APIs: make real HTTP requests (e.g. `curl`, `wget`) against a running server, verify response bodies, status codes, headers
+   - For libraries: write and execute small ad-hoc scripts that import and exercise the new functionality
+   - For UI changes: launch the application and interact with it, verify visual/behavioral correctness
+3. **Verify each acceptance criterion from the spec individually** with a concrete manual test — do not just assume passing unit tests means the criterion is satisfied
+4. **Run automated test suites** (e.g. `cargo test`, `npm test`) as a secondary check to catch regressions
+5. Report concrete commands executed, their actual output, and your interpretation
+6. Do NOT edit any source files — only run checks and report findings
+
+IMPORTANT: A QA pass requires evidence of REAL usage, not just "all tests passed." If the spec says "ralph init creates a config file," you must actually run `ralph init` in a temp directory and verify the file exists with correct contents. If the spec says "the API returns 404 for missing resources," you must actually curl that endpoint and show the 404 response.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If all checks pass:
+
+# QA: PASS
+
+## Manual Testing
+- <what you tested manually, the commands you ran, and what you observed>
+- <another manual test with actual output snippets>
+
+## Automated Tests
+- <command 1>: <result summary>
+- <command 2>: <result summary>
+
+## Acceptance Criteria Verification
+- [ ] <criterion 1>: <how you verified it manually, with evidence>
+- [ ] <criterion 2>: <how you verified it manually, with evidence>
+
+---
+
+If any checks fail:
+
+# QA: FAIL
+
+## Failures
+1. <what failed and how — include the actual command, expected output, and actual output>
+2. <another failure if applicable>
+
+## Suggested Fixes
+1. <concrete fix suggestion tied to a failure>
+2. <another fix if applicable>
+
+---
+
+## Context Provided
+
+### Master Prompt
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+### Feature Specification
+---
+artifact: spec
+loop: 3
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T02:59:44Z
+---
+
+Now I have complete clarity. Let me summarize what remains and write the spec for the next feature.
+
+**Completed (Loop 1 + 2):**
+1. `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helpers
+2. `backend_timeout_exhausted_fails_task` test (including no-reformatter assertion)
+3. QA/review rollback failure tests (renamed, hardened with `--loops 1`, `failed` status, empty loops, absent directory)
+4. `impl_response_artifact_on_review_feedback` test
+
+**Still missing from master prompt:**
+1. **`pr_metadata_verification` test** — E2E test using `e2e_mock_gh_logging_script()` to capture and assert full PR create args (`--title` with `ralph:` prefix, `--body-file` with `Closes #<N>`, diff stat, project ref, `--head`, `--repo`). The existing daemon tests cover partial body content but NOT the integrated E2E path with the gh logging script.
+2. **Reformatter semantics coverage** — No tests in `validate/` explicitly test: non-zero exit → `BackendCommandFailed` + no reformatter; empty output → retry then reformatter. The timeout→no-reformatter case IS covered by loop 1.
+3. **`docs/validate-e2e.md`** — Does not exist yet.
+
+These three items can reasonably be grouped into one final loop since PR metadata is a single test, reformatter semantics are 2-3 focused tests, and the docs file is mechanical documentation. Let me write the spec.
+
+# Feature: PR Metadata Verification, Reformatter Semantics Coverage, and E2E Documentation
+
+## Description
+Complete the final three requirements from the master prompt: (1) add a `pr_metadata_verification` E2E conformance test that uses `e2e_mock_gh_logging_script()` to capture and assert all required PR creation flags and body content through a real `ralph auto` run; (2) add reformatter fallback boundary tests covering `BackendCommandFailed` (non-zero exit, no reformatter) and empty-output retry-then-reformatter semantics; (3) create `docs/validate-e2e.md` with the five required sections (architecture overview, test-to-requirement mapping, running instructions, troubleshooting, adding-new-tests template).
+
+## Acceptance Criteria
+- [ ] `pr_metadata_verification` test exists in `src/validate/tests_e2e_conformance.rs`, uses `e2e_mock_gh_logging_script()` to capture full `gh pr create` invocation through the orchestration pipeline
+- [ ] PR metadata test asserts `--title` value begins with `ralph:` prefix
+- [ ] PR metadata test asserts `--body-file` content contains `Closes #<N>` (issue number), a diff stat section, and a project reference
+- [ ] PR metadata test asserts `--head` and `--repo` flags are present in captured args
+- [ ] `backend_command_failed_no_reformatter` test exists: mock backend exits non-zero, asserts `BackendCommandFailed` error is surfaced, asserts no reformatter fallback is triggered, asserts task ends `failed`
+- [ ] `empty_output_retries_then_reformatter` test exists: mock backend returns empty output, asserts same-backend retry occurs first, then reformatter fallback is attempted
+- [ ] Existing `backend_timeout_exhausted_fails_task` already covers timeout → no reformatter; no duplication needed
+- [ ] All new tests registered in the `tests()` function of `tests_e2e_conformance.rs` and wired via `mod.rs`
+- [ ] `docs/validate-e2e.md` exists with exactly five sections: (1) Architecture overview, (2) Test-to-requirement mapping, (3) Running instructions, (4) Troubleshooting, (5) Adding-new-tests template
+- [ ] Documentation test-to-requirement mapping covers all tests from loops 1-3 mapped to master prompt normative rules
+- [ ] All existing tests continue to pass (`cargo test` and `ralph validate` green)
+
+## Files to Modify/Create
+- `src/validate/tests_e2e_conformance.rs` — Add `pr_metadata_verification`, `backend_command_failed_no_reformatter`, and `empty_output_retries_then_reformatter` tests; register in `tests()` vec
+- `src/validate/mock_scripts.rs` — Add helper scripts: `nonzero_exit_backend_script()` (backend that exits non-zero after consuming input), `empty_output_backend_script()` (backend that produces no output); potentially add `e2e_mock_gh_with_env_logging()` variant if the existing `e2e_mock_gh_logging_script()` needs environment wiring for the orchestration integration path
+- `src/validate/harness.rs` — Add any needed helpers for configuring reformatter backend settings or capturing reformatter invocation logs if not already available
+- `docs/validate-e2e.md` — New file with all five required documentation sections
+
+## Dependencies
+- Requires: Backend Timeout Conformance and Mock Script Foundations (loop 1), QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance (loop 2)
+- Blocks: none (final feature; completes all master prompt requirements)
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 3
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T03:19:33Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added loop-3 E2E conformance coverage in `src/validate/tests_e2e_conformance.rs`:
+  - `e2e_conformance::pr_metadata_verification`
+  - `e2e_conformance::backend_command_failed_no_reformatter`
+  - `e2e_conformance::empty_output_retries_then_reformatter`
+- Added reusable mock helpers in `src/validate/mock_scripts.rs`:
+  - `nonzero_exit_backend_script()`
+  - `empty_output_backend_script()`
+  - Extended `e2e_mock_gh_logging_script()` to return deterministic `issue view --json title,body` data needed by E2E flows.
+- Updated run failure handling in `src/cli/run.rs` so `BackendCommandFailed` and `ParseRetriesExhausted` also mark project state as `failed`, matching the new conformance expectations.
+- Added `docs/validate-e2e.md` with the required five sections and requirement-to-test mapping.
+
+## Spec Deviations
+- `pr_metadata_verification` uses daemon dispatch with `daemon_mock_ralph_with_branch_switch_script()` (in `src/validate/tests_e2e_conformance.rs`) instead of a real child `ralph auto` execution. The real-auto path in this harness hit a deterministic IO failure before PR flow; the selected path still validates full `gh pr create` metadata/body assertions end-to-end through daemon PR handling.
+
+## Testing
+- `nix develop -c cargo check` (pass)
+- `nix develop -c cargo test` (pass)
+- `nix build -L` (pass; includes full conformance in build check phase)
+- `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (pass)
+- `./result/bin/ralph validate --bin ./result/bin/ralph` (pass)
+
+
+### Implementation Diff
+diff --git a/docs/validate-e2e.md b/docs/validate-e2e.md
+new file mode 100644
+index 0000000..bcf6492
+--- /dev/null
++++ b/docs/validate-e2e.md
+@@ -0,0 +1,39 @@
++# Validate E2E Conformance
++
++## Architecture overview
++The validate E2E conformance tests run the compiled `ralph` binary in isolated temporary git repositories via `RalphHarness`, with deterministic mock backends and mock `gh` scripts. Tests exercise real CLI entry points (`run`, `auto`, `daemon start`) and assert persisted state (`.ralph/projects/*/state.json`, `.ralph/daemon/tasks.json`), loop artifacts, and command/PR side effects.
++
++## Test-to-requirement mapping
++| Normative requirement | Conformance test(s) |
++| --- | --- |
++| 1. `ralph auto` happy-path tests must use `auto_mock_script()` | `e2e_conformance::pr_metadata_verification` (daemon-dispatched real `ralph auto` with `auto_mock_script()` backends), `auto_init::*` tests in `tests_auto_init.rs` |
++| 2. QA/review rollback failure removes loop and fails with `--loops 1` | `qa::iteration_limit_fails`, `run::review_limit_fails` |
++| 3. Timeout surfaces `BackendTimeoutExhausted` and task/project fails | `e2e_conformance::backend_timeout_exhausted_fails_task` |
++| 4. Reformatter boundaries (parse-error only; non-zero/timeout no reformatter; empty output retry then reformatter) | `e2e_conformance::backend_command_failed_no_reformatter`, `e2e_conformance::backend_timeout_exhausted_fails_task`, `e2e_conformance::empty_output_retries_then_reformatter` |
++| 5. Review-feedback path writes `*-impl-response-001.md` with required frontmatter/body | `run::impl_response_artifact_on_review_feedback` |
++| 6. PR metadata includes `ralph:` title prefix, `--body-file` body requirements, `--head`, `--repo` | `e2e_conformance::pr_metadata_verification` |
++
++## Running instructions
++1. Build and type-check:
++   `nix develop -c cargo check`
++2. Run unit/integration tests:
++   `nix develop -c cargo test`
++3. Build release binary:
++   `nix build -L`
++4. Run validate sanity subset:
++   `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp`
++5. Run full conformance suite:
++   `./result/bin/ralph validate --bin ./result/bin/ralph`
++
++## Troubleshooting
++- If daemon PR tests do not create a PR, verify the test sets an `origin` remote and that mock `gh` is first in `PATH`.
++- If backend scripts fail only in Nix environments, prefer `setup_mock_backends_stable()` so wrappers use `/bin/sh` + `bash` and clear default backend args.
++- If reformatter-semantics assertions fail, inspect stderr for `requesting reformat via` and inspect mock backend invocation logs (`RALPH_VALIDATE_BACKEND_LOG`).
++- If tests appear stuck, confirm the mock auto backend can reach completion deterministically (for E2E, set `RALPH_COMPLETE=yes` and `RALPH_E2E_FORCE_FEATURE=yes`).
++
++## Adding-new-tests template
++1. Add a `ConformanceTest` entry in the relevant `src/validate/tests_*.rs` module `tests()` list.
++2. Implement `fn <name>(h: &RalphHarness) -> TestResult` wrapped with `run_case(|| { ... })`.
++3. Use harness helpers to initialize workspace, configure mock backends/scripts, and execute real CLI commands.
++4. Assert user-visible behavior (exit code, stderr/stdout), persisted state files, and artifact naming/content.
++5. If external-process behavior is required, add a deterministic helper in `src/validate/mock_scripts.rs` and log invocations for explicit assertions.
+diff --git a/src/cli/daemon.rs b/src/cli/daemon.rs
+index 2e14235..6d6e068 100644
+--- a/src/cli/daemon.rs
++++ b/src/cli/daemon.rs
+@@ -225,14 +225,12 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+ fn preflight_check_gh() -> Result<()> {
+     match Command::new("gh").arg("--version").output() {
+         Ok(_) => Ok(()),
+-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+-            Err(RalphError::Validation(
+-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
++            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+                  post comments, and create PRs. Install it from https://cli.github.com/ \
+                  or run inside `nix develop`."
+-                    .to_owned(),
+-            ))
+-        }
++                .to_owned(),
++        )),
+         Err(err) => Err(RalphError::Validation(format!(
+             "gh (GitHub CLI) check failed: {err}"
+         ))),
+diff --git a/src/cli/run.rs b/src/cli/run.rs
+index 4a9549b..5fd3199 100644
+--- a/src/cli/run.rs
++++ b/src/cli/run.rs
+@@ -42,6 +42,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
+                 RalphError::BackendTimeoutExhausted { .. }
+                     | RalphError::QaIterationLimitExceeded { .. }
+                     | RalphError::ReviewIterationLimitExceeded { .. }
++                    | RalphError::BackendCommandFailed { .. }
++                    | RalphError::ParseRetriesExhausted { .. }
+             ) {
+                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
+             }
+diff --git a/src/daemon/github.rs b/src/daemon/github.rs
+index da3f7ed..85d6cba 100644
+--- a/src/daemon/github.rs
++++ b/src/daemon/github.rs
+@@ -239,9 +239,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
+         ])
+         .output()
+         .map_err(|err| {
+-            RalphError::Orchestration(format!(
+-                "failed to run gh issue edit --title: {err}"
+-            ))
++            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
+         })?;
+ 
+     if !output.status.success() {
+@@ -477,11 +475,7 @@ pub fn create_pr_with_body_file(
+ }
+ 
+ /// Edit an existing PR by URL using `--body-file` for large body content.
+-pub fn edit_pr(
+-    pr_url: &str,
+-    title: &str,
+-    body_file: &std::path::Path,
+-) -> Result<()> {
++pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
+     let body_file_str = body_file.to_string_lossy();
+     let output = Command::new("gh")
+         .args([
+@@ -796,7 +790,10 @@ mod tests {
+ 
+     use tempfile::tempdir;
+ 
+-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
++    use super::{
++        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
++        PrMergeStatus,
++    };
+ 
+     #[test]
+     fn gh_issue_deserialization_supports_body_present() {
+diff --git a/src/daemon/refine.rs b/src/daemon/refine.rs
+index 3c06d47..1146e7b 100644
+--- a/src/daemon/refine.rs
++++ b/src/daemon/refine.rs
+@@ -229,9 +229,8 @@ mod tests {
+     #[test]
+     fn parse_refined_output_rejects_overlong_title() {
+         let title = "a".repeat(MAX_TITLE_LENGTH + 1);
+-        let input = format!(
+-            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
+-        );
++        let input =
++            format!("TITLE: {title}\n---\nThis is a sufficiently long body for refinement output.");
+         let err = parse_refined_output(&input).unwrap_err();
+         assert!(err.to_string().contains("title too long"));
+     }
+diff --git a/src/daemon/runtime.rs b/src/daemon/runtime.rs
+index 6ec4550..34ac0f3 100644
+--- a/src/daemon/runtime.rs
++++ b/src/daemon/runtime.rs
+@@ -964,10 +964,7 @@ async fn complete_task(
+             }
+         }
+         if let Err(err) = handle_pr_flow(store, config, &task).await {
+-            eprintln!(
+-                "warning: PR flow failed for {}: {err}",
+-                task.task_id
+-            );
++            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
+         }
+     }
+ 
+@@ -1040,7 +1037,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
+     }
+ }
+ 
+-
+ // =============================================================================
+ // Auto-Rebase Phase
+ // =============================================================================
+@@ -1077,17 +1073,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+     for task in &all_tasks {
+         // Explicit skip reasons for missing PR URL / branch
+         if task.pr_url.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no PR URL",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
+             continue;
+         }
+         if task.branch.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no task branch",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
+             continue;
+         }
+         if rebase_count >= config.max_rebases_per_cycle {
+@@ -1132,10 +1122,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+         let merge_info = {
+             let owner = task.owner.clone();
+             let repo = task.repo.clone();
+-            match spawn_blocking_op(move || {
+-                github::query_pr_merge_info(&owner, &repo, pr_number)
+-            })
+-            .await
++            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
++                .await
+             {
+                 Ok(info) => info,
+                 Err(err) => {
+@@ -1266,19 +1254,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+                     continue;
+                 }
+ 
+-                eprintln!(
+-                    "auto-rebase: failure for {}: {err_msg}",
+-                    task.task_id
+-                );
++                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
+ 
+                 // Post failure comment on PR (deduplicated by head_sha)
+                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
+ 
+                 if should_post {
+-                    let marker = format!(
+-                        "<!-- ralph:rebase:{}:failed:{} -->",
+-                        task.task_id, head_sha
+-                    );
++                    let marker =
++                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
+                     let body = format!(
+                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
+                         task.task_id, head_sha
+@@ -1507,7 +1490,11 @@ pub(crate) fn build_pr_body(
+ /// 5. Check for existing PR via `find_existing_pr`.
+ /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
+ /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
+-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
++async fn handle_pr_flow(
++    store: &TaskStore,
++    _config: &DaemonRuntimeConfig,
++    task: &DaemonTask,
++) -> Result<()> {
+     let workspace_root = store
+         .path()
+         .parent()
+@@ -1528,10 +1515,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+         match spawn_blocking_op(move || github::has_diff(&wt)).await {
+             Ok(v) => v,
+             Err(err) => {
+-                eprintln!(
+-                    "warning: failed to check diff for {}: {err}",
+-                    task.task_id
+-                );
++                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
+                 return Ok(());
+             }
+         }
+@@ -1657,9 +1641,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+     let title = task
+         .refined_title
+         .clone()
+-        .or_else(|| {
+-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
+-        })
++        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
+         .unwrap_or(title);
+ 
+     match existing_pr_url {
+@@ -1797,11 +1779,9 @@ mod tests {
+         assert!(body.contains("Closes #42"));
+         assert!(body.contains("Diff stat unavailable."));
+         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
+-        assert!(
+-            body.contains(
+-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+-            )
+-        );
++        assert!(body.contains(
++            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
++        ));
+     }
+ 
+     #[test]
+diff --git a/src/daemon/worktree.rs b/src/daemon/worktree.rs
+index c4e8698..dce7d30 100644
+--- a/src/daemon/worktree.rs
++++ b/src/daemon/worktree.rs
+@@ -36,7 +36,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     // Check if the branch already exists (e.g. from a previous failed run
+     // where the worktree was cleaned up but the branch was not).
+     let branch_exists = Command::new("git")
+-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
++        .args([
++            "rev-parse",
++            "--verify",
++            &format!("refs/heads/{branch_name}"),
++        ])
+         .current_dir(repo_root)
+         .output()
+         .map(|o| o.status.success())
+@@ -45,12 +49,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     let output = if branch_exists {
+         // Reuse existing branch
+         Command::new("git")
+-            .args([
+-                "worktree",
+-                "add",
+-                &wt_path.to_string_lossy(),
+-                &branch_name,
+-            ])
++            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
+             .current_dir(repo_root)
+             .output()
+     } else {
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 069be65..198d43a 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -190,7 +190,7 @@ Nothing.
+ EOF
+ # --- Standard orchestration prompts ---
+ elif echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+-  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
++  if [[ "${RALPH_COMPLETE:-no}" == "yes" && "${RALPH_E2E_FORCE_FEATURE:-no}" != "yes" ]]; then
+     cat <<'EOF'
+ # Project Completion Request
+ 
+@@ -375,7 +375,20 @@ case "${1:-}" in
+     case "${2:-}" in
+       list) printf '[]'; exit 0 ;;
+       edit) exit 0 ;;
+-      view) printf '' ; exit 0 ;;
++      view)
++        want_title_body=0
++        for arg in "$@"; do
++          if [ "$arg" = "title,body" ]; then
++            want_title_body=1
++          fi
++        done
++        if [ "$want_title_body" = "1" ]; then
++          printf '{"title":"","body":"E2E issue context from mock gh."}'
++          exit 0
++        fi
++        printf ''
++        exit 0
++        ;;
+       comment) exit 0 ;;
+     esac
+     ;;
+@@ -398,6 +411,51 @@ exit 1
+     .to_owned()
+ }
+ 
++/// Mock backend script that consumes stdin and exits non-zero.
++///
++/// Optional logging:
++/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
++/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
++pub fn nonzero_exit_backend_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++cat >/dev/null
++if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
++  printf '%s:nonzero\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" >> "${RALPH_VALIDATE_BACKEND_LOG}"
++fi
++echo "intentional backend failure" >&2
++exit 17
++"###
++    .to_owned()
++}
++
++/// Mock backend script that consumes stdin and returns empty output with exit 0.
++///
++/// Optional logging:
++/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
++/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
++pub fn empty_output_backend_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++input="$(cat)"
++if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
++  kind="normal"
++  if printf '%s' "$input" | grep -q "CRITICAL: Your previous response could not be parsed."; then
++    kind="reformatter_prompt"
++  elif printf '%s' "$input" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
++    kind="format_reminder"
++  fi
++  printf '%s:%s\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" "$kind" >> "${RALPH_VALIDATE_BACKEND_LOG}"
++fi
++
++# Intentionally produce no stdout so orchestrator exercises empty-output handling.
++exit 0
++"###
++    .to_owned()
++}
++
+ /// Mock script whose prompt reviewer response includes nested `##` headings
+ /// inside the `## Refined Prompt` section, exercising the extract-to-EOF parser
+ /// semantics. All other roles respond identically to `standard_mock_script()`.
+diff --git a/src/validate/tests_commands.rs b/src/validate/tests_commands.rs
+index 281f3f5..81d7d2b 100644
+--- a/src/validate/tests_commands.rs
++++ b/src/validate/tests_commands.rs
+@@ -2,8 +2,7 @@ use super::*;
+ 
+ use crate::validate::assertions::{
+     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
+-    assert_stdout_eq,
+-    git_head_commit, git_tag_commit,
++    assert_stdout_eq, git_head_commit, git_tag_commit,
+ };
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::standard_mock_script;
+@@ -489,7 +488,10 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
+         );
+         let version_part = &stdout["ralph ".len()..];
+         assert!(
+-            version_part.chars().next().map_or(false, |c| c.is_ascii_digit()),
++            version_part
++                .chars()
++                .next()
++                .map_or(false, |c| c.is_ascii_digit()),
+             "expected semver version after 'ralph ', got: {stdout}"
+         );
+     })
+diff --git a/src/validate/tests_daemon.rs b/src/validate/tests_daemon.rs
+index d7d11ba..abbdeb9 100644
+--- a/src/validate/tests_daemon.rs
++++ b/src/validate/tests_daemon.rs
+@@ -486,7 +486,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
+         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+         let output = h
+             .ralph_env(
+-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
++                [
++                    "daemon",
++                    "start",
++                    "--single-iteration",
++                    "--repo",
++                    "acme/widgets",
++                ],
+                 &[("PATH", &gh_path)],
+             )
+             .expect("daemon start should execute");
+@@ -2254,7 +2260,8 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
+                     None,
+                 );
+                 t["project_id"] = json!(project_id);
+-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
++                t["raw_idea"] =
++                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                 t
+             }],
+         )
+@@ -3362,7 +3369,10 @@ exit 0
+ 
+         // The spawned child should have received the refined prompt
+         let idea = fs::read_to_string(&idea_log).expect("read idea log");
+-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
++        assert_eq!(
++            idea,
++            "Refined: implement the feature with proper error handling and tests."
++        );
+     })
+ }
+ 
+@@ -4707,8 +4717,7 @@ exit 1
+             .find(|t| t["task_id"] == "acme-widgets-301")
+             .unwrap();
+         assert!(
+-            task.get("refined_title").is_none()
+-                || task["refined_title"].is_null(),
++            task.get("refined_title").is_none() || task["refined_title"].is_null(),
+             "refined_title should not be set when refinement is disabled"
+         );
+     })
+@@ -5035,10 +5044,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // Check that the comment body includes the bold title
+-        assert!(
+-            comment_log.exists(),
+-            "comment should have been posted"
+-        );
++        assert!(comment_log.exists(), "comment should have been posted");
+         let log = fs::read_to_string(&comment_log).expect("read comment log");
+         assert!(
+             log.contains("**Bold comment title test**"),
+@@ -5068,7 +5074,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(wt.exists(), "worktree directory should exist");
+ 
+         // Verify branch exists
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should exist after create_worktree"
+@@ -5079,7 +5088,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(!wt.exists(), "worktree directory should be removed");
+ 
+         // Branch should still exist
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should survive worktree removal"
+@@ -5106,12 +5118,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
+         // Create a tracked file, commit it, then modify it (dirty tracked)
+         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
+         git(&wt, &["add", "tracked.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "add tracked",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "add tracked",
++            ],
++        );
+         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
+ 
+         // Create an untracked file (like SPEC.md from codex side-effect)
+@@ -5165,12 +5186,21 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
+         // Add a tracked file, commit, then modify (simulates prior run's changes)
+         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
+         git(&wt, &["add", "src.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "prior run",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "prior run",
++            ],
++        );
+         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
+ 
+         // Add an untracked file (simulates codex side-effect)
+@@ -5470,10 +5500,7 @@ exit 1
+         let stderr = String::from_utf8_lossy(&output.stderr);
+ 
+         // pr edit was attempted
+-        assert!(
+-            pr_edit_log.exists(),
+-            "pr edit should have been attempted"
+-        );
++        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
+ 
+         // pr create should NOT have been called (no fallthrough on edit failure)
+         assert!(
+@@ -5613,10 +5640,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // pr create should have been called
+-        assert!(
+-            pr_create_log.exists(),
+-            "pr create should have been called"
+-        );
++        assert!(pr_create_log.exists(), "pr create should have been called");
+ 
+         // Body file should have been captured and contain structured content
+         assert!(
+@@ -5811,8 +5835,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Disable auto-rebase
+-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+-            .expect("set auto_rebase_enabled failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_auto_rebase_enabled",
++            "false",
++        ])
++        .expect("set auto_rebase_enabled failed");
+ 
+         // Seed a completed task with a PR URL
+         write_tasks(
+@@ -6163,7 +6192,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6251,7 +6283,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6468,7 +6503,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
+         );
+ 
+         // The second task should NOT have been attempted (break after first failure)
+-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
++        let second_attempt_count = stderr
++            .matches("auto-rebase: rebasing acme-widgets-110")
++            .count();
+         assert_eq!(
+             second_attempt_count, 0,
+             "second task should not be attempted after gh pr view failure"
+@@ -6482,8 +6519,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Set max_rebases_per_cycle to 1 via config
+-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+-            .expect("set max_rebases_per_cycle failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_max_rebases_per_cycle",
++            "1",
++        ])
++        .expect("set max_rebases_per_cycle failed");
+ 
+         // Create 3 tasks with PRs
+         write_tasks(
+@@ -6574,11 +6616,17 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Use a very large interval to ensure skip regardless of clock skew
+-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+-            .expect("set rebase_interval_seconds failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_rebase_interval_seconds",
++            "999999",
++        ])
++        .expect("set rebase_interval_seconds failed");
+ 
+         // Dynamically compute a "just now" timestamp so test never becomes stale
+-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
++        let recent_timestamp =
++            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+ 
+         write_tasks(
+             h,
+@@ -6719,7 +6767,10 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
+         let tasks = load_tasks(h).expect("load_tasks failed");
+         assert_eq!(tasks.len(), 1);
+         assert!(
+-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
++            tasks[0]
++                .get("last_rebase_at")
++                .map(|v| v.is_null())
++                .unwrap_or(true),
+             "last_rebase_at should be null/missing"
+         );
+     })
+diff --git a/src/validate/tests_e2e_conformance.rs b/src/validate/tests_e2e_conformance.rs
+index 25b1b2c..efcd772 100644
+--- a/src/validate/tests_e2e_conformance.rs
++++ b/src/validate/tests_e2e_conformance.rs
+@@ -1,11 +1,15 @@
+ use super::*;
+ 
+ use std::fs;
++use std::path::PathBuf;
+ use std::process::Command;
+ 
+ use crate::validate::harness::RalphHarness;
+-use crate::validate::mock_scripts::{e2e_mock_gh_logging_script, e2e_mock_ralph_script};
+-use serde_json::json;
++use crate::validate::mock_scripts::{
++    daemon_mock_ralph_with_branch_switch_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
++    empty_output_backend_script, nonzero_exit_backend_script,
++};
++use serde_json::{json, Value};
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+     vec![
+@@ -13,6 +17,18 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "e2e_conformance::backend_timeout_exhausted_fails_task",
+             func: backend_timeout_exhausted_fails_task,
+         },
++        ConformanceTest {
++            name: "e2e_conformance::backend_command_failed_no_reformatter",
++            func: backend_command_failed_no_reformatter,
++        },
++        ConformanceTest {
++            name: "e2e_conformance::empty_output_retries_then_reformatter",
++            func: empty_output_retries_then_reformatter,
++        },
++        ConformanceTest {
++            name: "e2e_conformance::pr_metadata_verification",
++            func: pr_metadata_verification,
++        },
+         ConformanceTest {
+             name: "e2e_conformance::e2e_mock_ralph_script_delegates_to_auto",
+             func: e2e_mock_ralph_script_delegates_to_auto,
+@@ -80,6 +96,321 @@ fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-backend-command-failed";
++        h.init_workspace().expect("init failed");
++
++        let claude_script = h
++            .write_mock_script("backend-nonzero.sh", &nonzero_exit_backend_script())
++            .expect("failed to write nonzero backend script");
++
++        let codex_log = h.temp_dir.path().join("reformatter-should-not-run.log");
++        let codex_log_str = codex_log.to_string_lossy().into_owned();
++        let codex_script = h
++            .write_mock_script(
++                "reformatter-should-not-run.sh",
++                &format!(
++                    "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf 'unexpected reformatter call\\n' >> \"{codex_log_str}\"\nexit 0\n"
++                ),
++            )
++            .expect("failed to write codex marker script");
++        h.setup_separate_mock_backends(&claude_script, &codex_script)
++            .expect("setup_separate_mock_backends failed");
++
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++        h.create_project(
++            project_id,
++            "Backend Command Failed Project",
++            "Backend command failure reformatter boundary test prompt",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_ne!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected non-zero exit for backend non-zero command failure"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.to_lowercase().contains("backend command failed"),
++            "expected backend command failure in stderr, got:\n{stderr}"
++        );
++        assert!(
++            !stderr.contains("requesting reformat via"),
++            "backend command failure must not trigger reformatter fallback, got:\n{stderr}"
++        );
++        assert!(
++            !codex_log.exists(),
++            "reformatter backend should not run on BackendCommandFailed"
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_eq!(
++            state["status"],
++            json!("failed"),
++            "project should be marked failed after BackendCommandFailed"
++        );
++    })
++}
++
++fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-empty-output";
++        h.init_workspace().expect("init failed");
++
++        let claude_script = h
++            .write_mock_script("backend-empty-output.sh", &empty_output_backend_script())
++            .expect("failed to write empty-output backend script");
++        let codex_script = h
++            .write_mock_script(
++                "backend-reformatter-nonzero.sh",
++                &nonzero_exit_backend_script(),
++            )
++            .expect("failed to write nonzero reformatter backend script");
++        h.setup_separate_mock_backends(&claude_script, &codex_script)
++            .expect("setup_separate_mock_backends failed");
++
++        let call_log = h.temp_dir.path().join("backend-call-order.log");
++        let call_log_str = call_log.to_string_lossy().into_owned();
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.claude.env.RALPH_VALIDATE_BACKEND_LOG",
++            &call_log_str,
++        ])
++        .expect("config set claude log path failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.claude.env.RALPH_VALIDATE_BACKEND_LABEL",
++            "claude",
++        ])
++        .expect("config set claude label failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.codex.env.RALPH_VALIDATE_BACKEND_LOG",
++            &call_log_str,
++        ])
++        .expect("config set codex log path failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.codex.env.RALPH_VALIDATE_BACKEND_LABEL",
++            "codex",
++        ])
++        .expect("config set codex label failed");
++
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++        h.create_project(
++            project_id,
++            "Empty Output Retry Project",
++            "Empty backend output should retry and then attempt reformatter",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_ne!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected non-zero exit after empty output and failed reformatter attempt"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.to_lowercase().contains("backend command failed"),
++            "expected backend command failure after reformatter attempt, got:\n{stderr}"
++        );
++
++        let call_lines = fs::read_to_string(&call_log)
++            .expect("failed to read backend call log")
++            .lines()
++            .map(str::to_owned)
++            .collect::<Vec<_>>();
++        assert!(
++            call_lines.len() >= 3,
++            "expected at least 3 backend invocations, got {} lines:\n{}",
++            call_lines.len(),
++            call_lines.join("\n")
++        );
++        assert!(
++            call_lines[0].starts_with("claude:"),
++            "first invocation should be claude primary backend, got: {}",
++            call_lines[0]
++        );
++        assert!(
++            call_lines[1].starts_with("claude:"),
++            "second invocation should be same-backend retry, got: {}",
++            call_lines[1]
++        );
++        assert!(
++            call_lines.iter().any(|line| line.starts_with("codex:")),
++            "expected reformatter backend invocation after same-backend retry, got lines:\n{}",
++            call_lines.join("\n")
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_eq!(
++            state["status"],
++            json!("failed"),
++            "project should be marked failed when parse-repair path ultimately fails"
++        );
++    })
++}
++
++fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        h.init_workspace().expect("init failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_refinement_enabled",
++            "false",
++        ])
++        .expect("config set workspace.daemon_refinement_enabled failed");
++
++        let gh_script = h
++            .write_mock_script("gh", &e2e_mock_gh_logging_script())
++            .expect("failed to write e2e gh script");
++        let gh_dir = gh_script
++            .parent()
++            .expect("mock gh script should have parent directory");
++        let path_env = format!(
++            "{}:{}",
++            gh_dir.display(),
++            std::env::var("PATH").unwrap_or_default()
++        );
++
++        let daemon_ralph_script = h
++            .write_mock_script(
++                "daemon-ralph-branch-switch.sh",
++                &daemon_mock_ralph_with_branch_switch_script(),
++            )
++            .expect("failed to write daemon branch-switch mock ralph script");
++        let daemon_ralph_bin = daemon_ralph_script.to_string_lossy().into_owned();
++
++        let task_id = "acme-widgets-901";
++        let issue_number = 901_u32;
++        write_tasks(
++            h,
++            vec![task_json(
++                task_id,
++                "pending",
++                issue_number,
++                "acme",
++                "widgets",
++            )],
++        )
++        .expect("write_tasks failed");
++
++        let gh_log_path = h.temp_dir.path().join("gh-pr-create-e2e.log");
++        let gh_log_str = gh_log_path.to_string_lossy().into_owned();
++        let env_vars = [
++            ("PATH", path_env.as_str()),
++            ("RALPH_DAEMON_BIN", daemon_ralph_bin.as_str()),
++            ("RALPH_E2E_GH_LOG", gh_log_str.as_str()),
++        ];
++
++        let output = h
++            .ralph_env(
++                [
++                    "daemon",
++                    "start",
++                    "--repo",
++                    "acme/widgets",
++                    "--single-iteration",
++                ],
++                &env_vars,
++            )
++            .expect("daemon start should execute");
++        assert_eq!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected daemon start single iteration to succeed; stderr:\n{}",
++            String::from_utf8_lossy(&output.stderr)
++        );
++
++        let tasks_snapshot = load_tasks(h)
++            .map(|tasks| serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".to_owned()))
++            .unwrap_or_else(|err| format!("load_tasks error: {err}"));
++        assert!(
++            gh_log_path.exists(),
++            "expected gh pr create invocation log\nstdout:\n{}\nstderr:\n{}\ntasks:\n{}",
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr),
++            tasks_snapshot
++        );
++        let log_content = fs::read_to_string(&gh_log_path).expect("failed to read gh log");
++        let args = parse_logged_args(&log_content);
++
++        let title = arg_value(&args, "--title").expect("missing --title argument in gh log");
++        assert!(
++            title.starts_with("ralph:"),
++            "expected --title value to begin with 'ralph:', got: {title}"
++        );
++
++        let head = arg_value(&args, "--head").expect("missing --head argument in gh log");
++        assert!(
++            !head.trim().is_empty(),
++            "expected non-empty --head value, got: {head:?}"
++        );
++
++        let repo = arg_value(&args, "--repo").expect("missing --repo argument in gh log");
++        assert_eq!(
++            repo, "acme/widgets",
++            "expected --repo acme/widgets in gh log"
++        );
++
++        assert!(
++            args.iter().any(|arg| arg == "--body-file"),
++            "expected --body-file flag in gh pr create args, got:\n{}",
++            args.join(" ")
++        );
++
++        let body = extract_logged_body(&log_content).expect("missing logged --body-file content");
++        assert!(
++            body.contains(&format!("Closes #{issue_number}")),
++            "expected body to contain issue closure line, got:\n{body}"
++        );
++        assert!(
++            body.contains("## Diff Stat"),
++            "expected body to contain diff stat section, got:\n{body}"
++        );
++        assert!(
++            body.contains("Project Ref: `"),
++            "expected body to contain project reference footer, got:\n{body}"
++        );
++        assert!(
++            !body.contains("Project Ref: unavailable"),
++            "expected resolved project reference (not unavailable), got:\n{body}"
++        );
++
++        let tasks = load_tasks(h).expect("load_tasks failed");
++        let task = tasks
++            .iter()
++            .find(|t| t["task_id"] == task_id)
++            .expect("task should exist");
++        assert_eq!(
++            task["state"],
++            json!("completed"),
++            "expected task to complete in e2e PR metadata flow"
++        );
++        assert!(
++            task["pr_url"].as_str().is_some(),
++            "expected pr_url to be populated after gh pr create"
++        );
++    })
++}
++
+ fn e2e_mock_ralph_script_delegates_to_auto(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let script = h
+@@ -195,6 +526,66 @@ echo "unreachable"
+     .to_owned()
+ }
+ 
++fn parse_logged_args(log_content: &str) -> Vec<String> {
++    log_content
++        .lines()
++        .filter_map(|line| {
++            let rest = line.strip_prefix("arg[")?;
++            let (_, value) = rest.split_once("]=")?;
++            Some(value.to_owned())
++        })
++        .collect()
++}
++
++fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
++    args.windows(2)
++        .find(|window| window[0] == flag)
++        .map(|window| window[1].as_str())
++}
++
++fn extract_logged_body(log_content: &str) -> Option<String> {
++    let marker = "body_begin\n";
++    let start = log_content.find(marker)? + marker.len();
++    let tail = &log_content[start..];
++    let end = tail.find("\nbody_end")?;
++    Some(tail[..end].to_owned())
++}
++
++fn write_tasks(h: &RalphHarness, tasks: Vec<Value>) -> crate::Result<()> {
++    let path = tasks_path(h);
++    if let Some(parent) = path.parent() {
++        fs::create_dir_all(parent)?;
++    }
++    fs::write(path, serde_json::to_string_pretty(&tasks)?)?;
++    Ok(())
++}
++
++fn load_tasks(h: &RalphHarness) -> crate::Result<Vec<Value>> {
++    let raw = fs::read_to_string(tasks_path(h))?;
++    Ok(serde_json::from_str(&raw)?)
++}
++
++fn tasks_path(h: &RalphHarness) -> PathBuf {
++    h.repo_root.join(".ralph").join("daemon").join("tasks.json")
++}
++
++fn task_json(task_id: &str, state: &str, issue_number: u32, owner: &str, repo: &str) -> Value {
++    json!({
++        "task_id": task_id,
++        "state": state,
++        "issue_number": issue_number,
++        "owner": owner,
++        "repo": repo,
++        "project_id": null,
++        "child_pid": null,
++        "child_pgid": null,
++        "branch": null,
++        "pr_url": null,
++        "created_at": "2026-02-16T00:00:00Z",
++        "updated_at": "2026-02-16T00:00:00Z"
++    })
++}
++
+ fn run_case<F>(f: F) -> TestResult
+ where
+     F: FnOnce(),
+
+### Prior QA History
+
+
+
+## System Guardrails
+
+- Run all available build, test, and check commands.
+- Report concrete commands and their output.
+- Do NOT edit any source files — only run checks and report findings.
+- If all acceptance criteria pass, return `# QA: PASS` with evidence.
+- If any check fails, return `# QA: FAIL` with specific failure details and suggested fixes.
+
+## Master Prompt
+
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 3
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T02:59:44Z
+---
+
+Now I have complete clarity. Let me summarize what remains and write the spec for the next feature.
+
+**Completed (Loop 1 + 2):**
+1. `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helpers
+2. `backend_timeout_exhausted_fails_task` test (including no-reformatter assertion)
+3. QA/review rollback failure tests (renamed, hardened with `--loops 1`, `failed` status, empty loops, absent directory)
+4. `impl_response_artifact_on_review_feedback` test
+
+**Still missing from master prompt:**
+1. **`pr_metadata_verification` test** — E2E test using `e2e_mock_gh_logging_script()` to capture and assert full PR create args (`--title` with `ralph:` prefix, `--body-file` with `Closes #<N>`, diff stat, project ref, `--head`, `--repo`). The existing daemon tests cover partial body content but NOT the integrated E2E path with the gh logging script.
+2. **Reformatter semantics coverage** — No tests in `validate/` explicitly test: non-zero exit → `BackendCommandFailed` + no reformatter; empty output → retry then reformatter. The timeout→no-reformatter case IS covered by loop 1.
+3. **`docs/validate-e2e.md`** — Does not exist yet.
+
+These three items can reasonably be grouped into one final loop since PR metadata is a single test, reformatter semantics are 2-3 focused tests, and the docs file is mechanical documentation. Let me write the spec.
+
+# Feature: PR Metadata Verification, Reformatter Semantics Coverage, and E2E Documentation
+
+## Description
+Complete the final three requirements from the master prompt: (1) add a `pr_metadata_verification` E2E conformance test that uses `e2e_mock_gh_logging_script()` to capture and assert all required PR creation flags and body content through a real `ralph auto` run; (2) add reformatter fallback boundary tests covering `BackendCommandFailed` (non-zero exit, no reformatter) and empty-output retry-then-reformatter semantics; (3) create `docs/validate-e2e.md` with the five required sections (architecture overview, test-to-requirement mapping, running instructions, troubleshooting, adding-new-tests template).
+
+## Acceptance Criteria
+- [ ] `pr_metadata_verification` test exists in `src/validate/tests_e2e_conformance.rs`, uses `e2e_mock_gh_logging_script()` to capture full `gh pr create` invocation through the orchestration pipeline
+- [ ] PR metadata test asserts `--title` value begins with `ralph:` prefix
+- [ ] PR metadata test asserts `--body-file` content contains `Closes #<N>` (issue number), a diff stat section, and a project reference
+- [ ] PR metadata test asserts `--head` and `--repo` flags are present in captured args
+- [ ] `backend_command_failed_no_reformatter` test exists: mock backend exits non-zero, asserts `BackendCommandFailed` error is surfaced, asserts no reformatter fallback is triggered, asserts task ends `failed`
+- [ ] `empty_output_retries_then_reformatter` test exists: mock backend returns empty output, asserts same-backend retry occurs first, then reformatter fallback is attempted
+- [ ] Existing `backend_timeout_exhausted_fails_task` already covers timeout → no reformatter; no duplication needed
+- [ ] All new tests registered in the `tests()` function of `tests_e2e_conformance.rs` and wired via `mod.rs`
+- [ ] `docs/validate-e2e.md` exists with exactly five sections: (1) Architecture overview, (2) Test-to-requirement mapping, (3) Running instructions, (4) Troubleshooting, (5) Adding-new-tests template
+- [ ] Documentation test-to-requirement mapping covers all tests from loops 1-3 mapped to master prompt normative rules
+- [ ] All existing tests continue to pass (`cargo test` and `ralph validate` green)
+
+## Files to Modify/Create
+- `src/validate/tests_e2e_conformance.rs` — Add `pr_metadata_verification`, `backend_command_failed_no_reformatter`, and `empty_output_retries_then_reformatter` tests; register in `tests()` vec
+- `src/validate/mock_scripts.rs` — Add helper scripts: `nonzero_exit_backend_script()` (backend that exits non-zero after consuming input), `empty_output_backend_script()` (backend that produces no output); potentially add `e2e_mock_gh_with_env_logging()` variant if the existing `e2e_mock_gh_logging_script()` needs environment wiring for the orchestration integration path
+- `src/validate/harness.rs` — Add any needed helpers for configuring reformatter backend settings or capturing reformatter invocation logs if not already available
+- `docs/validate-e2e.md` — New file with all five required documentation sections
+
+## Dependencies
+- Requires: Backend Timeout Conformance and Mock Script Foundations (loop 1), QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance (loop 2)
+- Blocks: none (final feature; completes all master prompt requirements)
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 3
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T03:19:33Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added loop-3 E2E conformance coverage in `src/validate/tests_e2e_conformance.rs`:
+  - `e2e_conformance::pr_metadata_verification`
+  - `e2e_conformance::backend_command_failed_no_reformatter`
+  - `e2e_conformance::empty_output_retries_then_reformatter`
+- Added reusable mock helpers in `src/validate/mock_scripts.rs`:
+  - `nonzero_exit_backend_script()`
+  - `empty_output_backend_script()`
+  - Extended `e2e_mock_gh_logging_script()` to return deterministic `issue view --json title,body` data needed by E2E flows.
+- Updated run failure handling in `src/cli/run.rs` so `BackendCommandFailed` and `ParseRetriesExhausted` also mark project state as `failed`, matching the new conformance expectations.
+- Added `docs/validate-e2e.md` with the required five sections and requirement-to-test mapping.
+
+## Spec Deviations
+- `pr_metadata_verification` uses daemon dispatch with `daemon_mock_ralph_with_branch_switch_script()` (in `src/validate/tests_e2e_conformance.rs`) instead of a real child `ralph auto` execution. The real-auto path in this harness hit a deterministic IO failure before PR flow; the selected path still validates full `gh pr create` metadata/body assertions end-to-end through daemon PR handling.
+
+## Testing
+- `nix develop -c cargo check` (pass)
+- `nix develop -c cargo test` (pass)
+- `nix build -L` (pass; includes full conformance in build check phase)
+- `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (pass)
+- `./result/bin/ralph validate --bin ./result/bin/ralph` (pass)
+
+
+## Current Diff
+
+```diff
+diff --git a/docs/validate-e2e.md b/docs/validate-e2e.md
+new file mode 100644
+index 0000000..bcf6492
+--- /dev/null
++++ b/docs/validate-e2e.md
+@@ -0,0 +1,39 @@
++# Validate E2E Conformance
++
++## Architecture overview
++The validate E2E conformance tests run the compiled `ralph` binary in isolated temporary git repositories via `RalphHarness`, with deterministic mock backends and mock `gh` scripts. Tests exercise real CLI entry points (`run`, `auto`, `daemon start`) and assert persisted state (`.ralph/projects/*/state.json`, `.ralph/daemon/tasks.json`), loop artifacts, and command/PR side effects.
++
++## Test-to-requirement mapping
++| Normative requirement | Conformance test(s) |
++| --- | --- |
++| 1. `ralph auto` happy-path tests must use `auto_mock_script()` | `e2e_conformance::pr_metadata_verification` (daemon-dispatched real `ralph auto` with `auto_mock_script()` backends), `auto_init::*` tests in `tests_auto_init.rs` |
++| 2. QA/review rollback failure removes loop and fails with `--loops 1` | `qa::iteration_limit_fails`, `run::review_limit_fails` |
++| 3. Timeout surfaces `BackendTimeoutExhausted` and task/project fails | `e2e_conformance::backend_timeout_exhausted_fails_task` |
++| 4. Reformatter boundaries (parse-error only; non-zero/timeout no reformatter; empty output retry then reformatter) | `e2e_conformance::backend_command_failed_no_reformatter`, `e2e_conformance::backend_timeout_exhausted_fails_task`, `e2e_conformance::empty_output_retries_then_reformatter` |
++| 5. Review-feedback path writes `*-impl-response-001.md` with required frontmatter/body | `run::impl_response_artifact_on_review_feedback` |
++| 6. PR metadata includes `ralph:` title prefix, `--body-file` body requirements, `--head`, `--repo` | `e2e_conformance::pr_metadata_verification` |
++
++## Running instructions
++1. Build and type-check:
++   `nix develop -c cargo check`
++2. Run unit/integration tests:
++   `nix develop -c cargo test`
++3. Build release binary:
++   `nix build -L`
++4. Run validate sanity subset:
++   `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp`
++5. Run full conformance suite:
++   `./result/bin/ralph validate --bin ./result/bin/ralph`
++
++## Troubleshooting
++- If daemon PR tests do not create a PR, verify the test sets an `origin` remote and that mock `gh` is first in `PATH`.
++- If backend scripts fail only in Nix environments, prefer `setup_mock_backends_stable()` so wrappers use `/bin/sh` + `bash` and clear default backend args.
++- If reformatter-semantics assertions fail, inspect stderr for `requesting reformat via` and inspect mock backend invocation logs (`RALPH_VALIDATE_BACKEND_LOG`).
++- If tests appear stuck, confirm the mock auto backend can reach completion deterministically (for E2E, set `RALPH_COMPLETE=yes` and `RALPH_E2E_FORCE_FEATURE=yes`).
++
++## Adding-new-tests template
++1. Add a `ConformanceTest` entry in the relevant `src/validate/tests_*.rs` module `tests()` list.
++2. Implement `fn <name>(h: &RalphHarness) -> TestResult` wrapped with `run_case(|| { ... })`.
++3. Use harness helpers to initialize workspace, configure mock backends/scripts, and execute real CLI commands.
++4. Assert user-visible behavior (exit code, stderr/stdout), persisted state files, and artifact naming/content.
++5. If external-process behavior is required, add a deterministic helper in `src/validate/mock_scripts.rs` and log invocations for explicit assertions.
+diff --git a/src/cli/daemon.rs b/src/cli/daemon.rs
+index 2e14235..6d6e068 100644
+--- a/src/cli/daemon.rs
++++ b/src/cli/daemon.rs
+@@ -225,14 +225,12 @@ fn parse_repo_slug(repo: &str) -> Result<(String, String)> {
+ fn preflight_check_gh() -> Result<()> {
+     match Command::new("gh").arg("--version").output() {
+         Ok(_) => Ok(()),
+-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+-            Err(RalphError::Validation(
+-                "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
++            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
+                  post comments, and create PRs. Install it from https://cli.github.com/ \
+                  or run inside `nix develop`."
+-                    .to_owned(),
+-            ))
+-        }
++                .to_owned(),
++        )),
+         Err(err) => Err(RalphError::Validation(format!(
+             "gh (GitHub CLI) check failed: {err}"
+         ))),
+diff --git a/src/cli/run.rs b/src/cli/run.rs
+index 4a9549b..5fd3199 100644
+--- a/src/cli/run.rs
++++ b/src/cli/run.rs
+@@ -42,6 +42,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
+                 RalphError::BackendTimeoutExhausted { .. }
+                     | RalphError::QaIterationLimitExceeded { .. }
+                     | RalphError::ReviewIterationLimitExceeded { .. }
++                    | RalphError::BackendCommandFailed { .. }
++                    | RalphError::ParseRetriesExhausted { .. }
+             ) {
+                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
+             }
+diff --git a/src/daemon/github.rs b/src/daemon/github.rs
+index da3f7ed..85d6cba 100644
+--- a/src/daemon/github.rs
++++ b/src/daemon/github.rs
+@@ -239,9 +239,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
+         ])
+         .output()
+         .map_err(|err| {
+-            RalphError::Orchestration(format!(
+-                "failed to run gh issue edit --title: {err}"
+-            ))
++            RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
+         })?;
+ 
+     if !output.status.success() {
+@@ -477,11 +475,7 @@ pub fn create_pr_with_body_file(
+ }
+ 
+ /// Edit an existing PR by URL using `--body-file` for large body content.
+-pub fn edit_pr(
+-    pr_url: &str,
+-    title: &str,
+-    body_file: &std::path::Path,
+-) -> Result<()> {
++pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
+     let body_file_str = body_file.to_string_lossy();
+     let output = Command::new("gh")
+         .args([
+@@ -796,7 +790,10 @@ mod tests {
+ 
+     use tempfile::tempdir;
+ 
+-    use super::{has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue, PrMergeStatus};
++    use super::{
++        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
++        PrMergeStatus,
++    };
+ 
+     #[test]
+     fn gh_issue_deserialization_supports_body_present() {
+diff --git a/src/daemon/refine.rs b/src/daemon/refine.rs
+index 3c06d47..1146e7b 100644
+--- a/src/daemon/refine.rs
++++ b/src/daemon/refine.rs
+@@ -229,9 +229,8 @@ mod tests {
+     #[test]
+     fn parse_refined_output_rejects_overlong_title() {
+         let title = "a".repeat(MAX_TITLE_LENGTH + 1);
+-        let input = format!(
+-            "TITLE: {title}\n---\nThis is a sufficiently long body for refinement output."
+-        );
++        let input =
++            format!("TITLE: {title}\n---\nThis is a sufficiently long body for refinement output.");
+         let err = parse_refined_output(&input).unwrap_err();
+         assert!(err.to_string().contains("title too long"));
+     }
+diff --git a/src/daemon/runtime.rs b/src/daemon/runtime.rs
+index 6ec4550..34ac0f3 100644
+--- a/src/daemon/runtime.rs
++++ b/src/daemon/runtime.rs
+@@ -964,10 +964,7 @@ async fn complete_task(
+             }
+         }
+         if let Err(err) = handle_pr_flow(store, config, &task).await {
+-            eprintln!(
+-                "warning: PR flow failed for {}: {err}",
+-                task.task_id
+-            );
++            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
+         }
+     }
+ 
+@@ -1040,7 +1037,6 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
+     }
+ }
+ 
+-
+ // =============================================================================
+ // Auto-Rebase Phase
+ // =============================================================================
+@@ -1077,17 +1073,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+     for task in &all_tasks {
+         // Explicit skip reasons for missing PR URL / branch
+         if task.pr_url.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no PR URL",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
+             continue;
+         }
+         if task.branch.is_none() {
+-            eprintln!(
+-                "auto-rebase: skip {} — no task branch",
+-                task.task_id
+-            );
++            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
+             continue;
+         }
+         if rebase_count >= config.max_rebases_per_cycle {
+@@ -1132,10 +1122,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+         let merge_info = {
+             let owner = task.owner.clone();
+             let repo = task.repo.clone();
+-            match spawn_blocking_op(move || {
+-                github::query_pr_merge_info(&owner, &repo, pr_number)
+-            })
+-            .await
++            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
++                .await
+             {
+                 Ok(info) => info,
+                 Err(err) => {
+@@ -1266,19 +1254,14 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+                     continue;
+                 }
+ 
+-                eprintln!(
+-                    "auto-rebase: failure for {}: {err_msg}",
+-                    task.task_id
+-                );
++                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
+ 
+                 // Post failure comment on PR (deduplicated by head_sha)
+                 let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
+ 
+                 if should_post {
+-                    let marker = format!(
+-                        "<!-- ralph:rebase:{}:failed:{} -->",
+-                        task.task_id, head_sha
+-                    );
++                    let marker =
++                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
+                     let body = format!(
+                         "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
+                         task.task_id, head_sha
+@@ -1507,7 +1490,11 @@ pub(crate) fn build_pr_body(
+ /// 5. Check for existing PR via `find_existing_pr`.
+ /// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
+ /// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
+-async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task: &DaemonTask) -> Result<()> {
++async fn handle_pr_flow(
++    store: &TaskStore,
++    _config: &DaemonRuntimeConfig,
++    task: &DaemonTask,
++) -> Result<()> {
+     let workspace_root = store
+         .path()
+         .parent()
+@@ -1528,10 +1515,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+         match spawn_blocking_op(move || github::has_diff(&wt)).await {
+             Ok(v) => v,
+             Err(err) => {
+-                eprintln!(
+-                    "warning: failed to check diff for {}: {err}",
+-                    task.task_id
+-                );
++                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
+                 return Ok(());
+             }
+         }
+@@ -1657,9 +1641,7 @@ async fn handle_pr_flow(store: &TaskStore, _config: &DaemonRuntimeConfig, task:
+     let title = task
+         .refined_title
+         .clone()
+-        .or_else(|| {
+-            extract_original_title(task.raw_idea.as_deref().unwrap_or_default())
+-        })
++        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
+         .unwrap_or(title);
+ 
+     match existing_pr_url {
+@@ -1797,11 +1779,9 @@ mod tests {
+         assert!(body.contains("Closes #42"));
+         assert!(body.contains("Diff stat unavailable."));
+         assert!(body.contains("Issue context unavailable (legacy task or missing issue body)."));
+-        assert!(
+-            body.contains(
+-                "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
+-            )
+-        );
++        assert!(body.contains(
++            "Project Ref: unavailable (could not extract from branch `feature/no-project-ref`)."
++        ));
+     }
+ 
+     #[test]
+diff --git a/src/daemon/worktree.rs b/src/daemon/worktree.rs
+index c4e8698..dce7d30 100644
+--- a/src/daemon/worktree.rs
++++ b/src/daemon/worktree.rs
+@@ -36,7 +36,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     // Check if the branch already exists (e.g. from a previous failed run
+     // where the worktree was cleaned up but the branch was not).
+     let branch_exists = Command::new("git")
+-        .args(["rev-parse", "--verify", &format!("refs/heads/{branch_name}")])
++        .args([
++            "rev-parse",
++            "--verify",
++            &format!("refs/heads/{branch_name}"),
++        ])
+         .current_dir(repo_root)
+         .output()
+         .map(|o| o.status.success())
+@@ -45,12 +49,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
+     let output = if branch_exists {
+         // Reuse existing branch
+         Command::new("git")
+-            .args([
+-                "worktree",
+-                "add",
+-                &wt_path.to_string_lossy(),
+-                &branch_name,
+-            ])
++            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
+             .current_dir(repo_root)
+             .output()
+     } else {
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 069be65..198d43a 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -190,7 +190,7 @@ Nothing.
+ EOF
+ # --- Standard orchestration prompts ---
+ elif echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+-  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
++  if [[ "${RALPH_COMPLETE:-no}" == "yes" && "${RALPH_E2E_FORCE_FEATURE:-no}" != "yes" ]]; then
+     cat <<'EOF'
+ # Project Completion Request
+ 
+@@ -375,7 +375,20 @@ case "${1:-}" in
+     case "${2:-}" in
+       list) printf '[]'; exit 0 ;;
+       edit) exit 0 ;;
+-      view) printf '' ; exit 0 ;;
++      view)
++        want_title_body=0
++        for arg in "$@"; do
++          if [ "$arg" = "title,body" ]; then
++            want_title_body=1
++          fi
++        done
++        if [ "$want_title_body" = "1" ]; then
++          printf '{"title":"","body":"E2E issue context from mock gh."}'
++          exit 0
++        fi
++        printf ''
++        exit 0
++        ;;
+       comment) exit 0 ;;
+     esac
+     ;;
+@@ -398,6 +411,51 @@ exit 1
+     .to_owned()
+ }
+ 
++/// Mock backend script that consumes stdin and exits non-zero.
++///
++/// Optional logging:
++/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
++/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
++pub fn nonzero_exit_backend_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++cat >/dev/null
++if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
++  printf '%s:nonzero\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" >> "${RALPH_VALIDATE_BACKEND_LOG}"
++fi
++echo "intentional backend failure" >&2
++exit 17
++"###
++    .to_owned()
++}
++
++/// Mock backend script that consumes stdin and returns empty output with exit 0.
++///
++/// Optional logging:
++/// - `RALPH_VALIDATE_BACKEND_LOG`: append one line per invocation
++/// - `RALPH_VALIDATE_BACKEND_LABEL`: label prefix for logged lines
++pub fn empty_output_backend_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++input="$(cat)"
++if [ -n "${RALPH_VALIDATE_BACKEND_LOG:-}" ]; then
++  kind="normal"
++  if printf '%s' "$input" | grep -q "CRITICAL: Your previous response could not be parsed."; then
++    kind="reformatter_prompt"
++  elif printf '%s' "$input" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
++    kind="format_reminder"
++  fi
++  printf '%s:%s\n' "${RALPH_VALIDATE_BACKEND_LABEL:-backend}" "$kind" >> "${RALPH_VALIDATE_BACKEND_LOG}"
++fi
++
++# Intentionally produce no stdout so orchestrator exercises empty-output handling.
++exit 0
++"###
++    .to_owned()
++}
++
+ /// Mock script whose prompt reviewer response includes nested `##` headings
+ /// inside the `## Refined Prompt` section, exercising the extract-to-EOF parser
+ /// semantics. All other roles respond identically to `standard_mock_script()`.
+diff --git a/src/validate/tests_commands.rs b/src/validate/tests_commands.rs
+index 281f3f5..81d7d2b 100644
+--- a/src/validate/tests_commands.rs
++++ b/src/validate/tests_commands.rs
+@@ -2,8 +2,7 @@ use super::*;
+ 
+ use crate::validate::assertions::{
+     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
+-    assert_stdout_eq,
+-    git_head_commit, git_tag_commit,
++    assert_stdout_eq, git_head_commit, git_tag_commit,
+ };
+ use crate::validate::harness::RalphHarness;
+ use crate::validate::mock_scripts::standard_mock_script;
+@@ -489,7 +488,10 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
+         );
+         let version_part = &stdout["ralph ".len()..];
+         assert!(
+-            version_part.chars().next().map_or(false, |c| c.is_ascii_digit()),
++            version_part
++                .chars()
++                .next()
++                .map_or(false, |c| c.is_ascii_digit()),
+             "expected semver version after 'ralph ', got: {stdout}"
+         );
+     })
+diff --git a/src/validate/tests_daemon.rs b/src/validate/tests_daemon.rs
+index d7d11ba..abbdeb9 100644
+--- a/src/validate/tests_daemon.rs
++++ b/src/validate/tests_daemon.rs
+@@ -486,7 +486,13 @@ fn verbose_output_absent_when_disabled(h: &RalphHarness) -> TestResult {
+         let gh_path = write_daemon_mock_gh(h).expect("write mock gh");
+         let output = h
+             .ralph_env(
+-                ["daemon", "start", "--single-iteration", "--repo", "acme/widgets"],
++                [
++                    "daemon",
++                    "start",
++                    "--single-iteration",
++                    "--repo",
++                    "acme/widgets",
++                ],
+                 &[("PATH", &gh_path)],
+             )
+             .expect("daemon start should execute");
+@@ -2254,7 +2260,8 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
+                     None,
+                 );
+                 t["project_id"] = json!(project_id);
+-                t["raw_idea"] = json!("CAS activation race task\n\nForce persisted failed before CAS.");
++                t["raw_idea"] =
++                    json!("CAS activation race task\n\nForce persisted failed before CAS.");
+                 t
+             }],
+         )
+@@ -3362,7 +3369,10 @@ exit 0
+ 
+         // The spawned child should have received the refined prompt
+         let idea = fs::read_to_string(&idea_log).expect("read idea log");
+-        assert_eq!(idea, "Refined: implement the feature with proper error handling and tests.");
++        assert_eq!(
++            idea,
++            "Refined: implement the feature with proper error handling and tests."
++        );
+     })
+ }
+ 
+@@ -4707,8 +4717,7 @@ exit 1
+             .find(|t| t["task_id"] == "acme-widgets-301")
+             .unwrap();
+         assert!(
+-            task.get("refined_title").is_none()
+-                || task["refined_title"].is_null(),
++            task.get("refined_title").is_none() || task["refined_title"].is_null(),
+             "refined_title should not be set when refinement is disabled"
+         );
+     })
+@@ -5035,10 +5044,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // Check that the comment body includes the bold title
+-        assert!(
+-            comment_log.exists(),
+-            "comment should have been posted"
+-        );
++        assert!(comment_log.exists(), "comment should have been posted");
+         let log = fs::read_to_string(&comment_log).expect("read comment log");
+         assert!(
+             log.contains("**Bold comment title test**"),
+@@ -5068,7 +5074,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(wt.exists(), "worktree directory should exist");
+ 
+         // Verify branch exists
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should exist after create_worktree"
+@@ -5079,7 +5088,10 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
+         assert!(!wt.exists(), "worktree directory should be removed");
+ 
+         // Branch should still exist
+-        let branch_check = git_stdout(&h.repo_root, &["branch", "--list", "ralph/daemon/acme-widgets-99"]);
++        let branch_check = git_stdout(
++            &h.repo_root,
++            &["branch", "--list", "ralph/daemon/acme-widgets-99"],
++        );
+         assert!(
+             branch_check.contains("ralph/daemon/acme-widgets-99"),
+             "branch should survive worktree removal"
+@@ -5106,12 +5118,21 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
+         // Create a tracked file, commit it, then modify it (dirty tracked)
+         fs::write(wt.join("tracked.rs"), "fn original() {}").expect("write tracked");
+         git(&wt, &["add", "tracked.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "add tracked",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "add tracked",
++            ],
++        );
+         fs::write(wt.join("tracked.rs"), "fn modified() {}").expect("modify tracked");
+ 
+         // Create an untracked file (like SPEC.md from codex side-effect)
+@@ -5165,12 +5186,21 @@ fn dispatch_cleans_dirty_worktree(h: &RalphHarness) -> TestResult {
+         // Add a tracked file, commit, then modify (simulates prior run's changes)
+         fs::write(wt.join("src.rs"), "fn old() {}").expect("write tracked");
+         git(&wt, &["add", "src.rs"]);
+-        git(&wt, &[
+-            "-c", "user.name=Test",
+-            "-c", "user.email=test@test.com",
+-            "-c", "commit.gpgsign=false",
+-            "commit", "--no-verify", "-m", "prior run",
+-        ]);
++        git(
++            &wt,
++            &[
++                "-c",
++                "user.name=Test",
++                "-c",
++                "user.email=test@test.com",
++                "-c",
++                "commit.gpgsign=false",
++                "commit",
++                "--no-verify",
++                "-m",
++                "prior run",
++            ],
++        );
+         fs::write(wt.join("src.rs"), "fn dirty() {}").expect("dirty tracked");
+ 
+         // Add an untracked file (simulates codex side-effect)
+@@ -5470,10 +5500,7 @@ exit 1
+         let stderr = String::from_utf8_lossy(&output.stderr);
+ 
+         // pr edit was attempted
+-        assert!(
+-            pr_edit_log.exists(),
+-            "pr edit should have been attempted"
+-        );
++        assert!(pr_edit_log.exists(), "pr edit should have been attempted");
+ 
+         // pr create should NOT have been called (no fallthrough on edit failure)
+         assert!(
+@@ -5613,10 +5640,7 @@ exit 1
+         assert_exit_code(&output, 0);
+ 
+         // pr create should have been called
+-        assert!(
+-            pr_create_log.exists(),
+-            "pr create should have been called"
+-        );
++        assert!(pr_create_log.exists(), "pr create should have been called");
+ 
+         // Body file should have been captured and contain structured content
+         assert!(
+@@ -5811,8 +5835,13 @@ fn rebase_disabled_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Disable auto-rebase
+-        h.ralph_ok(["config", "set", "workspace.daemon_auto_rebase_enabled", "false"])
+-            .expect("set auto_rebase_enabled failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_auto_rebase_enabled",
++            "false",
++        ])
++        .expect("set auto_rebase_enabled failed");
+ 
+         // Seed a completed task with a PR URL
+         write_tasks(
+@@ -6163,7 +6192,10 @@ fn rebase_pr_comment_not_issue(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6251,7 +6283,10 @@ fn rebase_dedup_by_head_sha(h: &RalphHarness) -> TestResult {
+ 
+         // Mock git: worktree/checkout/fetch/rebase succeed, push fails
+         let mock_git = h
+-            .write_mock_script("git", &mock_scripts::daemon_mock_git_rebase_fail_push_script())
++            .write_mock_script(
++                "git",
++                &mock_scripts::daemon_mock_git_rebase_fail_push_script(),
++            )
+             .expect("write mock git");
+         let mock_git_dir = mock_git
+             .parent()
+@@ -6468,7 +6503,9 @@ fn rebase_gh_pr_view_failure_break(h: &RalphHarness) -> TestResult {
+         );
+ 
+         // The second task should NOT have been attempted (break after first failure)
+-        let second_attempt_count = stderr.matches("auto-rebase: rebasing acme-widgets-110").count();
++        let second_attempt_count = stderr
++            .matches("auto-rebase: rebasing acme-widgets-110")
++            .count();
+         assert_eq!(
+             second_attempt_count, 0,
+             "second task should not be attempted after gh pr view failure"
+@@ -6482,8 +6519,13 @@ fn rebase_per_cycle_cap(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Set max_rebases_per_cycle to 1 via config
+-        h.ralph_ok(["config", "set", "workspace.daemon_max_rebases_per_cycle", "1"])
+-            .expect("set max_rebases_per_cycle failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_max_rebases_per_cycle",
++            "1",
++        ])
++        .expect("set max_rebases_per_cycle failed");
+ 
+         // Create 3 tasks with PRs
+         write_tasks(
+@@ -6574,11 +6616,17 @@ fn rebase_interval_skip(h: &RalphHarness) -> TestResult {
+         h.init_workspace().expect("init failed");
+ 
+         // Use a very large interval to ensure skip regardless of clock skew
+-        h.ralph_ok(["config", "set", "workspace.daemon_rebase_interval_seconds", "999999"])
+-            .expect("set rebase_interval_seconds failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_rebase_interval_seconds",
++            "999999",
++        ])
++        .expect("set rebase_interval_seconds failed");
+ 
+         // Dynamically compute a "just now" timestamp so test never becomes stale
+-        let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
++        let recent_timestamp =
++            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+ 
+         write_tasks(
+             h,
+@@ -6719,7 +6767,10 @@ fn rebase_backward_compat_state(h: &RalphHarness) -> TestResult {
+         let tasks = load_tasks(h).expect("load_tasks failed");
+         assert_eq!(tasks.len(), 1);
+         assert!(
+-            tasks[0].get("last_rebase_at").map(|v| v.is_null()).unwrap_or(true),
++            tasks[0]
++                .get("last_rebase_at")
++                .map(|v| v.is_null())
++                .unwrap_or(true),
+             "last_rebase_at should be null/missing"
+         );
+     })
+diff --git a/src/validate/tests_e2e_conformance.rs b/src/validate/tests_e2e_conformance.rs
+index 25b1b2c..efcd772 100644
+--- a/src/validate/tests_e2e_conformance.rs
++++ b/src/validate/tests_e2e_conformance.rs
+@@ -1,11 +1,15 @@
+ use super::*;
+ 
+ use std::fs;
++use std::path::PathBuf;
+ use std::process::Command;
+ 
+ use crate::validate::harness::RalphHarness;
+-use crate::validate::mock_scripts::{e2e_mock_gh_logging_script, e2e_mock_ralph_script};
+-use serde_json::json;
++use crate::validate::mock_scripts::{
++    daemon_mock_ralph_with_branch_switch_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
++    empty_output_backend_script, nonzero_exit_backend_script,
++};
++use serde_json::{json, Value};
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+     vec![
+@@ -13,6 +17,18 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "e2e_conformance::backend_timeout_exhausted_fails_task",
+             func: backend_timeout_exhausted_fails_task,
+         },
++        ConformanceTest {
++            name: "e2e_conformance::backend_command_failed_no_reformatter",
++            func: backend_command_failed_no_reformatter,
++        },
++        ConformanceTest {
++            name: "e2e_conformance::empty_output_retries_then_reformatter",
++            func: empty_output_retries_then_reformatter,
++        },
++        ConformanceTest {
++            name: "e2e_conformance::pr_metadata_verification",
++            func: pr_metadata_verification,
++        },
+         ConformanceTest {
+             name: "e2e_conformance::e2e_mock_ralph_script_delegates_to_auto",
+             func: e2e_mock_ralph_script_delegates_to_auto,
+@@ -80,6 +96,321 @@ fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-backend-command-failed";
++        h.init_workspace().expect("init failed");
++
++        let claude_script = h
++            .write_mock_script("backend-nonzero.sh", &nonzero_exit_backend_script())
++            .expect("failed to write nonzero backend script");
++
++        let codex_log = h.temp_dir.path().join("reformatter-should-not-run.log");
++        let codex_log_str = codex_log.to_string_lossy().into_owned();
++        let codex_script = h
++            .write_mock_script(
++                "reformatter-should-not-run.sh",
++                &format!(
++                    "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf 'unexpected reformatter call\\n' >> \"{codex_log_str}\"\nexit 0\n"
++                ),
++            )
++            .expect("failed to write codex marker script");
++        h.setup_separate_mock_backends(&claude_script, &codex_script)
++            .expect("setup_separate_mock_backends failed");
++
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++        h.create_project(
++            project_id,
++            "Backend Command Failed Project",
++            "Backend command failure reformatter boundary test prompt",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_ne!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected non-zero exit for backend non-zero command failure"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.to_lowercase().contains("backend command failed"),
++            "expected backend command failure in stderr, got:\n{stderr}"
++        );
++        assert!(
++            !stderr.contains("requesting reformat via"),
++            "backend command failure must not trigger reformatter fallback, got:\n{stderr}"
++        );
++        assert!(
++            !codex_log.exists(),
++            "reformatter backend should not run on BackendCommandFailed"
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_eq!(
++            state["status"],
++            json!("failed"),
++            "project should be marked failed after BackendCommandFailed"
++        );
++    })
++}
++
++fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-empty-output";
++        h.init_workspace().expect("init failed");
++
++        let claude_script = h
++            .write_mock_script("backend-empty-output.sh", &empty_output_backend_script())
++            .expect("failed to write empty-output backend script");
++        let codex_script = h
++            .write_mock_script(
++                "backend-reformatter-nonzero.sh",
++                &nonzero_exit_backend_script(),
++            )
++            .expect("failed to write nonzero reformatter backend script");
++        h.setup_separate_mock_backends(&claude_script, &codex_script)
++            .expect("setup_separate_mock_backends failed");
++
++        let call_log = h.temp_dir.path().join("backend-call-order.log");
++        let call_log_str = call_log.to_string_lossy().into_owned();
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.claude.env.RALPH_VALIDATE_BACKEND_LOG",
++            &call_log_str,
++        ])
++        .expect("config set claude log path failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.claude.env.RALPH_VALIDATE_BACKEND_LABEL",
++            "claude",
++        ])
++        .expect("config set claude label failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.codex.env.RALPH_VALIDATE_BACKEND_LOG",
++            &call_log_str,
++        ])
++        .expect("config set codex log path failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "backends.codex.env.RALPH_VALIDATE_BACKEND_LABEL",
++            "codex",
++        ])
++        .expect("config set codex label failed");
++
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++        h.create_project(
++            project_id,
++            "Empty Output Retry Project",
++            "Empty backend output should retry and then attempt reformatter",
++        )
++        .expect("create_project failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++        assert_ne!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected non-zero exit after empty output and failed reformatter attempt"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.to_lowercase().contains("backend command failed"),
++            "expected backend command failure after reformatter attempt, got:\n{stderr}"
++        );
++
++        let call_lines = fs::read_to_string(&call_log)
++            .expect("failed to read backend call log")
++            .lines()
++            .map(str::to_owned)
++            .collect::<Vec<_>>();
++        assert!(
++            call_lines.len() >= 3,
++            "expected at least 3 backend invocations, got {} lines:\n{}",
++            call_lines.len(),
++            call_lines.join("\n")
++        );
++        assert!(
++            call_lines[0].starts_with("claude:"),
++            "first invocation should be claude primary backend, got: {}",
++            call_lines[0]
++        );
++        assert!(
++            call_lines[1].starts_with("claude:"),
++            "second invocation should be same-backend retry, got: {}",
++            call_lines[1]
++        );
++        assert!(
++            call_lines.iter().any(|line| line.starts_with("codex:")),
++            "expected reformatter backend invocation after same-backend retry, got lines:\n{}",
++            call_lines.join("\n")
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_eq!(
++            state["status"],
++            json!("failed"),
++            "project should be marked failed when parse-repair path ultimately fails"
++        );
++    })
++}
++
++fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        h.init_workspace().expect("init failed");
++        h.ralph_ok([
++            "config",
++            "set",
++            "workspace.daemon_refinement_enabled",
++            "false",
++        ])
++        .expect("config set workspace.daemon_refinement_enabled failed");
++
++        let gh_script = h
++            .write_mock_script("gh", &e2e_mock_gh_logging_script())
++            .expect("failed to write e2e gh script");
++        let gh_dir = gh_script
++            .parent()
++            .expect("mock gh script should have parent directory");
++        let path_env = format!(
++            "{}:{}",
++            gh_dir.display(),
++            std::env::var("PATH").unwrap_or_default()
++        );
++
++        let daemon_ralph_script = h
++            .write_mock_script(
++                "daemon-ralph-branch-switch.sh",
++                &daemon_mock_ralph_with_branch_switch_script(),
++            )
++            .expect("failed to write daemon branch-switch mock ralph script");
++        let daemon_ralph_bin = daemon_ralph_script.to_string_lossy().into_owned();
++
++        let task_id = "acme-widgets-901";
++        let issue_number = 901_u32;
++        write_tasks(
++            h,
++            vec![task_json(
++                task_id,
++                "pending",
++                issue_number,
++                "acme",
++                "widgets",
++            )],
++        )
++        .expect("write_tasks failed");
++
++        let gh_log_path = h.temp_dir.path().join("gh-pr-create-e2e.log");
++        let gh_log_str = gh_log_path.to_string_lossy().into_owned();
++        let env_vars = [
++            ("PATH", path_env.as_str()),
++            ("RALPH_DAEMON_BIN", daemon_ralph_bin.as_str()),
++            ("RALPH_E2E_GH_LOG", gh_log_str.as_str()),
++        ];
++
++        let output = h
++            .ralph_env(
++                [
++                    "daemon",
++                    "start",
++                    "--repo",
++                    "acme/widgets",
++                    "--single-iteration",
++                ],
++                &env_vars,
++            )
++            .expect("daemon start should execute");
++        assert_eq!(
++            output.status.code().unwrap_or(-1),
++            0,
++            "expected daemon start single iteration to succeed; stderr:\n{}",
++            String::from_utf8_lossy(&output.stderr)
++        );
++
++        let tasks_snapshot = load_tasks(h)
++            .map(|tasks| serde_json::to_string_pretty(&tasks).unwrap_or_else(|_| "[]".to_owned()))
++            .unwrap_or_else(|err| format!("load_tasks error: {err}"));
++        assert!(
++            gh_log_path.exists(),
++            "expected gh pr create invocation log\nstdout:\n{}\nstderr:\n{}\ntasks:\n{}",
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr),
++            tasks_snapshot
++        );
++        let log_content = fs::read_to_string(&gh_log_path).expect("failed to read gh log");
++        let args = parse_logged_args(&log_content);
++
++        let title = arg_value(&args, "--title").expect("missing --title argument in gh log");
++        assert!(
++            title.starts_with("ralph:"),
++            "expected --title value to begin with 'ralph:', got: {title}"
++        );
++
++        let head = arg_value(&args, "--head").expect("missing --head argument in gh log");
++        assert!(
++            !head.trim().is_empty(),
++            "expected non-empty --head value, got: {head:?}"
++        );
++
++        let repo = arg_value(&args, "--repo").expect("missing --repo argument in gh log");
++        assert_eq!(
++            repo, "acme/widgets",
++            "expected --repo acme/widgets in gh log"
++        );
++
++        assert!(
++            args.iter().any(|arg| arg == "--body-file"),
++            "expected --body-file flag in gh pr create args, got:\n{}",
++            args.join(" ")
++        );
++
++        let body = extract_logged_body(&log_content).expect("missing logged --body-file content");
++        assert!(
++            body.contains(&format!("Closes #{issue_number}")),
++            "expected body to contain issue closure line, got:\n{body}"
++        );
++        assert!(
++            body.contains("## Diff Stat"),
++            "expected body to contain diff stat section, got:\n{body}"
++        );
++        assert!(
++            body.contains("Project Ref: `"),
++            "expected body to contain project reference footer, got:\n{body}"
++        );
++        assert!(
++            !body.contains("Project Ref: unavailable"),
++            "expected resolved project reference (not unavailable), got:\n{body}"
++        );
++
++        let tasks = load_tasks(h).expect("load_tasks failed");
++        let task = tasks
++            .iter()
++            .find(|t| t["task_id"] == task_id)
++            .expect("task should exist");
++        assert_eq!(
++            task["state"],
++            json!("completed"),
++            "expected task to complete in e2e PR metadata flow"
++        );
++        assert!(
++            task["pr_url"].as_str().is_some(),
++            "expected pr_url to be populated after gh pr create"
++        );
++    })
++}
++
+ fn e2e_mock_ralph_script_delegates_to_auto(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let script = h
+@@ -195,6 +526,66 @@ echo "unreachable"
+     .to_owned()
+ }
+ 
++fn parse_logged_args(log_content: &str) -> Vec<String> {
++    log_content
++        .lines()
++        .filter_map(|line| {
++            let rest = line.strip_prefix("arg[")?;
++            let (_, value) = rest.split_once("]=")?;
++            Some(value.to_owned())
++        })
++        .collect()
++}
++
++fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
++    args.windows(2)
++        .find(|window| window[0] == flag)
++        .map(|window| window[1].as_str())
++}
++
++fn extract_logged_body(log_content: &str) -> Option<String> {
++    let marker = "body_begin\n";
++    let start = log_content.find(marker)? + marker.len();
++    let tail = &log_content[start..];
++    let end = tail.find("\nbody_end")?;
++    Some(tail[..end].to_owned())
++}
++
++fn write_tasks(h: &RalphHarness, tasks: Vec<Value>) -> crate::Result<()> {
++    let path = tasks_path(h);
++    if let Some(parent) = path.parent() {
++        fs::create_dir_all(parent)?;
++    }
++    fs::write(path, serde_json::to_string_pretty(&tasks)?)?;
++    Ok(())
++}
++
++fn load_tasks(h: &RalphHarness) -> crate::Result<Vec<Value>> {
++    let raw = fs::read_to_string(tasks_path(h))?;
++    Ok(serde_json::from_str(&raw)?)
++}
++
++fn tasks_path(h: &RalphHarness) -> PathBuf {
++    h.repo_root.join(".ralph").join("daemon").join("tasks.json")
++}
++
++fn task_json(task_id: &str, state: &str, issue_number: u32, owner: &str, repo: &str) -> Value {
++    json!({
++        "task_id": task_id,
++        "state": state,
++        "issue_number": issue_number,
++        "owner": owner,
++        "repo": repo,
++        "project_id": null,
++        "child_pid": null,
++        "child_pgid": null,
++        "branch": null,
++        "pr_url": null,
++        "created_at": "2026-02-16T00:00:00Z",
++        "updated_at": "2026-02-16T00:00:00Z"
++    })
++}
++
+ fn run_case<F>(f: F) -> TestResult
+ where
+     F: FnOnce(),
+```
+
+## Prior QA History
+
+(none)
+
+mcp startup: no servers
+
+thinking
+**Acknowledging manual test planning**
+codex
+I’m going to validate this as a QA pass by first building the artifact, then manually exercising the new `ralph` behaviors with real CLI runs and file/state inspection, and finally running the full automated suites listed in the acceptance criteria. I’ll start by checking the workspace state and locating the spec/notes/docs files.
+
+thinking
+**Running parallel reads**
+exec
+/run/current-system/sw/bin/bash -lc 'pwd && ls -la' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+total 300
+drwxr-xr-x  7 root root  4096 Feb 16 03:14 .
+drwxr-xr-x  8 root root  4096 Feb 16 03:18 ..
+-rw-r--r--  1 root root   112 Feb 16 01:43 .git
+-rw-r--r--  1 root root   104 Feb 16 01:43 .gitignore
+drwxr-xr-x  6 root root  4096 Feb 16 01:43 .ralph
+-rw-r--r--  1 root root  3803 Feb 16 01:43 AGENTS.md
+-rw-r--r--  1 root root 31893 Feb 16 01:43 Cargo.lock
+-rw-r--r--  1 root root   696 Feb 16 01:43 Cargo.toml
+-rw-r--r--  1 root root 14140 Feb 16 01:43 PLAN-qa-phase.md
+-rw-r--r--  1 root root  7880 Feb 16 01:43 PLAN-qa-validate.md
+-rw-r--r--  1 root root 38293 Feb 16 01:43 PLAN.md
+-rw-r--r--  1 root root 48099 Feb 16 01:43 PRD.md
+-rw-r--r--  1 root root  4609 Feb 16 01:43 PROMPT-auto-branch-sync.md
+-rw-r--r--  1 root root  7103 Feb 16 01:43 PROMPT-codex-reasoning-effort.md
+-rw-r--r--  1 root root  5701 Feb 16 01:43 PROMPT-explicit-models.md
+-rw-r--r--  1 root root  6212 Feb 16 01:43 PROMPT-per-role-models.md
+-rw-r--r--  1 root root 16482 Feb 16 01:43 PROMPT-prd-pipeline.md
+-rw-r--r--  1 root root  3196 Feb 16 01:43 PROMPT-reformatter.md
+
+thinking
+**Planning concurrent file searches**
+codex
+I confirmed the workspace and will now locate the exact `prompt.md`, `*-spec.md`, and `*-impl-notes.md` artifacts used for this loop so the QA report references the right inputs.
+exec
+/run/current-system/sw/bin/bash -lc "rg --files -g 'prompt.md' -g '*-spec.md' -g '*-impl-notes.md' ." in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "find .ralph -maxdepth 6 -type f \\( -name 'prompt.md' -o -name '*-spec.md' -o -name '*-impl-notes.md' \\) | sort" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 exited 1 in 51ms:
+
+ succeeded in 51ms:
+.ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214140656-spec.md
+.ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214141243-impl-notes.md
+.ralph/projects/add-verbose-logging-flag-to-daemon-start/prompt.md
+.ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153035-spec.md
+.ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153242-impl-notes.md
+.ralph/projects/add-version-flag-to-ralph-cli-add-versio/prompt.md
+.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020316-spec.md
+.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020946-impl-notes.md
+.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024001-spec.md
+.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024356-impl-notes.md
+.ralph/projects/auto-create-ralph-directory-if-not-exist/prompt.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034014-spec.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034213-impl-notes.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/002-async-runtime-loop-internals-and-async-prompt/20260214035637-spec.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/002-async-runtime-loop-internals-and-async-prompt/20260214040000-impl-notes.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/002-async-runtime-loop-internals-and-async-prompt/20260214040149-impl-notes.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/003-tokio-process-migration-and-async-killreap/20260214041844-spec.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/loops/003-tokio-process-migration-and-async-killreap/20260214042344-impl-notes.md
+.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/prompt.md
+.ralph/projects/summary-eliminate-all-unsafe-blocks-from/loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214200908-spec.md
+
+thinking
+**Noticing pattern matching issue**
+codex
+I found the exact loop artifacts under `.ralph/projects/summary-enhance-the-ralph-validate-test/loops/003-pr-metadata-verification-reformatter-semantics/`. Next I’ll build and then run manual CLI scenarios against the produced `ralph` binary.
+
+thinking
+**Planning sequential build and test execution**
+codex
+I’m starting the required build/test command sequence now, beginning with `nix develop -c cargo test`, and I’ll capture the key pass/fail lines and exit codes from each command.
+exec
+/run/current-system/sw/bin/bash -lc 'set -o pipefail; nix develop -c cargo test 2>&1 | tee /tmp/qa-cargo-test.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 4.96s:
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/ralph-3b3d545b10a51b88)
+
+running 375 tests
+test backend::codex::tests::parse_codex_model_effort_no_suffix ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_high ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_low ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_medium ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_xhigh ... ok
+test backend::codex::tests::parse_codex_model_effort_unknown_suffix ... ok
+test backend::tests::parse_backend_spec_accepts_bare_name ... ok
+test backend::tests::parse_backend_spec_accepts_name_with_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_name ... ok
+test backend::tests::parse_backend_spec_rejects_missing_opening_paren ... ok
+test backend::tests::parse_backend_spec_rejects_missing_closing_paren ... ok
+test backend::tmux::tests::format_window_label_basic ... ok
+test backend::tmux::tests::format_window_label_planner_role ... ok
+test backend::tmux::tests::format_window_label_long_values_truncated ... ok
+test backend::tmux::tests::sanitize_tmux_label_strips_invalid_chars ... ok
+
+thinking
+**Confirming tests pass**
+codex
+`cargo test` completed cleanly. Next I’m running `nix build -L` to build the release artifact and confirm it succeeds in this tree.
+exec
+/run/current-system/sw/bin/bash -lc 'set -o pipefail; nix build -L 2>&1 | tee /tmp/qa-nix-build.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+thinking
+**Planning poll session**
+codex
+The release build is still running; I’m waiting for completion and will report the final artifact/exit status next.
+
+thinking
+**Checking test execution phase**
+
+thinking
+**Waiting on validation completion**
+ succeeded in 1m 22s:
+this derivation will be built:
+  /nix/store/0hgq7vzda95i00xkdprgajkmv2rfd4xl-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv
+building '/nix/store/0hgq7vzda95i00xkdprgajkmv2rfd4xl-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv'...
+ralph-static-x86_64-unknown-linux-musl> Running phase: unpackPhase
+ralph-static-x86_64-unknown-linux-musl> unpacking source archive /nix/store/gz6kkrzcz8lirfv0wd7k92p4i1nmv15p-h68z7dzxfhcbfvsbcicgjs6gi9jgkdxy-source
+ralph-static-x86_64-unknown-linux-musl> source root is h68z7dzxfhcbfvsbcicgjs6gi9jgkdxy-source
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: patchPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Validating consistency between /build/h68z7dzxfhcbfvsbcicgjs6gi9jgkdxy-source/Cargo.lock and /build/cargo-vendor-dir/Cargo.lock
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: configurePhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: buildPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoBuildHook
+ralph-static-x86_64-unknown-linux-musl> cargoBuildHook flags: -j 16 --target x86_64-unknown-linux-musl --offline --profile release
+ralph-static-x86_64-unknown-linux-musl>    Compiling proc-macro2 v1.0.106
+ralph-static-x86_64-unknown-linux-musl>    Compiling quote v1.0.44
+
+thinking
+**Planning manual CLI validation**
+codex
+Build succeeded. I’ll now run manual E2E CLI checks in throwaway repos (with mock backend scripts) to validate failure semantics and artifact behavior directly, not just via `cargo test`. I’m first checking the exact config keys used for backend wiring.
+
+thinking
+**Exploring test setup usage**
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "setup_separate_mock_backends|setup_mock_backends|config set backends" src/validate/harness.rs src/validate/tests_e2e_conformance.rs src/validate/tests_run.rs src/validate/tests_qa.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "rg -n \"backends\\.claude|backends\\.codex|command\" src/validate/harness.rs src/validate/mock_scripts.rs | head -n 120" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+src/validate/harness.rs:195:    pub fn setup_mock_backends<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+src/validate/harness.rs:218:    pub fn setup_mock_backends_stable<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+src/validate/harness.rs:244:    pub fn setup_separate_mock_backends<P: AsRef<Path>, Q: AsRef<Path>>(
+src/validate/tests_run.rs:238:        h.setup_separate_mock_backends(&claude_script, &codex_script)
+src/validate/tests_run.rs:239:            .expect("setup_separate_mock_backends failed");
+src/validate/tests_run.rs:316:        h.setup_mock_backends(&script)
+src/validate/tests_run.rs:317:            .expect("setup_mock_backends failed");
+src/validate/tests_run.rs:571:        h.setup_mock_backends(&script_path)
+src/validate/tests_run.rs:572:            .expect("setup_mock_backends failed");
+src/validate/tests_run.rs:661:    h.setup_mock_backends(&script)
+src/validate/tests_run.rs:662:        .expect("setup_mock_backends failed");
+src/validate/tests_e2e_conformance.rs:51:        h.setup_mock_backends(&script)
+src/validate/tests_e2e_conformance.rs:52:            .expect("setup_mock_backends failed");
+src/validate/tests_e2e_conformance.rs:56:            .expect("config set backends.claude.timeout_seconds failed");
+src/validate/tests_e2e_conformance.rs:58:            .expect("config set backends.codex.timeout_seconds failed");
+src/validate/tests_e2e_conformance.rs:118:        h.setup_separate_mock_backends(&claude_script, &codex_script)
+src/validate/tests_e2e_conformance.rs:119:            .expect("setup_separate_mock_backends failed");
+src/validate/tests_e2e_conformance.rs:176:        h.setup_separate_mock_backends(&claude_script, &codex_script)
+src/validate/tests_e2e_conformance.rs:177:            .expect("setup_separate_mock_backends failed");
+src/validate/tests_qa.rs:316:    h.setup_mock_backends(&script_path)
+ succeeded in 51ms:
+src/validate/harness.rs:110:        let mut command = Command::new(&self.ralph_bin);
+src/validate/harness.rs:111:        command.args(args).current_dir(&self.repo_root);
+src/validate/harness.rs:113:            command.env(key, value);
+src/validate/harness.rs:115:        Ok(command.output()?)
+src/validate/harness.rs:200:            "backends.claude.command".to_owned(),
+src/validate/harness.rs:206:            "backends.codex.command".to_owned(),
+src/validate/harness.rs:216:    /// wrapper is set as the backend command with empty args so stale
+src/validate/harness.rs:231:                format!("backends.{backend}.command"),
+src/validate/harness.rs:254:            "backends.claude.command".to_owned(),
+src/validate/harness.rs:260:            "backends.codex.command".to_owned(),
+src/validate/harness.rs:346:        "git command failed in {}: git {}: {}",
+src/validate/mock_scripts.rs:408:echo "mock gh: unhandled command: $*" >&2
+src/validate/mock_scripts.rs:674:        echo "mock gh: unhandled issue subcommand: $2" >&2
+src/validate/mock_scripts.rs:695:        echo "mock gh: unhandled pr subcommand: $2" >&2
+src/validate/mock_scripts.rs:707:        echo "mock gh: unhandled repo subcommand: $2" >&2
+src/validate/mock_scripts.rs:713:    echo "mock gh: unhandled command: $1" >&2
+src/validate/mock_scripts.rs:732:    # Pass through other commands to real ralph
+src/validate/mock_scripts.rs:733:    echo "mock ralph: unhandled command: $1" >&2
+src/validate/mock_scripts.rs:762:    echo "mock ralph: unhandled command: $1" >&2
+src/validate/mock_scripts.rs:795:    echo "mock ralph: unhandled command: $1" >&2
+
+thinking
+**Planning config inspection**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '180,280p' src/validate/harness.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+    }
+
+    pub fn write_mock_script(&self, name: &str, content: &str) -> Result<PathBuf> {
+        let path = self.temp_dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, content)?;
+
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms)?;
+        Ok(path)
+    }
+
+    pub fn setup_mock_backends<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+        let script = script.as_ref().to_string_lossy().into_owned();
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+
+thinking
+**Planning manual backend tests**
+codex
+I have the backend config keys. I’m now running three direct manual CLI scenarios in fresh temp repos: non-zero backend, backend timeout, and empty-output retry/reformatter order, each with explicit state-file and log checks.
+
+thinking
+**Crafting robust shell test script**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-nonzero-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/tmp/qa-nonzero-init.log 2>&1
+cat > claude.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo claude_called >> claude.log
+echo "intentional backend failure" >&2
+exit 17
+SH
+cat > codex.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo codex_called >> codex.log
+exit 0
+SH
+chmod +x claude.sh codex.sh
+"$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+cat > prompt.md <<'"'EOF'
+Manual QA nonzero backend case
+EOF
+\""'$RALPH_BIN" project new --id qa-nonzero --name "QA Nonzero" --prompt prompt.md >/dev/null
+set +e
+"$RALPH_BIN" run --loops 1 > run.out 2> run.err
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 20 lines) ---\\n'
+head -n 20 run.err
+printf -- '--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-nonzero/state.json | head -n 1 || true
+printf -- '--- codex log exists? ---\\n'
+if [ -f codex.log ]; then echo YES; else echo NO; fi
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+TMP=/tmp/qa-nonzero-4Bkg
+RUN_EXIT=2
+--- stderr (first 20 lines) ---
+error: invalid input: cannot start a new loop with uncommitted changes outside `.ralph/`.
+commit/stash/discard those paths first:
+- claude.sh
+- codex.sh
+- prompt.md
+- run.err
+- run.out
+--- project status line ---
+13:  "status": "pending",
+--- codex log exists? ---
+NO
+
+thinking
+**Enforcing clean commit state before run**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-nonzero-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/dev/null 2>&1
+cat > claude.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo claude_called >> claude.log
+echo "intentional backend failure" >&2
+exit 17
+SH
+cat > codex.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo codex_called >> codex.log
+exit 0
+SH
+cat > prompt.md <<'"'EOF'
+Manual QA nonzero backend case
+EOF
+chmod +x claude.sh codex.sh
+git add claude.sh codex.sh prompt.md
+git commit -q -m \"add mock scripts\"
+\""'$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+"$RALPH_BIN" project new --id qa-nonzero --name "QA Nonzero" --prompt prompt.md >/dev/null
+set +e
+"$RALPH_BIN" run --loops 1 > run.out 2> run.err
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 25 lines) ---\\n'
+head -n 25 run.err
+printf -- '--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-nonzero/state.json | head -n 1 || true
+printf -- '--- codex log exists? ---\\n'
+if [ -f codex.log ]; then echo YES; else echo NO; fi
+printf -- '--- claude log exists? ---\\n'
+if [ -f claude.log ]; then cat claude.log; else echo NO; fi
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+TMP=/tmp/qa-nonzero-hWVN
+RUN_EXIT=2
+--- stderr (first 25 lines) ---
+error: invalid input: cannot start a new loop with uncommitted changes outside `.ralph/`.
+commit/stash/discard those paths first:
+- run.err
+- run.out
+--- project status line ---
+13:  "status": "pending",
+--- codex log exists? ---
+NO
+--- claude log exists? ---
+NO
+
+thinking
+**Redirecting output outside repo**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-nonzero-XXXX)"
+OUT_ERR="$(mktemp /tmp/qa-nonzero-run-err-XXXX)"
+OUT_OUT="$(mktemp /tmp/qa-nonzero-run-out-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/dev/null 2>&1
+cat > claude.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo claude_called >> /tmp/qa-nonzero-claude.log
+echo "intentional backend failure" >&2
+exit 17
+SH
+cat > codex.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+echo codex_called >> /tmp/qa-nonzero-codex.log
+exit 0
+SH
+cat > prompt.md <<'"'EOF'
+Manual QA nonzero backend case
+EOF
+chmod +x claude.sh codex.sh
+git add claude.sh codex.sh prompt.md
+git commit -q -m \"add mock scripts\"
+\""'$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+"$RALPH_BIN" project new --id qa-nonzero --name "QA Nonzero" --prompt prompt.md >/dev/null
+set +e
+"$RALPH_BIN" run --loops 1 > "$OUT_OUT" 2> "$OUT_ERR"
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 30 lines) ---\\n'
+head -n 30 \""'$OUT_ERR"
+printf -- '"'--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-nonzero/state.json | head -n 1 || true
+printf -- '--- codex log exists? ---\\n'
+if [ -f /tmp/qa-nonzero-codex.log ]; then echo YES; else echo NO; fi
+printf -- '--- claude log content ---\\n'
+if [ -f /tmp/qa-nonzero-claude.log ]; then cat /tmp/qa-nonzero-claude.log; else echo NO; fi
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+TMP=/tmp/qa-nonzero-n4Jl
+RUN_EXIT=1
+--- stderr (first 30 lines) ---
+error: backend command failed for claude(opus): intentional backend failure
+--- project status line ---
+13:  "status": "failed",
+--- codex log exists? ---
+NO
+--- claude log content ---
+claude_called
+
+thinking
+**Testing backend timeout behavior**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-timeout-XXXX)"
+OUT_ERR="$(mktemp /tmp/qa-timeout-run-err-XXXX)"
+OUT_OUT="$(mktemp /tmp/qa-timeout-run-out-XXXX)"
+CLAUDE_LOG="$(mktemp /tmp/qa-timeout-claude-log-XXXX)"
+CODEX_LOG="$(mktemp /tmp/qa-timeout-codex-log-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/dev/null 2>&1
+cat > claude.sh <<SH
+#!/bin/sh
+set -eu
+cat >/dev/null
+echo claude_called >> "$CLAUDE_LOG"
+sleep 30
+SH
+cat > codex.sh <<SH
+#!/bin/sh
+set -eu
+cat >/dev/null
+echo codex_called >> "$CODEX_LOG"
+exit 0
+SH
+cat > prompt.md <<'"'EOF'
+Manual QA timeout backend case
+EOF
+chmod +x claude.sh codex.sh
+git add claude.sh codex.sh prompt.md
+git commit -q -m \"add mock scripts\"
+\""'$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.claude.timeout_seconds 2 >/dev/null
+"$RALPH_BIN" config set backends.codex.timeout_seconds 2 >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+"$RALPH_BIN" project new --id qa-timeout --name "QA Timeout" --prompt prompt.md >/dev/null
+set +e
+"$RALPH_BIN" run --loops 1 > "$OUT_OUT" 2> "$OUT_ERR"
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 40 lines) ---\\n'
+head -n 40 \""'$OUT_ERR"
+printf -- '"'--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-timeout/state.json | head -n 1 || true
+printf -- '--- codex log bytes ---\\n'
+if [ -f \""'$CODEX_LOG" ]; then wc -c < "$CODEX_LOG"; else echo 0; fi
+printf -- '"'--- claude log bytes ---\\n'
+if [ -f \""'$CLAUDE_LOG" ]; then wc -c < "$CLAUDE_LOG"; else echo 0; fi
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 8.99s:
+TMP=/tmp/qa-timeout-I0OY
+RUN_EXIT=1
+--- stderr (first 40 lines) ---
+error: BackendTimeoutExhausted: backend timeout retries exhausted for claude(opus) during planning after 3 attempts
+--- project status line ---
+13:  "status": "failed",
+--- codex log bytes ---
+0
+--- claude log bytes ---
+42
+
+thinking
+**Creating output retry script**
+codex
+The non-zero and timeout manual runs behaved as expected. I’m now executing the empty-output scenario to verify same-backend retry first, then reformatter backend invocation order from real logs.
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-empty-XXXX)"
+OUT_ERR="$(mktemp /tmp/qa-empty-run-err-XXXX)"
+OUT_OUT="$(mktemp /tmp/qa-empty-run-out-XXXX)"
+CALL_LOG="$(mktemp /tmp/qa-empty-call-log-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/dev/null 2>&1
+cat > claude.sh <<SH
+#!/bin/sh
+set -eu
+input="$(cat)"
+kind="normal"
+if printf '"'%s' \""'$input" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+  kind="reformatter_prompt"
+elif printf '"'%s' \""'$input" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+  kind="format_reminder"
+fi
+printf '"'claude:%s\\n' \""'$kind" >> "$CALL_LOG"
+# empty output with success
+exit 0
+SH
+cat > codex.sh <<SH
+#!/bin/sh
+set -eu
+cat >/dev/null
+printf '"'codex:nonzero\\n' >> \""'$CALL_LOG"
+echo "intentional backend failure" >&2
+exit 17
+SH
+cat > prompt.md <<'"'EOF'
+Manual QA empty-output backend case
+EOF
+chmod +x claude.sh codex.sh
+git add claude.sh codex.sh prompt.md
+git commit -q -m \"add mock scripts\"
+\""'$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+"$RALPH_BIN" project new --id qa-empty --name "QA Empty" --prompt prompt.md >/dev/null
+set +e
+"$RALPH_BIN" run --loops 1 > "$OUT_OUT" 2> "$OUT_ERR"
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 60 lines) ---\\n'
+head -n 60 \""'$OUT_ERR"
+printf -- '"'--- call log ---\\n'
+cat \""'$CALL_LOG"
+printf -- '"'--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-empty/state.json | head -n 1 || true
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 exited 1 in 51ms:
+/run/current-system/sw/bin/bash: line 15: input: unbound variable
+
+thinking
+**Fixing heredoc quoting and env variable injection**
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+RALPH_BIN="$(pwd)/result/bin/ralph"
+TMP="$(mktemp -d /tmp/qa-empty-XXXX)"
+OUT_ERR="$(mktemp /tmp/qa-empty-run-err-XXXX)"
+OUT_OUT="$(mktemp /tmp/qa-empty-run-out-XXXX)"
+CALL_LOG="$(mktemp /tmp/qa-empty-call-log-XXXX)"
+cd "$TMP"
+git init -q
+git config user.email qa@example.com
+git config user.name "QA"
+echo "seed" > README.md
+git add README.md
+git commit -q -m "init"
+"$RALPH_BIN" init >/dev/null 2>&1
+cat > claude.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+input="$(cat)"
+kind="normal"
+if printf '"'%s' \""'$input" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+  kind="reformatter_prompt"
+elif printf '"'%s' \""'$input" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+  kind="format_reminder"
+fi
+printf '"'claude:%s\\n' \""'$kind" >> "$CALL_LOG"
+# empty output with success
+exit 0
+SH
+cat > codex.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+printf '"'codex:nonzero\\n' >> \""'$CALL_LOG"
+echo "intentional backend failure" >&2
+exit 17
+SH
+cat > prompt.md <<'"'EOF'
+Manual QA empty-output backend case
+EOF
+chmod +x claude.sh codex.sh
+git add claude.sh codex.sh prompt.md
+git commit -q -m \"add mock scripts\"
+\""'$RALPH_BIN" config set backends.claude.command "$TMP/claude.sh" >/dev/null
+"$RALPH_BIN" config set backends.codex.command "$TMP/codex.sh" >/dev/null
+"$RALPH_BIN" config set backends.claude.args "[]" >/dev/null
+"$RALPH_BIN" config set backends.codex.args "[]" >/dev/null
+"$RALPH_BIN" config set workflow.prompt_review_enabled false >/dev/null
+"$RALPH_BIN" project new --id qa-empty --name "QA Empty" --prompt prompt.md >/dev/null
+set +e
+CALL_LOG="$CALL_LOG" "$RALPH_BIN" run --loops 1 > "$OUT_OUT" 2> "$OUT_ERR"
+RUN_CODE=$?
+set -e
+printf '"'TMP=%s\\nRUN_EXIT=%s\\n' \""'$TMP" "$RUN_CODE"
+printf -- '"'--- stderr (first 60 lines) ---\\n'
+head -n 60 \""'$OUT_ERR"
+printf -- '"'--- call log ---\\n'
+cat \""'$CALL_LOG"
+printf -- '"'--- project status line ---\\n'
+grep -n '\"status\"' .ralph/projects/qa-empty/state.json | head -n 1 || true
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+TMP=/tmp/qa-empty-g0O5
+RUN_EXIT=1
+--- stderr (first 60 lines) ---
+error: backend command failed for codex(gpt-5.3-codex-medium): intentional backend failure
+--- call log ---
+claude:normal
+claude:normal
+codex:nonzero
+--- project status line ---
+13:  "status": "failed",
+
+thinking
+**Planning targeted test validation**
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance 2>&1 | tee /tmp/qa-validate-e2e-conformance.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 9.40s:
+test e2e_conformance::backend_timeout_exhausted_fails_task ... ok
+test e2e_conformance::backend_command_failed_no_reformatter ... ok
+test e2e_conformance::empty_output_retries_then_reformatter ... ok
+test e2e_conformance::pr_metadata_verification ... ok
+test e2e_conformance::e2e_mock_ralph_script_delegates_to_auto ... ok
+test e2e_conformance::e2e_mock_gh_logging_script_captures_pr_create ... ok
+test result: ok. 6 passed; 0 failed; 0 skipped
+
+thinking
+**Preparing to check documentation headings**
+codex
+I’ve completed direct CLI runs for the new backend failure semantics. Next I’m validating the documentation and registration expectations directly from the repo files, then I’ll run the required full validate commands.
+exec
+/run/current-system/sw/bin/bash -lc "printf '--- docs headings ---\\n'; rg -n '"'^## '"' docs/validate-e2e.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "printf '--- e2e tests registered ---\\n'; sed -n '1,80p' src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "printf '--- validate mod wiring ---\\n'; rg -n 'tests_e2e_conformance|tests\\.extend' src/validate/mod.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+/run/current-system/sw/bin/bash: line 1: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+3:## Architecture overview
+6:## Test-to-requirement mapping
+16:## Running instructions
+28:## Troubleshooting
+34:## Adding-new-tests template
+ succeeded in 51ms:
+/run/current-system/sw/bin/bash: line 1: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+use super::*;
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use crate::validate::harness::RalphHarness;
+use crate::validate::mock_scripts::{
+    daemon_mock_ralph_with_branch_switch_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
+    empty_output_backend_script, nonzero_exit_backend_script,
+};
+use serde_json::{json, Value};
+
+pub fn tests() -> Vec<ConformanceTest> {
+    vec![
+        ConformanceTest {
+            name: "e2e_conformance::backend_timeout_exhausted_fails_task",
+            func: backend_timeout_exhausted_fails_task,
+ succeeded in 50ms:
+/run/current-system/sw/bin/bash: line 1: printf: --: invalid option
+printf: usage: printf [-v var] format [arguments]
+17:mod tests_e2e_conformance;
+83:    tests.extend(tests_init::tests());
+84:    tests.extend(tests_mcp::tests());
+85:    tests.extend(tests_project::tests());
+86:    tests.extend(tests_run::tests());
+87:    tests.extend(tests_prompt_review::tests());
+88:    tests.extend(tests_qa::tests());
+89:    tests.extend(tests_commands::tests());
+90:    tests.extend(tests_auto_init::tests());
+91:    tests.extend(tests_tail::tests());
+92:    tests.extend(tests_daemon::tests());
+93:    tests.extend(tests_e2e_conformance::tests());
+
+thinking
+**Inspecting mock script execution path**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"e2e_mock_ralph_script|exec .*ralph auto\" src/validate/mock_scripts.rs && sed -n '820,890p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+321:pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+/// succeeds on `pr edit`, and logs `pr edit` and `pr create` calls via files.
+///
+/// Set `MOCK_GH_PR_EDIT_LOG` to a file path to record `pr edit` invocations.
+/// Set `MOCK_GH_PR_CREATE_LOG` to a file path to record `pr create` invocations.
+/// Set `MOCK_GH_PR_EDIT_FAIL` to "true" to make `pr edit` fail.
+pub fn daemon_mock_gh_edit_pr_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit) exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+
+thinking
+**Expanding context window**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '300,350p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script for validate E2E tests that always delegates to the
+/// provided absolute `ralph` binary path and executes `auto`.
+///
+/// This avoids recursive PATH-based resolution and ensures the delegated
+
+thinking
+**Running validation commands**
+exec
+/run/current-system/sw/bin/bash -lc 'set -o pipefail; ./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp 2>&1 | tee /tmp/qa-validate-mcp.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 313ms:
+test mcp::tool_project_show_returns_state ... ok
+test mcp::tool_project_new_creates_project ... ok
+test mcp::tool_status_shows_project_info ... ok
+test mcp::tool_history_empty_project ... ok
+test mcp::tool_tail_empty_project ... ok
+test mcp::tool_config_show_global ... ok
+test mcp::tool_config_show_project ... ok
+test mcp::tool_unknown_returns_error ... ok
+test mcp::tool_project_new_missing_id ... ok
+test mcp::tool_project_new_missing_prompt_source ... ok
+test mcp::tool_project_new_mutual_exclusion ... ok
+test mcp::tool_config_show_mutual_exclusion ... ok
+test mcp::tool_status_no_project ... ok
+test result: ok. 22 passed; 0 failed; 0 skipped
+
+thinking
+**Completing full validation**
+codex
+I’m running the two required `ralph validate` commands now (`--filter mcp` and then full suite) and will capture their exact pass/fail output summaries.
+exec
+/run/current-system/sw/bin/bash -lc 'set -o pipefail; ./result/bin/ralph validate --bin ./result/bin/ralph 2>&1 | tee /tmp/qa-validate-full.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+thinking
+**Planning continuous polling**
+codex
+Full `ralph validate` is still in progress; I’m polling until completion so I can report the final result line and exit status verbatim.
+
+thinking
+**Noticing many long daemon tests**
+ succeeded in 4m 27s:
+test mcp::malformed_json_returns_parse_error ... ok
+test mcp::tool_project_list_empty ... ok
+test mcp::tool_project_list_with_projects ... ok
+test mcp::tool_project_show_returns_state ... ok
+test mcp::tool_project_new_creates_project ... ok
+test mcp::tool_status_shows_project_info ... ok
+test mcp::tool_history_empty_project ... ok
+test mcp::tool_tail_empty_project ... ok
+test mcp::tool_config_show_global ... ok
+test mcp::tool_config_show_project ... ok
+test mcp::tool_unknown_returns_error ... ok
+test mcp::tool_project_new_missing_id ... ok
+test mcp::tool_project_new_missing_prompt_source ... ok
+test mcp::tool_project_new_mutual_exclusion ... ok
+test mcp::tool_config_show_mutual_exclusion ... ok
+test mcp::tool_status_no_project ... ok
+test project::new_creates_state ... ok
+test project::new_copies_prompt ... ok
+test project::new_activates_project ... ok
+test project::new_creates_branch ... ok
+
+thinking
+**Adding cargo check command**
+exec
+/run/current-system/sw/bin/bash -lc 'set -o pipefail; nix develop -c cargo check 2>&1 | tee /tmp/qa-cargo-check.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 455ms:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+
+thinking
+**Planning manual PR metadata check**
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter qa::iteration_limit_fails 2>&1 | tee /tmp/qa-validate-qa-rollback.log && ./result/bin/ralph validate --bin ./result/bin/ralph --filter run::review_limit_fails 2>&1 | tee /tmp/qa-validate-review-rollback.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 183ms:
+test run::review_limit_fails ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+
+thinking
+**Verifying response and metadata filters**
+codex
+I’m adding focused validation runs for the rollback and artifact/PR metadata criteria so each acceptance item has concrete evidence, not just the broad suite pass.
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter run::impl_response_artifact_on_review_feedback 2>&1 | tee /tmp/qa-validate-impl-response.log && ./result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance::pr_metadata_verification 2>&1 | tee /tmp/qa-validate-pr-metadata.log && ./result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance::e2e_mock_ralph_script_delegates_to_auto 2>&1 | tee /tmp/qa-validate-no-recursion.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 265ms:
+test run::impl_response_artifact_on_review_feedback ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+running 1 tests
+test e2e_conformance::pr_metadata_verification ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+running 1 tests
+test e2e_conformance::e2e_mock_ralph_script_delegates_to_auto ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+
+thinking
+**Verifying test presence and filtering**
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance::backend_command_failed_no_reformatter 2>&1 | tee /tmp/qa-validate-nonzero-boundary.log && ./result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance::empty_output_retries_then_reformatter 2>&1 | tee /tmp/qa-validate-empty-boundary.log && ./result/bin/ralph validate --bin ./result/bin/ralph --filter e2e_conformance::backend_timeout_exhausted_fails_task 2>&1 | tee /tmp/qa-validate-timeout-boundary.log' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+thinking
+**Monitoring test session progress**
+ succeeded in 9.16s:
+test e2e_conformance::backend_timeout_exhausted_fails_task ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+
+thinking
+**Confirming manual test coverage and spec deviations**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n '"'^## '"' docs/validate-e2e.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "rg -n 'exec .* auto \\\"\\"'$@'"\\\"|canonicalize|e2e_mock_ralph_script' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "rg -n 'backend_command_failed_no_reformatter|empty_output_retries_then_reformatter|pr_metadata_verification|backend_timeout_exhausted_fails_task' src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+3:## Architecture overview
+6:## Test-to-requirement mapping
+16:## Running instructions
+28:## Troubleshooting
+34:## Adding-new-tests template
+ succeeded in 51ms:
+321:pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+323:        .canonicalize()
+ succeeded in 51ms:
+17:            name: "e2e_conformance::backend_timeout_exhausted_fails_task",
+18:            func: backend_timeout_exhausted_fails_task,
+21:            name: "e2e_conformance::backend_command_failed_no_reformatter",
+22:            func: backend_command_failed_no_reformatter,
+25:            name: "e2e_conformance::empty_output_retries_then_reformatter",
+26:            func: empty_output_retries_then_reformatter,
+29:            name: "e2e_conformance::pr_metadata_verification",
+30:            func: pr_metadata_verification,
+43:fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
+99:fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
+162:fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
+270:fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
+
+thinking
+**Checking code around target lines**
+codex
+I’ve now captured file-level evidence (test registration, doc sections, and the no-recursion helper). I’ll do a final pass over command logs and produce the QA verdict with criterion-by-criterion evidence.
+
+thinking
+**Preparing command line modification**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '321,332p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+    let absolute = ralph_bin
+        .canonicalize()
+        .unwrap_or_else(|_| ralph_bin.to_path_buf());
+    let quoted = shell_single_quote(&absolute.to_string_lossy());
+    format!(
+        "#!/bin/sh\n\
+set -eu\n\
+exec {quoted} auto \"$@\"\n"
+    )
+}
+
+
+thinking
+**Checking test script usage**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n 'e2e_mock_gh_logging_script|RALPH_E2E_GH_LOG|--body-file|--title|--head|--repo' src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+9:    daemon_mock_ralph_with_branch_switch_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
+37:            name: "e2e_conformance::e2e_mock_gh_logging_script_captures_pr_create",
+38:            func: e2e_mock_gh_logging_script_captures_pr_create,
+282:            .write_mock_script("gh", &e2e_mock_gh_logging_script())
+320:            ("RALPH_E2E_GH_LOG", gh_log_str.as_str()),
+328:                    "--repo",
+355:        let title = arg_value(&args, "--title").expect("missing --title argument in gh log");
+358:            "expected --title value to begin with 'ralph:', got: {title}"
+361:        let head = arg_value(&args, "--head").expect("missing --head argument in gh log");
+364:            "expected non-empty --head value, got: {head:?}"
+367:        let repo = arg_value(&args, "--repo").expect("missing --repo argument in gh log");
+370:            "expected --repo acme/widgets in gh log"
+374:            args.iter().any(|arg| arg == "--body-file"),
+375:            "expected --body-file flag in gh pr create args, got:\n{}",
+379:        let body = extract_logged_body(&log_content).expect("missing logged --body-file content");
+452:fn e2e_mock_gh_logging_script_captures_pr_create(h: &RalphHarness) -> TestResult {
+455:            .write_mock_script("e2e-mock-gh.sh", &e2e_mock_gh_logging_script())
+471:                "--title",
+473:                "--body-file",
+475:                "--head",
+
+thinking
+**Planning test inspection for loop states**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n 'iteration_limit_fails|review_limit_fails|loops array is empty|loops\\.len\\(|remove_loop|loop directory' src/validate/tests_qa.rs src/validate/tests_run.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+src/validate/tests_qa.rs:29:            name: "qa::iteration_limit_fails",
+src/validate/tests_qa.rs:30:            func: iteration_limit_fails,
+src/validate/tests_qa.rs:88:        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
+src/validate/tests_qa.rs:124:        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
+src/validate/tests_qa.rs:173:        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
+src/validate/tests_qa.rs:219:fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+src/validate/tests_qa.rs:659:            loops.len() >= 2,
+src/validate/tests_qa.rs:661:            loops.len()
+src/validate/tests_run.rs:49:            name: "run::review_limit_fails",
+src/validate/tests_run.rs:50:            func: review_limit_fails,
+src/validate/tests_run.rs:101:        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
+src/validate/tests_run.rs:155:            "expected spec artifact in loop directory"
+src/validate/tests_run.rs:159:            "expected impl-notes artifact in loop directory"
+src/validate/tests_run.rs:165:            "expected review-approved artifact in loop directory"
+src/validate/tests_run.rs:252:        assert_eq!(loops.len(), 2, "expected two loop entries");
+src/validate/tests_run.rs:308:fn review_limit_fails(h: &RalphHarness) -> TestResult {
+src/validate/tests_run.rs:373:        assert_eq!(loops.len(), 1, "expected one in-progress loop");
+src/validate/tests_run.rs:414:        assert_eq!(loops.len(), 1, "expected one loop entry");
+src/validate/tests_run.rs:453:        assert_eq!(loops.len(), 1, "expected one loop entry");
+src/validate/tests_run.rs:504:        assert_eq!(loops.len(), 1, "expected one loop entry");
+
+thinking
+**Inspecting functions for loop presence**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '219,300p' src/validate/tests_qa.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '308,390p' src/validate/tests_run.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qa-limit";
+        setup_with_mock_script(
+            h,
+            project_id,
+            "qa-always-fail.sh",
+            &qa_always_fail_mock_script(),
+        );
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
+            .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.max_qa_iterations", "1"])
+            .expect("config set workflow.max_qa_iterations 1 failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert!(
+            !output.status.success(),
+            "expected run to fail after QA iteration limit is exceeded"
+ succeeded in 51ms:
+fn review_limit_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-review-limit";
+        h.init_workspace().expect("init failed");
+
+        let script = h
+            .write_mock_script("reject-review.sh", &always_reject_review_script())
+            .expect("failed to write reject-review script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        h.create_project(project_id, "Review Limit Project", "Review limit prompt")
+            .expect("create_project failed");
+
+        h.ralph_ok(["config", "set", "workflow.max_review_iterations", "1"])
+            .expect("config set workflow.max_review_iterations failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert!(
+
+thinking
+**Inspecting loop artifact assertion**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n 'fn assert_no_loop_artifacts' src/validate/assertions.rs && sed -n '140,190p' src/validate/assertions.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+224:pub fn assert_no_loop_artifacts(project_dir: &Path) {
+        .parse::<TomlValue>()
+        .unwrap_or_else(|err| panic!("failed to parse TOML {}: {err}", path.to_string_lossy()))
+}
+
+pub fn assert_toml_field(value: &TomlValue, field: &str, expected: &TomlValue) {
+    let mut current = value;
+    for segment in field.split('.') {
+        current = current
+            .get(segment)
+            .unwrap_or_else(|| panic!("missing TOML field segment '{segment}' in '{field}'"));
+    }
+    assert_eq!(
+        current, expected,
+        "unexpected value for TOML field '{field}'"
+    );
+}
+
+pub fn assert_json_array_len(value: &Value, field: &str, expected_len: usize) {
+    let mut current = value;
+
+thinking
+**Preparing assertion fix with sed**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '224,250p' src/validate/assertions.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+pub fn assert_no_loop_artifacts(project_dir: &Path) {
+    let loops_dir = project_dir.join("loops");
+    if !loops_dir.exists() {
+        return;
+    }
+    let mut entries = fs::read_dir(&loops_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", loops_dir.to_string_lossy()));
+    assert!(
+        entries.next().is_none(),
+        "expected no loop artifacts under '{}'",
+        loops_dir.to_string_lossy()
+    );
+}
+
+pub fn assert_stderr_contains(output: &Output, needle: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(needle),
+        "expected stderr to contain '{}', got:\n{}",
+        needle,
+
+thinking
+**Planning docs section count check**
+exec
+/run/current-system/sw/bin/bash -lc 'SECTION_COUNT=$(rg -n '"'"'^## '"' docs/validate-e2e.md | wc -l); echo \"SECTION_COUNT="'$SECTION_COUNT"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+SECTION_COUNT=5
+
+thinking
+**Assessing PR metadata test compliance**
+🌐 Searching the web...
+🌐 Searched: dummy
+
+thinking
+**Refocusing on local code inspection**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n 'auto_mock_script\\(|standard_mock_script\\(' src/validate/tests_*.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+src/validate/tests_auto_init.rs:156:        .write_mock_script("auto-mock.sh", &auto_mock_script())
+src/validate/tests_commands.rs:553:        .write_mock_script("standard-mock.sh", &standard_mock_script())
+src/validate/tests_prompt_review.rs:59:        .write_mock_script("standard-mock.sh", &standard_mock_script())
+src/validate/tests_prompt_review.rs:159:            .write_mock_script("auto-mock.sh", &auto_mock_script())
+src/validate/tests_prompt_review.rs:311:            .write_mock_script("stable-model-mock.sh", &standard_mock_script())
+src/validate/tests_run.rs:233:            .write_mock_script("claude-mock.sh", &standard_mock_script())
+src/validate/tests_run.rs:236:            .write_mock_script("codex-mock.sh", &standard_mock_script())
+src/validate/tests_run.rs:659:        .write_mock_script("standard-mock.sh", &standard_mock_script())
+src/validate/tests_tail.rs:136:        .write_mock_script("standard-mock.sh", &standard_mock_script())
+
+thinking
+**Assessing normative test deviations**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '270,315p' src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("config set workspace.daemon_refinement_enabled failed");
+
+        let gh_script = h
+            .write_mock_script("gh", &e2e_mock_gh_logging_script())
+            .expect("failed to write e2e gh script");
+        let gh_dir = gh_script
+            .parent()
+            .expect("mock gh script should have parent directory");
+        let path_env = format!(
+            "{}:{}",
+            gh_dir.display(),
+
+thinking
+**Highlighting spec deviation failure**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n 'pr_metadata_verification|daemon_mock_ralph_with_branch_switch_script|e2e_mock_ralph_script' src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+9:    daemon_mock_ralph_with_branch_switch_script, e2e_mock_gh_logging_script, e2e_mock_ralph_script,
+29:            name: "e2e_conformance::pr_metadata_verification",
+30:            func: pr_metadata_verification,
+33:            name: "e2e_conformance::e2e_mock_ralph_script_delegates_to_auto",
+34:            func: e2e_mock_ralph_script_delegates_to_auto,
+270:fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
+296:                &daemon_mock_ralph_with_branch_switch_script(),
+414:fn e2e_mock_ralph_script_delegates_to_auto(h: &RalphHarness) -> TestResult {
+417:            .write_mock_script("e2e-mock-ralph.sh", &e2e_mock_ralph_script(&h.ralph_bin))
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '6,13p' docs/validate-e2e.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+## Test-to-requirement mapping
+| Normative requirement | Conformance test(s) |
+| --- | --- |
+| 1. `ralph auto` happy-path tests must use `auto_mock_script()` | `e2e_conformance::pr_metadata_verification` (daemon-dispatched real `ralph auto` with `auto_mock_script()` backends), `auto_init::*` tests in `tests_auto_init.rs` |
+| 2. QA/review rollback failure removes loop and fails with `--loops 1` | `qa::iteration_limit_fails`, `run::review_limit_fails` |
+| 3. Timeout surfaces `BackendTimeoutExhausted` and task/project fails | `e2e_conformance::backend_timeout_exhausted_fails_task` |
+| 4. Reformatter boundaries (parse-error only; non-zero/timeout no reformatter; empty output retry then reformatter) | `e2e_conformance::backend_command_failed_no_reformatter`, `e2e_conformance::backend_timeout_exhausted_fails_task`, `e2e_conformance::empty_output_retries_then_reformatter` |
+| 5. Review-feedback path writes `*-impl-response-001.md` with required frontmatter/body | `run::impl_response_artifact_on_review_feedback` |
+
+thinking
+**Summarizing manual test failures**
+codex
+# QA: FAIL
+
+## Failures
+1. `pr_metadata_verification` does not follow the spec’s required real-`ralph auto` path.
+   - Command: `sed -n '270,315p' src/validate/tests_e2e_conformance.rs`
+   - Expected: use of `e2e_mock_ralph_script(&h.ralph_bin)` / real `ralph auto` execution path (per normative rule #1).
+   - Actual: test wires `daemon_mock_ralph_with_branch_switch_script()`:
+     ```rust
+     &daemon_mock_ralph_with_branch_switch_script(),
+     ```
+   - Result: normative requirement “happy-path tests for `ralph auto` must use `auto_mock_script()` through real `ralph auto`” is not met by this test.
+
+2. `docs/validate-e2e.md` contains a mapping claim that does not match the implementation.
+   - Command: `sed -n '6,13p' docs/validate-e2e.md`
+   - Actual docs text says `pr_metadata_verification` is “daemon-dispatched real `ralph auto` with `auto_mock_script()` backends”.
+   - Command: `rg -n 'pr_metadata_verification|daemon_mock_ralph_with_branch_switch_script' src/validate/tests_e2e_conformance.rs`
+   - Actual implementation shows `pr_metadata_verification` uses `daemon_mock_ralph_with_branch_switch_script`, not real `ralph auto` via `auto_mock_script()`.
+
+## Suggested Fixes
+1. Update `pr_metadata_verification` in `src/validate/tests_e2e_conformance.rs` to execute the real auto path (use `e2e_mock_ralph_script(&h.ralph_bin)` or equivalent direct `ralph auto` invocation) and ensure `auto_mock_script()` semantics are exercised.
+2. Update `docs/validate-e2e.md` mapping text to exactly reflect actual test behavior after the code fix (or, if keeping current behavior, remove the “real `ralph auto` with `auto_mock_script()`” claim).
+tokens used
+284,307
+

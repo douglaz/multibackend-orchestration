@@ -42,6 +42,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                 RalphError::BackendTimeoutExhausted { .. }
                     | RalphError::QaIterationLimitExceeded { .. }
                     | RalphError::ReviewIterationLimitExceeded { .. }
+                    | RalphError::BackendCommandFailed { .. }
+                    | RalphError::ParseRetriesExhausted { .. }
             ) {
                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
             }
