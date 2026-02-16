@@ -1,0 +1,41 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Auto-path feasibility",
+      "feedback": "The happy-path test assumes a child `ralph auto` run can use `standard_mock_script()`, but `auto` requires quick-PRD writer/reviewer prompt handling first. `standard_mock_script()` does not cover those prompts, so this flow will fail before planning/implementation unless you use `auto_mock_script()` or equivalent."
+    },
+    {
+      "area": "QA/review rollback semantics",
+      "feedback": "The proposed QA/review iteration-limit expectations do not match orchestrator behavior. Rollback removes the in-progress loop and resets planning; it does not reliably increase persisted loop count. Also, `run --loops 1` returns an error on limit hit, while `auto` (`until_complete`) can loop indefinitely if QA/review always fails."
+    },
+    {
+      "area": "Timeout coverage gap",
+      "feedback": "Requirements explicitly call for backend timeout handling, but no timeout-focused test is defined. Add at least one deterministic timeout case (e.g., mock backend sleep + low timeout config) and verify terminal task state/error handling."
+    },
+    {
+      "area": "Reformatter fallback scope",
+      "feedback": "The spec treats fallback as 'primary backend fails', but current reformatter fallback is parse-error-driven, not generic backend execution failure/timeout fallback. Clarify intended behavior and add tests that match actual semantics (parse fallback success and non-parse failure path)."
+    },
+    {
+      "area": "State transition completeness",
+      "feedback": "Acceptance asks for `state.json` consistency at key workflow stages, but the plan mostly validates final state. There is no mechanism described to capture intermediate phase boundaries during daemon execution."
+    },
+    {
+      "area": "Implementation-response format coverage",
+      "feedback": "Requirements call out implementation response formatting (timestamp prefix, YAML frontmatter, required sections). The plan validates spec/impl-notes/review-approved artifacts, but does not explicitly force and validate `*-impl-response-NNN.md` artifacts."
+    },
+    {
+      "area": "Documentation acceptance mismatch",
+      "feedback": "The acceptance criteria require documentation updates on test architecture/run instructions, but the spec says only `tests_e2e.rs` and `mod.rs` change and mentions only doc comments. Add explicit docs file updates (e.g., README/validate docs)."
+    },
+    {
+      "area": "Mock child invocation risk",
+      "feedback": "A mock `RALPH_DAEMON_BIN` script that internally runs `ralph auto` can recurse into itself if it resolves `ralph` from PATH. The spec should require invoking the real binary via absolute path (`h.ralph_bin`) inside the wrapper."
+    },
+    {
+      "area": "PR metadata verification depth",
+      "feedback": "Happy-path PR assertions check creation/URL but not 'correct metadata' (title/body/head/base). Add explicit assertions against captured `gh pr create` arguments/body file contents."
+    }
+  ]
+}

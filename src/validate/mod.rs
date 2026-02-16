@@ -14,6 +14,7 @@ pub mod runner;
 mod tests_auto_init;
 mod tests_commands;
 mod tests_daemon;
+mod tests_e2e_conformance;
 mod tests_init;
 mod tests_mcp;
 mod tests_project;
@@ -89,6 +90,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_auto_init::tests());
     tests.extend(tests_tail::tests());
     tests.extend(tests_daemon::tests());
+    tests.extend(tests_e2e_conformance::tests());
     tests
 }
 

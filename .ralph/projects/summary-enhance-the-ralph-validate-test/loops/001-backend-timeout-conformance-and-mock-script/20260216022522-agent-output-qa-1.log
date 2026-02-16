@@ -1,0 +1,1683 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: FAIL
+
+## Failures
+1. Timeout error surfacing does not meet the spec’s strict `BackendTimeoutExhausted` requirement.  
+Command run (manual E2E): `./result/bin/ralph run --loops 1` in `/tmp/ralph-qa-timeout2-repo-pDbv63` with a `sleep 30` backend and `timeout_seconds=2`.  
+Expected: stderr includes `BackendTimeoutExhausted`.  
+Actual: `error: backend timeout retries exhausted for claude(opus) during planning after 3 attempts` and `contains_BackendTimeoutExhausted=no` (from `rg`).  
+Code evidence: `src/validate/tests_e2e_conformance.rs:52` allows either `BackendTimeoutExhausted` **or** human text.
+
+2. Failed-state assertion is weaker than the spec’s “ends in failed state” requirement.  
+Command run (manual E2E): `jq -r '.status' /tmp/ralph-qa-timeout2-repo-pDbv63/.ralph/projects/e2e-timeout-manual/state.json`  
+Expected: failed task/orchestration state assertion.  
+Actual: `pending`.  
+Code evidence: `src/validate/tests_e2e_conformance.rs:62` only asserts `state["status"] != "completed"`.
+
+3. New mock helpers are defined but not used by any tests yet, despite the “provide/use helper” implementation requirement.  
+Command run: `rg -n "e2e_mock_ralph_script\\(|e2e_mock_gh_logging_script\\(" src/validate`  
+Expected: at least one test call site for each helper.  
+Actual: only definitions in `src/validate/mock_scripts.rs` are returned.
+
+## Suggested Fixes
+1. Make timeout conformance strict: either emit `BackendTimeoutExhausted` in CLI stderr for this path, or update the spec; then tighten the test to require that exact marker.
+2. Assert an explicit failed terminal condition (preferred: true failed state in tracked task/project status). If the model cannot represent `failed`, update spec and test language to a concrete enforceable invariant.
+3. Wire `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` into conformance tests that exercise `ralph auto` delegation and PR metadata capture paths.
+
+---
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c643c-0d7a-72f3-b4a6-5cc1d0e60b80
+--------
+user
+You are a QA engineer validating an implementation against its specification.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- `<TS>-impl-notes.md`
+- The current implementation diff
+
+Your PRIMARY job is manual, hands-on testing — exercise the actual product as a real user would. Automated test suites are a secondary confirmation, not a substitute for real verification.
+
+Your job is to:
+1. **Build the project** so you have a working artifact (e.g. `cargo build`, `npm run build`, `nix build`, etc.)
+2. **Manually test the implemented feature end-to-end** by actually using it:
+   - For CLI tools: run the built binary with real arguments, inspect stdout/stderr, check exit codes, test edge cases (missing args, bad input, help flags, etc.)
+   - For APIs: make real HTTP requests (e.g. `curl`, `wget`) against a running server, verify response bodies, status codes, headers
+   - For libraries: write and execute small ad-hoc scripts that import and exercise the new functionality
+   - For UI changes: launch the application and interact with it, verify visual/behavioral correctness
+3. **Verify each acceptance criterion from the spec individually** with a concrete manual test — do not just assume passing unit tests means the criterion is satisfied
+4. **Run automated test suites** (e.g. `cargo test`, `npm test`) as a secondary check to catch regressions
+5. Report concrete commands executed, their actual output, and your interpretation
+6. Do NOT edit any source files — only run checks and report findings
+
+IMPORTANT: A QA pass requires evidence of REAL usage, not just "all tests passed." If the spec says "ralph init creates a config file," you must actually run `ralph init` in a temp directory and verify the file exists with correct contents. If the spec says "the API returns 404 for missing resources," you must actually curl that endpoint and show the 404 response.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If all checks pass:
+
+# QA: PASS
+
+## Manual Testing
+- <what you tested manually, the commands you ran, and what you observed>
+- <another manual test with actual output snippets>
+
+## Automated Tests
+- <command 1>: <result summary>
+- <command 2>: <result summary>
+
+## Acceptance Criteria Verification
+- [ ] <criterion 1>: <how you verified it manually, with evidence>
+- [ ] <criterion 2>: <how you verified it manually, with evidence>
+
+---
+
+If any checks fail:
+
+# QA: FAIL
+
+## Failures
+1. <what failed and how — include the actual command, expected output, and actual output>
+2. <another failure if applicable>
+
+## Suggested Fixes
+1. <concrete fix suggestion tied to a failure>
+2. <another fix if applicable>
+
+---
+
+## Context Provided
+
+### Master Prompt
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+### Feature Specification
+---
+artifact: spec
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T02:11:08Z
+---
+
+Now I have a comprehensive picture. Let me synthesize my findings and write the feature specification.
+
+Based on my analysis:
+
+**State**: Loop 0, planning phase, no previous specs. This is the very first feature to plan.
+
+**What exists already**:
+- QA rollback test (`iteration_limit_rolls_back`) — checks non-zero exit, empty loops, no loop artifacts, no git tag — but uses naming `*_rolls_back` not `*_fails` as requested
+- Review rollback test (`review_limit_rollback`) — checks non-zero exit, empty loops, no loop artifacts — but missing stderr check and git tag check, and uses `*_rollback` naming
+- PR metadata tests in daemon — partial coverage (body-file, head, diff stat, issue context, project ref) but missing explicit assertions on `--title` with `ralph:` prefix, `--repo`, and `Closes #N`
+- No backend timeout test at all
+- No reformatter semantics tests
+- No impl_response_artifact test
+- No `e2e_mock_ralph_script()` or `e2e_mock_gh_logging_script()` helpers
+- No `docs/validate-e2e.md`
+
+The prompt requires a large body of work. For loop 1, I should focus on the foundational pieces: the missing mock helpers and the backend timeout test, since other tests depend on these helpers and the timeout test is entirely new functionality with no existing partial coverage.
+
+# Feature: Backend Timeout Conformance and Mock Script Foundations
+
+## Description
+Add the foundational `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helpers to the validate harness, then implement the `backend_timeout_exhausted_fails_task` conformance test. This establishes the new helper functions that later features (PR metadata verification, impl-response artifact test) depend on, while delivering the only entirely missing test category: backend timeout handling. The test verifies that a sleeping backend exceeding `timeout_seconds` surfaces `BackendTimeoutExhausted` and marks the orchestration as failed with non-zero exit.
+
+## Acceptance Criteria
+- [ ] `e2e_mock_ralph_script(ralph_bin: &Path) -> String` helper exists in `src/validate/mock_scripts.rs`, embeds absolute path at generation time, uses `exec /absolute/path/to/ralph auto "$@"` pattern, does not resolve `ralph` via `PATH`
+- [ ] `e2e_mock_gh_logging_script() -> String` helper exists in `src/validate/mock_scripts.rs`, captures full `gh pr create` args and `--body-file` content to a log file for later assertion
+- [ ] New test module `src/validate/tests_e2e_conformance.rs` is created and registered in `src/validate/mod.rs`
+- [ ] Test `backend_timeout_exhausted_fails_task` exists and: uses a mock backend that sleeps 30s, sets `backends.<name>.timeout_seconds = 2`, asserts surfaced error contains `BackendTimeoutExhausted`, asserts non-zero exit code, asserts task/orchestration ends in failed state
+- [ ] Test does not introduce any recursive mock `ralph` invocation (mock embeds absolute path)
+- [ ] No reformatter path is triggered on backend timeout (the test confirms timeout → `BackendTimeoutExhausted`, not reformatter fallback)
+- [ ] Existing tests continue to pass (`cargo test` and `ralph validate` green)
+
+## Files to Modify/Create
+- `src/validate/mock_scripts.rs` — Add `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helper functions
+- `src/validate/tests_e2e_conformance.rs` — New test module containing `backend_timeout_exhausted_fails_task`
+- `src/validate/mod.rs` — Register `tests_e2e_conformance` module and wire its `tests()` into `register_tests()`
+- `src/validate/harness.rs` — Add any needed timeout-config helpers (e.g., `setup_backend_with_timeout()`) if existing `setup_mock_backends` is insufficient for per-backend timeout config
+
+## Dependencies
+- Requires: none (first feature)
+- Blocks: QA/review rollback renaming tests (use `e2e_mock_ralph_script`), PR metadata verification test (uses `e2e_mock_gh_logging_script`), impl-response artifact test, reformatter semantics tests, documentation
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T02:16:23Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added `e2e_mock_ralph_script(ralph_bin: &Path)` in `src/validate/mock_scripts.rs:321` to hard-bind execution to the provided absolute binary via `exec <absolute> auto "$@"`, with shell-safe quoting to avoid PATH recursion.
+- Added `e2e_mock_gh_logging_script()` in `src/validate/mock_scripts.rs:337` to log full `gh pr create` argv and `--body-file` contents to `RALPH_E2E_GH_LOG` for later PR-metadata assertions.
+- Created `src/validate/tests_e2e_conformance.rs:1` with `backend_timeout_exhausted_fails_task`:
+  - backend script consumes stdin then `sleep 30`
+  - sets `backends.claude.timeout_seconds` and `backends.codex.timeout_seconds` to `2`
+  - asserts non-zero orchestration exit
+  - asserts timeout exhaustion is surfaced in stderr
+  - asserts no reformatter trigger string is present
+  - asserts project state is not `completed`
+- Registered the new conformance module in `src/validate/mod.rs:17` and `src/validate/mod.rs:93`.
+
+## Spec Deviations
+- The spec asks to assert orchestration ends in a `failed` state; project state currently has no `failed` enum (`pending|in_progress|completed`). The test asserts failure via non-zero exit and `state.status != completed`.
+- The spec asks for surfaced text containing `BackendTimeoutExhausted`; CLI error rendering is human-readable. The test accepts either literal `BackendTimeoutExhausted` or the canonical timeout-exhaustion message.
+
+## Testing
+- `nix develop -c cargo check`  
+  - Pass
+- `nix develop -c cargo run -- validate --bin ./target/debug/ralph --filter backend_timeout_exhausted_fails_task`  
+  - Pass (`1 passed; 0 failed`)
+
+
+### Implementation Diff
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 2f191dd..221d91b 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1,3 +1,9 @@
++use std::path::Path;
++
++fn shell_single_quote(value: &str) -> String {
++    format!("'{}'", value.replace('\'', "'\"'\"'"))
++}
++
+ pub fn standard_mock_script() -> String {
+     r###"#!/usr/bin/env bash
+ set -euo pipefail
+@@ -307,6 +313,91 @@ fi
+     .to_owned()
+ }
+ 
++/// Mock `ralph` script for validate E2E tests that always delegates to the
++/// provided absolute `ralph` binary path and executes `auto`.
++///
++/// This avoids recursive PATH-based resolution and ensures the delegated
++/// executable is exactly the caller-provided binary.
++pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
++    let absolute = ralph_bin
++        .canonicalize()
++        .unwrap_or_else(|_| ralph_bin.to_path_buf());
++    let quoted = shell_single_quote(&absolute.to_string_lossy());
++    format!(
++        "#!/bin/sh\n\
++set -eu\n\
++exec {quoted} auto \"$@\"\n"
++    )
++}
++
++/// Mock `gh` script for validate E2E tests that captures full `gh pr create`
++/// arguments and `--body-file` contents to a log file.
++///
++/// Set `RALPH_E2E_GH_LOG` to control the output path.
++pub fn e2e_mock_gh_logging_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++log_path="${RALPH_E2E_GH_LOG:-${TMPDIR:-/tmp}/ralph-e2e-gh.log}"
++
++if [ $# -ge 2 ] && [ "$1" = "pr" ] && [ "$2" = "create" ]; then
++  : > "$log_path"
++
++  idx=0
++  for arg in "$@"; do
++    printf 'arg[%s]=%s\n' "$idx" "$arg" >> "$log_path"
++    idx=$((idx + 1))
++  done
++
++  body_file=""
++  prev=""
++  for arg in "$@"; do
++    if [ "$prev" = "--body-file" ]; then
++      body_file="$arg"
++      break
++    fi
++    prev="$arg"
++  done
++
++  if [ -n "$body_file" ] && [ -f "$body_file" ]; then
++    printf 'body_file=%s\n' "$body_file" >> "$log_path"
++    printf 'body_begin\n' >> "$log_path"
++    cat "$body_file" >> "$log_path"
++    printf '\nbody_end\n' >> "$log_path"
++  fi
++
++  printf 'https://github.com/mock/repo/pull/123\n'
++  exit 0
++fi
++
++case "${1:-}" in
++  issue)
++    case "${2:-}" in
++      list) printf '[]'; exit 0 ;;
++      edit) exit 0 ;;
++      view) printf '' ; exit 0 ;;
++      comment) exit 0 ;;
++    esac
++    ;;
++  pr)
++    case "${2:-}" in
++      list) printf '' ; exit 0 ;;
++      edit) exit 0 ;;
++    esac
++    ;;
++  repo)
++    case "${2:-}" in
++      view) printf 'acme/widgets\n'; exit 0 ;;
++    esac
++    ;;
++esac
++
++echo "mock gh: unhandled command: $*" >&2
++exit 1
++"###
++    .to_owned()
++}
++
+ /// Mock script whose prompt reviewer response includes nested `##` headings
+ /// inside the `## Refined Prompt` section, exercising the extract-to-EOF parser
+ /// semantics. All other roles respond identically to `standard_mock_script()`.
+diff --git a/src/validate/mod.rs b/src/validate/mod.rs
+index 6220616..06137de 100644
+--- a/src/validate/mod.rs
++++ b/src/validate/mod.rs
+@@ -14,6 +14,7 @@ pub mod runner;
+ mod tests_auto_init;
+ mod tests_commands;
+ mod tests_daemon;
++mod tests_e2e_conformance;
+ mod tests_init;
+ mod tests_mcp;
+ mod tests_project;
+@@ -89,6 +90,7 @@ fn register_tests() -> Vec<ConformanceTest> {
+     tests.extend(tests_auto_init::tests());
+     tests.extend(tests_tail::tests());
+     tests.extend(tests_daemon::tests());
++    tests.extend(tests_e2e_conformance::tests());
+     tests
+ }
+ 
+diff --git a/src/validate/tests_e2e_conformance.rs b/src/validate/tests_e2e_conformance.rs
+new file mode 100644
+index 0000000..1aed307
+--- /dev/null
++++ b/src/validate/tests_e2e_conformance.rs
+@@ -0,0 +1,90 @@
++use super::*;
++
++use crate::validate::harness::RalphHarness;
++use serde_json::json;
++
++pub fn tests() -> Vec<ConformanceTest> {
++    vec![ConformanceTest {
++        name: "e2e_conformance::backend_timeout_exhausted_fails_task",
++        func: backend_timeout_exhausted_fails_task,
++    }]
++}
++
++fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-timeout";
++        h.init_workspace().expect("init failed");
++
++        let script = h
++            .write_mock_script("sleep-timeout.sh", &sleeping_backend_script())
++            .expect("failed to write sleeping backend script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++
++        // Backend timeout settings are global config keys.
++        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "2"])
++            .expect("config set backends.claude.timeout_seconds failed");
++        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "2"])
++            .expect("config set backends.codex.timeout_seconds failed");
++
++        h.create_project(
++            project_id,
++            "E2E Timeout Project",
++            "Backend timeout test prompt",
++        )
++        .expect("create_project failed");
++        // Keep the test focused on orchestration timeout handling during planning.
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++
++        let exit_code = output.status.code().unwrap_or(-1);
++        assert_ne!(
++            exit_code, 0,
++            "expected non-zero exit when backend times out"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.contains("BackendTimeoutExhausted")
++                || stderr.contains("backend timeout retries exhausted"),
++            "expected timeout exhaustion to be surfaced in stderr, got:\n{stderr}"
++        );
++        assert!(
++            !stderr.contains("requesting reformat via"),
++            "timeout should not trigger reformatter fallback, got:\n{stderr}"
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_ne!(
++            state["status"],
++            json!("completed"),
++            "project should not be completed after backend timeout failure"
++        );
++    })
++}
++
++fn sleeping_backend_script() -> String {
++    r#"#!/bin/sh
++set -eu
++
++# Consume prompt input, then sleep long enough to exceed backend timeout.
++cat >/dev/null
++sleep 30
++echo "unreachable"
++"#
++    .to_owned()
++}
++
++fn run_case<F>(f: F) -> TestResult
++where
++    F: FnOnce(),
++{
++    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
++        Ok(()) => TestResult::Pass,
++        Err(e) => TestResult::Fail(panic_message(e)),
++    }
++}
+
+### Prior QA History
+
+
+
+## System Guardrails
+
+- Run all available build, test, and check commands.
+- Report concrete commands and their output.
+- Do NOT edit any source files — only run checks and report findings.
+- If all acceptance criteria pass, return `# QA: PASS` with evidence.
+- If any check fails, return `# QA: FAIL` with specific failure details and suggested fixes.
+
+## Master Prompt
+
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T02:11:08Z
+---
+
+Now I have a comprehensive picture. Let me synthesize my findings and write the feature specification.
+
+Based on my analysis:
+
+**State**: Loop 0, planning phase, no previous specs. This is the very first feature to plan.
+
+**What exists already**:
+- QA rollback test (`iteration_limit_rolls_back`) — checks non-zero exit, empty loops, no loop artifacts, no git tag — but uses naming `*_rolls_back` not `*_fails` as requested
+- Review rollback test (`review_limit_rollback`) — checks non-zero exit, empty loops, no loop artifacts — but missing stderr check and git tag check, and uses `*_rollback` naming
+- PR metadata tests in daemon — partial coverage (body-file, head, diff stat, issue context, project ref) but missing explicit assertions on `--title` with `ralph:` prefix, `--repo`, and `Closes #N`
+- No backend timeout test at all
+- No reformatter semantics tests
+- No impl_response_artifact test
+- No `e2e_mock_ralph_script()` or `e2e_mock_gh_logging_script()` helpers
+- No `docs/validate-e2e.md`
+
+The prompt requires a large body of work. For loop 1, I should focus on the foundational pieces: the missing mock helpers and the backend timeout test, since other tests depend on these helpers and the timeout test is entirely new functionality with no existing partial coverage.
+
+# Feature: Backend Timeout Conformance and Mock Script Foundations
+
+## Description
+Add the foundational `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helpers to the validate harness, then implement the `backend_timeout_exhausted_fails_task` conformance test. This establishes the new helper functions that later features (PR metadata verification, impl-response artifact test) depend on, while delivering the only entirely missing test category: backend timeout handling. The test verifies that a sleeping backend exceeding `timeout_seconds` surfaces `BackendTimeoutExhausted` and marks the orchestration as failed with non-zero exit.
+
+## Acceptance Criteria
+- [ ] `e2e_mock_ralph_script(ralph_bin: &Path) -> String` helper exists in `src/validate/mock_scripts.rs`, embeds absolute path at generation time, uses `exec /absolute/path/to/ralph auto "$@"` pattern, does not resolve `ralph` via `PATH`
+- [ ] `e2e_mock_gh_logging_script() -> String` helper exists in `src/validate/mock_scripts.rs`, captures full `gh pr create` args and `--body-file` content to a log file for later assertion
+- [ ] New test module `src/validate/tests_e2e_conformance.rs` is created and registered in `src/validate/mod.rs`
+- [ ] Test `backend_timeout_exhausted_fails_task` exists and: uses a mock backend that sleeps 30s, sets `backends.<name>.timeout_seconds = 2`, asserts surfaced error contains `BackendTimeoutExhausted`, asserts non-zero exit code, asserts task/orchestration ends in failed state
+- [ ] Test does not introduce any recursive mock `ralph` invocation (mock embeds absolute path)
+- [ ] No reformatter path is triggered on backend timeout (the test confirms timeout → `BackendTimeoutExhausted`, not reformatter fallback)
+- [ ] Existing tests continue to pass (`cargo test` and `ralph validate` green)
+
+## Files to Modify/Create
+- `src/validate/mock_scripts.rs` — Add `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` helper functions
+- `src/validate/tests_e2e_conformance.rs` — New test module containing `backend_timeout_exhausted_fails_task`
+- `src/validate/mod.rs` — Register `tests_e2e_conformance` module and wire its `tests()` into `register_tests()`
+- `src/validate/harness.rs` — Add any needed timeout-config helpers (e.g., `setup_backend_with_timeout()`) if existing `setup_mock_backends` is insufficient for per-backend timeout config
+
+## Dependencies
+- Requires: none (first feature)
+- Blocks: QA/review rollback renaming tests (use `e2e_mock_ralph_script`), PR metadata verification test (uses `e2e_mock_gh_logging_script`), impl-response artifact test, reformatter semantics tests, documentation
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T02:16:23Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added `e2e_mock_ralph_script(ralph_bin: &Path)` in `src/validate/mock_scripts.rs:321` to hard-bind execution to the provided absolute binary via `exec <absolute> auto "$@"`, with shell-safe quoting to avoid PATH recursion.
+- Added `e2e_mock_gh_logging_script()` in `src/validate/mock_scripts.rs:337` to log full `gh pr create` argv and `--body-file` contents to `RALPH_E2E_GH_LOG` for later PR-metadata assertions.
+- Created `src/validate/tests_e2e_conformance.rs:1` with `backend_timeout_exhausted_fails_task`:
+  - backend script consumes stdin then `sleep 30`
+  - sets `backends.claude.timeout_seconds` and `backends.codex.timeout_seconds` to `2`
+  - asserts non-zero orchestration exit
+  - asserts timeout exhaustion is surfaced in stderr
+  - asserts no reformatter trigger string is present
+  - asserts project state is not `completed`
+- Registered the new conformance module in `src/validate/mod.rs:17` and `src/validate/mod.rs:93`.
+
+## Spec Deviations
+- The spec asks to assert orchestration ends in a `failed` state; project state currently has no `failed` enum (`pending|in_progress|completed`). The test asserts failure via non-zero exit and `state.status != completed`.
+- The spec asks for surfaced text containing `BackendTimeoutExhausted`; CLI error rendering is human-readable. The test accepts either literal `BackendTimeoutExhausted` or the canonical timeout-exhaustion message.
+
+## Testing
+- `nix develop -c cargo check`  
+  - Pass
+- `nix develop -c cargo run -- validate --bin ./target/debug/ralph --filter backend_timeout_exhausted_fails_task`  
+  - Pass (`1 passed; 0 failed`)
+
+
+## Current Diff
+
+```diff
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 2f191dd..221d91b 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1,3 +1,9 @@
++use std::path::Path;
++
++fn shell_single_quote(value: &str) -> String {
++    format!("'{}'", value.replace('\'', "'\"'\"'"))
++}
++
+ pub fn standard_mock_script() -> String {
+     r###"#!/usr/bin/env bash
+ set -euo pipefail
+@@ -307,6 +313,91 @@ fi
+     .to_owned()
+ }
+ 
++/// Mock `ralph` script for validate E2E tests that always delegates to the
++/// provided absolute `ralph` binary path and executes `auto`.
++///
++/// This avoids recursive PATH-based resolution and ensures the delegated
++/// executable is exactly the caller-provided binary.
++pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
++    let absolute = ralph_bin
++        .canonicalize()
++        .unwrap_or_else(|_| ralph_bin.to_path_buf());
++    let quoted = shell_single_quote(&absolute.to_string_lossy());
++    format!(
++        "#!/bin/sh\n\
++set -eu\n\
++exec {quoted} auto \"$@\"\n"
++    )
++}
++
++/// Mock `gh` script for validate E2E tests that captures full `gh pr create`
++/// arguments and `--body-file` contents to a log file.
++///
++/// Set `RALPH_E2E_GH_LOG` to control the output path.
++pub fn e2e_mock_gh_logging_script() -> String {
++    r###"#!/bin/sh
++set -eu
++
++log_path="${RALPH_E2E_GH_LOG:-${TMPDIR:-/tmp}/ralph-e2e-gh.log}"
++
++if [ $# -ge 2 ] && [ "$1" = "pr" ] && [ "$2" = "create" ]; then
++  : > "$log_path"
++
++  idx=0
++  for arg in "$@"; do
++    printf 'arg[%s]=%s\n' "$idx" "$arg" >> "$log_path"
++    idx=$((idx + 1))
++  done
++
++  body_file=""
++  prev=""
++  for arg in "$@"; do
++    if [ "$prev" = "--body-file" ]; then
++      body_file="$arg"
++      break
++    fi
++    prev="$arg"
++  done
++
++  if [ -n "$body_file" ] && [ -f "$body_file" ]; then
++    printf 'body_file=%s\n' "$body_file" >> "$log_path"
++    printf 'body_begin\n' >> "$log_path"
++    cat "$body_file" >> "$log_path"
++    printf '\nbody_end\n' >> "$log_path"
++  fi
++
++  printf 'https://github.com/mock/repo/pull/123\n'
++  exit 0
++fi
++
++case "${1:-}" in
++  issue)
++    case "${2:-}" in
++      list) printf '[]'; exit 0 ;;
++      edit) exit 0 ;;
++      view) printf '' ; exit 0 ;;
++      comment) exit 0 ;;
++    esac
++    ;;
++  pr)
++    case "${2:-}" in
++      list) printf '' ; exit 0 ;;
++      edit) exit 0 ;;
++    esac
++    ;;
++  repo)
++    case "${2:-}" in
++      view) printf 'acme/widgets\n'; exit 0 ;;
++    esac
++    ;;
++esac
++
++echo "mock gh: unhandled command: $*" >&2
++exit 1
++"###
++    .to_owned()
++}
++
+ /// Mock script whose prompt reviewer response includes nested `##` headings
+ /// inside the `## Refined Prompt` section, exercising the extract-to-EOF parser
+ /// semantics. All other roles respond identically to `standard_mock_script()`.
+diff --git a/src/validate/mod.rs b/src/validate/mod.rs
+index 6220616..06137de 100644
+--- a/src/validate/mod.rs
++++ b/src/validate/mod.rs
+@@ -14,6 +14,7 @@ pub mod runner;
+ mod tests_auto_init;
+ mod tests_commands;
+ mod tests_daemon;
++mod tests_e2e_conformance;
+ mod tests_init;
+ mod tests_mcp;
+ mod tests_project;
+@@ -89,6 +90,7 @@ fn register_tests() -> Vec<ConformanceTest> {
+     tests.extend(tests_auto_init::tests());
+     tests.extend(tests_tail::tests());
+     tests.extend(tests_daemon::tests());
++    tests.extend(tests_e2e_conformance::tests());
+     tests
+ }
+ 
+diff --git a/src/validate/tests_e2e_conformance.rs b/src/validate/tests_e2e_conformance.rs
+new file mode 100644
+index 0000000..1aed307
+--- /dev/null
++++ b/src/validate/tests_e2e_conformance.rs
+@@ -0,0 +1,90 @@
++use super::*;
++
++use crate::validate::harness::RalphHarness;
++use serde_json::json;
++
++pub fn tests() -> Vec<ConformanceTest> {
++    vec![ConformanceTest {
++        name: "e2e_conformance::backend_timeout_exhausted_fails_task",
++        func: backend_timeout_exhausted_fails_task,
++    }]
++}
++
++fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "e2e-timeout";
++        h.init_workspace().expect("init failed");
++
++        let script = h
++            .write_mock_script("sleep-timeout.sh", &sleeping_backend_script())
++            .expect("failed to write sleeping backend script");
++        h.setup_mock_backends(&script)
++            .expect("setup_mock_backends failed");
++
++        // Backend timeout settings are global config keys.
++        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "2"])
++            .expect("config set backends.claude.timeout_seconds failed");
++        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "2"])
++            .expect("config set backends.codex.timeout_seconds failed");
++
++        h.create_project(
++            project_id,
++            "E2E Timeout Project",
++            "Backend timeout test prompt",
++        )
++        .expect("create_project failed");
++        // Keep the test focused on orchestration timeout handling during planning.
++        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
++            .expect("config set workflow.prompt_review_enabled failed");
++
++        let output = h
++            .ralph(["run", "--loops", "1"])
++            .expect("ralph run should execute");
++
++        let exit_code = output.status.code().unwrap_or(-1);
++        assert_ne!(
++            exit_code, 0,
++            "expected non-zero exit when backend times out"
++        );
++
++        let stderr = String::from_utf8_lossy(&output.stderr);
++        assert!(
++            stderr.contains("BackendTimeoutExhausted")
++                || stderr.contains("backend timeout retries exhausted"),
++            "expected timeout exhaustion to be surfaced in stderr, got:\n{stderr}"
++        );
++        assert!(
++            !stderr.contains("requesting reformat via"),
++            "timeout should not trigger reformatter fallback, got:\n{stderr}"
++        );
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        assert_ne!(
++            state["status"],
++            json!("completed"),
++            "project should not be completed after backend timeout failure"
++        );
++    })
++}
++
++fn sleeping_backend_script() -> String {
++    r#"#!/bin/sh
++set -eu
++
++# Consume prompt input, then sleep long enough to exceed backend timeout.
++cat >/dev/null
++sleep 30
++echo "unreachable"
++"#
++    .to_owned()
++}
++
++fn run_case<F>(f: F) -> TestResult
++where
++    F: FnOnce(),
++{
++    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
++        Ok(()) => TestResult::Pass,
++        Err(e) => TestResult::Fail(panic_message(e)),
++    }
++}
+```
+
+## Prior QA History
+
+(none)
+
+mcp startup: no servers
+
+thinking
+**Acknowledging testing plan**
+codex
+I’m validating this as a QA pass by building the project, manually exercising the new behavior through the built `ralph` binary, then running the full automated checks. I’ll start by locating the referenced spec/notes files and confirming the current diff state before executing tests.
+
+thinking
+**Listing project files**
+exec
+/run/current-system/sw/bin/bash -lc "pwd; ls -la; rg --files | rg -n \"prompt.md|spec\\.md|impl-notes\\.md|validate-e2e\\.md|tests_e2e_conformance|mock_scripts|mod\\.rs"'$"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+total 292
+drwxr-xr-x  6 root root  4096 Feb 16 02:13 .
+drwxr-xr-x  7 root root  4096 Feb 16 01:43 ..
+-rw-r--r--  1 root root   112 Feb 16 01:43 .git
+-rw-r--r--  1 root root   104 Feb 16 01:43 .gitignore
+drwxr-xr-x  6 root root  4096 Feb 16 01:43 .ralph
+-rw-r--r--  1 root root  3803 Feb 16 01:43 AGENTS.md
+-rw-r--r--  1 root root 31893 Feb 16 01:43 Cargo.lock
+-rw-r--r--  1 root root   696 Feb 16 01:43 Cargo.toml
+-rw-r--r--  1 root root 14140 Feb 16 01:43 PLAN-qa-phase.md
+-rw-r--r--  1 root root  7880 Feb 16 01:43 PLAN-qa-validate.md
+-rw-r--r--  1 root root 38293 Feb 16 01:43 PLAN.md
+-rw-r--r--  1 root root 48099 Feb 16 01:43 PRD.md
+-rw-r--r--  1 root root  4609 Feb 16 01:43 PROMPT-auto-branch-sync.md
+-rw-r--r--  1 root root  7103 Feb 16 01:43 PROMPT-codex-reasoning-effort.md
+-rw-r--r--  1 root root  5701 Feb 16 01:43 PROMPT-explicit-models.md
+-rw-r--r--  1 root root  6212 Feb 16 01:43 PROMPT-per-role-models.md
+-rw-r--r--  1 root root 16482 Feb 16 01:43 PROMPT-prd-pipeline.md
+-rw-r--r--  1 root root  3196 Feb 16 01:43 PROMPT-reformatter.md
+
+thinking
+**Inspecting hidden project files**
+codex
+I found the code changes in place and the new test module exists. Next I’ll locate the exact `prompt.md`, `*-spec.md`, and `*-impl-notes.md` artifacts in `.ralph` so I can validate against the intended acceptance criteria precisely.
+exec
+/run/current-system/sw/bin/bash -lc "rg --files .ralph | rg -n \"prompt\\.md"'$|-spec'"\\.md"'$|-impl-notes'"\\.md"'$|docs/validate-e2e'"\\.md"'$|validate-e2e'"\\.md"'$"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+49:.ralph/projects/auto-create-ralph-directory-if-not-exist/prompt.md
+54:.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020316-spec.md
+58:.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020946-impl-notes.md
+59:.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024001-spec.md
+62:.ralph/projects/auto-create-ralph-directory-if-not-exist/loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024356-impl-notes.md
+73:.ralph/projects/task-preserve-worktree-and-branch-on-dae/prompt.md
+75:.ralph/projects/summary-eliminate-all-unsafe-blocks-from/prompt.md
+77:.ralph/projects/task-preserve-worktree-and-branch-on-dae/loops/001-failed-task-worktree-preservation-and-dispatch/20260214224127-impl-notes.md
+79:.ralph/projects/task-preserve-worktree-and-branch-on-dae/loops/001-failed-task-worktree-preservation-and-dispatch/20260214223148-spec.md
+81:.ralph/projects/add-verbose-logging-flag-to-daemon-start/prompt.md
+85:.ralph/projects/task-preserve-worktree-and-branch-on-dae/loops/003-cas-race-test-hardening-and-conformance-test/20260214230753-spec.md
+86:.ralph/projects/task-preserve-worktree-and-branch-on-dae/loops/003-cas-race-test-hardening-and-conformance-test/20260214232929-impl-notes.md
+87:.ralph/projects/summary-eliminate-all-unsafe-blocks-from/loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214200908-spec.md
+90:.ralph/projects/summary-eliminate-all-unsafe-blocks-from/loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214201131-impl-notes.md
+102:.ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214140656-spec.md
+105:.ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214141243-impl-notes.md
+106:.ralph/projects/refactor-the-daemon-runtime-loop-src-dae/prompt.md
+114:.ralph/projects/when-a-daemon-task-fails-e-g-backend-tim/loops/003-fix-fresh-dispatch-regression-gate-on-taskproject/20260214215643-spec.md
+115:.ralph/projects/when-a-daemon-task-fails-e-g-backend-tim/loops/003-fix-fresh-dispatch-regression-gate-on-taskproject/20260214220450-impl-notes.md
+124:.ralph/projects/task-auto-rebase-open-prs-when-conflicts/prompt.md
+
+thinking
+**Checking for unexpected changes**
+exec
+/run/current-system/sw/bin/bash -lc 'git status --short' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+D  .ralph/daemon/tasks.json
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/.lock
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214140656-spec.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214141243-impl-notes.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214142116-qa-001-pass.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/001-add-verbose-flag-to-daemon-start/20260214142148-review-approved.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/002-completion/20260214142158-termination-request.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/002-completion/20260214142338-completer-verdict.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/002-completion/20260214142729-acceptance-pass-claudeopus.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/loops/002-completion/20260214143249-acceptance-pass-codexgpt-53-codex-xhigh.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/prompt-original.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/prompt-review.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/prompt.md
+D  .ralph/projects/add-verbose-logging-flag-to-daemon-start/state.json
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/.lock
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153035-spec.md
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153242-impl-notes.md
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153409-qa-001-pass.md
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/001-add-version-flag-to-ralph-cli/20260214153422-review-approved.md
+D  .ralph/projects/add-version-flag-to-ralph-cli-add-versio/loops/002-completion/20260214153433-termination-request.md
+
+thinking
+**Evaluating dirty repo impact**
+codex
+I’ve confirmed the working tree is already dirty (mostly under `.ralph/`), so I’ll avoid any file modifications and continue with read-only QA commands. Next I’m loading the exact project prompt/spec/impl-notes artifacts for this feature to map each acceptance criterion to concrete manual checks.
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,220p' .ralph/projects/summary-enhance-the-ralph-validate-test/prompt.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,260p' .ralph/projects/summary-enhance-the-ralph-validate-test/loops/001-backend-timeout-conformance-and-mock-script/20260216021108-spec.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,260p' .ralph/projects/summary-enhance-the-ralph-validate-test/loops/001-backend-timeout-conformance-and-mock-script/20260216021623-impl-notes.md" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+ succeeded in 50ms:
+---
+artifact: spec
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: planner
+created_at: 2026-02-16T02:11:08Z
+---
+
+Now I have a comprehensive picture. Let me synthesize my findings and write the feature specification.
+
+Based on my analysis:
+
+**State**: Loop 0, planning phase, no previous specs. This is the very first feature to plan.
+
+**What exists already**:
+- QA rollback test (`iteration_limit_rolls_back`) — checks non-zero exit, empty loops, no loop artifacts, no git tag — but uses naming `*_rolls_back` not `*_fails` as requested
+- Review rollback test (`review_limit_rollback`) — checks non-zero exit, empty loops, no loop artifacts — but missing stderr check and git tag check, and uses `*_rollback` naming
+- PR metadata tests in daemon — partial coverage (body-file, head, diff stat, issue context, project ref) but missing explicit assertions on `--title` with `ralph:` prefix, `--repo`, and `Closes #N`
+- No backend timeout test at all
+ succeeded in 50ms:
+---
+artifact: impl-notes
+loop: 1
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-high)
+role: implementer
+created_at: 2026-02-16T02:16:23Z
+---
+
+# Implementation Notes
+
+## Decisions Made
+- Added `e2e_mock_ralph_script(ralph_bin: &Path)` in `src/validate/mock_scripts.rs:321` to hard-bind execution to the provided absolute binary via `exec <absolute> auto "$@"`, with shell-safe quoting to avoid PATH recursion.
+- Added `e2e_mock_gh_logging_script()` in `src/validate/mock_scripts.rs:337` to log full `gh pr create` argv and `--body-file` contents to `RALPH_E2E_GH_LOG` for later PR-metadata assertions.
+- Created `src/validate/tests_e2e_conformance.rs:1` with `backend_timeout_exhausted_fails_task`:
+  - backend script consumes stdin then `sleep 30`
+  - sets `backends.claude.timeout_seconds` and `backends.codex.timeout_seconds` to `2`
+  - asserts non-zero orchestration exit
+  - asserts timeout exhaustion is surfaced in stderr
+  - asserts no reformatter trigger string is present
+
+thinking
+**Planning manual end-to-end testing setup**
+codex
+I’ve mapped the target spec and implementation notes. Next I’m running the required build commands (`nix build -L`, then test commands) and then I’ll manually execute `ralph` in a temp workspace to reproduce the backend-timeout behavior directly, outside the test harness.
+
+thinking
+**Starting detailed build command**
+exec
+/run/current-system/sw/bin/bash -lc 'nix build -L' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+thinking
+**Waiting for build completion**
+ succeeded in 1m 20s:
+this derivation will be built:
+  /nix/store/hmp2fpjqi06xdg5yzw6fjs3whmg5hvql-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv
+building '/nix/store/hmp2fpjqi06xdg5yzw6fjs3whmg5hvql-ralph-static-x86_64-unknown-linux-musl-0.1.0.drv'...
+ralph-static-x86_64-unknown-linux-musl> Running phase: unpackPhase
+ralph-static-x86_64-unknown-linux-musl> unpacking source archive /nix/store/9jxg8vgfb3nixv98br7lcdxvzdqypmhl-ra8gckb6dzxydkp6r54g5ch8492y3pr7-source
+ralph-static-x86_64-unknown-linux-musl> source root is ra8gckb6dzxydkp6r54g5ch8492y3pr7-source
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostUnpackHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: patchPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Validating consistency between /build/ra8gckb6dzxydkp6r54g5ch8492y3pr7-source/Cargo.lock and /build/cargo-vendor-dir/Cargo.lock
+ralph-static-x86_64-unknown-linux-musl> Finished cargoSetupPostPatchHook
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: updateAutotoolsGnuConfigScriptsPhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: configurePhase
+ralph-static-x86_64-unknown-linux-musl> Running phase: buildPhase
+ralph-static-x86_64-unknown-linux-musl> Executing cargoBuildHook
+ralph-static-x86_64-unknown-linux-musl> cargoBuildHook flags: -j 16 --target x86_64-unknown-linux-musl --offline --profile release
+ralph-static-x86_64-unknown-linux-musl>    Compiling proc-macro2 v1.0.106
+ralph-static-x86_64-unknown-linux-musl>    Compiling quote v1.0.44
+
+thinking
+**Running tests with nix develop**
+exec
+/run/current-system/sw/bin/bash -lc 'nix develop -c cargo test' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 9.11s:
+   Compiling ralph v0.1.0 (/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.34s
+     Running unittests src/lib.rs (target/debug/deps/ralph-3b3d545b10a51b88)
+
+running 375 tests
+test backend::codex::tests::parse_codex_model_effort_no_suffix ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_high ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_low ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_xhigh ... ok
+test backend::codex::tests::parse_codex_model_effort_strips_medium ... ok
+test backend::codex::tests::parse_codex_model_effort_unknown_suffix ... ok
+test backend::tests::parse_backend_spec_accepts_bare_name ... ok
+test backend::tests::parse_backend_spec_accepts_name_with_model ... ok
+test backend::tests::parse_backend_spec_rejects_empty_name ... ok
+test backend::tests::parse_backend_spec_rejects_empty_model ... ok
+test backend::tests::parse_backend_spec_rejects_missing_closing_paren ... ok
+test backend::tests::parse_backend_spec_rejects_missing_opening_paren ... ok
+test backend::tmux::tests::format_window_label_basic ... ok
+test backend::tmux::tests::format_window_label_long_values_truncated ... ok
+test backend::tmux::tests::format_window_label_reviewer_role ... ok
+
+thinking
+**Running validation commands**
+codex
+Build and `cargo test` both completed successfully. I’ll now run the exact required conformance commands with `./result/bin/ralph`, then do direct manual CLI runs in a throwaway workspace to validate timeout/error behavior and edge cases outside automated tests.
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter mcp' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 294ms:
+test mcp::tool_project_show_returns_state ... ok
+test mcp::tool_project_new_creates_project ... ok
+test mcp::tool_status_shows_project_info ... ok
+test mcp::tool_history_empty_project ... ok
+test mcp::tool_tail_empty_project ... ok
+test mcp::tool_config_show_global ... ok
+test mcp::tool_config_show_project ... ok
+test mcp::tool_unknown_returns_error ... ok
+test mcp::tool_project_new_missing_id ... ok
+test mcp::tool_project_new_missing_prompt_source ... ok
+test mcp::tool_project_new_mutual_exclusion ... ok
+test mcp::tool_config_show_mutual_exclusion ... ok
+test mcp::tool_status_no_project ... ok
+test result: ok. 22 passed; 0 failed; 0 skipped
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+thinking
+**Planning continuous polling**
+
+thinking
+
+ succeeded in 4m 05s:
+test mcp::malformed_json_returns_parse_error ... ok
+test mcp::tool_project_list_empty ... ok
+test mcp::tool_project_list_with_projects ... ok
+test mcp::tool_project_show_returns_state ... ok
+test mcp::tool_project_new_creates_project ... ok
+test mcp::tool_status_shows_project_info ... ok
+test mcp::tool_history_empty_project ... ok
+test mcp::tool_tail_empty_project ... ok
+test mcp::tool_config_show_global ... ok
+test mcp::tool_config_show_project ... ok
+test mcp::tool_unknown_returns_error ... ok
+test mcp::tool_project_new_missing_id ... ok
+test mcp::tool_project_new_missing_prompt_source ... ok
+test mcp::tool_project_new_mutual_exclusion ... ok
+test mcp::tool_config_show_mutual_exclusion ... ok
+test mcp::tool_status_no_project ... ok
+test project::new_creates_state ... ok
+test project::new_copies_prompt ... ok
+test project::new_activates_project ... ok
+test project::new_creates_branch ... ok
+
+thinking
+**Planning manual feature testing**
+codex
+The required automated commands are green. I’m moving to true manual verification now: I’ll run `./result/bin/ralph` in a fresh temp repo/workspace, wire a sleeping mock backend through config, and confirm timeout failure behavior and stderr/exit semantics directly.
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"fn setup_mock_backends|timeout_seconds|mock_backend|backends\\.claude\\.command|backends\\.codex\\.command\" src/validate src/config src/cli" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,260p' src/validate/harness.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '260,520p' src/validate/harness.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+src/validate/harness.rs:195:    pub fn setup_mock_backends<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+src/validate/harness.rs:200:            "backends.claude.command".to_owned(),
+src/validate/harness.rs:206:            "backends.codex.command".to_owned(),
+src/validate/harness.rs:218:    pub fn setup_mock_backends_stable<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+src/validate/harness.rs:244:    pub fn setup_separate_mock_backends<P: AsRef<Path>, Q: AsRef<Path>>(
+src/validate/harness.rs:254:            "backends.claude.command".to_owned(),
+src/validate/harness.rs:260:            "backends.codex.command".to_owned(),
+src/config/project.rs:63:    pub rebase_timeout_seconds: Option<u64>,
+src/validate/tests_tail.rs:138:    h.setup_mock_backends(&script)
+src/validate/tests_tail.rs:139:        .expect("setup_mock_backends failed");
+src/cli/daemon.rs:123:        rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
+src/config/global.rs:56:    #[serde(default = "default_daemon_rebase_timeout_seconds")]
+src/config/global.rs:57:    pub daemon_rebase_timeout_seconds: u64,
+src/config/global.rs:82:    #[serde(default = "default_backend_timeout_seconds")]
+src/config/global.rs:83:    pub timeout_seconds: u64,
+src/config/global.rs:241:            daemon_rebase_timeout_seconds: default_daemon_rebase_timeout_seconds(),
+src/config/global.rs:260:            timeout_seconds: default_backend_timeout_seconds(),
+src/config/global.rs:272:    timeout_seconds: Option<u64>,
+src/config/global.rs:285:        if let Some(timeout_seconds) = self.timeout_seconds {
+src/config/global.rs:286:            defaults.timeout_seconds = timeout_seconds;
+ succeeded in 50ms:
+use std::ffi::OsStr;
+use std::fs;
+use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
+use tempfile::TempDir;
+
+use crate::error::RalphError;
+use crate::validate::assertions::assert_exit_code;
+use crate::Result;
+
+#[derive(Debug)]
+pub struct RalphHarness {
+    pub temp_dir: TempDir,
+    pub repo_root: PathBuf,
+    pub ralph_bin: PathBuf,
+}
+ succeeded in 50ms:
+            "backends.codex.command".to_owned(),
+            codex,
+        ])?;
+        Ok(())
+    }
+
+    pub fn create_project(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
+        let prompt_path = self.temp_dir.path().join(format!("{id}-prompt.md"));
+        fs::write(&prompt_path, prompt)?;
+
+        self.ralph_ok(vec![
+            "project".to_owned(),
+            "new".to_owned(),
+            "--id".to_owned(),
+            id.to_owned(),
+            "--name".to_owned(),
+            name.to_owned(),
+            "--prompt".to_owned(),
+            prompt_path.to_string_lossy().into_owned(),
+        ])?;
+
+thinking
+**Reviewing mock script handling**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,220p' src/validate/mock_scripts.rs; sed -n '280,430p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+use std::path::Path;
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+pub fn standard_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+
+thinking
+**Checking for missing docs file**
+exec
+/run/current-system/sw/bin/bash -lc "ls -la docs || true; rg --files docs 2>/dev/null | rg -n \"validate-e2e\\.md\" || true" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+ls: cannot access 'docs': No such file or directory
+
+thinking
+**Planning manual backend timeout test**
+exec
+/run/current-system/sw/bin/bash -lc 'TMP_QA_DIR=$(mktemp -d /tmp/ralph-qa-timeout-XXXXXX); echo "$TMP_QA_DIR"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+/tmp/ralph-qa-timeout-fLrwZ8
+
+thinking
+**Planning explicit path testing**
+exec
+/run/current-system/sw/bin/bash -lc 'set -e
+cd /tmp/ralph-qa-timeout-fLrwZ8
+./result/bin/ralph --help >/tmp/ralph-qa-timeout-fLrwZ8/help.txt 2>&1 || true' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+
+
+thinking
+**Fixing command execution path**
+codex
+I’m now running a manual end-to-end timeout scenario in a fresh temp git repo using the built `result/bin/ralph`, including CLI edge checks (`--help` and invalid timeout value) before the real `run --loops 1` execution.
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26/result/bin/ralph"
+QA_DIR="/tmp/ralph-qa-timeout-fLrwZ8"
+cd "$QA_DIR"
+
+# init git repo required by ralph flows
+git init >/tmp/ralph-qa-timeout-fLrwZ8/git-init.out 2>&1
+git config user.email qa@example.com
+git config user.name "QA User"
+echo "seed" > README.md
+git add README.md
+git commit -m "init" >/tmp/ralph-qa-timeout-fLrwZ8/git-commit.out 2>&1
+
+# CLI edge: help flag should succeed
+"$BIN" --help > /tmp/ralph-qa-timeout-fLrwZ8/help.out 2>&1
+HELP_EXIT=$?
+
+# initialize ralph workspace
+"$BIN" init > /tmp/ralph-qa-timeout-fLrwZ8/init.out 2>&1
+
+# configure backend commands to sleeping script
+cat > /tmp/ralph-qa-timeout-fLrwZ8/sleep-timeout.sh <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+sleep 30
+echo "unreachable"
+SH
+chmod +x /tmp/ralph-qa-timeout-fLrwZ8/sleep-timeout.sh
+
+"$BIN" config set backends.claude.command /tmp/ralph-qa-timeout-fLrwZ8/sleep-timeout.sh > /tmp/ralph-qa-timeout-fLrwZ8/cfg-claude-cmd.out 2>&1
+"$BIN" config set backends.codex.command /tmp/ralph-qa-timeout-fLrwZ8/sleep-timeout.sh > /tmp/ralph-qa-timeout-fLrwZ8/cfg-codex-cmd.out 2>&1
+"$BIN" config set backends.claude.timeout_seconds 2 > /tmp/ralph-qa-timeout-fLrwZ8/cfg-claude-timeout.out 2>&1
+"$BIN" config set backends.codex.timeout_seconds 2 > /tmp/ralph-qa-timeout-fLrwZ8/cfg-codex-timeout.out 2>&1
+"$BIN" config set workflow.prompt_review_enabled false > /tmp/ralph-qa-timeout-fLrwZ8/cfg-prompt-review.out 2>&1
+
+# CLI edge: invalid timeout input should fail
+set +e
+"$BIN" config set backends.claude.timeout_seconds nope > /tmp/ralph-qa-timeout-fLrwZ8/cfg-invalid-timeout.out 2>&1
+INVALID_TIMEOUT_EXIT=$?
+set -e
+
+# project + run
+cat > /tmp/ralph-qa-timeout-fLrwZ8/PROMPT.md <<'"'MD'
+# Timeout QA Prompt
+Trigger backend timeout during planning.
+MD
+\""'$BIN" project new --id e2e-timeout-manual --name "E2E Timeout Manual" --prompt /tmp/ralph-qa-timeout-fLrwZ8/PROMPT.md > /tmp/ralph-qa-timeout-fLrwZ8/project-new.out 2>&1
+
+set +e
+"$BIN" run --loops 1 > /tmp/ralph-qa-timeout-fLrwZ8/run.out 2> /tmp/ralph-qa-timeout-fLrwZ8/run.err
+RUN_EXIT=$?
+set -e
+
+# print concise evidence
+printf '"'HELP_EXIT=%s\\n' \""'$HELP_EXIT"
+printf '"'INVALID_TIMEOUT_EXIT=%s\\n' \""'$INVALID_TIMEOUT_EXIT"
+printf '"'RUN_EXIT=%s\\n' \""'$RUN_EXIT"
+printf '"'STATE_STATUS='
+python3 - <<'PY'
+import json
+p='/tmp/ralph-qa-timeout-fLrwZ8/.ralph/projects/e2e-timeout-manual/state.json'
+with open(p) as f:
+    s=json.load(f)
+print(s.get('status'))
+PY
+printf 'LOOPS_LEN='
+python3 - <<'PY'
+import json
+p='/tmp/ralph-qa-timeout-fLrwZ8/.ralph/projects/e2e-timeout-manual/state.json'
+with open(p) as f:
+    s=json.load(f)
+print(len(s.get('loops',[])))
+PY
+printf 'RUN_ERR_MATCH_TIMEOUT='; if rg -q \"BackendTimeoutExhausted|backend timeout retries exhausted\" /tmp/ralph-qa-timeout-fLrwZ8/run.err; then echo yes; else echo no; fi
+printf 'RUN_ERR_MATCH_REFORMATTER='; if rg -q \"requesting reformat via\" /tmp/ralph-qa-timeout-fLrwZ8/run.err; then echo yes; else echo no; fi
+
+printf '\\n--- run.err (first 40 lines) ---\\n'
+sed -n '1,40p' /tmp/ralph-qa-timeout-fLrwZ8/run.err
+printf '\\n--- cfg-invalid-timeout.out ---\\n'
+sed -n '1,40p' /tmp/ralph-qa-timeout-fLrwZ8/cfg-invalid-timeout.out
+printf '\\n--- help.out (first 20 lines) ---\\n'
+sed -n '1,20p' /tmp/ralph-qa-timeout-fLrwZ8/help.out
+" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 exited 127 in 51ms:
+HELP_EXIT=0
+INVALID_TIMEOUT_EXIT=2
+RUN_EXIT=2
+STATE_STATUS=/run/current-system/sw/bin/bash: line 60: python3: command not found
+
+thinking
+**Testing alternative parsing tools**
+exec
+/run/current-system/sw/bin/bash -lc 'command -v jq || true; command -v python || true; command -v python3 || true' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 50ms:
+/nix/store/qnaw7i777j52fpgbl5pgmzkq85znp083-jq-1.8.1-bin/bin/jq
+
+thinking
+**Gathering run outputs and status**
+exec
+/run/current-system/sw/bin/bash -lc "set -euo pipefail
+STATE=/tmp/ralph-qa-timeout-fLrwZ8/.ralph/projects/e2e-timeout-manual/state.json
+printf 'STATE_STATUS='; jq -r '.status' \""'$STATE"
+printf '"'LOOPS_LEN='; jq '.loops | length' \""'$STATE"
+printf '"'RUN_ERR_MATCH_TIMEOUT='; if rg -q \"BackendTimeoutExhausted|backend timeout retries exhausted\" /tmp/ralph-qa-timeout-fLrwZ8/run.err; then echo yes; else echo no; fi
+printf 'RUN_ERR_MATCH_REFORMATTER='; if rg -q \"requesting reformat via\" /tmp/ralph-qa-timeout-fLrwZ8/run.err; then echo yes; else echo no; fi
+printf '\\n--- run.err (first 80 lines) ---\\n'; sed -n '1,80p' /tmp/ralph-qa-timeout-fLrwZ8/run.err
+printf '\\n--- run.out (first 60 lines) ---\\n'; sed -n '1,60p' /tmp/ralph-qa-timeout-fLrwZ8/run.out
+printf '\\n--- cfg-invalid-timeout.out ---\\n'; sed -n '1,80p' /tmp/ralph-qa-timeout-fLrwZ8/cfg-invalid-timeout.out
+printf '\\n--- help.out (first 20 lines) ---\\n'; sed -n '1,20p' /tmp/ralph-qa-timeout-fLrwZ8/help.out" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+STATE_STATUS=pending
+LOOPS_LEN=0
+RUN_ERR_MATCH_TIMEOUT=no
+RUN_ERR_MATCH_REFORMATTER=no
+
+--- run.err (first 80 lines) ---
+error: invalid input: cannot start a new loop with uncommitted changes outside `.ralph/`.
+commit/stash/discard those paths first:
+- PROMPT.md
+- cfg-claude-cmd.out
+- cfg-claude-timeout.out
+- cfg-codex-cmd.out
+- cfg-codex-timeout.out
+- cfg-invalid-timeout.out
+- cfg-prompt-review.out
+- git-commit.out
+- git-init.out
+- help.out
+- ... and 6 more path(s)
+
+
+thinking
+**Reconfiguring test environment for cleanliness**
+codex
+The first manual run surfaced a real-user precondition failure (dirty tree), which is useful, but it blocked the timeout path. I’m rerunning in a second clean temp repo with logs stored outside the repo so `run --loops 1` can hit the backend timeout behavior directly.
+exec
+/run/current-system/sw/bin/bash -lc 'set -euo pipefail
+BIN="/tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26/result/bin/ralph"
+QA_REPO=$(mktemp -d /tmp/ralph-qa-timeout2-repo-XXXXXX)
+QA_LOG=$(mktemp -d /tmp/ralph-qa-timeout2-log-XXXXXX)
+
+cd "$QA_REPO"
+git init >/dev/null 2>&1
+git config user.email qa@example.com
+git config user.name "QA User"
+echo "seed" > README.md
+git add README.md
+git commit -m "init" >/dev/null 2>&1
+
+"$BIN" init > "$QA_LOG/init.out" 2>&1
+
+cat > "$QA_LOG/sleep-timeout.sh" <<'"'SH'
+#"'!/bin/sh
+set -eu
+cat >/dev/null
+sleep 30
+echo "unreachable"
+SH
+chmod +x "$QA_LOG/sleep-timeout.sh"
+
+"$BIN" config set backends.claude.command "$QA_LOG/sleep-timeout.sh" > "$QA_LOG/cfg-claude-cmd.out" 2>&1
+"$BIN" config set backends.codex.command "$QA_LOG/sleep-timeout.sh" > "$QA_LOG/cfg-codex-cmd.out" 2>&1
+"$BIN" config set backends.claude.timeout_seconds 2 > "$QA_LOG/cfg-claude-timeout.out" 2>&1
+"$BIN" config set backends.codex.timeout_seconds 2 > "$QA_LOG/cfg-codex-timeout.out" 2>&1
+"$BIN" config set workflow.prompt_review_enabled false > "$QA_LOG/cfg-prompt-review.out" 2>&1
+
+cat > "$QA_LOG/PROMPT.md" <<'"'MD'
+# Timeout QA Prompt
+Trigger backend timeout during planning.
+MD
+\""'$BIN" project new --id e2e-timeout-manual --name "E2E Timeout Manual" --prompt "$QA_LOG/PROMPT.md" > "$QA_LOG/project-new.out" 2>&1
+
+set +e
+"$BIN" run --loops 1 > "$QA_LOG/run.out" 2> "$QA_LOG/run.err"
+RUN_EXIT=$?
+set -e
+
+STATE="$QA_REPO/.ralph/projects/e2e-timeout-manual/state.json"
+printf '"'QA_REPO=%s\\n' \""'$QA_REPO"
+printf '"'QA_LOG=%s\\n' \""'$QA_LOG"
+printf '"'RUN_EXIT=%s\\n' \""'$RUN_EXIT"
+printf '"'STATE_STATUS='; jq -r '.status' \""'$STATE"
+printf '"'LOOPS_LEN='; jq '.loops | length' \""'$STATE"
+printf '"'RUN_ERR_MATCH_TIMEOUT='; if rg -q \"BackendTimeoutExhausted|backend timeout retries exhausted\" \""'$QA_LOG/run.err"; then echo yes; else echo no; fi
+printf '"'RUN_ERR_MATCH_REFORMATTER='; if rg -q \"requesting reformat via\" \""'$QA_LOG/run.err"; then echo yes; else echo no; fi
+
+printf '"'\\n--- run.err (first 120 lines) ---\\n'; sed -n '1,120p' \""'$QA_LOG/run.err"
+printf '"'\\n--- run.out (first 80 lines) ---\\n'; sed -n '1,80p' \""'$QA_LOG/run.out"
+printf '"'\\n--- git status --short (repo after run) ---\\n'; git -C \""'$QA_REPO" status --short
+' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 8.98s:
+QA_REPO=/tmp/ralph-qa-timeout2-repo-pDbv63
+QA_LOG=/tmp/ralph-qa-timeout2-log-sSINgx
+RUN_EXIT=1
+STATE_STATUS=pending
+LOOPS_LEN=0
+RUN_ERR_MATCH_TIMEOUT=yes
+RUN_ERR_MATCH_REFORMATTER=no
+
+--- run.err (first 120 lines) ---
+error: backend timeout retries exhausted for claude(opus) during planning after 3 attempts
+
+--- run.out (first 80 lines) ---
+ INFO ralph::workflow::orchestrator: checking backend availability...
+ INFO ralph::workflow::orchestrator: starting planning phase loop=1
+ INFO ralph::workflow::orchestrator: invoking planner... loop=1 backend="claude(opus)"
+ WARN ralph::workflow::orchestrator: backend timeout, retrying... role="planner" backend=claude(opus) attempt=1 backoff_secs=1
+ WARN ralph::workflow::orchestrator: backend timeout, retrying... role="planner" backend=claude(opus) attempt=2 backoff_secs=2
+ WARN ralph::workflow::orchestrator: backend timeout, retries exhausted role="planner" backend=claude(opus)
+
+--- git status --short (repo after run) ---
+
+thinking
+**Gathering command output evidence**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"fn e2e_mock_ralph_script|fn e2e_mock_gh_logging_script|exec \\{quoted\\} auto|mod tests_e2e_conformance|tests.extend\\(tests_e2e_conformance::tests\\(\\)\\)|backend_timeout_exhausted_fails_task\" src/validate/mock_scripts.rs src/validate/mod.rs src/validate/tests_e2e_conformance.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+src/validate/mock_scripts.rs:321:pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+src/validate/mock_scripts.rs:329:exec {quoted} auto \"$@\"\n"
+src/validate/mock_scripts.rs:337:pub fn e2e_mock_gh_logging_script() -> String {
+src/validate/mod.rs:17:mod tests_e2e_conformance;
+src/validate/mod.rs:93:    tests.extend(tests_e2e_conformance::tests());
+src/validate/tests_e2e_conformance.rs:8:        name: "e2e_conformance::backend_timeout_exhausted_fails_task",
+src/validate/tests_e2e_conformance.rs:9:        func: backend_timeout_exhausted_fails_task,
+src/validate/tests_e2e_conformance.rs:13:fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
+
+thinking
+**Verifying docs and targeted tests**
+exec
+/run/current-system/sw/bin/bash -lc './result/bin/ralph validate --bin ./result/bin/ralph --filter backend_timeout_exhausted_fails_task' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 8.97s:
+test e2e_conformance::backend_timeout_exhausted_fails_task ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+
+thinking
+**Evaluating spec deviation on failure state**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"e2e_mock_ralph_script\\(\" src" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+src/validate/mock_scripts.rs:321:pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+
+thinking
+**Assessing helper usage in tests**
+codex
+I’ve now validated the new behavior both through conformance runs and a direct CLI workflow. I’m doing one final compliance sweep against the loop-specific acceptance list (including whether helper usage is actually wired, not just defined) before I issue the PASS/FAIL report.
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"e2e_mock_gh_logging_script\\(|e2e_mock_ralph_script\\(\" src/validate" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+src/validate/mock_scripts.rs:321:pub fn e2e_mock_ralph_script(ralph_bin: &Path) -> String {
+src/validate/mock_scripts.rs:337:pub fn e2e_mock_gh_logging_script() -> String {
+
+thinking
+**Preparing final QA report**
+exec
+/run/current-system/sw/bin/bash -lc "nl -ba src/validate/tests_e2e_conformance.rs | sed -n '40,80p'" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+    40	        let output = h
+    41	            .ralph(["run", "--loops", "1"])
+    42	            .expect("ralph run should execute");
+    43	
+    44	        let exit_code = output.status.code().unwrap_or(-1);
+    45	        assert_ne!(
+    46	            exit_code, 0,
+    47	            "expected non-zero exit when backend times out"
+    48	        );
+    49	
+    50	        let stderr = String::from_utf8_lossy(&output.stderr);
+    51	        assert!(
+    52	            stderr.contains("BackendTimeoutExhausted")
+    53	                || stderr.contains("backend timeout retries exhausted"),
+    54	            "expected timeout exhaustion to be surfaced in stderr, got:\n{stderr}"
+    55	        );
+    56	        assert!(
+    57	            !stderr.contains("requesting reformat via"),
+    58	            "timeout should not trigger reformatter fallback, got:\n{stderr}"
+    59	        );
+
+thinking
+**Identifying missing token in run logs**
+exec
+/run/current-system/sw/bin/bash -lc "set -e
+QA_LOG=/tmp/ralph-qa-timeout2-log-sSINgx
+printf 'contains_BackendTimeoutExhausted='; if rg -q \"BackendTimeoutExhausted\" \""'$QA_LOG/run.err"; then echo yes; else echo no; fi
+printf '"'stderr_line='; sed -n '1,1p' \""'$QA_LOG/run.err"' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+contains_BackendTimeoutExhausted=no
+stderr_line=error: backend timeout retries exhausted for claude(opus) during planning after 3 attempts
+
+thinking
+**Considering pending status command**
+exec
+/run/current-system/sw/bin/bash -lc "jq -r '.status' /tmp/ralph-qa-timeout2-repo-pDbv63/.ralph/projects/e2e-timeout-manual/state.json" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+pending
+
+thinking
+**Planning detailed failure report**
+codex
+# QA: FAIL
+
+## Failures
+1. Timeout error surfacing does not meet the spec’s strict `BackendTimeoutExhausted` requirement.  
+Command run (manual E2E): `./result/bin/ralph run --loops 1` in `/tmp/ralph-qa-timeout2-repo-pDbv63` with a `sleep 30` backend and `timeout_seconds=2`.  
+Expected: stderr includes `BackendTimeoutExhausted`.  
+Actual: `error: backend timeout retries exhausted for claude(opus) during planning after 3 attempts` and `contains_BackendTimeoutExhausted=no` (from `rg`).  
+Code evidence: `src/validate/tests_e2e_conformance.rs:52` allows either `BackendTimeoutExhausted` **or** human text.
+
+2. Failed-state assertion is weaker than the spec’s “ends in failed state” requirement.  
+Command run (manual E2E): `jq -r '.status' /tmp/ralph-qa-timeout2-repo-pDbv63/.ralph/projects/e2e-timeout-manual/state.json`  
+Expected: failed task/orchestration state assertion.  
+Actual: `pending`.  
+Code evidence: `src/validate/tests_e2e_conformance.rs:62` only asserts `state["status"] != "completed"`.
+
+3. New mock helpers are defined but not used by any tests yet, despite the “provide/use helper” implementation requirement.  
+Command run: `rg -n "e2e_mock_ralph_script\\(|e2e_mock_gh_logging_script\\(" src/validate`  
+Expected: at least one test call site for each helper.  
+Actual: only definitions in `src/validate/mock_scripts.rs` are returned.
+
+## Suggested Fixes
+1. Make timeout conformance strict: either emit `BackendTimeoutExhausted` in CLI stderr for this path, or update the spec; then tighten the test to require that exact marker.
+2. Assert an explicit failed terminal condition (preferred: true failed state in tracked task/project status). If the model cannot represent `failed`, update spec and test language to a concrete enforceable invariant.
+3. Wire `e2e_mock_ralph_script()` and `e2e_mock_gh_logging_script()` into conformance tests that exercise `ralph auto` delegation and PR metadata capture paths.
+
+---
+tokens used
+126,725
+
