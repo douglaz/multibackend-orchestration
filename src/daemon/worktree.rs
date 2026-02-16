@@ -111,7 +111,9 @@ fn sync_remote_master(repo_root: &Path, task_id: &str) -> Result<()> {
         .current_dir(repo_root)
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!("failed to fetch origin master for {task_id}: {err}"))
+            RalphError::Orchestration(format!(
+                "failed to fetch origin master for {task_id}: {err}"
+            ))
         })?;
 
     if output.status.success() {

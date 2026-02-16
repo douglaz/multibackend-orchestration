@@ -53,11 +53,13 @@ pub enum RalphError {
     BackendCommandFailed { backend: String, details: String },
 
     #[error(
-        "BackendTimeoutExhausted: backend timeout retries exhausted for {backend} during {phase} after {attempts} attempts"
+        "BackendTimeoutExhausted: backend timeout retries exhausted for {backend} during {phase} (role={role}, timeout={timeout_secs}s) after {attempts} attempts"
     )]
     BackendTimeoutExhausted {
         backend: String,
         phase: String,
+        role: String,
+        timeout_secs: u64,
         attempts: u8,
     },
 

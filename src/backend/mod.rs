@@ -328,9 +328,9 @@ impl CliBackend {
             })?;
 
         let stderr_backend = self.name.clone();
-        let stderr_log_file: Option<std::fs::File> = log_writer.as_ref().and_then(|w| {
-            std::fs::OpenOptions::new().append(true).open(w.path()).ok()
-        });
+        let stderr_log_file: Option<std::fs::File> = log_writer
+            .as_ref()
+            .and_then(|w| std::fs::OpenOptions::new().append(true).open(w.path()).ok());
         let stderr_handle = tokio::spawn(async move {
             let mut log_file = stderr_log_file;
             let mut captured = Vec::new();
@@ -583,6 +583,14 @@ impl BackendRegistry {
         }
     }
 
+    pub fn timeout_for_role(&self, backend_spec: &str, role: &str) -> Duration {
+        parse_backend_spec(backend_spec)
+            .ok()
+            .and_then(|parsed| self.config.backend_config(&parsed.name))
+            .map(|config| config.timeout_for_role(role))
+            .unwrap_or_else(|| Duration::from_secs(7200))
+    }
+
     pub fn assign_feature_backends(
         &self,
         loop_number: u32,
@@ -727,7 +735,11 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{parse_backend_spec, Backend, BackendSpec, CliBackend};
+    use super::{
+        parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig, BackendSpec,
+        CliBackend,
+    };
+    use crate::config::GlobalConfig;
     use crate::error::RalphError;
     use crate::output_log::LogWriter;
 
@@ -773,6 +785,48 @@ mod tests {
     #[test]
     fn parse_backend_spec_rejects_missing_opening_paren() {
         assert!(parse_backend_spec("claudeopus)").is_err());
+    }
+
+    fn tmux_disabled() -> BackendRegistryTmuxConfig {
+        BackendRegistryTmuxConfig {
+            enabled: false,
+            session_name: "ralph".to_owned(),
+            window_keep_seconds: 5,
+        }
+    }
+
+    #[test]
+    fn backend_registry_timeout_for_role_uses_backend_role_override_for_bare_and_modeled_specs() {
+        let mut config = GlobalConfig::default();
+        config.backends.claude.timeout_seconds = 123;
+        config.backends.claude.role_timeouts.planner = Some(45);
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+
+        assert_eq!(registry.timeout_for_role("claude", "planner").as_secs(), 45);
+        assert_eq!(
+            registry
+                .timeout_for_role("claude(opus)", "planner")
+                .as_secs(),
+            45
+        );
+        assert_eq!(registry.timeout_for_role("claude", "qa").as_secs(), 123);
+    }
+
+    #[test]
+    fn backend_registry_timeout_for_role_falls_back_to_default_for_unknown_or_invalid_spec() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+
+        assert_eq!(
+            registry
+                .timeout_for_role("unknown(opus)", "planner")
+                .as_secs(),
+            7200
+        );
+        assert_eq!(
+            registry.timeout_for_role("claude(", "planner").as_secs(),
+            7200
+        );
     }
 
     fn write_executable_script(

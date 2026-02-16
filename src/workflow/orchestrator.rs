@@ -2874,6 +2874,8 @@ async fn execute_with_timeout_retries(
                     return Err(RalphError::BackendTimeoutExhausted {
                         backend: backend_name,
                         phase: phase.to_owned(),
+                        role: role.to_owned(),
+                        timeout_secs: 0,
                         attempts: attempt,
                     });
                 }

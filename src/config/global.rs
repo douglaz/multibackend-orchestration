@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -85,6 +86,8 @@ pub struct BackendConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub models: BackendRoleModels,
+    #[serde(default)]
+    pub role_timeouts: RoleTimeouts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -97,6 +100,19 @@ pub struct BackendRoleModels {
     pub completer: Option<String>,
     pub acceptance_qa: Option<String>,
     pub reformatter: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RoleTimeouts {
+    pub planner: Option<u64>,
+    pub implementer: Option<u64>,
+    pub reviewer: Option<u64>,
+    pub qa: Option<u64>,
+    pub completer: Option<u64>,
+    pub acceptance_qa: Option<u64>,
+    pub reformatter: Option<u64>,
+    pub prompt_reviewer: Option<u64>,
 }
 
 impl BackendRoleModels {
@@ -135,6 +151,59 @@ impl BackendRoleModels {
         }
         if self.reformatter.is_none() {
             self.reformatter.clone_from(&defaults.reformatter);
+        }
+    }
+}
+
+impl RoleTimeouts {
+    pub fn for_role(&self, role: &str) -> Option<u64> {
+        match role {
+            "planner" => self.planner,
+            "implementer" => self.implementer,
+            "reviewer" => self.reviewer,
+            "qa" => self.qa,
+            "completer" => self.completer,
+            "acceptance_qa" => self.acceptance_qa,
+            "reformatter" => self.reformatter,
+            "prompt_reviewer" => self.prompt_reviewer,
+            _ => None,
+        }
+    }
+
+    /// Fill any `None` fields from `defaults`.
+    pub fn fill_from(&mut self, defaults: &RoleTimeouts) {
+        if self.planner.is_none() {
+            self.planner = defaults.planner;
+        }
+        if self.implementer.is_none() {
+            self.implementer = defaults.implementer;
+        }
+        if self.reviewer.is_none() {
+            self.reviewer = defaults.reviewer;
+        }
+        if self.qa.is_none() {
+            self.qa = defaults.qa;
+        }
+        if self.completer.is_none() {
+            self.completer = defaults.completer;
+        }
+        if self.acceptance_qa.is_none() {
+            self.acceptance_qa = defaults.acceptance_qa;
+        }
+        if self.reformatter.is_none() {
+            self.reformatter = defaults.reformatter;
+        }
+        if self.prompt_reviewer.is_none() {
+            self.prompt_reviewer = defaults.prompt_reviewer;
+        }
+    }
+}
+
+impl BackendConfig {
+    pub fn timeout_for_role(&self, role: &str) -> Duration {
+        match self.role_timeouts.for_role(role) {
+            Some(timeout) => Duration::from_secs(timeout),
+            None => Duration::from_secs(self.timeout_seconds),
         }
     }
 }
@@ -260,6 +329,7 @@ impl Default for BackendConfig {
             timeout_seconds: default_backend_timeout_seconds(),
             env: BTreeMap::new(),
             models: BackendRoleModels::default(),
+            role_timeouts: RoleTimeouts::default(),
         }
     }
 }
@@ -272,6 +342,7 @@ struct PartialBackendConfig {
     timeout_seconds: Option<u64>,
     env: Option<BTreeMap<String, String>>,
     models: Option<BackendRoleModels>,
+    role_timeouts: Option<RoleTimeouts>,
 }
 
 impl PartialBackendConfig {
@@ -291,6 +362,10 @@ impl PartialBackendConfig {
         if let Some(mut models) = self.models {
             models.fill_from(&defaults.models);
             defaults.models = models;
+        }
+        if let Some(mut role_timeouts) = self.role_timeouts {
+            role_timeouts.fill_from(&defaults.role_timeouts);
+            defaults.role_timeouts = role_timeouts;
         }
         defaults
     }
@@ -402,6 +477,7 @@ fn default_claude_backend_config() -> BackendConfig {
             acceptance_qa: Some("opus".to_owned()),
             reformatter: Some("sonnet".to_owned()),
         },
+        role_timeouts: RoleTimeouts::default(),
     }
 }
 
@@ -424,6 +500,7 @@ fn default_codex_backend_config() -> BackendConfig {
             acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
             reformatter: Some("gpt-5.3-codex-medium".to_owned()),
         },
+        role_timeouts: RoleTimeouts::default(),
     }
 }
 
@@ -559,9 +636,19 @@ impl GlobalConfig {
             .fill_from(&defaults.backends.claude.models);
         config
             .backends
+            .claude
+            .role_timeouts
+            .fill_from(&defaults.backends.claude.role_timeouts);
+        config
+            .backends
             .codex
             .models
             .fill_from(&defaults.backends.codex.models);
+        config
+            .backends
+            .codex
+            .role_timeouts
+            .fill_from(&defaults.backends.codex.role_timeouts);
         Ok(config)
     }
 
@@ -582,7 +669,9 @@ impl GlobalConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRoleModels, GlobalConfig};
+    use super::{
+        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig, RoleTimeouts,
+    };
 
     #[test]
     fn empty_toml_deserializes_to_defaults() {
@@ -1082,6 +1171,160 @@ base_branch = "master"
             Some("default-acceptance-qa")
         );
         assert_eq!(models.reformatter.as_deref(), Some("default-reformatter"));
+    }
+
+    #[test]
+    fn role_timeouts_for_role_returns_expected_timeout_for_each_role() {
+        let role_timeouts = RoleTimeouts {
+            planner: Some(10),
+            implementer: Some(20),
+            reviewer: Some(30),
+            qa: Some(40),
+            completer: Some(50),
+            acceptance_qa: Some(60),
+            reformatter: Some(70),
+            prompt_reviewer: Some(80),
+        };
+
+        assert_eq!(role_timeouts.for_role("planner"), Some(10));
+        assert_eq!(role_timeouts.for_role("implementer"), Some(20));
+        assert_eq!(role_timeouts.for_role("reviewer"), Some(30));
+        assert_eq!(role_timeouts.for_role("qa"), Some(40));
+        assert_eq!(role_timeouts.for_role("completer"), Some(50));
+        assert_eq!(role_timeouts.for_role("acceptance_qa"), Some(60));
+        assert_eq!(role_timeouts.for_role("reformatter"), Some(70));
+        assert_eq!(role_timeouts.for_role("prompt_reviewer"), Some(80));
+        assert_eq!(role_timeouts.for_role("unknown-role"), None);
+    }
+
+    #[test]
+    fn role_timeouts_fill_from_fills_none_fields_from_defaults() {
+        let mut role_timeouts = RoleTimeouts {
+            planner: Some(12),
+            implementer: None,
+            reviewer: None,
+            qa: None,
+            completer: Some(56),
+            acceptance_qa: None,
+            reformatter: None,
+            prompt_reviewer: None,
+        };
+        let defaults = RoleTimeouts {
+            planner: Some(1),
+            implementer: Some(2),
+            reviewer: Some(3),
+            qa: Some(4),
+            completer: Some(5),
+            acceptance_qa: Some(6),
+            reformatter: Some(7),
+            prompt_reviewer: Some(8),
+        };
+
+        role_timeouts.fill_from(&defaults);
+        assert_eq!(role_timeouts.planner, Some(12));
+        assert_eq!(role_timeouts.implementer, Some(2));
+        assert_eq!(role_timeouts.reviewer, Some(3));
+        assert_eq!(role_timeouts.qa, Some(4));
+        assert_eq!(role_timeouts.completer, Some(56));
+        assert_eq!(role_timeouts.acceptance_qa, Some(6));
+        assert_eq!(role_timeouts.reformatter, Some(7));
+        assert_eq!(role_timeouts.prompt_reviewer, Some(8));
+    }
+
+    #[test]
+    fn backend_config_timeout_for_role_prefers_override_and_falls_back() {
+        let config = BackendConfig {
+            timeout_seconds: 77,
+            role_timeouts: RoleTimeouts {
+                planner: Some(33),
+                ..RoleTimeouts::default()
+            },
+            ..BackendConfig::default()
+        };
+
+        assert_eq!(config.timeout_for_role("planner").as_secs(), 33);
+        assert_eq!(config.timeout_for_role("qa").as_secs(), 77);
+        assert_eq!(config.timeout_for_role("unknown").as_secs(), 77);
+    }
+
+    #[test]
+    fn backend_role_timeouts_toml_deserialize_without_table_uses_fallback_timeout() {
+        let raw = r#"
+[backends.claude]
+command = "claude-custom"
+timeout_seconds = 91
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(
+            config.backends.claude.timeout_for_role("planner").as_secs(),
+            91
+        );
+        assert_eq!(
+            config.backends.claude.role_timeouts,
+            RoleTimeouts::default()
+        );
+    }
+
+    #[test]
+    fn backend_role_timeouts_toml_deserialize_with_table_sets_overrides() {
+        let raw = r#"
+[backends.claude]
+command = "claude-custom"
+timeout_seconds = 91
+
+[backends.claude.role_timeouts]
+planner = 12
+prompt_reviewer = 34
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(
+            config.backends.claude.timeout_for_role("planner").as_secs(),
+            12
+        );
+        assert_eq!(
+            config
+                .backends
+                .claude
+                .timeout_for_role("prompt_reviewer")
+                .as_secs(),
+            34
+        );
+        assert_eq!(config.backends.claude.timeout_for_role("qa").as_secs(), 91);
+    }
+
+    #[test]
+    fn partial_backend_config_merge_fills_role_timeouts_from_defaults() {
+        let partial = PartialBackendConfig {
+            role_timeouts: Some(RoleTimeouts {
+                planner: Some(10),
+                qa: Some(30),
+                ..RoleTimeouts::default()
+            }),
+            ..PartialBackendConfig::default()
+        };
+        let defaults = BackendConfig {
+            role_timeouts: RoleTimeouts {
+                planner: Some(99),
+                implementer: Some(20),
+                reviewer: Some(21),
+                qa: Some(22),
+                completer: Some(23),
+                acceptance_qa: Some(24),
+                reformatter: Some(25),
+                prompt_reviewer: Some(26),
+            },
+            ..BackendConfig::default()
+        };
+
+        let merged = partial.into_backend_config_with_defaults(defaults);
+        assert_eq!(merged.role_timeouts.planner, Some(10));
+        assert_eq!(merged.role_timeouts.implementer, Some(20));
+        assert_eq!(merged.role_timeouts.reviewer, Some(21));
+        assert_eq!(merged.role_timeouts.qa, Some(30));
+        assert_eq!(merged.role_timeouts.completer, Some(23));
+        assert_eq!(merged.role_timeouts.acceptance_qa, Some(24));
+        assert_eq!(merged.role_timeouts.reformatter, Some(25));
+        assert_eq!(merged.role_timeouts.prompt_reviewer, Some(26));
     }
 
     #[test]

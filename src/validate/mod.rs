@@ -21,6 +21,7 @@ mod tests_project;
 mod tests_prompt_review;
 mod tests_prd;
 mod tests_qa;
+mod tests_role_timeouts;
 mod tests_run;
 mod tests_streaming;
 mod tests_tail;
@@ -89,6 +90,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_prompt_review::tests());
     tests.extend(tests_prd::tests());
     tests.extend(tests_qa::tests());
+    tests.extend(tests_role_timeouts::tests());
     tests.extend(tests_commands::tests());
     tests.extend(tests_auto_init::tests());
     tests.extend(tests_streaming::tests());

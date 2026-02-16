@@ -88,7 +88,12 @@ impl LogWriter {
     /// Returns a writer that is always usable — if the open fails, the writer
     /// is in a disabled state and all subsequent writes are silently skipped
     /// after a single warning.
-    pub fn open(project_dir: &Path, loop_number: Option<u32>, slug: Option<&str>, role: &str) -> Self {
+    pub fn open(
+        project_dir: &Path,
+        loop_number: Option<u32>,
+        slug: Option<&str>,
+        role: &str,
+    ) -> Self {
         let path = log_path_for_role(project_dir, loop_number, slug, role);
         let file = match Self::try_open(&path) {
             Ok(f) => Some(f),
@@ -343,8 +348,9 @@ mod tests {
             w.write_str("second run\n");
         }
 
-        let content = fs::read_to_string(log_path_for_role(project_dir, Some(1), None, "implementer"))
-            .expect("read log");
+        let content =
+            fs::read_to_string(log_path_for_role(project_dir, Some(1), None, "implementer"))
+                .expect("read log");
         assert!(content.contains("first run"));
         assert!(content.contains("second run"));
     }

@@ -146,7 +146,10 @@ pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     // Unstage any .ralph/ entries that slipped in (e.g. repos where .ralph
     // is not gitignored).  --ignore-unmatch avoids errors when nothing was
     // staged.  Best-effort: errors are harmless.
-    let _ = run_git(workdir, &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"]);
+    let _ = run_git(
+        workdir,
+        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
+    );
     Ok(())
 }
 
