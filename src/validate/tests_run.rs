@@ -10,7 +10,9 @@ use crate::validate::assertions::{
     assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::{always_reject_review_script, standard_mock_script};
+use crate::validate::mock_scripts::{
+    always_reject_review_script, review_feedback_once_then_approve_script, standard_mock_script,
+};
 use serde_json::json;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -22,6 +24,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "run::artifact_naming",
             func: artifact_naming,
+        },
+        ConformanceTest {
+            name: "run::agent_output_artifacts",
+            func: agent_output_artifacts,
+        },
+        ConformanceTest {
+            name: "run::planner_no_agent_output",
+            func: planner_no_agent_output,
         },
         ConformanceTest {
             name: "run::artifact_frontmatter",
@@ -44,8 +54,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: completion_flow,
         },
         ConformanceTest {
-            name: "run::review_limit_rollback",
-            func: review_limit_rollback,
+            name: "run::review_limit_fails",
+            func: review_limit_fails,
         },
         ConformanceTest {
             name: "run::dry_run",
@@ -78,6 +88,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "run::completion_artifacts_committed",
             func: completion_artifacts_committed,
+        },
+        ConformanceTest {
+            name: "run::impl_response_artifact_on_review_feedback",
+            func: impl_response_artifact_on_review_feedback,
         },
     ]
 }
@@ -186,6 +200,80 @@ fn artifact_frontmatter(h: &RalphHarness) -> TestResult {
         assert!(fm.get("project").is_some(), "missing 'project' frontmatter");
         assert!(fm.get("backend").is_some(), "missing 'backend' frontmatter");
         assert!(fm.get("role").is_some(), "missing 'role' frontmatter");
+    })
+}
+
+fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-agent-output";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let names = artifacts
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("artifact filename should be valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let agent_output = names
+            .iter()
+            .filter(|name| name.contains("-agent-output-") && name.ends_with(".log"))
+            .collect::<Vec<_>>();
+
+        assert!(
+            !agent_output.is_empty(),
+            "expected at least one agent-output log artifact in loop directory"
+        );
+        assert!(
+            agent_output
+                .iter()
+                .any(|name| name.contains("-agent-output-implementer-")),
+            "expected implementer agent-output artifact"
+        );
+        assert!(
+            agent_output
+                .iter()
+                .any(|name| name.contains("-agent-output-reviewer-")),
+            "expected reviewer agent-output artifact"
+        );
+    })
+}
+
+fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-no-planner-agent-output";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let names = artifacts
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("artifact filename should be valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("-agent-output-planner-")),
+            "planner should not write agent-output artifacts"
+        );
     })
 }
 
@@ -299,7 +387,7 @@ fn completion_flow(h: &RalphHarness) -> TestResult {
     })
 }
 
-fn review_limit_rollback(h: &RalphHarness) -> TestResult {
+fn review_limit_fails(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "run-review-limit";
         h.init_workspace().expect("init failed");
@@ -324,8 +412,10 @@ fn review_limit_rollback(h: &RalphHarness) -> TestResult {
         );
 
         let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("failed"));
         assert_json_array_len(&state, "loops", 0);
         assert_no_loop_artifacts(&h.project_dir(project_id));
+        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
     })
 }
 
@@ -546,6 +636,101 @@ fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
             commit_msg.contains("completion"),
             "completion commit message should contain 'completion', got: {}",
             commit_msg.trim()
+        );
+    })
+}
+
+fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-impl-response";
+        let review_counter = h.temp_dir.path().join("review-counter.txt");
+        let script = review_feedback_once_then_approve_script(&review_counter);
+
+        h.init_workspace().expect("init failed");
+        let script_path = h
+            .write_mock_script("feedback-then-approve.sh", &script)
+            .expect("failed to write feedback-then-approve script");
+        h.setup_mock_backends(&script_path)
+            .expect("setup_mock_backends failed");
+        h.create_project(
+            project_id,
+            "Impl Response Conformance Project",
+            "Impl response test prompt",
+        )
+        .expect("create_project failed");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed with review feedback cycle");
+
+        let state = h.load_state(project_id).expect("load_state failed");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
+        let loop_state = &loops[0];
+
+        // Assert at least one review exchange occurred
+        let reviews = loop_state["artifacts"]["reviews"]
+            .as_array()
+            .expect("reviews should be an array");
+        assert!(
+            !reviews.is_empty(),
+            "expected at least one review exchange from feedback cycle"
+        );
+
+        // Find the impl-response-001 artifact
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let impl_response_artifacts: Vec<_> = artifacts
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("-impl-response-001.md"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            impl_response_artifacts.len(),
+            1,
+            "expected exactly one *-impl-response-001.md artifact, got {}",
+            impl_response_artifacts.len()
+        );
+
+        let impl_response_path = impl_response_artifacts[0];
+
+        // Assert YAML frontmatter includes required keys
+        let fm = parse_yaml_frontmatter(impl_response_path);
+        assert!(
+            fm.get("artifact").is_some(),
+            "impl-response frontmatter missing 'artifact' key"
+        );
+        assert!(
+            fm.get("iteration").is_some(),
+            "impl-response frontmatter missing 'iteration' key"
+        );
+        assert!(
+            fm.get("role").is_some(),
+            "impl-response frontmatter missing 'role' key"
+        );
+
+        // Assert body contains expected implementer response content
+        let content = fs::read_to_string(impl_response_path).unwrap_or_else(|err| {
+            panic!(
+                "failed to read {}: {err}",
+                impl_response_path.to_string_lossy()
+            )
+        });
+        assert!(
+            content.contains("# Implementation Response"),
+            "impl-response artifact should contain '# Implementation Response' heading"
+        );
+        assert!(
+            content.contains("## Changes Made"),
+            "impl-response artifact should contain '## Changes Made' section"
+        );
+        assert!(
+            content.contains("Addressed reviewer feedback"),
+            "impl-response artifact body should contain expected feedback response content"
         );
     })
 }

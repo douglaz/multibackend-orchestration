@@ -48,6 +48,7 @@ pub enum Phase {
 pub enum ProjectStatus {
     Pending,
     InProgress,
+    Failed,
     Completed,
 }
 

@@ -7,7 +7,7 @@ use tokio::fs;
 use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
-use super::{Backend, CliBackend, SharedTmuxContext};
+use super::{persist_cli_output, Backend, CliBackend, SharedTmuxContext};
 use crate::error::RalphError;
 use crate::output_log::LogWriter;
 use crate::Result;
@@ -23,6 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub struct TmuxExecutionContext {
     pub loop_number: Option<u32>,
     pub role: Option<String>,
+    pub loop_dir: Option<PathBuf>,
 }
 
 /// A `Backend` implementation that runs commands inside tmux windows
@@ -229,10 +230,20 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
                 if window_alive {
                     // Window still alive — this is a genuine timeout.
                     // Propagate as BackendTimeout so orchestrator can retry.
+                    debug!(
+                        backend = self.inner.name(),
+                        role = ?ctx.role,
+                        "skipping backend output artifact: tmux command timed out before output capture"
+                    );
                     return Err(RalphError::BackendTimeout {
                         backend: self.inner.name().to_owned(),
                     });
                 }
+                debug!(
+                    backend = self.inner.name(),
+                    role = ?ctx.role,
+                    "skipping backend output artifact: tmux window disappeared before output capture"
+                );
                 // Window (or session) is gone — external interruption.
                 return Err(RalphError::BackendCommandFailed {
                     backend: self.inner.name().to_owned(),
@@ -264,6 +275,38 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // 7. Best-effort window cleanup
         tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
 
+        // 8. Read captured stdout before interpreting exit code so we can
+        // persist artifacts even for non-zero exits.
+        let output_bytes = match fs::read(&output_file).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if exit_code == 0 {
+                    return Err(RalphError::BackendCommandFailed {
+                        backend: self.inner.name().to_owned(),
+                        details: format!("failed to read output file: {err}"),
+                    });
+                }
+                debug!(
+                    backend = self.inner.name(),
+                    role = ?ctx.role,
+                    path = %output_file.display(),
+                    error = %err,
+                    "non-zero tmux command exit without readable output capture"
+                );
+                Vec::new()
+            }
+        };
+
+        persist_cli_output(
+            ctx.loop_dir.as_deref(),
+            self.inner.name(),
+            ctx.role.as_deref(),
+            Some(exit_code),
+            &output_bytes,
+            &[],
+        )
+        .await;
+
         if exit_code != 0 {
             return Err(RalphError::BackendCommandFailed {
                 backend: self.inner.name().to_owned(),
@@ -274,15 +317,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             });
         }
 
-        // 8. Read the captured stdout
-        let output = fs::read_to_string(&output_file).await.map_err(|err| {
-            RalphError::BackendCommandFailed {
-                backend: self.inner.name().to_owned(),
-                details: format!("failed to read output file: {err}"),
-            }
-        })?;
-
-        Ok(output)
+        Ok(String::from_utf8_lossy(&output_bytes).to_string())
     }
 
     async fn execute_with_log(

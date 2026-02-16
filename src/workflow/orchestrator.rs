@@ -251,6 +251,7 @@ impl Orchestrator {
                 .set_tmux_context(TmuxExecutionContext {
                     loop_number: None,
                     role: Some("prompt_reviewer".to_owned()),
+                    loop_dir: None,
                 })
                 .await;
 
@@ -374,6 +375,7 @@ impl Orchestrator {
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
                             role: Some("planner".to_owned()),
+                            loop_dir: None,
                         })
                         .await;
 
@@ -517,7 +519,12 @@ impl Orchestrator {
                         registry
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
-                                role: Some("impl".to_owned()),
+                                role: Some("implementer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-{loop_slug}")),
+                                ),
                             })
                             .await;
 
@@ -617,7 +624,12 @@ impl Orchestrator {
                         registry
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
-                                role: Some("impl".to_owned()),
+                                role: Some("implementer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-{loop_slug}")),
+                                ),
                             })
                             .await;
 
@@ -721,7 +733,12 @@ impl Orchestrator {
                         registry
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
-                                role: Some("impl".to_owned()),
+                                role: Some("implementer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-{loop_slug}")),
+                                ),
                             })
                             .await;
 
@@ -882,6 +899,11 @@ impl Orchestrator {
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
                             role: Some("qa".to_owned()),
+                            loop_dir: Some(
+                                project_dir
+                                    .join("loops")
+                                    .join(format!("{loop_number:03}-{loop_slug}")),
+                            ),
                         })
                         .await;
 
@@ -1074,6 +1096,11 @@ impl Orchestrator {
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
                                 role: Some("reviewer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-{loop_slug}")),
+                                ),
                             })
                             .await;
 
@@ -1309,6 +1336,11 @@ impl Orchestrator {
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
                             role: Some("completer".to_owned()),
+                            loop_dir: Some(
+                                project_dir
+                                    .join("loops")
+                                    .join(format!("{loop_number:03}-completion")),
+                            ),
                         })
                         .await;
 
@@ -1399,6 +1431,11 @@ impl Orchestrator {
                                         .set_tmux_context(TmuxExecutionContext {
                                             loop_number: Some(loop_number),
                                             role: Some("qa".to_owned()),
+                                            loop_dir: Some(
+                                                project_dir
+                                                    .join("loops")
+                                                    .join(format!("{loop_number:03}-completion")),
+                                            ),
                                         })
                                         .await;
 

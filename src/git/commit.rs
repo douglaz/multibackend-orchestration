@@ -8,7 +8,7 @@ use crate::git::{
 use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
-pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph/**";
+pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph";
 
 /// Returns the diff of both staged and unstaged changes against HEAD.
 pub fn working_tree_diff(workdir: &Path) -> Result<String> {
@@ -135,9 +135,18 @@ pub fn commit_feature_loop(
 
 /// Stage all non-orchestration changes so reviewer diff (`git diff HEAD`)
 /// includes newly created files.
+///
+/// Uses `git add -A` followed by unstaging `.ralph/` because pathspec
+/// exclusions (`:(exclude).ralph`) cause `git add` to error when `.ralph`
+/// is gitignored.  The two-step approach works regardless of `.gitignore`
+/// configuration.
 pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     ensure_git_repo(workdir)?;
-    run_git_with_exclusions(workdir, &["add", "-A"], &[ORCHESTRATION_STATE_PATHSPEC])?;
+    run_git(workdir, &["add", "-A"])?;
+    // Unstage any .ralph/ entries that slipped in (e.g. repos where .ralph
+    // is not gitignored).  --ignore-unmatch avoids errors when nothing was
+    // staged.  Best-effort: errors are harmless.
+    let _ = run_git(workdir, &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"]);
     Ok(())
 }
 

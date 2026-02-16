@@ -23,8 +23,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: auto_does_not_change_other_commands_workspace_not_found_behavior,
         },
         ConformanceTest {
-            name: "auto_init::auto_on_existing_workspace_with_missing_ralph_toml_still_errors",
-            func: auto_on_existing_workspace_with_missing_ralph_toml_still_errors,
+            name: "auto_init::auto_on_existing_workspace_with_missing_ralph_toml_reinitializes",
+            func: auto_on_existing_workspace_with_missing_ralph_toml_reinitializes,
         },
         ConformanceTest {
             name: "auto_init::init_behavior_unchanged_for_non_empty_target",
@@ -109,7 +109,9 @@ fn auto_does_not_change_other_commands_workspace_not_found_behavior(
     })
 }
 
-fn auto_on_existing_workspace_with_missing_ralph_toml_still_errors(h: &RalphHarness) -> TestResult {
+fn auto_on_existing_workspace_with_missing_ralph_toml_reinitializes(
+    h: &RalphHarness,
+) -> TestResult {
     run_case(|| {
         let workspace_root = h.repo_root.join(".ralph");
         fs::create_dir_all(&workspace_root).expect("create .ralph dir");
@@ -121,13 +123,15 @@ fn auto_on_existing_workspace_with_missing_ralph_toml_still_errors(h: &RalphHarn
                 &[("PATH", path_env.as_str())],
             )
             .expect("ralph auto --dry-run should execute");
-        assert_exit_code(&output, 1);
-        assert_stderr_contains(&output, "io error");
+        // Discovery skips .ralph/ without ralph.toml, so ensure_workspace
+        // treats it as WorkspaceNotFound and reinitializes the workspace.
+        assert_exit_code(&output, 0);
+        assert_file_exists(&workspace_root.join("ralph.toml"));
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("initialized workspace at .ralph"),
-            "auto-init notice should not be printed when .ralph already exists and load fails"
+            stderr.contains("initialized workspace at .ralph"),
+            "auto-init notice should be printed when .ralph exists but ralph.toml is missing, got:\n{stderr}"
         );
     })
 }

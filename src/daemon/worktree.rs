@@ -22,8 +22,14 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
 pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
+    let branch_name = format!("ralph/daemon/{task_id}");
 
     if wt_path.exists() {
+        verify_worktree_branch(&wt_path, &branch_name)?;
+        // Ensure config is present even for reused worktrees (may have been
+        // created before the config-copy logic, or by quick-prd which doesn't
+        // copy config).
+        copy_workspace_config(workspace_root, &wt_path);
         return Ok(wt_path);
     }
 
@@ -31,7 +37,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         fs::create_dir_all(parent)?;
     }
 
-    let branch_name = format!("ralph/daemon/{task_id}");
+    prune_worktrees(repo_root, task_id);
 
     // Check if the branch already exists (e.g. from a previous failed run
     // where the worktree was cleaned up but the branch was not).
@@ -77,7 +83,152 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         )));
     }
 
+    // .ralph/ is gitignored so worktrees don't inherit workspace config.
+    // Copy ralph.toml and templates/ from the main repo so that
+    // `Workspace::discover()` + `Workspace::load()` work inside the worktree.
+    copy_workspace_config(workspace_root, &wt_path);
+
     Ok(wt_path)
+}
+
+/// Copy essential workspace config files from the main `.ralph/` into a
+/// worktree's `.ralph/` directory.  Best-effort: failures are logged but
+/// not fatal (the orchestrator may still work if config was already present).
+fn copy_workspace_config(workspace_root: &Path, wt_path: &Path) {
+    let wt_ralph = wt_path.join(".ralph");
+    let _ = fs::create_dir_all(&wt_ralph);
+
+    // ralph.toml
+    let src_toml = workspace_root.join("ralph.toml");
+    if src_toml.is_file() {
+        if let Err(err) = fs::copy(&src_toml, wt_ralph.join("ralph.toml")) {
+            eprintln!(
+                "warning: failed to copy ralph.toml into worktree {}: {err}",
+                wt_path.display()
+            );
+        }
+    }
+
+    // templates/
+    let src_templates = workspace_root.join("templates");
+    if src_templates.is_dir() {
+        if let Err(err) = copy_dir_recursive(&src_templates, &wt_ralph.join("templates")) {
+            eprintln!(
+                "warning: failed to copy templates/ into worktree {}: {err}",
+                wt_path.display()
+            );
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dest = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
+    let current = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to verify worktree branch in {}: {err}",
+                wt_path.display()
+            ))
+        })?;
+
+    if !current.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "failed to verify worktree branch in {}: {}",
+            wt_path.display(),
+            String::from_utf8_lossy(&current.stderr).trim()
+        )));
+    }
+
+    let actual_branch = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+    if actual_branch == expected_branch {
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: worktree: event=branch_mismatch path={} actual_branch={} expected_branch={expected_branch}",
+        wt_path.display(),
+        actual_branch
+    );
+    eprintln!(
+        "warning: worktree: event=branch_correction_attempt path={} actual_branch={} expected_branch={expected_branch}",
+        wt_path.display(),
+        actual_branch
+    );
+
+    let checkout = Command::new("git")
+        .args(["checkout", "--force", expected_branch])
+        .current_dir(wt_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to correct worktree branch in {} from {} to {}: {err}",
+                wt_path.display(),
+                actual_branch,
+                expected_branch
+            ))
+        })?;
+
+    if checkout.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_owned();
+    eprintln!(
+        "warning: worktree: event=branch_correction_failure path={} actual_branch={} expected_branch={expected_branch} error={stderr}",
+        wt_path.display(),
+        actual_branch
+    );
+
+    Err(RalphError::Orchestration(format!(
+        "failed to correct worktree branch in {}: actual branch '{}' does not match expected '{}' and git checkout --force failed: {}",
+        wt_path.display(),
+        actual_branch,
+        expected_branch,
+        stderr
+    )))
+}
+
+fn prune_worktrees(repo_root: &Path, task_id: &str) {
+    match Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let removed_entries = stdout.contains("Removing") || stderr.contains("Removing");
+            eprintln!(
+                "debug: worktree: event=prune task_id={task_id} status={} removed_entries={} stdout={} stderr={}",
+                output.status,
+                removed_entries,
+                stdout.replace('\n', "\\n"),
+                stderr.replace('\n', "\\n")
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "debug: worktree: event=prune task_id={task_id} status=spawn_error removed_entries=false error={err}"
+            );
+        }
+    }
 }
 
 /// Clean a worktree of any dirty files outside `.ralph/`, restoring it to a

@@ -1,0 +1,125 @@
+Running quick-prd phase...
+  idea: ## Summary
+Update the daemon's GitHub integration to generate pull requests with meaningful titles and descriptions instead of only showing the project ID.
+
+## Requirements
+- Generate descriptive PR titles that summarize the changes made
+- Include PR body with:
+  - What changes were made
+  - Why the changes were made (based on project context/PRD)
+  - Reference to the project that generated the PR
+- Maintain existing daemon PR creation workflow
+
+## Implementation Constraints
+- Code is in `src/daemon/github.rs` and `src/daemon/mod.rs`
+- Must work with existing project state structure (`.ralph/projects/<id>/state.json`)
+- Should utilize available project metadata (PRD, loop artifacts, etc.)
+
+## Acceptance Criteria
+- [ ] PR titles are descriptive and concise (max 80 chars)
+- [ ] PR bodies include summary of changes made
+- [ ] PR bodies include rationale/context from project
+- [ ] Project ID is still referenced (in body or metadata)
+- [ ] Changes work with existing daemon workflow
+- [ ] No regression in daemon PR creation functionality
+  writer backend: claude
+  reviewer backend: codex
+  max revisions: 1
+Quick-prd completed.
+  spec: /root/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-9/.ralph/quick-prd/274a2fded4fc/SPEC.md
+  cache: /root/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-9/.ralph/quick-prd/274a2fded4fc
+  revisions: 1
+  Quick PRD completed: NOT approved after 1 revision(s) (max revisions exhausted)
+
+Creating project...
+  project id: summary-update-the-daemon-s-github-integ
+  project created
+
+Running orchestration until completion...
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m checking backend availability...
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m running prompt review...
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking prompt reviewer... [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m prompt review completed; prompt file updated
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting planning phase [3mloop[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking planner... [3mloop[0m[2m=[0m1 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m planner created feature spec [3mloop[0m[2m=[0m1 [3mfeature[0m[2m=[0mPure PR metadata helpers and unit tests
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting implementing phase [3mloop[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking implementer... [3mloop[0m[2m=[0m1 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-high)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting QA phase [3mloop[0m[2m=[0m1 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking QA... [3mloop[0m[2m=[0m1 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-high)" [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m QA passed [3mloop[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting review phase [3mloop[0m[2m=[0m1 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking reviewer... [3mloop[0m[2m=[0m1 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m reviewer approved changes [3mloop[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting commit phase [3mloop[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting planning phase [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking planner... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m planner created feature spec [3mloop[0m[2m=[0m2 [3mfeature[0m[2m=[0mDeterministic PR Edit/Create Flow with Body-File Safety
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting implementing phase [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking implementer... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting QA phase [3mloop[0m[2m=[0m2 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking QA... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"claude(opus)" [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m QA failed [3mloop[0m[2m=[0m2 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting implementing phase [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m implementer responding to QA failure feedback [3mloop[0m[2m=[0m2 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking implementer for QA feedback response... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"claude(opus)" [3miteration[0m[2m=[0m1
+[33m WARN[0m [2mralph::workflow::orchestrator[0m[2m:[0m parse failed, requesting reformat via codex(gpt-5.3-codex-medium) (attempt 1/3) [3mrole[0m[2m=[0m"implementer" [3mbackend[0m[2m=[0mcodex(gpt-5.3-codex-medium) [3merror[0m[2m=[0mparse error: implementer output is missing a top-level H1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting QA phase [3mloop[0m[2m=[0m2 [3miteration[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking QA... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"claude(opus)" [3miteration[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m QA passed [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting review phase [3mloop[0m[2m=[0m2 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking reviewer... [3mloop[0m[2m=[0m2 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-high)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m reviewer approved changes [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting commit phase [3mloop[0m[2m=[0m2
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting planning phase [3mloop[0m[2m=[0m3
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking planner... [3mloop[0m[2m=[0m3 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m planner requested project completion [3mloop[0m[2m=[0m3
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting completion validation phase [3mloop[0m[2m=[0m3
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking completer... [3mloop[0m[2m=[0m3 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting planning phase [3mloop[0m[2m=[0m4
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking planner... [3mloop[0m[2m=[0m4 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m planner created feature spec [3mloop[0m[2m=[0m4 [3mfeature[0m[2m=[0mPropagate Existing-PR Edit Failures as Runtime Errors
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting implementing phase [3mloop[0m[2m=[0m4
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking implementer... [3mloop[0m[2m=[0m4 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting QA phase [3mloop[0m[2m=[0m4 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking QA... [3mloop[0m[2m=[0m4 [3mbackend[0m[2m=[0m"claude(opus)" [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m QA passed [3mloop[0m[2m=[0m4
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting review phase [3mloop[0m[2m=[0m4 [3miteration[0m[2m=[0m1
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking reviewer... [3mloop[0m[2m=[0m4 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-high)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m reviewer approved changes [3mloop[0m[2m=[0m4
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting commit phase [3mloop[0m[2m=[0m4
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting planning phase [3mloop[0m[2m=[0m5
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking planner... [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m planner requested project completion [3mloop[0m[2m=[0m5
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m starting completion validation phase [3mloop[0m[2m=[0m5
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking completer... [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m running acceptance QA across required backend families [3mloop[0m[2m=[0m5 [3mbackends[0m[2m=[0m["claude(opus)", "codex(gpt-5.3-codex-xhigh)"]
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking acceptance QA... [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m acceptance QA: PASS [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"claude(opus)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m invoking acceptance QA... [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m acceptance QA: PASS [3mloop[0m[2m=[0m5 [3mbackend[0m[2m=[0m"codex(gpt-5.3-codex-xhigh)"
+[32m INFO[0m [2mralph::workflow::orchestrator[0m[2m:[0m acceptance QA aggregate: PASS [3mloop[0m[2m=[0m5 [3mpassed_backends[0m[2m=[0m["claude(opus)", "codex(gpt-5.3-codex-xhigh)"]
+loop 1: planner created feature spec
+loop 1: implementer wrote impl-notes
+loop 1: QA passed, proceeding to review
+loop 1: reviewer approved changes
+loop 1: reviewer suggested commit message 'feat(daemon): add pure PR metadata helpers (extract_project_ref, build_pr_title, build_pr_body, extract_issue_body) with unit tests'
+loop 1: committed and tagged (ralph/summary-update-the-daemon-s-github-integ/loop-1)
+loop 2: planner created feature spec
+loop 2: implementer wrote impl-notes
+loop 2: QA failed at iteration 1, sending back to implementer
+loop 2: implementer responded to QA failure iteration 1
+loop 2: QA passed, proceeding to review
+loop 2: reviewer approved changes
+loop 2: reviewer suggested commit message 'daemon: harden PR edit/create flow with body-file handling and fallback diff context'
+loop 2: committed and tagged (ralph/summary-update-the-daemon-s-github-integ/loop-2)
+loop 3: planner requested completion check
+loop 3: completer returned CONTINUE; planning next feature
+loop 4: planner created feature spec
+loop 4: implementer wrote impl-notes
+loop 4: QA passed, proceeding to review
+loop 4: reviewer approved changes
+loop 4: reviewer suggested commit message 'daemon: propagate existing PR edit failures and assert surfaced PR-flow errors in daemon validate test'
+loop 4: committed and tagged (ralph/summary-update-the-daemon-s-github-integ/loop-4)
+loop 5: planner requested completion check
+loop 5: acceptance QA passed on [claude(opus), codex(gpt-5.3-codex-xhigh)]; project finished

@@ -430,6 +430,7 @@ async fn tmux_backend_uses_contextual_label_from_shared_context() {
         .set(TmuxExecutionContext {
             loop_number: Some(3),
             role: Some("impl".to_owned()),
+            loop_dir: None,
         })
         .await;
 
@@ -706,6 +707,7 @@ async fn tmux_backend_context_preserved_across_multiple_executions() {
         .set(TmuxExecutionContext {
             loop_number: Some(5),
             role: Some("reviewer".to_owned()),
+            loop_dir: None,
         })
         .await;
 
