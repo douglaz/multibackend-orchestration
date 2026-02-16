@@ -1044,7 +1044,7 @@ async fn complete_task(
         .await
     };
 
-    let task = match updated {
+    let mut task = match updated {
         Ok((Some(t), _)) => t,
         Ok((None, Some(existing_state))) => {
             cleanup_worktree_for_terminal_state(
@@ -1063,6 +1063,43 @@ async fn complete_task(
             return;
         }
     };
+
+    // Backfill project_id if still missing (fresh `ralph auto --idea` dispatches
+    // create the project during execution, so the task record never got updated).
+    if task.project_id.is_none() {
+        let workspace_root = store
+            .path()
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let tid = task.task_id.clone();
+        let wt_path = worktree::task_worktree_path(&workspace_root, &tid);
+        let discovered =
+            spawn_blocking_op(move || Ok(discover_project_ids(&wt_path))).await.unwrap_or_default();
+        if discovered.len() == 1 {
+            let project_id = discovered.into_iter().next().unwrap();
+            eprintln!(
+                "complete-task: backfill project_id={project_id} for task {task_id}"
+            );
+            task.project_id = Some(project_id.clone());
+            let store_clone = store.clone();
+            let tid = task.task_id.clone();
+            let pid = project_id.clone();
+            if let Err(err) = spawn_blocking_op(move || {
+                store_clone.update_task(&tid, |t| {
+                    t.project_id = Some(pid.clone());
+                    Ok(())
+                })
+            })
+            .await
+            {
+                eprintln!(
+                    "warning: failed to backfill project_id for task {task_id}: {err}"
+                );
+            }
+        }
+    }
 
     // GitHub completion flow
     let terminal_label = match terminal_state {
