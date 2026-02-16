@@ -1,0 +1,49 @@
+=== Backend Output Log ===
+backend: claude(opus)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: PASS
+
+## Manual Testing
+
+All four acceptance commands executed successfully:
+
+| Command | Result |
+|---------|--------|
+| `nix develop -c cargo test` | All unit/integration tests pass |
+| `nix build -L` | Build succeeds; 191 validate tests pass during check phase |
+| `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` | 22 passed; 0 failed; 0 skipped |
+| `./result/bin/ralph validate --bin ./result/bin/ralph` | **191 passed; 0 failed; 0 skipped** |
+
+## Automated Tests
+
+All required test cases are registered and pass:
+
+**E2E Conformance (new module `tests_e2e_conformance.rs`):**
+- `e2e_conformance::backend_timeout_exhausted_fails_task` — timeout_seconds=2, sleeping backend, asserts `BackendTimeoutExhausted`, non-zero exit, status=failed, no reformatter
+- `e2e_conformance::backend_command_failed_no_reformatter` — nonzero exit backend, asserts `BackendCommandFailed`, reformatter not invoked, status=failed
+- `e2e_conformance::empty_output_retries_then_reformatter` — empty output backend, verifies same-backend retry then codex reformatter attempt via call log ordering
+- `e2e_conformance::pr_metadata_verification` — daemon-dispatched flow with `e2e_mock_ralph_script()` + `auto_mock_script()`, verifies `ralph:` title prefix, `--head`, `--repo`, `--body-file` with `Closes #N`, diff stat, and project reference
+- `e2e_conformance::e2e_mock_ralph_script_delegates_to_auto` — verifies no PATH recursion, absolute binary embedded
+- `e2e_conformance::e2e_mock_gh_logging_script_captures_pr_create` — verifies mock gh captures all PR create args and body content
+
+**Renamed/Updated tests:**
+- `qa::iteration_limit_fails` (renamed from `iteration_limit_rolls_back`) — asserts non-zero exit, status=failed, loops=[], no artifacts
+- `run::review_limit_fails` (renamed from `review_limit_rollback`) — asserts non-zero exit, status=failed, loops=[], no artifacts, no git tag
+- `run::impl_response_artifact_on_review_feedback` (new) — asserts `*-impl-response-001.md` with `artifact`/`iteration`/`role` frontmatter and expected body content
+
+## Acceptance Criteria Verification
+
+| # | Criterion | Status | Evidence |
+|---|-----------|--------|----------|
+| 1 | All required tests exist, registered, and pass locally | PASS | 191/191 pass in full validate suite |
+| 2 | Validate behavior matches all normative rules | PASS | All 6 normative requirements verified: auto mock usage, QA/review rollback, timeout propagation, reformatter boundaries, impl-response artifacts, PR metadata |
+| 3 | No recursive mock ralph invocation possible | PASS | `e2e_mock_ralph_script()` uses `canonicalize()` + embedded absolute path; dedicated test confirms no PATH resolution |
+| 4 | Docs file exists with all five required sections | PASS | `docs/validate-e2e.md` contains: Architecture overview, Test-to-requirement mapping, Running instructions, Troubleshooting, Adding-new-tests template |
+| 5 | All acceptance commands succeed | PASS | `nix develop -c cargo test`, `nix build -L`, `ralph validate --filter mcp` (22 pass), `ralph validate` (191 pass) |
+
+
+=== STDERR ===
+
