@@ -1318,7 +1318,7 @@ impl Orchestrator {
                         "invoking completer..."
                     );
                     let mut completer_log =
-                        LogWriter::open(&project_dir, Some(loop_number), "planner");
+                        LogWriter::open(&project_dir, Some(loop_number), "completer");
                     let completer_decision: CompleterDecision = execute_with_parse_retries(
                         completer_backend,
                         &registry,

@@ -233,14 +233,25 @@ impl CliBackend {
             })?;
 
         let stderr_backend = self.name.clone();
+        let stderr_log_file: Option<std::fs::File> = log_writer.as_ref().and_then(|w| {
+            std::fs::OpenOptions::new().append(true).open(w.path()).ok()
+        });
         let stderr_handle = tokio::spawn(async move {
+            let mut log_file = stderr_log_file;
             let mut captured = Vec::new();
             let mut chunk = BytesMut::with_capacity(4096);
             loop {
                 chunk.clear();
                 match stderr.read_buf(&mut chunk).await {
                     Ok(0) => return Ok(captured),
-                    Ok(_) => captured.extend_from_slice(chunk.as_ref()),
+                    Ok(n) => {
+                        let bytes = &chunk[..n];
+                        captured.extend_from_slice(bytes);
+                        if let Some(ref mut f) = log_file {
+                            use std::io::Write;
+                            let _ = f.write_all(bytes).and_then(|_| f.flush());
+                        }
+                    }
                     Err(err) => {
                         return Err(RalphError::BackendCommandFailed {
                             backend: stderr_backend.clone(),
