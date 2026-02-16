@@ -497,6 +497,44 @@ fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
     found
 }
 
+/// Find the most recently created project in a worktree by parsing
+/// `created_at` from each `state.json`. Returns `None` if no projects exist.
+fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
+    let projects_dir = worktree_path.join(".ralph").join("projects");
+    let entries = match std::fs::read_dir(&projects_dir) {
+        Ok(entries) => entries,
+        Err(_) => return None,
+    };
+
+    let mut best: Option<(String, String)> = None; // (project_id, created_at)
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let state_path = entry.path().join("state.json");
+        if let Ok(contents) = std::fs::read_to_string(&state_path) {
+            // Extract created_at without pulling in a full JSON parse dependency.
+            // state.json contains `"created_at": "2026-..."`.
+            if let Some(pos) = contents.find("\"created_at\"") {
+                // Find the value string after the key
+                if let Some(start) = contents[pos..].find('"').and_then(|p| {
+                    contents[pos + p + 1..].find('"').map(|q| pos + p + 1 + q + 1)
+                }) {
+                    if let Some(end) = contents[start..].find('"') {
+                        let created_at = &contents[start..start + end];
+                        let dominated = match &best {
+                            Some((_, prev)) => created_at > prev.as_str(),
+                            None => true,
+                        };
+                        if dominated {
+                            best = Some((name, created_at.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
 /// Dispatch a single task: create worktree, spawn child, update state.
 ///
 /// Uses a CAS-style transition: after spawning the child, the task is only
@@ -1066,6 +1104,8 @@ async fn complete_task(
 
     // Backfill project_id if still missing (fresh `ralph auto --idea` dispatches
     // create the project during execution, so the task record never got updated).
+    // The worktree may contain many projects from the cloned repo history, so we
+    // pick the most recently created one rather than requiring exactly one.
     if task.project_id.is_none() {
         let workspace_root = store
             .path()
@@ -1076,9 +1116,8 @@ async fn complete_task(
         let tid = task.task_id.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, &tid);
         let discovered =
-            spawn_blocking_op(move || Ok(discover_project_ids(&wt_path))).await.unwrap_or_default();
-        if discovered.len() == 1 {
-            let project_id = discovered.into_iter().next().unwrap();
+            spawn_blocking_op(move || Ok(discover_latest_project_id(&wt_path))).await.unwrap_or(None);
+        if let Some(project_id) = discovered {
             eprintln!(
                 "complete-task: backfill project_id={project_id} for task {task_id}"
             );
