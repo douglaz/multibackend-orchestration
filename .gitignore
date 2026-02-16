@@ -13,3 +13,6 @@
 *.swp
 *.swo
 .DS_Store
+
+# Ralph orchestration artifacts
+.ralph/**/*.log
