@@ -26,8 +26,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: fail_retries_then_passes,
         },
         ConformanceTest {
-            name: "qa::iteration_limit_rolls_back",
-            func: iteration_limit_rolls_back,
+            name: "qa::iteration_limit_fails",
+            func: iteration_limit_fails,
         },
         ConformanceTest {
             name: "qa::config_get_set",
@@ -216,7 +216,7 @@ fn fail_retries_then_passes(h: &RalphHarness) -> TestResult {
     })
 }
 
-fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
+fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qa-limit";
         setup_with_mock_script(
@@ -240,6 +240,7 @@ fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
         assert_stderr_contains(&output, "QA iteration limit exceeded");
 
         let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_field(&state, "status", &json!("failed"));
         assert_json_array_len(&state, "loops", 0);
         assert_no_loop_artifacts(&h.project_dir(project_id));
         assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));

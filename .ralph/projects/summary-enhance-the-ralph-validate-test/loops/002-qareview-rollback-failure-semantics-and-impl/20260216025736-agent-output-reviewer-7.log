@@ -1,0 +1,1437 @@
+=== Backend Output Log ===
+backend: codex(gpt-5.3-codex-high)
+role: reviewer
+exit_status: 0
+
+=== STDOUT ===
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Rollback tests were renamed and hardened to explicit failure semantics: `qa::iteration_limit_fails` and `run::review_limit_fails` (`src/validate/tests_qa.rs:29`, `src/validate/tests_run.rs:49`).
+- [x] QA rollback test runs with `--loops 1` and asserts non-zero exit, failed status, empty `loops`, no loop artifacts, and no loop tag (`src/validate/tests_qa.rs:219`).
+- [x] Review rollback test runs with `--loops 1` and asserts non-zero exit, failed status, empty `loops`, no loop artifacts, and no loop tag (`src/validate/tests_run.rs:308`).
+- [x] Runtime failure marking now includes QA/review iteration-limit terminal errors (`src/cli/run.rs:40`).
+- [x] `impl_response_artifact_on_review_feedback` test was added and registered (`src/validate/tests_run.rs:85`, `src/validate/tests_run.rs:561`).
+- [x] Impl-response test asserts exactly one `*-impl-response-001.md`, checks frontmatter keys `artifact`/`iteration`/`role`, and validates expected response body content (`src/validate/tests_run.rs:598`, `src/validate/tests_run.rs:620`, `src/validate/tests_run.rs:637`).
+- [x] Deterministic one-feedback-then-approve mock flow was added for this conformance path (`src/validate/mock_scripts.rs:1104`).
+
+## Notes
+Targeted conformance checks passed locally:
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter qa::iteration_limit_fails`
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter run::review_limit_fails`
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter run::impl_response_artifact_on_review_feedback`
+
+## Commit Message
+test(validate): enforce QA/review failure rollback semantics and impl-response artifact conformance
+
+
+=== STDERR ===
+OpenAI Codex v0.98.0 (research preview)
+--------
+workdir: /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019c6460-ae65-7ac2-8e78-280603c04ebe
+--------
+user
+You are a code reviewer ensuring implementations match specifications.
+
+Given:
+- `prompt.md`
+- `<TS>-spec.md`
+- The implementation diff
+- `<TS>-impl-notes.md`
+
+Review for:
+1. Spec compliance - does it meet all acceptance criteria?
+2. Code quality - is it clean, maintainable, secure?
+3. Consistency - does it follow project patterns?
+4. Scope fidelity - ignore orchestration runtime files under `.ralph/` and focus on product/code changes
+
+If acceptance criteria are already satisfied and no additional code change is required,
+return `# Review: APPROVED` with evidence instead of requesting re-implementation.
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+Your output MUST be:
+
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] <criterion 1>
+- [x] <criterion 2>
+
+## Notes
+(optional)
+<approval rationale>
+
+## Commit Message
+(optional)
+<single-line commit message suggestion>
+
+---
+
+OR:
+
+# Review: SUGGESTIONS
+
+## Required Changes
+1. **<area>**: <what needs to change>
+   - Current: <what it does now>
+   - Expected: <what it should do>
+   - Reference: <spec or prompt section>
+
+## Recommended Improvements
+(optional)
+1. <suggestion>
+
+---
+
+## Context Provided
+
+### Master Prompt
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+### Feature Specification
+---
+artifact: spec
+loop: 2
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-xhigh)
+role: planner
+created_at: 2026-02-16T02:43:44Z
+---
+
+# Feature: QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance
+
+## Description
+Loop 1 completed backend-timeout conformance and foundational E2E mock helpers. The next missing, high-impact scope is rollback failure semantics and review-feedback artifact coverage: tighten QA/review rollback tests to enforce failed terminal state behavior, and add the missing `impl-response` artifact conformance test for review feedback iterations.
+
+## Acceptance Criteria
+- [ ] Rename and harden rollback tests to explicit failure semantics (`qa::iteration_limit_fails`, `run::review_limit_fails`) while keeping their current rollback setup paths.
+- [ ] QA and review rollback tests both run with `--loops 1`, force failure independently, and assert: non-zero exit, `state.json` project `status` is `failed`, `loops` is empty, and rolled-back loop directory is absent.
+- [ ] Rollback tests also assert no loop git tag remains for the rolled-back loop.
+- [ ] Runtime error handling marks project state `failed` when orchestration exits due to QA/review iteration-limit errors (matching existing timeout-failure handling).
+- [ ] Add `impl_response_artifact_on_review_feedback` conformance test that triggers one review feedback cycle before approval.
+- [ ] The new impl-response test asserts exactly one `*-impl-response-001.md` artifact exists and its YAML frontmatter includes `artifact`, `iteration`, and `role`.
+- [ ] The impl-response artifact body assertion verifies expected implementer response content for the feedback iteration.
+
+## Files to Modify/Create
+- `src/validate/tests_qa.rs` - Rename/update QA rollback test to assert failed terminal state and stricter rollback outcomes.
+- `src/validate/tests_run.rs` - Rename/update review rollback test; add `impl_response_artifact_on_review_feedback`.
+- `src/validate/mock_scripts.rs` - Add deterministic mock behavior for “review feedback once, then approve” flow.
+- `src/cli/run.rs` - Extend project-failure marking to include QA/review iteration-limit terminal errors.
+- `src/validate/assertions.rs` - Add small helper(s) if needed for single-artifact suffix matching and loop-path absence checks.
+
+## Dependencies
+- Requires: Backend Timeout Conformance and Mock Script Foundations
+- Blocks: Reformatter fallback boundary conformance, PR metadata verification, `docs/validate-e2e.md` final documentation mapping
+
+---
+
+
+### Implementation Notes
+---
+artifact: impl-notes
+loop: 2
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: implementer
+created_at: 2026-02-16T02:48:47Z
+---
+
+Now let me write the implementation notes artifact.
+
+# Implementation Notes
+
+## Decisions Made
+- Extended the `mark_project_failed` trigger in `src/cli/run.rs` to include `QaIterationLimitExceeded` and `ReviewIterationLimitExceeded` error variants alongside the existing `BackendTimeoutExhausted`, using a single `matches!` expression with `|` alternation — this is the minimal change needed to satisfy the failure-marking acceptance criterion while preserving the existing pattern.
+- Renamed `qa::iteration_limit_rolls_back` → `qa::iteration_limit_fails` and `run::review_limit_rollback` → `run::review_limit_fails` to reflect the explicit failure semantics, while keeping all existing setup paths (mock scripts, config values) intact.
+- Added `assert_json_field(&state, "status", &json!("failed"))` to both hardened rollback tests, which validates the new `mark_project_failed` behavior.
+- Added `assert_git_tag_not_exists` to the review-limit test (the QA test already had it).
+- Created `review_feedback_once_then_approve_script` as a new mock script in `mock_scripts.rs` that uses a counter file to reject on the first review iteration and approve on the second, producing exactly one review-feedback cycle and a `*-impl-response-001.md` artifact.
+- The `impl_response_artifact_on_review_feedback` test uses the existing `list_artifacts` + suffix filter pattern rather than adding a new assertion helper, keeping the change minimal and consistent with existing test patterns (e.g., `artifact_naming` test).
+- No changes to `src/validate/assertions.rs` were needed — existing helpers (`parse_yaml_frontmatter`, `assert_git_tag_not_exists`, `assert_no_loop_artifacts`, `assert_json_field`) were sufficient for all new assertions.
+
+## Spec Deviations
+- The spec mentions `src/validate/assertions.rs` as a file to modify with "small helper(s) if needed for single-artifact suffix matching and loop-path absence checks." These helpers were not needed — `assert_no_loop_artifacts` already exists, and artifact suffix matching is done inline via iterator filter, consistent with existing patterns.
+
+## Testing
+- `cargo check` passes cleanly with zero warnings.
+- Run `ralph validate --bin ./result/bin/ralph --filter qa::iteration_limit_fails` to verify the hardened QA rollback test.
+- Run `ralph validate --bin ./result/bin/ralph --filter run::review_limit_fails` to verify the hardened review rollback test.
+- Run `ralph validate --bin ./result/bin/ralph --filter run::impl_response_artifact_on_review_feedback` to verify the new impl-response conformance test.
+- Run full suite with `ralph validate --bin ./result/bin/ralph` to verify no regressions.
+
+
+### Implementation Response (if reviewing iteration)
+
+
+### Implementation Diff
+diff --git a/src/cli/run.rs b/src/cli/run.rs
+index 7399e04..4a9549b 100644
+--- a/src/cli/run.rs
++++ b/src/cli/run.rs
+@@ -37,7 +37,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
+             Ok(())
+         }
+         Err(err) => {
+-            if matches!(err, RalphError::BackendTimeoutExhausted { .. }) {
++            if matches!(
++                err,
++                RalphError::BackendTimeoutExhausted { .. }
++                    | RalphError::QaIterationLimitExceeded { .. }
++                    | RalphError::ReviewIterationLimitExceeded { .. }
++            ) {
+                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
+             }
+             Err(err)
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 221d91b..069be65 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1098,6 +1098,132 @@ esac
+     .to_owned()
+ }
+ 
++/// Mock script whose reviewer rejects on the first iteration and approves on
++/// the second. This produces exactly one review-feedback cycle, generating
++/// `*-impl-response-001.md` before final approval.
++pub fn review_feedback_once_then_approve_script(review_counter: &std::path::Path) -> String {
++    format!(
++        r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++REVIEW_COUNTER="{review_counter}"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  cat <<'EOF'
++# Feature: Feedback Feature
++
++## Description
++Mock feature used by impl-response conformance tests.
++
++## Acceptance Criteria
++- [ ] Mock implementation file is created
++
++## Files to Modify/Create
++- `mock_file.txt` - file created by the mock implementer
++
++## Dependencies
++- Requires: none
++- Blocks: none
++EOF
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
++    cat <<'EOF'
++# Implementation Response (Iteration 1)
++
++## Changes Made
++1. Addressed reviewer feedback: tightened mock validation.
++
++## Could Not Address
++- None
++
++## Pending Changes (Pre-Commit)
++- Updated mock_file.txt with validated content
++EOF
++  else
++    cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++  fi
++  echo "implemented" > mock_file.txt
++  git add mock_file.txt
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  RCOUNT="$(cat "$REVIEW_COUNTER" 2>/dev/null || echo 0)"
++  RCOUNT=$((RCOUNT + 1))
++  echo "$RCOUNT" > "$REVIEW_COUNTER"
++  if [ "$RCOUNT" -le 1 ]; then
++    cat <<'EOF'
++# Review: SUGGESTIONS
++
++## Required Changes
++1. Tighten mock validation behavior.
++EOF
++  else
++    cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Feedback addressed.
++
++## Commit Message
++feat: apply mock implementation after review feedback
++EOF
++  fi
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###,
++        review_counter = review_counter.to_string_lossy(),
++    )
++}
++
+ pub fn always_reject_review_script() -> String {
+     r###"#!/usr/bin/env bash
+ set -euo pipefail
+diff --git a/src/validate/tests_qa.rs b/src/validate/tests_qa.rs
+index 447ad9c..0db06a3 100644
+--- a/src/validate/tests_qa.rs
++++ b/src/validate/tests_qa.rs
+@@ -26,8 +26,8 @@ pub fn tests() -> Vec<ConformanceTest> {
+             func: fail_retries_then_passes,
+         },
+         ConformanceTest {
+-            name: "qa::iteration_limit_rolls_back",
+-            func: iteration_limit_rolls_back,
++            name: "qa::iteration_limit_fails",
++            func: iteration_limit_fails,
+         },
+         ConformanceTest {
+             name: "qa::config_get_set",
+@@ -216,7 +216,7 @@ fn fail_retries_then_passes(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
+-fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
++fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let project_id = "qa-limit";
+         setup_with_mock_script(
+@@ -240,6 +240,7 @@ fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
+         assert_stderr_contains(&output, "QA iteration limit exceeded");
+ 
+         let state = h.load_state(project_id).expect("load_state failed");
++        assert_json_field(&state, "status", &json!("failed"));
+         assert_json_array_len(&state, "loops", 0);
+         assert_no_loop_artifacts(&h.project_dir(project_id));
+         assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+diff --git a/src/validate/tests_run.rs b/src/validate/tests_run.rs
+index cc74c04..bd14f87 100644
+--- a/src/validate/tests_run.rs
++++ b/src/validate/tests_run.rs
+@@ -10,7 +10,9 @@ use crate::validate::assertions::{
+     assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
+ };
+ use crate::validate::harness::RalphHarness;
+-use crate::validate::mock_scripts::{always_reject_review_script, standard_mock_script};
++use crate::validate::mock_scripts::{
++    always_reject_review_script, review_feedback_once_then_approve_script, standard_mock_script,
++};
+ use serde_json::json;
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+@@ -44,8 +46,8 @@ pub fn tests() -> Vec<ConformanceTest> {
+             func: completion_flow,
+         },
+         ConformanceTest {
+-            name: "run::review_limit_rollback",
+-            func: review_limit_rollback,
++            name: "run::review_limit_fails",
++            func: review_limit_fails,
+         },
+         ConformanceTest {
+             name: "run::dry_run",
+@@ -79,6 +81,10 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "run::completion_artifacts_committed",
+             func: completion_artifacts_committed,
+         },
++        ConformanceTest {
++            name: "run::impl_response_artifact_on_review_feedback",
++            func: impl_response_artifact_on_review_feedback,
++        },
+     ]
+ }
+ 
+@@ -299,7 +305,7 @@ fn completion_flow(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
+-fn review_limit_rollback(h: &RalphHarness) -> TestResult {
++fn review_limit_fails(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let project_id = "run-review-limit";
+         h.init_workspace().expect("init failed");
+@@ -324,8 +330,10 @@ fn review_limit_rollback(h: &RalphHarness) -> TestResult {
+         );
+ 
+         let state = h.load_state(project_id).expect("load_state failed");
++        assert_json_field(&state, "status", &json!("failed"));
+         assert_json_array_len(&state, "loops", 0);
+         assert_no_loop_artifacts(&h.project_dir(project_id));
++        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+     })
+ }
+ 
+@@ -550,6 +558,101 @@ fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "run-impl-response";
++        let review_counter = h.temp_dir.path().join("review-counter.txt");
++        let script = review_feedback_once_then_approve_script(&review_counter);
++
++        h.init_workspace().expect("init failed");
++        let script_path = h
++            .write_mock_script("feedback-then-approve.sh", &script)
++            .expect("failed to write feedback-then-approve script");
++        h.setup_mock_backends(&script_path)
++            .expect("setup_mock_backends failed");
++        h.create_project(
++            project_id,
++            "Impl Response Conformance Project",
++            "Impl response test prompt",
++        )
++        .expect("create_project failed");
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed with review feedback cycle");
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        let loops = state["loops"].as_array().expect("loops should be an array");
++        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
++        let loop_state = &loops[0];
++
++        // Assert at least one review exchange occurred
++        let reviews = loop_state["artifacts"]["reviews"]
++            .as_array()
++            .expect("reviews should be an array");
++        assert!(
++            !reviews.is_empty(),
++            "expected at least one review exchange from feedback cycle"
++        );
++
++        // Find the impl-response-001 artifact
++        let artifacts = h
++            .list_artifacts(project_id, 1)
++            .expect("list_artifacts should succeed");
++        let impl_response_artifacts: Vec<_> = artifacts
++            .iter()
++            .filter(|p| {
++                p.file_name()
++                    .and_then(|n| n.to_str())
++                    .map(|n| n.ends_with("-impl-response-001.md"))
++                    .unwrap_or(false)
++            })
++            .collect();
++        assert_eq!(
++            impl_response_artifacts.len(),
++            1,
++            "expected exactly one *-impl-response-001.md artifact, got {}",
++            impl_response_artifacts.len()
++        );
++
++        let impl_response_path = impl_response_artifacts[0];
++
++        // Assert YAML frontmatter includes required keys
++        let fm = parse_yaml_frontmatter(impl_response_path);
++        assert!(
++            fm.get("artifact").is_some(),
++            "impl-response frontmatter missing 'artifact' key"
++        );
++        assert!(
++            fm.get("iteration").is_some(),
++            "impl-response frontmatter missing 'iteration' key"
++        );
++        assert!(
++            fm.get("role").is_some(),
++            "impl-response frontmatter missing 'role' key"
++        );
++
++        // Assert body contains expected implementer response content
++        let content = fs::read_to_string(impl_response_path).unwrap_or_else(|err| {
++            panic!(
++                "failed to read {}: {err}",
++                impl_response_path.to_string_lossy()
++            )
++        });
++        assert!(
++            content.contains("# Implementation Response"),
++            "impl-response artifact should contain '# Implementation Response' heading"
++        );
++        assert!(
++            content.contains("## Changes Made"),
++            "impl-response artifact should contain '## Changes Made' section"
++        );
++        assert!(
++            content.contains("Addressed reviewer feedback"),
++            "impl-response artifact body should contain expected feedback response content"
++        );
++    })
++}
++
+ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
+     h.init_workspace().expect("init failed");
+     let script = h
+
+### Review History (prior iterations)
+
+
+
+## System Guardrails
+
+- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
+- Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop.
+- If criteria are already satisfied and no code change is required, return `# Review: APPROVED` with evidence.
+- Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues.
+
+## Master Prompt
+
+# Validate E2E Conformance for `ralph auto` Failure Semantics, Artifacts, and PR Metadata
+
+## Goal
+Implement and/or update conformance tests and docs so `ralph auto` behavior is unambiguous and regression-resistant across:
+1. Auto-path execution feasibility
+2. QA/review rollback behavior
+3. Backend timeout handling
+4. Reformatter fallback boundaries
+5. Implementation-response artifact format
+6. PR metadata generation
+
+## In Scope
+- Conformance tests under `src/validate/` (new or updated).
+- Validate harness/script helpers needed by those tests.
+- Documentation file `docs/validate-e2e.md`.
+- Test registration wiring in `src/validate/mod.rs` if new test module(s) are added.
+
+## Out of Scope
+- Mid-phase state snapshot instrumentation inside runtime binaries.
+- Any reformatter fallback beyond parse-error-driven flow.
+- Changes to unrelated CLI/workflow behavior.
+
+## Required Behavior (Normative)
+1. Happy-path tests for `ralph auto` must use `auto_mock_script()` (not `standard_mock_script()`), so quick-PRD prompts and spec-writer/reviewer/reviser flow execute through the real `ralph auto`.
+2. QA/review failure rollback must remove the loop from `state.json` via existing rollback semantics (`state.remove_loop()` behavior). With `--loops 1`, rollback leaves zero loops and task must end `failed` with non-zero exit.
+3. Backend timeout must propagate as `BackendTimeoutExhausted` and mark the task `failed`.
+4. Reformatter fallback rules:
+   - Parse error: reformatter path allowed.
+   - Backend non-zero exit: `BackendCommandFailed`, no reformatter.
+   - Backend timeout: `BackendTimeoutExhausted`, no reformatter.
+   - Empty output: retry same backend first, then reformatter attempt.
+5. Review-feedback path must produce `*-impl-response-001.md` containing YAML frontmatter keys `artifact`, `iteration`, `role`, plus expected body content.
+6. PR creation metadata must include:
+   - `--title` with `ralph:` prefix
+   - `--body-file` content containing `Closes #<N>`, diff stat, and project reference
+   - `--head`
+   - `--repo`
+
+## Implementation Requirements
+
+### 1. Mock Script Safety (No Recursion)
+- Provide/use helper: `e2e_mock_ralph_script(ralph_bin: &Path)`.
+- Script must embed absolute `h.ralph_bin` at generation time.
+- Invocation pattern must be equivalent to:
+  - `exec /absolute/path/to/ralph auto "$@"`
+- Do not resolve `ralph` via `PATH` inside this mock.
+
+### 2. Test Cases (Required)
+Add/update tests with explicit setup/assertions equivalent to:
+
+1. `backend_timeout_exhausted_fails_task`
+- Mock backend sleeps (`sleep 30`).
+- Set `backends.<name>.timeout_seconds = 2`.
+- Assert surfaced error is `BackendTimeoutExhausted`.
+- Assert daemon task state is `failed`.
+
+2. QA/review rollback failure tests (rename legacy `*_new_loop` style names to `*_fails`)
+- Run with `--loops 1`.
+- Force QA failure and review failure separately.
+- Assert:
+  - non-zero orchestration exit
+  - task state `failed`
+  - `state.json` loops array is empty
+  - loop directory is absent
+
+3. `impl_response_artifact_on_review_feedback`
+- Trigger review feedback iteration.
+- Assert one artifact matching `*-impl-response-001.md`.
+- Assert frontmatter includes `artifact`, `iteration`, `role`.
+- Assert body contains expected implementation response content.
+
+4. `pr_metadata_verification`
+- Use `e2e_mock_gh_logging_script()` to capture full `gh pr create` args and `--body-file` content.
+- Assert required flags/content listed in “Required Behavior”.
+
+### 3. Reformatter Semantics Coverage
+- Ensure tests explicitly encode:
+  - non-zero exit => `BackendCommandFailed` and no reformatter
+  - timeout => `BackendTimeoutExhausted` and no reformatter
+  - empty output => same-backend retry, then reformatter
+- If existing tests cover part of this, extend them rather than duplicating.
+
+### 4. Documentation
+Create/update `docs/validate-e2e.md` with exactly these sections:
+1. Architecture overview
+2. Test-to-requirement mapping
+3. Running instructions
+4. Troubleshooting
+5. Adding-new-tests template
+
+## File Targets
+- `src/validate/tests_*.rs` (new and/or existing test modules)
+- `src/validate/harness.rs` (mock helper functions as needed)
+- `src/validate/mod.rs` (registration if new module)
+- `docs/validate-e2e.md`
+
+## Acceptance Criteria
+1. All required tests exist, are registered, and pass locally.
+2. Validate behavior matches all normative rules above.
+3. No recursive mock `ralph` invocation is possible.
+4. Docs file exists and includes all five required sections.
+5. Commands succeed:
+   - `nix develop -c cargo test`
+   - `nix build -L`
+   - `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp` (sanity; ensure no regressions)
+   - `./result/bin/ralph validate --bin ./result/bin/ralph` (full suite expected green)
+
+## Notes for Implementer
+- Prefer extending existing validate patterns and helpers.
+- Keep tests deterministic (no network dependency, controlled temp files/paths, bounded runtime).
+- Preserve existing project conventions for naming and `run_case(|| { ... })` structure.
+
+## Feature Spec
+
+---
+artifact: spec
+loop: 2
+project: summary-enhance-the-ralph-validate-test
+backend: codex(gpt-5.3-codex-xhigh)
+role: planner
+created_at: 2026-02-16T02:43:44Z
+---
+
+# Feature: QA/Review Rollback Failure Semantics and Impl-Response Artifact Conformance
+
+## Description
+Loop 1 completed backend-timeout conformance and foundational E2E mock helpers. The next missing, high-impact scope is rollback failure semantics and review-feedback artifact coverage: tighten QA/review rollback tests to enforce failed terminal state behavior, and add the missing `impl-response` artifact conformance test for review feedback iterations.
+
+## Acceptance Criteria
+- [ ] Rename and harden rollback tests to explicit failure semantics (`qa::iteration_limit_fails`, `run::review_limit_fails`) while keeping their current rollback setup paths.
+- [ ] QA and review rollback tests both run with `--loops 1`, force failure independently, and assert: non-zero exit, `state.json` project `status` is `failed`, `loops` is empty, and rolled-back loop directory is absent.
+- [ ] Rollback tests also assert no loop git tag remains for the rolled-back loop.
+- [ ] Runtime error handling marks project state `failed` when orchestration exits due to QA/review iteration-limit errors (matching existing timeout-failure handling).
+- [ ] Add `impl_response_artifact_on_review_feedback` conformance test that triggers one review feedback cycle before approval.
+- [ ] The new impl-response test asserts exactly one `*-impl-response-001.md` artifact exists and its YAML frontmatter includes `artifact`, `iteration`, and `role`.
+- [ ] The impl-response artifact body assertion verifies expected implementer response content for the feedback iteration.
+
+## Files to Modify/Create
+- `src/validate/tests_qa.rs` - Rename/update QA rollback test to assert failed terminal state and stricter rollback outcomes.
+- `src/validate/tests_run.rs` - Rename/update review rollback test; add `impl_response_artifact_on_review_feedback`.
+- `src/validate/mock_scripts.rs` - Add deterministic mock behavior for “review feedback once, then approve” flow.
+- `src/cli/run.rs` - Extend project-failure marking to include QA/review iteration-limit terminal errors.
+- `src/validate/assertions.rs` - Add small helper(s) if needed for single-artifact suffix matching and loop-path absence checks.
+
+## Dependencies
+- Requires: Backend Timeout Conformance and Mock Script Foundations
+- Blocks: Reformatter fallback boundary conformance, PR metadata verification, `docs/validate-e2e.md` final documentation mapping
+
+---
+
+
+## Implementation Notes
+
+---
+artifact: impl-notes
+loop: 2
+project: summary-enhance-the-ralph-validate-test
+backend: claude(opus)
+role: implementer
+created_at: 2026-02-16T02:48:47Z
+---
+
+Now let me write the implementation notes artifact.
+
+# Implementation Notes
+
+## Decisions Made
+- Extended the `mark_project_failed` trigger in `src/cli/run.rs` to include `QaIterationLimitExceeded` and `ReviewIterationLimitExceeded` error variants alongside the existing `BackendTimeoutExhausted`, using a single `matches!` expression with `|` alternation — this is the minimal change needed to satisfy the failure-marking acceptance criterion while preserving the existing pattern.
+- Renamed `qa::iteration_limit_rolls_back` → `qa::iteration_limit_fails` and `run::review_limit_rollback` → `run::review_limit_fails` to reflect the explicit failure semantics, while keeping all existing setup paths (mock scripts, config values) intact.
+- Added `assert_json_field(&state, "status", &json!("failed"))` to both hardened rollback tests, which validates the new `mark_project_failed` behavior.
+- Added `assert_git_tag_not_exists` to the review-limit test (the QA test already had it).
+- Created `review_feedback_once_then_approve_script` as a new mock script in `mock_scripts.rs` that uses a counter file to reject on the first review iteration and approve on the second, producing exactly one review-feedback cycle and a `*-impl-response-001.md` artifact.
+- The `impl_response_artifact_on_review_feedback` test uses the existing `list_artifacts` + suffix filter pattern rather than adding a new assertion helper, keeping the change minimal and consistent with existing test patterns (e.g., `artifact_naming` test).
+- No changes to `src/validate/assertions.rs` were needed — existing helpers (`parse_yaml_frontmatter`, `assert_git_tag_not_exists`, `assert_no_loop_artifacts`, `assert_json_field`) were sufficient for all new assertions.
+
+## Spec Deviations
+- The spec mentions `src/validate/assertions.rs` as a file to modify with "small helper(s) if needed for single-artifact suffix matching and loop-path absence checks." These helpers were not needed — `assert_no_loop_artifacts` already exists, and artifact suffix matching is done inline via iterator filter, consistent with existing patterns.
+
+## Testing
+- `cargo check` passes cleanly with zero warnings.
+- Run `ralph validate --bin ./result/bin/ralph --filter qa::iteration_limit_fails` to verify the hardened QA rollback test.
+- Run `ralph validate --bin ./result/bin/ralph --filter run::review_limit_fails` to verify the hardened review rollback test.
+- Run `ralph validate --bin ./result/bin/ralph --filter run::impl_response_artifact_on_review_feedback` to verify the new impl-response conformance test.
+- Run full suite with `ralph validate --bin ./result/bin/ralph` to verify no regressions.
+
+
+## Latest Implementation Response
+
+(none)
+
+## Current Diff
+
+```diff
+diff --git a/src/cli/run.rs b/src/cli/run.rs
+index 7399e04..4a9549b 100644
+--- a/src/cli/run.rs
++++ b/src/cli/run.rs
+@@ -37,7 +37,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
+             Ok(())
+         }
+         Err(err) => {
+-            if matches!(err, RalphError::BackendTimeoutExhausted { .. }) {
++            if matches!(
++                err,
++                RalphError::BackendTimeoutExhausted { .. }
++                    | RalphError::QaIterationLimitExceeded { .. }
++                    | RalphError::ReviewIterationLimitExceeded { .. }
++            ) {
+                 mark_project_failed(&workspace, project_id_for_failure.as_deref());
+             }
+             Err(err)
+diff --git a/src/validate/mock_scripts.rs b/src/validate/mock_scripts.rs
+index 221d91b..069be65 100644
+--- a/src/validate/mock_scripts.rs
++++ b/src/validate/mock_scripts.rs
+@@ -1098,6 +1098,132 @@ esac
+     .to_owned()
+ }
+ 
++/// Mock script whose reviewer rejects on the first iteration and approves on
++/// the second. This produces exactly one review-feedback cycle, generating
++/// `*-impl-response-001.md` before final approval.
++pub fn review_feedback_once_then_approve_script(review_counter: &std::path::Path) -> String {
++    format!(
++        r###"#!/usr/bin/env bash
++set -euo pipefail
++
++INPUT="$(cat)"
++
++REVIEW_COUNTER="{review_counter}"
++
++if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
++  cat <<'EOF'
++# Feature: Feedback Feature
++
++## Description
++Mock feature used by impl-response conformance tests.
++
++## Acceptance Criteria
++- [ ] Mock implementation file is created
++
++## Files to Modify/Create
++- `mock_file.txt` - file created by the mock implementer
++
++## Dependencies
++- Requires: none
++- Blocks: none
++EOF
++elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
++  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
++    cat <<'EOF'
++# Implementation Response (Iteration 1)
++
++## Changes Made
++1. Addressed reviewer feedback: tightened mock validation.
++
++## Could Not Address
++- None
++
++## Pending Changes (Pre-Commit)
++- Updated mock_file.txt with validated content
++EOF
++  else
++    cat <<'EOF'
++# Implementation Notes
++
++## Decisions Made
++- Created a mock implementation artifact.
++
++## Spec Deviations
++- None
++
++## Testing
++- Mock script execution only
++EOF
++  fi
++  echo "implemented" > mock_file.txt
++  git add mock_file.txt
++elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
++  cat <<'EOF'
++# Prompt Review
++
++## Issues Found
++- Mock issue for testing
++
++## Refined Prompt
++This is the refined prompt from the mock reviewer.
++EOF
++elif echo "$INPUT" | grep -q "You are a QA engineer"; then
++  cat <<'EOF'
++# QA: PASS
++
++## Manual Testing
++- mock manual check: passed
++
++## Automated Tests
++- mock test suite: passed
++
++## Acceptance Criteria Verification
++All acceptance criteria verified by mock QA.
++EOF
++elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
++  RCOUNT="$(cat "$REVIEW_COUNTER" 2>/dev/null || echo 0)"
++  RCOUNT=$((RCOUNT + 1))
++  echo "$RCOUNT" > "$REVIEW_COUNTER"
++  if [ "$RCOUNT" -le 1 ]; then
++    cat <<'EOF'
++# Review: SUGGESTIONS
++
++## Required Changes
++1. Tighten mock validation behavior.
++EOF
++  else
++    cat <<'EOF'
++# Review: APPROVED
++
++## Acceptance Criteria Checklist
++- [x] Mock implementation file is created
++
++## Notes
++Feedback addressed.
++
++## Commit Message
++feat: apply mock implementation after review feedback
++EOF
++  fi
++elif echo "$INPUT" | grep -q "You are a project completion validator."; then
++  cat <<'EOF'
++# Verdict: CONTINUE
++
++## Missing Requirements
++1. Additional feature remains.
++
++## Recommended Next Features
++1. Implement another mock feature.
++EOF
++else
++  echo "unrecognized prompt" >&2
++  exit 1
++fi
++"###,
++        review_counter = review_counter.to_string_lossy(),
++    )
++}
++
+ pub fn always_reject_review_script() -> String {
+     r###"#!/usr/bin/env bash
+ set -euo pipefail
+diff --git a/src/validate/tests_qa.rs b/src/validate/tests_qa.rs
+index 447ad9c..0db06a3 100644
+--- a/src/validate/tests_qa.rs
++++ b/src/validate/tests_qa.rs
+@@ -26,8 +26,8 @@ pub fn tests() -> Vec<ConformanceTest> {
+             func: fail_retries_then_passes,
+         },
+         ConformanceTest {
+-            name: "qa::iteration_limit_rolls_back",
+-            func: iteration_limit_rolls_back,
++            name: "qa::iteration_limit_fails",
++            func: iteration_limit_fails,
+         },
+         ConformanceTest {
+             name: "qa::config_get_set",
+@@ -216,7 +216,7 @@ fn fail_retries_then_passes(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
+-fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
++fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let project_id = "qa-limit";
+         setup_with_mock_script(
+@@ -240,6 +240,7 @@ fn iteration_limit_rolls_back(h: &RalphHarness) -> TestResult {
+         assert_stderr_contains(&output, "QA iteration limit exceeded");
+ 
+         let state = h.load_state(project_id).expect("load_state failed");
++        assert_json_field(&state, "status", &json!("failed"));
+         assert_json_array_len(&state, "loops", 0);
+         assert_no_loop_artifacts(&h.project_dir(project_id));
+         assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+diff --git a/src/validate/tests_run.rs b/src/validate/tests_run.rs
+index cc74c04..bd14f87 100644
+--- a/src/validate/tests_run.rs
++++ b/src/validate/tests_run.rs
+@@ -10,7 +10,9 @@ use crate::validate::assertions::{
+     assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
+ };
+ use crate::validate::harness::RalphHarness;
+-use crate::validate::mock_scripts::{always_reject_review_script, standard_mock_script};
++use crate::validate::mock_scripts::{
++    always_reject_review_script, review_feedback_once_then_approve_script, standard_mock_script,
++};
+ use serde_json::json;
+ 
+ pub fn tests() -> Vec<ConformanceTest> {
+@@ -44,8 +46,8 @@ pub fn tests() -> Vec<ConformanceTest> {
+             func: completion_flow,
+         },
+         ConformanceTest {
+-            name: "run::review_limit_rollback",
+-            func: review_limit_rollback,
++            name: "run::review_limit_fails",
++            func: review_limit_fails,
+         },
+         ConformanceTest {
+             name: "run::dry_run",
+@@ -79,6 +81,10 @@ pub fn tests() -> Vec<ConformanceTest> {
+             name: "run::completion_artifacts_committed",
+             func: completion_artifacts_committed,
+         },
++        ConformanceTest {
++            name: "run::impl_response_artifact_on_review_feedback",
++            func: impl_response_artifact_on_review_feedback,
++        },
+     ]
+ }
+ 
+@@ -299,7 +305,7 @@ fn completion_flow(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
+-fn review_limit_rollback(h: &RalphHarness) -> TestResult {
++fn review_limit_fails(h: &RalphHarness) -> TestResult {
+     run_case(|| {
+         let project_id = "run-review-limit";
+         h.init_workspace().expect("init failed");
+@@ -324,8 +330,10 @@ fn review_limit_rollback(h: &RalphHarness) -> TestResult {
+         );
+ 
+         let state = h.load_state(project_id).expect("load_state failed");
++        assert_json_field(&state, "status", &json!("failed"));
+         assert_json_array_len(&state, "loops", 0);
+         assert_no_loop_artifacts(&h.project_dir(project_id));
++        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+     })
+ }
+ 
+@@ -550,6 +558,101 @@ fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
+     })
+ }
+ 
++fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
++    run_case(|| {
++        let project_id = "run-impl-response";
++        let review_counter = h.temp_dir.path().join("review-counter.txt");
++        let script = review_feedback_once_then_approve_script(&review_counter);
++
++        h.init_workspace().expect("init failed");
++        let script_path = h
++            .write_mock_script("feedback-then-approve.sh", &script)
++            .expect("failed to write feedback-then-approve script");
++        h.setup_mock_backends(&script_path)
++            .expect("setup_mock_backends failed");
++        h.create_project(
++            project_id,
++            "Impl Response Conformance Project",
++            "Impl response test prompt",
++        )
++        .expect("create_project failed");
++
++        h.ralph_ok(["run", "--loops", "1"])
++            .expect("ralph run --loops 1 should succeed with review feedback cycle");
++
++        let state = h.load_state(project_id).expect("load_state failed");
++        let loops = state["loops"].as_array().expect("loops should be an array");
++        assert_eq!(loops.len(), 1, "expected exactly one completed loop");
++        let loop_state = &loops[0];
++
++        // Assert at least one review exchange occurred
++        let reviews = loop_state["artifacts"]["reviews"]
++            .as_array()
++            .expect("reviews should be an array");
++        assert!(
++            !reviews.is_empty(),
++            "expected at least one review exchange from feedback cycle"
++        );
++
++        // Find the impl-response-001 artifact
++        let artifacts = h
++            .list_artifacts(project_id, 1)
++            .expect("list_artifacts should succeed");
++        let impl_response_artifacts: Vec<_> = artifacts
++            .iter()
++            .filter(|p| {
++                p.file_name()
++                    .and_then(|n| n.to_str())
++                    .map(|n| n.ends_with("-impl-response-001.md"))
++                    .unwrap_or(false)
++            })
++            .collect();
++        assert_eq!(
++            impl_response_artifacts.len(),
++            1,
++            "expected exactly one *-impl-response-001.md artifact, got {}",
++            impl_response_artifacts.len()
++        );
++
++        let impl_response_path = impl_response_artifacts[0];
++
++        // Assert YAML frontmatter includes required keys
++        let fm = parse_yaml_frontmatter(impl_response_path);
++        assert!(
++            fm.get("artifact").is_some(),
++            "impl-response frontmatter missing 'artifact' key"
++        );
++        assert!(
++            fm.get("iteration").is_some(),
++            "impl-response frontmatter missing 'iteration' key"
++        );
++        assert!(
++            fm.get("role").is_some(),
++            "impl-response frontmatter missing 'role' key"
++        );
++
++        // Assert body contains expected implementer response content
++        let content = fs::read_to_string(impl_response_path).unwrap_or_else(|err| {
++            panic!(
++                "failed to read {}: {err}",
++                impl_response_path.to_string_lossy()
++            )
++        });
++        assert!(
++            content.contains("# Implementation Response"),
++            "impl-response artifact should contain '# Implementation Response' heading"
++        );
++        assert!(
++            content.contains("## Changes Made"),
++            "impl-response artifact should contain '## Changes Made' section"
++        );
++        assert!(
++            content.contains("Addressed reviewer feedback"),
++            "impl-response artifact body should contain expected feedback response content"
++        );
++    })
++}
++
+ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
+     h.init_workspace().expect("init failed");
+     let script = h
+```
+
+mcp startup: no servers
+
+thinking
+**Confirming review scope and approach**
+codex
+Reviewing the provided diff against the loop-2 spec now. I’ll inspect the touched files for context and confirm whether each acceptance criterion is actually enforced by tests and runtime behavior before issuing APPROVED or SUGGESTIONS.
+exec
+/run/current-system/sw/bin/bash -lc 'rg -n "QaIterationLimitExceeded|ReviewIterationLimitExceeded|BackendTimeoutExhausted|mark_project_failed" src/cli/run.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc 'rg -n "review_feedback_once_then_approve_script|always_reject_review_script" src/validate/mock_scripts.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc 'rg -n "iteration_limit_fails|review_limit_fails|impl_response_artifact_on_review_feedback|iteration_limit_rolls_back|review_limit_rollback" src/validate/tests_qa.rs src/validate/tests_run.rs' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+42:                RalphError::BackendTimeoutExhausted { .. }
+43:                    | RalphError::QaIterationLimitExceeded { .. }
+44:                    | RalphError::ReviewIterationLimitExceeded { .. }
+46:                mark_project_failed(&workspace, project_id_for_failure.as_deref());
+53:fn mark_project_failed(workspace: &Workspace, project_id: Option<&str>) {
+ succeeded in 51ms:
+1104:pub fn review_feedback_once_then_approve_script(review_counter: &std::path::Path) -> String {
+1227:pub fn always_reject_review_script() -> String {
+ succeeded in 50ms:
+src/validate/tests_qa.rs:29:            name: "qa::iteration_limit_fails",
+src/validate/tests_qa.rs:30:            func: iteration_limit_fails,
+src/validate/tests_qa.rs:219:fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+src/validate/tests_run.rs:49:            name: "run::review_limit_fails",
+src/validate/tests_run.rs:50:            func: review_limit_fails,
+src/validate/tests_run.rs:85:            name: "run::impl_response_artifact_on_review_feedback",
+src/validate/tests_run.rs:86:            func: impl_response_artifact_on_review_feedback,
+src/validate/tests_run.rs:308:fn review_limit_fails(h: &RalphHarness) -> TestResult {
+src/validate/tests_run.rs:561:fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
+
+thinking
+**Planning detailed test inspection**
+codex
+I’ve confirmed the renamed tests and runtime error handling hooks exist. Next I’m checking the exact assertions in those tests (non-zero exit, failed status, empty loops, no artifacts/tag) and the review-feedback artifact assertions for strictness.
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '200,290p' src/validate/tests_qa.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '280,370p' src/validate/tests_run.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc "sed -n '540,680p' src/validate/tests_run.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+
+        let impl_qa_response_rel = qa_results[0]["implementer_response"]
+            .as_str()
+            .expect("first QA result should include implementer response artifact");
+        assert_file_exists(&project_dir.join(impl_qa_response_rel));
+
+        assert!(
+            qa_results[1]["implementer_response"].is_null(),
+            "second QA result should not include implementer response"
+        );
+
+        assert!(
+            loop_state["commit"].as_str().is_some(),
+            "expected loop to commit after QA retry then pass"
+        );
+        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+    })
+}
+
+fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
+ succeeded in 50ms:
+        assert_eq!(
+            loop1_backend, "claude",
+            "expected loop 1 planner backend to be 'claude', got '{loop1_backend}' (raw: '{loop1_backend_raw}')"
+        );
+        assert_eq!(
+            loop2_backend, "codex",
+            "expected loop 2 planner backend to be 'codex', got '{loop2_backend}' (raw: '{loop2_backend_raw}')"
+        );
+    })
+}
+
+fn completion_flow(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "run-completion";
+        setup_with_standard_mock(h, project_id);
+
+        let output = h
+            .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run with env should execute");
+        assert_exit_code(&output, 0);
+ succeeded in 50ms:
+            "HEAD should advance after completion commit"
+        );
+
+        // No uncommitted .ralph/ files should remain
+        assert_no_uncommitted_ralph_files(&h.repo_root);
+
+        // The completion commit message should reference completion artifacts
+        let log_output = Command::new("git")
+            .args(["log", "-1", "--format=%s"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git log should execute");
+        let commit_msg = String::from_utf8_lossy(&log_output.stdout);
+        assert!(
+            commit_msg.contains("completion"),
+            "completion commit message should contain 'completion', got: {}",
+            commit_msg.trim()
+        );
+    })
+}
+
+thinking
+**Inspecting project failure marking**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1,140p' src/cli/run.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+use crate::cli::RunArgs;
+use crate::error::RalphError;
+use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::state::ProjectStatus;
+use crate::workflow::orchestrator::{Orchestrator, RunOptions};
+use crate::workspace::Workspace;
+use crate::Result;
+
+pub async fn execute(args: RunArgs) -> Result<()> {
+    let workspace = Workspace::discover()?;
+    let project_id_for_failure = workspace.resolve_project_id(args.project.as_deref()).ok();
+    let mut orchestrator = Orchestrator::new(workspace.clone());
+
+    let result = orchestrator
+        .run(RunOptions {
+            project: args.project,
+            loops: args.loops,
+            until_review: args.until_review,
+            until_complete: args.until_complete,
+            dry_run: args.dry_run,
+
+thinking
+**Reviewing mock function robustness**
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '1080,1265p' src/validate/mock_scripts.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+    ;;
+  checkout) exit 0 ;;
+  rev-parse)
+    for arg in "$@"; do
+      if [ "$arg" = "--show-toplevel" ]; then
+        pwd
+        exit 0
+      fi
+      if [ "$arg" = "--abbrev-ref" ]; then
+        echo "mock-branch"
+        exit 0
+      fi
+    done
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+"###
+    .to_owned()
+}
+
+thinking
+**Inspecting loop artifact checks**
+exec
+/run/current-system/sw/bin/bash -lc "rg -n \"fn assert_no_loop_artifacts|assert_git_tag_not_exists|parse_yaml_frontmatter|assert_json_field\" src/validate/assertions.rs && sed -n '1,220p' src/validate/assertions.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+21:pub fn assert_json_field(value: &Value, field: &str, expected: &Value) {
+103:pub fn assert_git_tag_not_exists(repo_root: &Path, tag: &str) {
+188:pub fn parse_yaml_frontmatter(path: &Path) -> YamlValue {
+224:pub fn assert_no_loop_artifacts(project_dir: &Path) {
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+
+use regex::Regex;
+use serde_json::Value;
+use serde_yaml::Value as YamlValue;
+use toml::Value as TomlValue;
+
+pub fn assert_exit_code(output: &Output, expected: i32) {
+    let code = output.status.code().unwrap_or(-1);
+    assert_eq!(
+        code,
+        expected,
+        "unexpected exit code.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+exec
+/run/current-system/sw/bin/bash -lc "sed -n '220,300p' src/validate/assertions.rs" in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+        )
+    })
+}
+
+pub fn assert_no_loop_artifacts(project_dir: &Path) {
+    let loops_dir = project_dir.join("loops");
+    if !loops_dir.exists() {
+        return;
+    }
+    let mut entries = fs::read_dir(&loops_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", loops_dir.to_string_lossy()));
+    assert!(
+        entries.next().is_none(),
+        "expected no loop artifacts under '{}'",
+        loops_dir.to_string_lossy()
+    );
+}
+
+pub fn assert_stderr_contains(output: &Output, needle: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+thinking
+**Verifying test behavior and artifacts**
+codex
+I’ve verified the assertions in the changed tests match the loop-2 spec at code level. I’ll run focused tests for the three updated conformance cases to check behavior, then I’ll finalize the review decision.
+
+thinking
+**Planning targeted validate test runs**
+exec
+/run/current-system/sw/bin/bash -lc 'cargo build -q' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 51ms:
+
+
+thinking
+**Running targeted validation tests**
+exec
+/run/current-system/sw/bin/bash -lc './target/debug/ralph validate --bin ./target/debug/ralph --filter qa::iteration_limit_fails' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc './target/debug/ralph validate --bin ./target/debug/ralph --filter run::impl_response_artifact_on_review_feedback' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26exec
+/run/current-system/sw/bin/bash -lc './target/debug/ralph validate --bin ./target/debug/ralph --filter run::review_limit_fails' in /tmp/ralph-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-26 succeeded in 52ms:
+test result: ok. 1 passed; 0 failed; 0 skipped
+ succeeded in 50ms:
+running 1 tests
+test run::review_limit_fails ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+ succeeded in 71ms:
+test run::impl_response_artifact_on_review_feedback ... ok
+test result: ok. 1 passed; 0 failed; 0 skipped
+
+thinking
+**Confirming approval criteria met**
+codex
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Rollback tests were renamed and hardened to explicit failure semantics: `qa::iteration_limit_fails` and `run::review_limit_fails` (`src/validate/tests_qa.rs:29`, `src/validate/tests_run.rs:49`).
+- [x] QA rollback test runs with `--loops 1` and asserts non-zero exit, failed status, empty `loops`, no loop artifacts, and no loop tag (`src/validate/tests_qa.rs:219`).
+- [x] Review rollback test runs with `--loops 1` and asserts non-zero exit, failed status, empty `loops`, no loop artifacts, and no loop tag (`src/validate/tests_run.rs:308`).
+- [x] Runtime failure marking now includes QA/review iteration-limit terminal errors (`src/cli/run.rs:40`).
+- [x] `impl_response_artifact_on_review_feedback` test was added and registered (`src/validate/tests_run.rs:85`, `src/validate/tests_run.rs:561`).
+- [x] Impl-response test asserts exactly one `*-impl-response-001.md`, checks frontmatter keys `artifact`/`iteration`/`role`, and validates expected response body content (`src/validate/tests_run.rs:598`, `src/validate/tests_run.rs:620`, `src/validate/tests_run.rs:637`).
+- [x] Deterministic one-feedback-then-approve mock flow was added for this conformance path (`src/validate/mock_scripts.rs:1104`).
+
+## Notes
+Targeted conformance checks passed locally:
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter qa::iteration_limit_fails`
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter run::review_limit_fails`
+- `./target/debug/ralph validate --bin ./target/debug/ralph --filter run::impl_response_artifact_on_review_feedback`
+
+## Commit Message
+test(validate): enforce QA/review failure rollback semantics and impl-response artifact conformance
+tokens used
+25,456
+

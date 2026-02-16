@@ -1,0 +1,33 @@
+=== Backend Output Log ===
+backend: claude(opus)
+role: qa
+exit_status: 0
+
+=== STDOUT ===
+# QA: PASS
+
+## Manual Testing
+- **`nix build -L`**: Built successfully, produced `./result/bin/ralph` (11814184 bytes).
+- **`nix develop -c cargo test`**: All 375 unit tests + 3 integration tests passed, zero failures.
+- **`./result/bin/ralph validate --bin ./result/bin/ralph --filter qa::iteration_limit_fails`**: 1 passed, 0 failed — the renamed QA rollback test exercises `--loops 1`, asserts non-zero exit, `status: "failed"`, empty loops array, no loop artifacts, and no git tag.
+- **`./result/bin/ralph validate --bin ./result/bin/ralph --filter run::review_limit_fails`**: 1 passed, 0 failed — the renamed review rollback test exercises `--loops 1`, asserts non-zero exit, `status: "failed"`, empty loops, no loop artifacts, and no git tag.
+- **`./result/bin/ralph validate --bin ./result/bin/ralph --filter run::impl_response_artifact_on_review_feedback`**: 1 passed, 0 failed — triggers one review-feedback cycle, asserts exactly one `*-impl-response-001.md` artifact with required frontmatter keys (`artifact`, `iteration`, `role`) and expected body content.
+- **`./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp`**: 22 passed, 0 failed — MCP sanity check shows no regressions.
+- **`./result/bin/ralph validate --bin ./result/bin/ralph`**: Full suite — **188 passed, 0 failed, 0 skipped**.
+
+## Automated Tests
+- `nix develop -c cargo test`: 375 unit tests + 12 template tests + 3 integration tests — all pass.
+- `./result/bin/ralph validate --bin ./result/bin/ralph`: 188 conformance tests — all pass.
+
+## Acceptance Criteria Verification
+- [x] **Rename and harden rollback tests to explicit failure semantics**: `qa::iteration_limit_rolls_back` → `qa::iteration_limit_fails` and `run::review_limit_rollback` → `run::review_limit_fails`. Verified via grep: no references to old names remain in `src/`. Both new names registered in `tests()` and pass in the validate suite.
+- [x] **QA and review rollback tests assert: non-zero exit, `status` is `failed`, `loops` is empty, loop directory absent**: Verified by reading `tests_qa.rs:233-247` and `tests_run.rs:324-337` — both assert `!output.status.success()`, `assert_json_field(&state, "status", &json!("failed"))`, `assert_json_array_len(&state, "loops", 0)`, and `assert_no_loop_artifacts`. Both pass.
+- [x] **Rollback tests assert no loop git tag remains**: `assert_git_tag_not_exists` present in both `tests_qa.rs:246` (was already there) and `tests_run.rs:336` (newly added). Both pass.
+- [x] **Runtime error handling marks project state `failed` for QA/review iteration-limit errors**: `src/cli/run.rs:40-46` now uses `matches!(err, BackendTimeoutExhausted | QaIterationLimitExceeded | ReviewIterationLimitExceeded)` to call `mark_project_failed`. Verified the code and both rollback tests assert the `"failed"` status — confirming it works end-to-end.
+- [x] **`impl_response_artifact_on_review_feedback` conformance test added**: Registered as `run::impl_response_artifact_on_review_feedback` at `tests_run.rs:85-86`, implemented at lines 561-653. Passes in the full suite.
+- [x] **Impl-response test asserts exactly one `*-impl-response-001.md` artifact with frontmatter keys `artifact`, `iteration`, `role`**: Verified in code at `tests_run.rs:601-632` — filters artifacts by suffix, asserts count == 1, then parses YAML frontmatter and checks all three keys. Passes.
+- [x] **Impl-response artifact body assertion verifies expected content**: Verified at `tests_run.rs:634-652` — checks for `# Implementation Response`, `## Changes Made`, and `Addressed reviewer feedback`. Passes.
+
+
+=== STDERR ===
+
