@@ -2,10 +2,12 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::RollbackArgs;
+use crate::config::resolve_effective_config;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::is_git_repo;
 use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::load_project_config_if_exists;
 use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
@@ -103,7 +105,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         )?;
     }
 
-    for loop_number in to_remove {
+    for &loop_number in &to_remove {
         let pattern = format!("{loop_number:03}-");
         let loops_dir = project_dir.join("loops");
         if loops_dir.is_dir() {
@@ -121,6 +123,26 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     state
         .completion_attempts
         .retain(|l| l.loop_number <= args.loop_number);
+
+    // Session invalidation: unconditionally remove sessions for loops > target.
+    for loop_number in &to_remove {
+        state.session_store.remove_for_loop(*loop_number);
+    }
+
+    // For the target loop: clear sessions when session_reuse_reset_on_rollback is true.
+    if args.loop_number > 0 {
+        let project_config = load_project_config_if_exists(&project_dir)?;
+        let effective = resolve_effective_config(
+            &workspace.root,
+            &project_dir,
+            workspace.config.clone(),
+            project_config,
+            Default::default(),
+        )?;
+        if effective.workflow.session_reuse_reset_on_rollback {
+            state.session_store.remove_for_loop(args.loop_number);
+        }
+    }
 
     state.current_loop = args.loop_number;
     state.current_phase = Phase::Planning;

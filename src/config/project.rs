@@ -47,6 +47,14 @@ pub struct ProjectWorkflowOverrides {
     pub max_qa_history_entries_in_prompt: Option<usize>,
     #[serde(default)]
     pub include_history_when_session_reuse_enabled: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_enabled: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub session_reuse_reset_on_prompt_change: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_reset_on_rollback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

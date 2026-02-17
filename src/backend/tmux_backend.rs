@@ -24,6 +24,10 @@ pub struct TmuxExecutionContext {
     pub loop_number: Option<u32>,
     pub role: Option<String>,
     pub loop_dir: Option<PathBuf>,
+    /// When set, `build_shell_command` will delegate to `effective_args()` for
+    /// session-aware argument rewriting. If rewriting fails, it falls back to
+    /// the default args.
+    pub session_id: Option<String>,
 }
 
 /// A `Backend` implementation that runs commands inside tmux windows
@@ -76,13 +80,41 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
     ///   1. Pipes the prompt file into the backend command via stdin
     ///   2. Pipes stdout through `tee` so it's visible in the tmux pane AND captured to the output file
     ///   3. Writes the exit code to the exit file
+    ///
+    /// When the execution context contains a `session_id`, this method
+    /// delegates to `CliBackend::effective_args()` for session-aware arg
+    /// rewriting. If rewriting fails, it falls back to the default args.
     fn build_shell_command(
         &self,
         prompt_file: &Path,
         output_file: &Path,
         exit_file: &Path,
+        ctx: &TmuxExecutionContext,
     ) -> String {
         let resolved = self.inner.resolved_command_path().display().to_string();
+
+        // Try session-aware arg rewriting when a session_id is present.
+        let args = if let Some(ref session_id) = ctx.session_id {
+            let invocation_ctx = super::BackendInvocationContext {
+                loop_dir: ctx.loop_dir.clone().unwrap_or_default(),
+                role: ctx.role.clone().unwrap_or_default(),
+                session_id: Some(session_id.clone()),
+                json_output_required: true,
+            };
+            match self.inner.effective_args(&invocation_ctx) {
+                Ok(rewritten) => rewritten,
+                Err(e) => {
+                    debug!(
+                        backend = self.inner.name(),
+                        error = %e,
+                        "effective_args rewrite failed, falling back to default args"
+                    );
+                    self.inner.args().to_vec()
+                }
+            }
+        } else {
+            self.inner.args().to_vec()
+        };
 
         let mut parts: Vec<String> = Vec::new();
 
@@ -100,9 +132,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             "cat {} | {} {} | tee {}; echo ${{PIPESTATUS[1]}} > {}",
             shell_escape(&prompt_file.display().to_string()),
             shell_escape(&resolved),
-            self.inner
-                .args()
-                .iter()
+            args.iter()
                 .map(|a| shell_escape(a))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -176,7 +206,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         tmux::ensure_session(&self.runner, &self.session_name).await?;
 
         // 3. Create tmux window with the shell command (with retry on session loss)
-        let shell_cmd = self.build_shell_command(&prompt_file, &output_file, &exit_file);
+        let shell_cmd = self.build_shell_command(&prompt_file, &output_file, &exit_file, &ctx);
         let label = self.build_label(&ctx);
 
         debug!(
@@ -434,6 +464,7 @@ mod tests {
             Path::new("/tmp/prompt.txt"),
             Path::new("/tmp/output.txt"),
             Path::new("/tmp/exit.txt"),
+            &TmuxExecutionContext::default(),
         );
 
         // Should pipe prompt -> command -> output, and capture exit code
@@ -465,6 +496,7 @@ mod tests {
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
             Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
         );
 
         assert!(cmd.contains("'-n'"), "missing -n arg: {cmd}");
@@ -479,6 +511,7 @@ mod tests {
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
             Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
         );
 
         assert!(
@@ -505,6 +538,7 @@ mod tests {
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
             Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
         );
 
         // Single quotes inside should be escaped as '\''

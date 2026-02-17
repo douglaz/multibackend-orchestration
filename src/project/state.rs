@@ -29,6 +29,54 @@ pub struct ProjectState {
     pub status: ProjectStatus,
     pub loops: Vec<FeatureLoopState>,
     pub completion_attempts: Vec<CompletionLoopState>,
+    #[serde(default)]
+    pub session_store: SessionStore,
+}
+
+// ---------------------------------------------------------------------------
+// Session reuse data model
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub backend_spec: String,
+    pub role: String,
+    pub loop_number: u32,
+    pub bootstrap_hash: String,
+    pub call_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionStore {
+    #[serde(default)]
+    pub records: Vec<SessionRecord>,
+}
+
+impl SessionStore {
+    pub fn lookup(&self, loop_number: u32, role: &str, backend_spec: &str) -> Option<&SessionRecord> {
+        self.records.iter().find(|r| {
+            r.loop_number == loop_number && r.role == role && r.backend_spec == backend_spec
+        })
+    }
+
+    pub fn upsert(&mut self, record: SessionRecord) {
+        if let Some(existing) = self.records.iter_mut().find(|r| {
+            r.loop_number == record.loop_number
+                && r.role == record.role
+                && r.backend_spec == record.backend_spec
+        }) {
+            *existing = record;
+        } else {
+            self.records.push(record);
+        }
+    }
+
+    pub fn remove_for_loop(&mut self, loop_number: u32) {
+        self.records.retain(|r| r.loop_number != loop_number);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +240,7 @@ impl ProjectState {
             status: ProjectStatus::Pending,
             loops: Vec::new(),
             completion_attempts: Vec::new(),
+            session_store: SessionStore::default(),
         }
     }
 
@@ -324,6 +373,8 @@ impl ProjectState {
             .retain(|loop_state| loop_state.loop_number != loop_number);
         self.completion_attempts
             .retain(|loop_state| loop_state.loop_number != loop_number);
+        // Also remove session records for this loop (spec D1/D6).
+        self.session_store.remove_for_loop(loop_number);
     }
 
     pub fn last_loop_number(&self) -> u32 {
@@ -518,5 +569,152 @@ mod tests {
         assert_eq!(loaded.project_id, state.project_id);
         assert_eq!(loaded.project_name, state.project_name);
         assert_eq!(loaded.created_at, state.created_at);
+    }
+
+    #[test]
+    fn legacy_state_without_session_store_deserializes_to_empty() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        let mut value = serde_json::to_value(&state).expect("serialize state");
+        value
+            .as_object_mut()
+            .expect("state should serialize as object")
+            .remove("session_store");
+
+        let parsed: ProjectState =
+            serde_json::from_value(value).expect("deserialize legacy state");
+        assert!(parsed.session_store.records.is_empty());
+    }
+
+    #[test]
+    fn session_store_lookup_finds_matching_record() {
+        use super::SessionStore;
+        let mut store = SessionStore::default();
+        store.upsert(super::SessionRecord {
+            session_id: "sid-1".to_owned(),
+            backend_spec: "claude(opus)".to_owned(),
+            role: "implementer".to_owned(),
+            loop_number: 1,
+            bootstrap_hash: "hash1".to_owned(),
+            call_count: 1,
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        });
+
+        assert!(store.lookup(1, "implementer", "claude(opus)").is_some());
+        assert!(store.lookup(1, "reviewer", "claude(opus)").is_none());
+        assert!(store.lookup(2, "implementer", "claude(opus)").is_none());
+        assert!(store.lookup(1, "implementer", "codex").is_none());
+    }
+
+    #[test]
+    fn session_store_upsert_replaces_existing_record() {
+        use super::{SessionRecord, SessionStore};
+        let mut store = SessionStore::default();
+        let now = Utc::now();
+        store.upsert(SessionRecord {
+            session_id: "sid-old".to_owned(),
+            backend_spec: "claude".to_owned(),
+            role: "qa".to_owned(),
+            loop_number: 2,
+            bootstrap_hash: "hash".to_owned(),
+            call_count: 1,
+            created_at: now,
+            last_used_at: now,
+        });
+        store.upsert(SessionRecord {
+            session_id: "sid-new".to_owned(),
+            backend_spec: "claude".to_owned(),
+            role: "qa".to_owned(),
+            loop_number: 2,
+            bootstrap_hash: "hash".to_owned(),
+            call_count: 2,
+            created_at: now,
+            last_used_at: now,
+        });
+        assert_eq!(store.records.len(), 1);
+        assert_eq!(store.records[0].session_id, "sid-new");
+        assert_eq!(store.records[0].call_count, 2);
+    }
+
+    #[test]
+    fn session_store_remove_for_loop_clears_matching_records() {
+        use super::{SessionRecord, SessionStore};
+        let mut store = SessionStore::default();
+        let now = Utc::now();
+        for (loop_number, role) in [(1, "implementer"), (1, "reviewer"), (2, "implementer")] {
+            store.upsert(SessionRecord {
+                session_id: format!("sid-{loop_number}-{role}"),
+                backend_spec: "claude".to_owned(),
+                role: role.to_owned(),
+                loop_number,
+                bootstrap_hash: "h".to_owned(),
+                call_count: 1,
+                created_at: now,
+                last_used_at: now,
+            });
+        }
+        assert_eq!(store.records.len(), 3);
+        store.remove_for_loop(1);
+        assert_eq!(store.records.len(), 1);
+        assert_eq!(store.records[0].loop_number, 2);
+    }
+
+    #[test]
+    fn session_store_serde_roundtrip() {
+        use super::{SessionRecord, SessionStore};
+        let now = Utc::now();
+        let mut store = SessionStore::default();
+        store.upsert(SessionRecord {
+            session_id: "sid-rt".to_owned(),
+            backend_spec: "codex(gpt-5.3-codex-high)".to_owned(),
+            role: "reviewer".to_owned(),
+            loop_number: 3,
+            bootstrap_hash: "abcd1234".to_owned(),
+            call_count: 5,
+            created_at: now,
+            last_used_at: now,
+        });
+        let json = serde_json::to_string(&store).expect("serialize session store");
+        let parsed: SessionStore = serde_json::from_str(&json).expect("deserialize session store");
+        assert_eq!(parsed.records.len(), 1);
+        assert_eq!(parsed.records[0].session_id, "sid-rt");
+        assert_eq!(parsed.records[0].call_count, 5);
+    }
+
+    #[test]
+    fn new_state_initializes_empty_session_store() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        assert!(state.session_store.records.is_empty());
+    }
+
+    #[test]
+    fn remove_loop_clears_session_records() {
+        use super::SessionRecord;
+        let mut state = ProjectState::new("demo", "Demo", "abc123", None);
+        let now = Utc::now();
+        state.session_store.upsert(SessionRecord {
+            session_id: "sid-1".to_owned(),
+            backend_spec: "claude".to_owned(),
+            role: "implementer".to_owned(),
+            loop_number: 1,
+            bootstrap_hash: "h".to_owned(),
+            call_count: 1,
+            created_at: now,
+            last_used_at: now,
+        });
+        state.session_store.upsert(SessionRecord {
+            session_id: "sid-2".to_owned(),
+            backend_spec: "claude".to_owned(),
+            role: "reviewer".to_owned(),
+            loop_number: 2,
+            bootstrap_hash: "h".to_owned(),
+            call_count: 1,
+            created_at: now,
+            last_used_at: now,
+        });
+        // remove_loop must clear session records for that loop (spec D1)
+        state.remove_loop(1);
+        assert_eq!(state.session_store.records.len(), 1, "only loop 2 session should remain");
+        assert_eq!(state.session_store.records[0].loop_number, 2);
     }
 }

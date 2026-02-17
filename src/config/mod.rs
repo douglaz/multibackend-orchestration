@@ -36,6 +36,10 @@ pub struct EffectiveWorkflowConfig {
     pub max_review_history_entries_in_prompt: usize,
     pub max_qa_history_entries_in_prompt: usize,
     pub include_history_when_session_reuse_enabled: bool,
+    pub session_reuse_enabled: bool,
+    pub session_reuse_roles: Vec<String>,
+    pub session_reuse_reset_on_prompt_change: bool,
+    pub session_reuse_reset_on_rollback: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -198,6 +202,18 @@ pub fn resolve_effective_config(
         include_history_when_session_reuse_enabled: project_ref
             .and_then(|p| p.workflow.include_history_when_session_reuse_enabled)
             .unwrap_or(global.workflow.include_history_when_session_reuse_enabled),
+        session_reuse_enabled: project_ref
+            .and_then(|p| p.workflow.session_reuse_enabled)
+            .unwrap_or(global.workflow.session_reuse_enabled),
+        session_reuse_roles: project_ref
+            .and_then(|p| p.workflow.session_reuse_roles.clone())
+            .unwrap_or_else(|| global.workflow.session_reuse_roles.clone()),
+        session_reuse_reset_on_prompt_change: project_ref
+            .and_then(|p| p.workflow.session_reuse_reset_on_prompt_change)
+            .unwrap_or(global.workflow.session_reuse_reset_on_prompt_change),
+        session_reuse_reset_on_rollback: project_ref
+            .and_then(|p| p.workflow.session_reuse_reset_on_rollback)
+            .unwrap_or(global.workflow.session_reuse_reset_on_rollback),
     };
 
     let templates = EffectiveTemplateConfig {

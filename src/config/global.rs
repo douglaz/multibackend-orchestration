@@ -251,6 +251,14 @@ pub struct WorkflowConfig {
     pub max_qa_history_entries_in_prompt: usize,
     #[serde(default = "default_include_history_when_session_reuse_enabled")]
     pub include_history_when_session_reuse_enabled: bool,
+    #[serde(default)]
+    pub session_reuse_enabled: bool,
+    #[serde(default = "default_session_reuse_roles")]
+    pub session_reuse_roles: Vec<String>,
+    #[serde(default = "default_session_reuse_reset_on_prompt_change")]
+    pub session_reuse_reset_on_prompt_change: bool,
+    #[serde(default = "default_session_reuse_reset_on_rollback")]
+    pub session_reuse_reset_on_rollback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -444,6 +452,10 @@ impl Default for WorkflowConfig {
             max_qa_history_entries_in_prompt: default_max_qa_history_entries_in_prompt(),
             include_history_when_session_reuse_enabled:
                 default_include_history_when_session_reuse_enabled(),
+            session_reuse_enabled: false,
+            session_reuse_roles: default_session_reuse_roles(),
+            session_reuse_reset_on_prompt_change: default_session_reuse_reset_on_prompt_change(),
+            session_reuse_reset_on_rollback: default_session_reuse_reset_on_rollback(),
         }
     }
 }
@@ -650,6 +662,22 @@ fn default_max_qa_history_entries_in_prompt() -> usize {
 
 fn default_include_history_when_session_reuse_enabled() -> bool {
     false
+}
+
+fn default_session_reuse_roles() -> Vec<String> {
+    vec![
+        "implementer".to_owned(),
+        "reviewer".to_owned(),
+        "qa".to_owned(),
+    ]
+}
+
+fn default_session_reuse_reset_on_prompt_change() -> bool {
+    true
+}
+
+fn default_session_reuse_reset_on_rollback() -> bool {
+    true
 }
 
 fn default_qa_enabled() -> bool {

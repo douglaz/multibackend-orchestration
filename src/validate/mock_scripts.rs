@@ -313,6 +313,141 @@ fi
     .to_owned()
 }
 
+/// Mock script that records `pwd` to a known file before producing standard output.
+/// Used by the working_directory conformance test to verify repo-root invariant.
+/// Mirrors `standard_mock_script()` prompt coverage exactly (including prompt reviewer)
+/// with the addition of pwd capture at the top.
+pub fn pwd_recording_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+# Record pwd to a sidecar file for the conformance test to inspect.
+pwd > "${RALPH_PWD_LOG:-/tmp/ralph-pwd.log}"
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: CWD Test Feature
+
+## Description
+Feature to verify working directory invariant.
+
+## Acceptance Criteria
+- [ ] Working directory stays at repo root
+
+## Files to Modify/Create
+- `cwd_test.txt` - test file
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Verified cwd is at repo root.
+
+## Spec Deviations
+- None
+
+## Testing
+- pwd check only
+EOF
+  fi
+  echo "cwd-ok" > cwd_test.txt
+  git add cwd_test.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- cwd check: passed
+
+## Automated Tests
+- pwd matches repo root
+
+## Acceptance Criteria Verification
+All criteria verified.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Working directory stays at repo root
+
+## Notes
+CWD is correct.
+
+## Commit Message
+feat: verify cwd invariant
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- CWD requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional features remain.
+
+## Recommended Next Features
+1. More features.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 /// Mock `ralph` script for validate E2E tests that always delegates to the
 /// provided absolute `ralph` binary path and executes `auto`.
 ///

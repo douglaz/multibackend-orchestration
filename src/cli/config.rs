@@ -145,6 +145,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
                     "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
                     "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
+                    "session_reuse_enabled": effective.workflow.session_reuse_enabled,
+                    "session_reuse_roles": effective.workflow.session_reuse_roles,
+                    "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
+                    "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -224,6 +228,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
                     "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
                     "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
+                    "session_reuse_enabled": effective.workflow.session_reuse_enabled,
+                    "session_reuse_roles": effective.workflow.session_reuse_roles,
+                    "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
+                    "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -446,6 +454,18 @@ fn set_global_value(
             config.workflow.include_history_when_session_reuse_enabled =
                 parse_bool(raw_value, key)?;
         }
+        "workflow.session_reuse_enabled" => {
+            config.workflow.session_reuse_enabled = parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_roles" => {
+            config.workflow.session_reuse_roles = parse_session_reuse_roles(raw_value)?;
+        }
+        "workflow.session_reuse_reset_on_prompt_change" => {
+            config.workflow.session_reuse_reset_on_prompt_change = parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_reset_on_rollback" => {
+            config.workflow.session_reuse_reset_on_rollback = parse_bool(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
@@ -574,6 +594,20 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.include_history_when_session_reuse_enabled" => {
             config.workflow.include_history_when_session_reuse_enabled =
+                parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_enabled" => {
+            config.workflow.session_reuse_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_roles" => {
+            config.workflow.session_reuse_roles = parse_optional_session_reuse_roles(raw_value)?;
+        }
+        "workflow.session_reuse_reset_on_prompt_change" => {
+            config.workflow.session_reuse_reset_on_prompt_change =
+                parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_reset_on_rollback" => {
+            config.workflow.session_reuse_reset_on_rollback =
                 parse_optional_bool(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
@@ -772,6 +806,29 @@ fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
 
 fn ensure_backend(raw: &str) -> Result<()> {
     crate::cli::backend_spec::validate_backend_spec_name(raw)
+}
+
+const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+
+fn parse_session_reuse_roles(raw: &str) -> Result<Vec<String>> {
+    let roles = parse_string_list(raw)?;
+    for role in &roles {
+        if !KNOWN_ROLES.contains(&role.as_str()) {
+            return Err(RalphError::Validation(format!(
+                "unknown role '{}' in session_reuse_roles; valid roles: {}",
+                role,
+                KNOWN_ROLES.join(", ")
+            )));
+        }
+    }
+    Ok(roles)
+}
+
+fn parse_optional_session_reuse_roles(raw: &str) -> Result<Option<Vec<String>>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_session_reuse_roles(raw)?))
 }
 
 fn parse_optional_string(raw: &str) -> Option<String> {

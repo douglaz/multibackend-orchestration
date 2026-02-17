@@ -23,6 +23,7 @@ mod tests_prompt_review;
 mod tests_qa;
 mod tests_role_timeouts;
 mod tests_run;
+mod tests_sessions;
 mod tests_streaming;
 mod tests_tail;
 
@@ -96,6 +97,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_streaming::tests());
     tests.extend(tests_tail::tests());
     tests.extend(tests_daemon::tests());
+    tests.extend(tests_sessions::tests());
     tests.extend(tests_e2e_conformance::tests());
     tests
 }

@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "c268d43048b18da58fe0c3df19bb80ce5e6fd5c33e9561b8743d5f5d1deedc14",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 3,
+  "current_loop": 4,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -78,7 +78,7 @@
       "slug": "deterministic-history-capping-c",
       "feature_name": "Deterministic History Capping (C)",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -93,8 +93,53 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "afc7b29ff533228af4896ac6a2ab8e595c04cf27",
       "started_at": "2026-02-17T15:33:25.628748866Z",
+      "completed_at": "2026-02-17T15:40:27.106838452Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "session-reuse-v1-core-d",
+      "feature_name": "Session Reuse v1 Core (D)",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/004-session-reuse-v1-core-d/20260217154542-spec.md",
+        "impl_notes": "loops/004-session-reuse-v1-core-d/20260217161110-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/004-session-reuse-v1-core-d/20260217161346-review-001-feedback.md",
+            "response": "loops/004-session-reuse-v1-core-d/20260217162930-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/004-session-reuse-v1-core-d/20260217163256-review-002-feedback.md",
+            "response": "loops/004-session-reuse-v1-core-d/20260217164353-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/004-session-reuse-v1-core-d/20260217164623-review-003-feedback.md",
+            "response": "loops/004-session-reuse-v1-core-d/20260217170619-impl-response-003.md"
+          },
+          {
+            "iteration": 4,
+            "feedback": "loops/004-session-reuse-v1-core-d/20260217171449-review-004-feedback.md",
+            "response": "loops/004-session-reuse-v1-core-d/20260217174252-impl-response-004.md"
+          }
+        ],
+        "approval": "loops/004-session-reuse-v1-core-d/20260217174643-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-17T15:45:42.838250410Z",
       "completed_at": null
     }
   ],

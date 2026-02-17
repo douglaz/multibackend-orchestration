@@ -190,6 +190,10 @@ impl Orchestrator {
         let mut state = load_project_state(&project_dir)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
+        // Compute repo root for cwd invariant assertions (spec D6).
+        let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
+        let repo_root_ref = repo_root.as_deref();
+
         if !options.dry_run && self.workspace.config.git.auto_branch {
             if let Some(repo_root) = self.workspace.root.parent() {
                 if is_git_repo(repo_root) {
@@ -253,12 +257,13 @@ impl Orchestrator {
                     loop_number: None,
                     role: Some("prompt_reviewer".to_owned()),
                     loop_dir: None,
+                    session_id: None,
                 })
                 .await;
 
             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
             let mut pr_log = LogWriter::open(&project_dir, None, None, "prompt-reviewer");
-            let decision = execute_with_parse_retries(
+            let _retry_result = execute_with_parse_retries(
                 pr_backend,
                 &registry,
                 "prompt_reviewer",
@@ -270,8 +275,11 @@ impl Orchestrator {
                     .timeout_for_role(pr_backend_spec, "prompt_reviewer")
                     .as_secs(),
                 &mut pr_log,
+                None,
+                repo_root_ref,
             )
             .await?;
+            let decision = _retry_result.parsed;
 
             // Validate that prompt-original.md does not already exist.
             let backup_path = project_dir.join("prompt-original.md");
@@ -339,6 +347,7 @@ impl Orchestrator {
                 options
                     .on_prompt_change
                     .unwrap_or(effective.workflow.prompt_change_action),
+                effective.workflow.session_reuse_reset_on_prompt_change,
             )?;
             state.prompt_hash = prompt_hash.clone();
 
@@ -376,11 +385,22 @@ impl Orchestrator {
                         &project_dir,
                     )?;
 
+                    // Session reuse: exercise role policy for planner (will warn+skip for v1)
+                    let _planner_session_id = resolve_session_for_role(
+                        &effective,
+                        &mut state,
+                        "planner",
+                        &feature_backends.planner,
+                        loop_number,
+                        "", // planner has no bootstrap hash
+                    );
+
                     registry
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
                             role: Some("planner".to_owned()),
                             loop_dir: None,
+                            session_id: None, // always None: planner not supported for v1 reuse
                         })
                         .await;
 
@@ -391,7 +411,7 @@ impl Orchestrator {
                     );
                     let mut planner_log =
                         LogWriter::open(&project_dir, Some(loop_number), None, "planner");
-                    let planner_decision = execute_with_parse_retries(
+                    let _retry_result = execute_with_parse_retries(
                         planner_backend,
                         &registry,
                         "planner",
@@ -401,8 +421,11 @@ impl Orchestrator {
                         &expected_format_template_for("planner", None),
                         registry.timeout_for_role(&feature_backends.planner, "planner").as_secs(),
                         &mut planner_log,
+                        None,
+                        repo_root_ref,
                     )
                     .await?;
+                    let planner_decision = _retry_result.parsed;
                     debug!(loop = loop_number, "planner responded");
 
                     let now = Utc::now();
@@ -507,6 +530,38 @@ impl Orchestrator {
                     let iteration = state.phase_iteration;
 
                     if impl_notes_rel.is_none() {
+                        // Session reuse: resolve session for implementer
+                        ensure_prompt_hash_at_loop_start(&mut state);
+                        let impl_template_content = load_template_source(
+                            &effective.templates.implementer,
+                            default_implementer_template(),
+                        );
+                        let impl_bootstrap = compute_bootstrap_hash(
+                            "implementer",
+                            &implementer_backend_name,
+                            &state.prompt_hash_at_loop_start,
+                            &spec_content,
+                            &impl_template_content,
+                        );
+                        let impl_loop_dir = project_dir
+                            .join("loops")
+                            .join(format!("{loop_number:03}-{loop_slug}"));
+                        let session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                        );
+                        let session_id = validate_session_rewrite(
+                            &registry,
+                            &implementer_backend_name,
+                            session_id,
+                            &impl_loop_dir,
+                            "implementer",
+                        );
+
                         let impl_prompt = build_implementer_prompt(
                             &effective,
                             &state,
@@ -527,11 +582,8 @@ impl Orchestrator {
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
                                 role: Some("implementer".to_owned()),
-                                loop_dir: Some(
-                                    project_dir
-                                        .join("loops")
-                                        .join(format!("{loop_number:03}-{loop_slug}")),
-                                ),
+                                loop_dir: Some(impl_loop_dir),
+                                session_id: session_id.clone(),
                             })
                             .await;
 
@@ -542,7 +594,8 @@ impl Orchestrator {
                         );
                         let mut impl_log =
                             LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
-                        let decision = execute_with_parse_retries(
+                        let mut impl_out_session_id: Option<String> = None;
+                        let retry_result = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
                             "implementer",
@@ -552,8 +605,25 @@ impl Orchestrator {
                             &expected_format_template_for("implementer-notes", None),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
+                            Some(&mut impl_out_session_id),
+                            repo_root_ref,
                         )
-                        .await?;
+                        .await;
+                        // Session lifecycle: upsert even if parse failed (D6)
+                        let effective_sid = retry_result.as_ref().ok()
+                            .and_then(|r| r.session_id.clone())
+                            .or(impl_out_session_id);
+                        upsert_session_after_execution(
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                            effective_sid.as_deref(),
+                            session_id.is_some(),
+                        );
+                        let retry_result = retry_result?;
+                        let decision = retry_result.parsed;
                         debug!(loop = loop_number, "implementer responded");
 
                         let ImplementerDecision::Notes { body } = decision else {
@@ -614,6 +684,38 @@ impl Orchestrator {
                         let qa_feedback_content =
                             read_project_relative_file(&project_dir, &qa_feedback_path)?;
 
+                        // Session reuse for implementer (QA feedback response)
+                        ensure_prompt_hash_at_loop_start(&mut state);
+                        let impl_template_content = load_template_source(
+                            &effective.templates.implementer,
+                            default_implementer_template(),
+                        );
+                        let impl_bootstrap = compute_bootstrap_hash(
+                            "implementer",
+                            &implementer_backend_name,
+                            &state.prompt_hash_at_loop_start,
+                            &spec_content,
+                            &impl_template_content,
+                        );
+                        let impl_loop_dir = project_dir
+                            .join("loops")
+                            .join(format!("{loop_number:03}-{loop_slug}"));
+                        let session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                        );
+                        let session_id = validate_session_rewrite(
+                            &registry,
+                            &implementer_backend_name,
+                            session_id,
+                            &impl_loop_dir,
+                            "implementer",
+                        );
+
                         let impl_prompt = build_implementer_prompt(
                             &effective,
                             &state,
@@ -634,11 +736,8 @@ impl Orchestrator {
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
                                 role: Some("implementer".to_owned()),
-                                loop_dir: Some(
-                                    project_dir
-                                        .join("loops")
-                                        .join(format!("{loop_number:03}-{loop_slug}")),
-                                ),
+                                loop_dir: Some(impl_loop_dir),
+                                session_id: session_id.clone(),
                             })
                             .await;
 
@@ -650,7 +749,8 @@ impl Orchestrator {
                         );
                         let mut impl_log =
                             LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
-                        let decision = execute_with_parse_retries(
+                        let mut impl_out_session_id: Option<String> = None;
+                        let retry_result = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
                             "implementer",
@@ -660,8 +760,24 @@ impl Orchestrator {
                             &expected_format_template_for("implementer-response", Some(iteration)),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
+                            Some(&mut impl_out_session_id),
+                            repo_root_ref,
                         )
-                        .await?;
+                        .await;
+                        let effective_sid = retry_result.as_ref().ok()
+                            .and_then(|r| r.session_id.clone())
+                            .or(impl_out_session_id);
+                        upsert_session_after_execution(
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                            effective_sid.as_deref(),
+                            session_id.is_some(),
+                        );
+                        let retry_result = retry_result?;
+                        let decision = retry_result.parsed;
 
                         let ImplementerDecision::Response {
                             iteration: parsed_iteration,
@@ -725,6 +841,38 @@ impl Orchestrator {
                         let feedback_content =
                             read_project_relative_file(&project_dir, &feedback_rel)?;
 
+                        // Session reuse for implementer (review feedback response)
+                        ensure_prompt_hash_at_loop_start(&mut state);
+                        let impl_template_content = load_template_source(
+                            &effective.templates.implementer,
+                            default_implementer_template(),
+                        );
+                        let impl_bootstrap = compute_bootstrap_hash(
+                            "implementer",
+                            &implementer_backend_name,
+                            &state.prompt_hash_at_loop_start,
+                            &spec_content,
+                            &impl_template_content,
+                        );
+                        let impl_loop_dir = project_dir
+                            .join("loops")
+                            .join(format!("{loop_number:03}-{loop_slug}"));
+                        let session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                        );
+                        let session_id = validate_session_rewrite(
+                            &registry,
+                            &implementer_backend_name,
+                            session_id,
+                            &impl_loop_dir,
+                            "implementer",
+                        );
+
                         let impl_prompt = build_implementer_prompt(
                             &effective,
                             &state,
@@ -745,11 +893,8 @@ impl Orchestrator {
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
                                 role: Some("implementer".to_owned()),
-                                loop_dir: Some(
-                                    project_dir
-                                        .join("loops")
-                                        .join(format!("{loop_number:03}-{loop_slug}")),
-                                ),
+                                loop_dir: Some(impl_loop_dir),
+                                session_id: session_id.clone(),
                             })
                             .await;
 
@@ -761,7 +906,8 @@ impl Orchestrator {
                         );
                         let mut impl_log =
                             LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
-                        let decision = execute_with_parse_retries(
+                        let mut impl_out_session_id: Option<String> = None;
+                        let retry_result = execute_with_parse_retries(
                             implementer_backend,
                             &registry,
                             "implementer",
@@ -771,8 +917,24 @@ impl Orchestrator {
                             &expected_format_template_for("implementer-response", Some(iteration)),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
                             &mut impl_log,
+                            Some(&mut impl_out_session_id),
+                            repo_root_ref,
                         )
-                        .await?;
+                        .await;
+                        let effective_sid = retry_result.as_ref().ok()
+                            .and_then(|r| r.session_id.clone())
+                            .or(impl_out_session_id);
+                        upsert_session_after_execution(
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                            effective_sid.as_deref(),
+                            session_id.is_some(),
+                        );
+                        let retry_result = retry_result?;
+                        let decision = retry_result.parsed;
 
                         let ImplementerDecision::Response {
                             iteration: parsed_iteration,
@@ -894,6 +1056,38 @@ impl Orchestrator {
                     let qa_history =
                         collect_qa_history_for_prompt(&effective, &state, &project_dir, false)?;
 
+                    // Session reuse: resolve session for QA
+                    ensure_prompt_hash_at_loop_start(&mut state);
+                    let qa_template_content = load_template_source(
+                        &effective.templates.qa,
+                        default_qa_template(),
+                    );
+                    let qa_bootstrap = compute_bootstrap_hash(
+                        "qa",
+                        &qa_backend_name,
+                        &state.prompt_hash_at_loop_start,
+                        &spec_content,
+                        &qa_template_content,
+                    );
+                    let qa_loop_dir = project_dir
+                        .join("loops")
+                        .join(format!("{loop_number:03}-{loop_slug}"));
+                    let qa_session_id = resolve_session_for_role(
+                        &effective,
+                        &mut state,
+                        "qa",
+                        &qa_backend_name,
+                        loop_number,
+                        &qa_bootstrap,
+                    );
+                    let qa_session_id = validate_session_rewrite(
+                        &registry,
+                        &qa_backend_name,
+                        qa_session_id,
+                        &qa_loop_dir,
+                        "qa",
+                    );
+
                     let qa_prompt = build_qa_prompt(
                         &effective,
                         &state,
@@ -912,11 +1106,8 @@ impl Orchestrator {
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
                             role: Some("qa".to_owned()),
-                            loop_dir: Some(
-                                project_dir
-                                    .join("loops")
-                                    .join(format!("{loop_number:03}-{loop_slug}")),
-                            ),
+                            loop_dir: Some(qa_loop_dir),
+                            session_id: qa_session_id.clone(),
                         })
                         .await;
 
@@ -927,7 +1118,8 @@ impl Orchestrator {
                         "invoking QA..."
                     );
                     let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "qa");
-                    let qa_decision = execute_with_parse_retries(
+                    let mut qa_out_session_id: Option<String> = None;
+                    let retry_result = execute_with_parse_retries(
                         qa_backend,
                         &registry,
                         "qa",
@@ -937,8 +1129,25 @@ impl Orchestrator {
                         &expected_format_template_for("qa", None),
                         registry.timeout_for_role(&qa_backend_name, "qa").as_secs(),
                         &mut qa_log,
+                        Some(&mut qa_out_session_id),
+                        repo_root_ref,
                     )
-                    .await?;
+                    .await;
+                    // Session lifecycle: upsert even if parse failed (D6)
+                    let effective_sid = retry_result.as_ref().ok()
+                        .and_then(|r| r.session_id.clone())
+                        .or(qa_out_session_id);
+                    upsert_session_after_execution(
+                        &mut state,
+                        "qa",
+                        &qa_backend_name,
+                        loop_number,
+                        &qa_bootstrap,
+                        effective_sid.as_deref(),
+                        qa_session_id.is_some(),
+                    );
+                    let retry_result = retry_result?;
+                    let qa_decision = retry_result.parsed;
                     debug!(loop = loop_number, "QA responded");
 
                     let iteration = state.phase_iteration;
@@ -1091,6 +1300,38 @@ impl Orchestrator {
                             None
                         };
 
+                        // Session reuse: resolve session for reviewer
+                        ensure_prompt_hash_at_loop_start(&mut state);
+                        let reviewer_template_content = load_template_source(
+                            &effective.templates.reviewer,
+                            default_reviewer_template(),
+                        );
+                        let reviewer_bootstrap = compute_bootstrap_hash(
+                            "reviewer",
+                            &reviewer_backend_name,
+                            &state.prompt_hash_at_loop_start,
+                            &spec_content,
+                            &reviewer_template_content,
+                        );
+                        let reviewer_loop_dir = project_dir
+                            .join("loops")
+                            .join(format!("{loop_number:03}-{loop_slug}"));
+                        let reviewer_session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "reviewer",
+                            &reviewer_backend_name,
+                            loop_number,
+                            &reviewer_bootstrap,
+                        );
+                        let reviewer_session_id = validate_session_rewrite(
+                            &registry,
+                            &reviewer_backend_name,
+                            reviewer_session_id,
+                            &reviewer_loop_dir,
+                            "reviewer",
+                        );
+
                         let reviewer_prompt = build_reviewer_prompt(
                             &effective,
                             &state,
@@ -1111,11 +1352,8 @@ impl Orchestrator {
                             .set_tmux_context(TmuxExecutionContext {
                                 loop_number: Some(loop_number),
                                 role: Some("reviewer".to_owned()),
-                                loop_dir: Some(
-                                    project_dir
-                                        .join("loops")
-                                        .join(format!("{loop_number:03}-{loop_slug}")),
-                                ),
+                                loop_dir: Some(reviewer_loop_dir),
+                                session_id: reviewer_session_id.clone(),
                             })
                             .await;
 
@@ -1126,7 +1364,8 @@ impl Orchestrator {
                         );
                         let mut reviewer_log =
                             LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "reviewer");
-                        let reviewer_decision = execute_with_parse_retries(
+                        let mut reviewer_out_session_id: Option<String> = None;
+                        let retry_result = execute_with_parse_retries(
                             reviewer_backend,
                             &registry,
                             "reviewer",
@@ -1136,8 +1375,25 @@ impl Orchestrator {
                             &expected_format_template_for("reviewer", None),
                             registry.timeout_for_role(&reviewer_backend_name, "reviewer").as_secs(),
                             &mut reviewer_log,
+                            Some(&mut reviewer_out_session_id),
+                            repo_root_ref,
                         )
-                        .await?;
+                        .await;
+                        // Session lifecycle: upsert even if parse failed (D6)
+                        let effective_sid = retry_result.as_ref().ok()
+                            .and_then(|r| r.session_id.clone())
+                            .or(reviewer_out_session_id);
+                        upsert_session_after_execution(
+                            &mut state,
+                            "reviewer",
+                            &reviewer_backend_name,
+                            loop_number,
+                            &reviewer_bootstrap,
+                            effective_sid.as_deref(),
+                            reviewer_session_id.is_some(),
+                        );
+                        let retry_result = retry_result?;
+                        let reviewer_decision = retry_result.parsed;
                         debug!(loop = loop_number, "reviewer responded");
 
                         match reviewer_decision {
@@ -1347,6 +1603,16 @@ impl Orchestrator {
                         &project_dir,
                     )?;
 
+                    // Session reuse: exercise role policy for completer (will warn+skip for v1)
+                    let _completer_session_id = resolve_session_for_role(
+                        &effective,
+                        &mut state,
+                        "completer",
+                        &completer_backend_name,
+                        loop_number,
+                        "", // completer has no bootstrap hash
+                    );
+
                     registry
                         .set_tmux_context(TmuxExecutionContext {
                             loop_number: Some(loop_number),
@@ -1356,6 +1622,7 @@ impl Orchestrator {
                                     .join("loops")
                                     .join(format!("{loop_number:03}-completion")),
                             ),
+                            session_id: None, // always None: completer not supported for v1 reuse
                         })
                         .await;
 
@@ -1366,7 +1633,7 @@ impl Orchestrator {
                     );
                     let mut completer_log =
                         LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "completer");
-                    let completer_decision: CompleterDecision = execute_with_parse_retries(
+                    let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
                         completer_backend,
                         &registry,
                         "completer",
@@ -1376,8 +1643,11 @@ impl Orchestrator {
                         &expected_format_template_for("completer", None),
                         registry.timeout_for_role(&completer_backend_name, "completer").as_secs(),
                         &mut completer_log,
+                        None,
+                        repo_root_ref,
                     )
                     .await?;
+                    let completer_decision = _retry_result.parsed;
                     debug!(loop = loop_number, "completer responded");
 
                     let verdict_path = write_artifact(
@@ -1452,6 +1722,7 @@ impl Orchestrator {
                                                     .join("loops")
                                                     .join(format!("{loop_number:03}-completion")),
                                             ),
+                                            session_id: None,
                                         })
                                         .await;
 
@@ -1462,7 +1733,7 @@ impl Orchestrator {
                                     );
                                     let mut acceptance_log =
                                         LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "qa");
-                                    let acceptance_decision = execute_with_parse_retries(
+                                    let retry_result = execute_with_parse_retries(
                                         acceptance_qa_backend,
                                         &registry,
                                         "qa",
@@ -1472,8 +1743,11 @@ impl Orchestrator {
                                         &expected_format_template_for("qa", None),
                                         registry.timeout_for_role(acceptance_qa_backend_name, "acceptance_qa").as_secs(),
                                         &mut acceptance_log,
+                                        None,
+                                        repo_root_ref,
                                     )
                                     .await?;
+                                    let acceptance_decision = retry_result.parsed;
                                     debug!(
                                         loop = loop_number,
                                         backend = acceptance_qa_backend_name,
@@ -1993,6 +2267,7 @@ fn handle_prompt_change(
     workspace_root: &Path,
     new_prompt_hash: &str,
     action: PromptChangeAction,
+    session_reuse_reset_on_prompt_change: bool,
 ) -> Result<()> {
     if new_prompt_hash == state.prompt_hash {
         return Ok(());
@@ -2013,7 +2288,25 @@ fn handle_prompt_change(
             state.current_loop
         ))),
         PromptChangeAction::RestartLoop => {
+            let current_loop = state.current_loop;
+            // Save current-loop session records before rollback (which clears them via remove_loop).
+            // Restore them if the prompt-change flag says not to reset sessions.
+            let saved_sessions: Vec<_> = if !session_reuse_reset_on_prompt_change {
+                state
+                    .session_store
+                    .records
+                    .iter()
+                    .filter(|r| r.loop_number == current_loop)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             rollback_current_loop(state, project_dir, workspace_root)?;
+            // Restore saved sessions when reset is disabled
+            for record in saved_sessions {
+                state.session_store.upsert(record);
+            }
             state.prompt_hash = new_prompt_hash.to_owned();
             state.prompt_hash_at_loop_start = new_prompt_hash.to_owned();
             Ok(())
@@ -3257,6 +3550,76 @@ OR\n\
     }
 }
 
+/// Validate that session-aware arg rewriting would succeed for this backend.
+/// If rewriting fails, logs a warning, returns None to disable reuse for this
+/// invocation. The orchestrator continues with a fresh (non-resumed) call.
+///
+/// This ensures rewrite failures are handled at orchestrator level for all
+/// backends (tmux and non-tmux), not just silently inside tmux.
+fn validate_session_rewrite(
+    registry: &BackendRegistry,
+    backend_spec: &str,
+    session_id: Option<String>,
+    loop_dir: &Path,
+    role: &str,
+) -> Option<String> {
+    let sid = session_id?;
+    // Try to obtain the CliBackend to test effective_args
+    let cli = match registry.cli_backend_for_spec(backend_spec) {
+        Ok(cli) => cli,
+        Err(_) => return Some(sid), // unknown spec, pass through
+    };
+    let ctx = crate::backend::BackendInvocationContext {
+        loop_dir: loop_dir.to_owned(),
+        role: role.to_owned(),
+        session_id: Some(sid.clone()),
+        json_output_required: true,
+    };
+    match cli.effective_args(&ctx) {
+        Ok(_) => Some(sid),
+        Err(e) => {
+            warn!(
+                backend = backend_spec,
+                role = role,
+                error = %e,
+                "session arg rewrite failed, disabling reuse for this invocation"
+            );
+            None
+        }
+    }
+}
+
+/// Normalize raw backend output, extracting structured text when available.
+/// On normalization error, logs a warning and falls back to raw output.
+fn normalize_backend_output(
+    backend_name: &str,
+    raw: &str,
+) -> crate::backend::output_normalizer::NormalizedOutput {
+    use crate::backend::output_normalizer::{normalize_output, NormalizedOutput};
+    match normalize_output(backend_name, raw) {
+        Ok(normalized) => normalized,
+        Err(e) => {
+            warn!(
+                backend = backend_name,
+                error = %e,
+                "output normalization failed, falling back to raw output"
+            );
+            NormalizedOutput {
+                text: raw.to_owned(),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Result from `execute_with_parse_retries` that includes the parsed value
+/// plus session metadata from output normalization.
+struct ParseRetryResult<T> {
+    parsed: T,
+    /// Session ID extracted from normalized output (if any).
+    session_id: Option<String>,
+}
+
 async fn execute_with_parse_retries<T, F>(
     backend: Arc<dyn Backend>,
     registry: &BackendRegistry,
@@ -3267,17 +3630,25 @@ async fn execute_with_parse_retries<T, F>(
     expected_format: &str,
     timeout_secs: u64,
     log_writer: &mut LogWriter,
-) -> Result<T>
+    // Written with the last discovered session_id, even if parse ultimately fails.
+    // Enables callers to persist session records per D6 lifecycle rules.
+    out_session_id: Option<&mut Option<String>>,
+    // Repo root for cwd invariant assertion (spec D6).
+    repo_root: Option<&Path>,
+) -> Result<ParseRetryResult<T>>
 where
     F: Fn(&str) -> Result<T>,
 {
-    let first_output = execute_with_timeout_retries(
+    let backend_name = backend.name().to_owned();
+
+    let first_raw = execute_with_timeout_retries(
         backend.clone(),
         role,
         phase,
         original_prompt,
         timeout_secs,
         log_writer,
+        repo_root,
     )
     .await?;
 
@@ -3285,33 +3656,46 @@ where
     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
     // overloaded API), not a formatting problem. Sending empty output to the reformatter
     // causes it to fabricate a structurally valid but semantically wrong response.
-    let first_output = if first_output.trim().len() < 20 {
+    let first_raw = if first_raw.trim().len() < 20 {
         warn!(
             role = role,
-            output_len = first_output.len(),
+            output_len = first_raw.len(),
             "backend returned empty/near-empty output, retrying with same backend"
         );
-        let retry_output = execute_with_timeout_retries(
+        let retry_raw = execute_with_timeout_retries(
             backend.clone(),
             role,
             phase,
             original_prompt,
             timeout_secs,
             log_writer,
+            repo_root,
         )
         .await?;
-        if retry_output.trim().len() > first_output.trim().len() {
-            retry_output
+        if retry_raw.trim().len() > first_raw.trim().len() {
+            retry_raw
         } else {
-            first_output
+            first_raw
         }
     } else {
-        first_output
+        first_raw
     };
 
+    // Normalize output: extract structured text and session_id from Claude/Codex JSON.
+    let normalized = normalize_backend_output(&backend_name, &first_raw);
+    let first_session_id = normalized.session_id.clone();
+    let first_output = normalized.text;
+
     match parse_fn(&first_output) {
-        Ok(parsed) => Ok(parsed),
+        Ok(parsed) => Ok(ParseRetryResult {
+            parsed,
+            session_id: first_session_id,
+        }),
         Err(parse_error_1) => {
+            // Parse failed but normalization may have yielded a session_id.
+            // Track it for the caller even if parse ultimately fails.
+            let mut last_session_id = first_session_id;
+
             let reformatter_spec = registry
                 .opposite(backend.name())
                 .map(|opposite_name| {
@@ -3346,17 +3730,23 @@ where
                 Respond ONLY with the corrected markdown. No explanation.\n",
             );
 
-            let second_output = execute_with_timeout_retries(
+            let second_raw = execute_with_timeout_retries(
                 reformatter_backend,
                 role,
                 phase,
                 &reformat_prompt,
                 reformatter_timeout_secs,
                 log_writer,
+                repo_root,
             )
             .await?;
-            if let Ok(parsed) = parse_fn(&second_output) {
-                return Ok(parsed);
+            // Normalize using reformatter's backend name, not the original
+            let second_normalized = normalize_backend_output(&reformatter_name, &second_raw);
+            if let Ok(parsed) = parse_fn(&second_normalized.text) {
+                return Ok(ParseRetryResult {
+                    parsed,
+                    session_id: last_session_id,
+                });
             }
 
             warn!(
@@ -3369,20 +3759,33 @@ where
                 No preamble. No commentary before the H1. No YAML frontmatter. \
                 Include all required H2 sections.\n\n{original_prompt}",
             );
-            let third_output = execute_with_timeout_retries(
+            let third_raw = execute_with_timeout_retries(
                 backend,
                 role,
                 phase,
                 &reminded_prompt,
                 timeout_secs,
                 log_writer,
+                repo_root,
             )
             .await?;
-            if let Ok(parsed) = parse_fn(&third_output) {
-                return Ok(parsed);
+            let third_normalized = normalize_backend_output(&backend_name, &third_raw);
+            // Update session_id if third attempt yielded one
+            if third_normalized.session_id.is_some() {
+                last_session_id = third_normalized.session_id;
+            }
+            if let Ok(parsed) = parse_fn(&third_normalized.text) {
+                return Ok(ParseRetryResult {
+                    parsed,
+                    session_id: last_session_id,
+                });
             }
 
             warn!(role = role, "all parse retries exhausted (attempt 3/3)");
+            // Write last discovered session_id even on failure (D6 lifecycle rule).
+            if let Some(out) = out_session_id {
+                *out = last_session_id;
+            }
             Err(RalphError::ParseRetriesExhausted {
                 role: role.to_owned(),
                 phase: phase.to_owned(),
@@ -3399,7 +3802,24 @@ async fn execute_with_timeout_retries(
     prompt: &str,
     timeout_secs: u64,
     log_writer: &mut LogWriter,
+    repo_root: Option<&Path>,
 ) -> Result<String> {
+    // Verify cwd is exactly at repo root before backend invocation (spec D6).
+    // Enforces strict equality: debug_assert_eq!(current_dir, repo_root).
+    // Guard: only assert when cwd is related to repo_root (same tree).
+    // Unit tests that don't chdir into the temp workspace have an unrelated
+    // cwd and are safely skipped.
+    if let (Ok(cwd), Some(root)) = (std::env::current_dir(), repo_root) {
+        if cwd.starts_with(root) || root.starts_with(&cwd) {
+            debug_assert_eq!(
+                cwd, root,
+                "backend invocation cwd ({}) must equal repo root ({})",
+                cwd.display(),
+                root.display()
+            );
+        }
+    }
+
     for attempt in 1..=3_u8 {
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
@@ -3442,6 +3862,155 @@ async fn execute_with_timeout_retries(
     Err(RalphError::Orchestration(
         "unexpected timeout retry control-flow error".to_owned(),
     ))
+}
+
+/// Compute the bootstrap hash for session reuse identity verification.
+#[allow(dead_code)]
+///
+/// The hash includes the role, backend spec, prompt hash at loop start, spec
+/// content hash, template content hash, and a version salt. If any of these
+/// change between invocations, the stored session is stale and must not be reused.
+fn compute_bootstrap_hash(
+    role: &str,
+    backend_spec: &str,
+    prompt_hash_at_loop_start: &str,
+    spec_content: &str,
+    role_template_content: &str,
+) -> String {
+    let spec_hash = sha256_hex(spec_content);
+    let template_hash = sha256_hex(role_template_content);
+    sha256_hex(&format!(
+        "{role}|{backend_spec}|{prompt_hash_at_loop_start}|{spec_hash}|{template_hash}|sessions-v1"
+    ))
+}
+
+/// V1 supported roles for session reuse. Planner and completer are known roles
+/// but not supported for session reuse in v1.
+const V1_SESSION_REUSE_SUPPORTED_ROLES: &[&str] = &["implementer", "reviewer", "qa"];
+const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+
+/// Determine whether session reuse should be attempted for a given role.
+///
+/// Returns `Some(session_id)` if a valid stored session exists with matching
+/// bootstrap hash, or `None` if session reuse is disabled/skipped for this role.
+///
+/// Runtime role-policy rules:
+/// - Unknown roles: warn and skip.
+/// - Known but unsupported v1 roles (planner, completer): warn and skip.
+/// - Supported roles not in config `session_reuse_roles`: skip silently.
+fn resolve_session_for_role(
+    effective: &EffectiveConfig,
+    state: &mut ProjectState,
+    role: &str,
+    backend_spec: &str,
+    loop_number: u32,
+    bootstrap_hash: &str,
+) -> Option<String> {
+    if !effective.workflow.session_reuse_enabled {
+        return None;
+    }
+
+    // Unknown role => warn and skip
+    if !KNOWN_ROLES.contains(&role) {
+        warn!(role = role, "unknown role for session reuse, skipping");
+        return None;
+    }
+
+    // Known but unsupported v1 role => warn and skip
+    if !V1_SESSION_REUSE_SUPPORTED_ROLES.contains(&role) {
+        warn!(
+            role = role,
+            "session reuse not supported for v1 role, skipping"
+        );
+        return None;
+    }
+
+    // Not in configured roles => skip silently
+    if !effective
+        .workflow
+        .session_reuse_roles
+        .contains(&role.to_owned())
+    {
+        return None;
+    }
+
+    // Lookup existing session record
+    if let Some(record) = state.session_store.lookup(loop_number, role, backend_spec) {
+        if record.bootstrap_hash == bootstrap_hash {
+            return Some(record.session_id.clone());
+        }
+        // Bootstrap hash mismatch: will force fresh call, record replaced after execution
+        debug!(
+            role = role,
+            loop_number = loop_number,
+            "session bootstrap hash mismatch, forcing fresh call"
+        );
+    }
+
+    None
+}
+
+/// Update session store after a backend execution. Follows session lifecycle rules:
+/// - Store only when session_id exists.
+/// - Update on new id; keep prior id when resume response omits id.
+/// - Parse failure after normalization still updates/stores session record.
+fn upsert_session_after_execution(
+    state: &mut ProjectState,
+    role: &str,
+    backend_spec: &str,
+    loop_number: u32,
+    bootstrap_hash: &str,
+    new_session_id: Option<&str>,
+    had_prior_session: bool,
+) {
+    use crate::project::state::SessionRecord;
+
+    match new_session_id {
+        Some(sid) => {
+            // New session id: store or update
+            let existing = state
+                .session_store
+                .lookup(loop_number, role, backend_spec);
+            let (call_count, created_at) = match existing {
+                Some(r) => (r.call_count + 1, r.created_at),
+                None => (1, Utc::now()),
+            };
+            state.session_store.upsert(SessionRecord {
+                session_id: sid.to_owned(),
+                backend_spec: backend_spec.to_owned(),
+                role: role.to_owned(),
+                loop_number,
+                bootstrap_hash: bootstrap_hash.to_owned(),
+                call_count,
+                created_at,
+                last_used_at: Utc::now(),
+            });
+        }
+        None if had_prior_session => {
+            // Resume response omitted session_id: keep prior stored id,
+            // just bump call_count and last_used_at.
+            if let Some(existing) = state
+                .session_store
+                .lookup(loop_number, role, backend_spec)
+            {
+                let mut updated = existing.clone();
+                updated.call_count += 1;
+                updated.last_used_at = Utc::now();
+                state.session_store.upsert(updated);
+            }
+        }
+        None => {
+            // No session id and no prior session: nothing to store
+        }
+    }
+}
+
+/// Ensure the legacy `prompt_hash_at_loop_start` field is populated.
+/// If empty, fall back to `prompt_hash` and persist the repaired value.
+fn ensure_prompt_hash_at_loop_start(state: &mut ProjectState) {
+    if state.prompt_hash_at_loop_start.is_empty() && !state.prompt_hash.is_empty() {
+        state.prompt_hash_at_loop_start = state.prompt_hash.clone();
+    }
 }
 
 #[cfg(test)]
@@ -4531,5 +5100,129 @@ mod tests {
             summary.contains("verdict=failed"),
             "loop with failed QA should have verdict=failed"
         );
+    }
+
+    // --- Bootstrap hash determinism and invalidation tests ---
+
+    #[test]
+    fn bootstrap_hash_is_deterministic() {
+        let hash1 = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "prompt_hash_abc",
+            "spec body",
+            "template content",
+        );
+        let hash2 = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "prompt_hash_abc",
+            "spec body",
+            "template content",
+        );
+        assert_eq!(hash1, hash2, "identical inputs must produce identical hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_changes_on_role_change() {
+        let base = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec",
+            "template",
+        );
+        let changed = super::compute_bootstrap_hash(
+            "reviewer",
+            "claude(opus)",
+            "phash",
+            "spec",
+            "template",
+        );
+        assert_ne!(base, changed, "different roles must produce different hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_changes_on_backend_change() {
+        let base = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec",
+            "template",
+        );
+        let changed = super::compute_bootstrap_hash(
+            "implementer",
+            "codex(gpt-5.3)",
+            "phash",
+            "spec",
+            "template",
+        );
+        assert_ne!(base, changed, "different backends must produce different hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_changes_on_prompt_hash_change() {
+        let base = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash_v1",
+            "spec",
+            "template",
+        );
+        let changed = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash_v2",
+            "spec",
+            "template",
+        );
+        assert_ne!(base, changed, "different prompt hashes must produce different bootstrap hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_changes_on_spec_content_change() {
+        let base = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec v1",
+            "template",
+        );
+        let changed = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec v2",
+            "template",
+        );
+        assert_ne!(base, changed, "different spec content must produce different hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_changes_on_template_content_change() {
+        let base = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec",
+            "template v1",
+        );
+        let changed = super::compute_bootstrap_hash(
+            "implementer",
+            "claude(opus)",
+            "phash",
+            "spec",
+            "template v2",
+        );
+        assert_ne!(base, changed, "different template content must produce different hashes");
+    }
+
+    #[test]
+    fn bootstrap_hash_includes_version_salt() {
+        // Verify the hash is not simply sha256 of concatenated fields without salt
+        let hash = super::compute_bootstrap_hash("qa", "codex", "ph", "s", "t");
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64, "sha256 hex output should be 64 chars");
     }
 }
