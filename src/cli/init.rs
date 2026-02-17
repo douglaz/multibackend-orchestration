@@ -199,6 +199,7 @@ fn create_workspace_from_actions(root: &Path, actions: &[InitAction]) -> Result<
 }
 
 pub(crate) fn create_workspace(root: &Path) -> Result<Workspace> {
+    validate_target(root)?;
     let actions = plan_actions(root);
     create_workspace_from_actions(root, &actions)
 }
