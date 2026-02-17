@@ -286,20 +286,54 @@ impl CliBackend {
         self.timeout
     }
 
-    /// Rewrite CLI args for session resume when a session_id is provided.
-    /// Returns unchanged args when no session is active.
+    /// Rewrite CLI args for session resume and/or JSON output.
+    /// When a session_id is provided, adds resume flags and --output-format json.
+    /// When json_output_required is true but no session_id, adds only JSON output flags
+    /// so the normalizer can extract a session_id from the first invocation.
     pub fn effective_args(&self, ctx: &BackendInvocationContext) -> Result<Vec<String>> {
-        let session_id = match &ctx.session_id {
-            Some(id) => id,
-            None => return Ok(self.args.clone()),
-        };
+        match &ctx.session_id {
+            Some(id) => match self.name.as_str() {
+                n if n.starts_with("claude") || n == "claude" => {
+                    self.effective_args_claude(id)
+                }
+                n if n.starts_with("codex") || n == "codex" => {
+                    self.effective_args_codex(id)
+                }
+                _ => Ok(self.args.clone()),
+            },
+            None if ctx.json_output_required => {
+                self.ensure_json_output_args()
+            }
+            None => Ok(self.args.clone()),
+        }
+    }
 
+    /// Add JSON output flags without session resume args.
+    /// For Claude: adds --output-format json (keeps -p).
+    /// For Codex: adds --json.
+    fn ensure_json_output_args(&self) -> Result<Vec<String>> {
         match self.name.as_str() {
             n if n.starts_with("claude") || n == "claude" => {
-                self.effective_args_claude(session_id)
+                let mut args = self.args.clone();
+                // Only add if not already present
+                if !args.iter().any(|a| a == "--output-format" || a.starts_with("--output-format=")) {
+                    args.push("--output-format".to_owned());
+                    args.push("json".to_owned());
+                }
+                Ok(args)
             }
             n if n.starts_with("codex") || n == "codex" => {
-                self.effective_args_codex(session_id)
+                let mut args = self.args.clone();
+                if !args.contains(&"--json".to_owned()) {
+                    // Insert --json before trailing "-" if present
+                    if args.last().map(|s| s.as_str()) == Some("-") {
+                        let pos = args.len() - 1;
+                        args.insert(pos, "--json".to_owned());
+                    } else {
+                        args.push("--json".to_owned());
+                    }
+                }
+                Ok(args)
             }
             _ => Ok(self.args.clone()),
         }
@@ -453,13 +487,13 @@ impl CliBackend {
         prompt: &str,
         mut log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
-        // Compute effective args: if an invocation context with a session_id is set,
-        // use effective_args() for session-aware arg rewriting. On failure, fall back
-        // to base args (the orchestrator already logged the warning).
+        // Compute effective args: if an invocation context is set, use
+        // effective_args() for session-aware arg rewriting and/or JSON output
+        // flags. On failure, fall back to base args.
         let effective_args = {
             let ctx_opt = self.invocation_ctx.get().await;
             match ctx_opt {
-                Some(ref ctx) if ctx.session_id.is_some() => {
+                Some(ref ctx) => {
                     match self.effective_args(ctx) {
                         Ok(args) => args,
                         Err(e) => {
@@ -472,7 +506,7 @@ impl CliBackend {
                         }
                     }
                 }
-                _ => self.args.clone(),
+                None => self.args.clone(),
             }
         };
 
@@ -726,11 +760,12 @@ impl BackendRegistry {
     /// invocation. Also propagates session_id to the shared invocation context
     /// so non-tmux CliBackend instances can perform session-aware arg rewriting.
     pub async fn set_tmux_context(&self, ctx: TmuxExecutionContext) {
-        // Propagate session info to the shared invocation context for non-tmux backends.
-        let invocation = ctx.session_id.as_ref().map(|sid| BackendInvocationContext {
+        // Always propagate invocation context so that json_output_required is
+        // honoured even on first invocations without a session_id.
+        let invocation = Some(BackendInvocationContext {
             loop_dir: ctx.loop_dir.clone().unwrap_or_default(),
             role: ctx.role.clone().unwrap_or_default(),
-            session_id: Some(sid.clone()),
+            session_id: ctx.session_id.clone(),
             json_output_required: true,
         });
         self.invocation_context.set(invocation).await;
@@ -1189,7 +1224,7 @@ sleep 30
     }
 
     #[test]
-    fn effective_args_no_session_returns_unchanged() {
+    fn effective_args_no_session_adds_json_output() {
         let backend = CliBackend::new(
             "claude",
             "claude".to_owned(),
@@ -1197,7 +1232,26 @@ sleep 30
             Duration::from_secs(10),
             BTreeMap::new(),
         );
-        let ctx = make_invocation_ctx(None);
+        let ctx = make_invocation_ctx(None); // json_output_required = true
+        let args = backend.effective_args(&ctx).unwrap();
+        assert_eq!(args, vec!["-p", "--flag", "--output-format", "json"]);
+    }
+
+    #[test]
+    fn effective_args_no_session_no_json_returns_unchanged() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec!["-p".to_owned(), "--flag".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = super::BackendInvocationContext {
+            loop_dir: std::path::PathBuf::from("/tmp/loop"),
+            role: "implementer".to_owned(),
+            session_id: None,
+            json_output_required: false,
+        };
         let args = backend.effective_args(&ctx).unwrap();
         assert_eq!(args, vec!["-p", "--flag"]);
     }

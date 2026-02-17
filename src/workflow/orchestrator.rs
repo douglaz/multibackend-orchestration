@@ -579,7 +579,7 @@ impl Orchestrator {
                             None,
                             None,
                             &project_dir,
-                            false,
+                            session_id.is_some(),
                         )?;
 
                         registry
@@ -735,7 +735,7 @@ impl Orchestrator {
                             Some(iteration),
                             Some(&qa_feedback_content),
                             &project_dir,
-                            false,
+                            session_id.is_some(),
                         )?;
 
                         registry
@@ -894,7 +894,7 @@ impl Orchestrator {
                             Some(iteration),
                             Some(&feedback_content),
                             &project_dir,
-                            false,
+                            session_id.is_some(),
                         )?;
 
                         registry
@@ -1063,10 +1063,9 @@ impl Orchestrator {
                     let impl_notes_content =
                         read_project_relative_file(&project_dir, &impl_notes_rel)?;
                     let git_diff = current_git_diff(&self.workspace.root)?;
-                    let qa_history =
-                        collect_qa_history_for_prompt(&effective, &state, &project_dir, false)?;
 
-                    // Session reuse: resolve session for QA
+                    // Session reuse: resolve session for QA (before history collection
+                    // so we can pass actual session-reuse state to the history builder)
                     ensure_prompt_hash_at_loop_start(&mut state);
                     let qa_template_content = load_template_source(
                         &effective.templates.qa,
@@ -1097,6 +1096,9 @@ impl Orchestrator {
                         &qa_loop_dir,
                         "qa",
                     );
+
+                    let qa_history =
+                        collect_qa_history_for_prompt(&effective, &state, &project_dir, qa_session_id.is_some())?;
 
                     let qa_prompt = build_qa_prompt(
                         &effective,
@@ -1357,7 +1359,7 @@ impl Orchestrator {
                             impl_response_content.as_deref(),
                             &git_diff,
                             &project_dir,
-                            false,
+                            reviewer_session_id.is_some(),
                         )?;
 
                         registry

@@ -2,7 +2,6 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::RollbackArgs;
-use crate::config::resolve_effective_config;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::is_git_repo;
@@ -130,16 +129,14 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     }
 
     // For the target loop: clear sessions when session_reuse_reset_on_rollback is true.
+    // Read config values directly to avoid resolve_effective_config which validates
+    // backend specs — rollback must not fail on unrelated backend-config errors.
     if args.loop_number > 0 {
         let project_config = load_project_config_if_exists(&project_dir)?;
-        let effective = resolve_effective_config(
-            &workspace.root,
-            &project_dir,
-            workspace.config.clone(),
-            project_config,
-            Default::default(),
-        )?;
-        if effective.workflow.session_reuse_reset_on_rollback {
+        let reset_on_rollback = project_config
+            .and_then(|p| p.workflow.session_reuse_reset_on_rollback)
+            .unwrap_or(workspace.config.workflow.session_reuse_reset_on_rollback);
+        if reset_on_rollback {
             state.session_store.remove_for_loop(args.loop_number);
         }
     }
