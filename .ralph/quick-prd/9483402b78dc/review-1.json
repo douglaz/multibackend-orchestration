@@ -1,0 +1,21 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Clarity / Parsing behavior",
+      "feedback": "The spec is internally inconsistent about invalid cleaned-body handling. The technical approach says to validate both sections with `validate_output`, but the test plan expects empty/short cleaned-body to degrade to `None` without failing refinement. Define exact behavior: structured `body` validation stays strict; cleaned-body validation is best-effort and must not fail refinement/dispatch."
+    },
+    {
+      "area": "Edge case / Prompt contract",
+      "feedback": "`raw_idea` is formatted as `title\\n\\nbody` (`src/daemon/runtime.rs:432`, `src/daemon/runtime.rs:917`). The prompt changes do not explicitly require that `=== CLEANED BODY ===` contain only the issue body (not title). Without that, the model can return title+body and overwrite the GitHub issue body incorrectly. Add explicit body-only instruction and acceptance check."
+    },
+    {
+      "area": "Parser robustness",
+      "feedback": "The proposed split on `=== CLEANED BODY ===` is ambiguous if that token appears in normal content (e.g., code blocks). Specify line-delimiter parsing (`line.trim() == \"=== CLEANED BODY ===\"`) and deterministic marker handling, with a test where the token appears in content."
+    },
+    {
+      "area": "Testing coverage",
+      "feedback": "The plan only mentions `refine.rs` unit tests and a manual test, but this feature changes daemon runtime side effects. Add conformance coverage in `src/validate/tests_daemon.rs` to verify: `gh issue edit --body` receives cleaned body, `ralph auto --idea` and refined-prompt comments still use structured task description only, and missing cleaned-body section skips body edit."
+    }
+  ]
+}

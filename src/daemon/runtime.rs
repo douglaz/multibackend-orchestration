@@ -659,21 +659,21 @@ async fn dispatch_task(
     };
 
     // Refine the prompt if enabled, falling back to raw idea on failure.
-    let (idea, refined_title) = if config.refinement_enabled {
+    let (idea, refined_title, cleaned_body) = if config.refinement_enabled {
         match refine::refine_prompt(&raw_idea, &config.refinement_backend, &config.global_config)
             .await
         {
-            Ok(refined) => (refined.body, refined.title),
+            Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
             Err(err) => {
                 eprintln!(
                     "warning: refinement failed for task {}, using raw idea: {err}",
                     task.task_id
                 );
-                (raw_idea, None)
+                (raw_idea, None, None)
             }
         }
     } else {
-        (raw_idea, None)
+        (raw_idea, None, None)
     };
 
     // Persist refined_title best-effort (do not abort dispatch on failure).
@@ -710,6 +710,24 @@ async fn dispatch_task(
         {
             eprintln!(
                 "warning: failed to update issue title for {}: {err}",
+                task.task_id
+            );
+        }
+    }
+
+    // Update GitHub issue body with cleaned body (best-effort).
+    if let Some(ref cleaned_body) = cleaned_body {
+        let owner = task.owner.clone();
+        let repo = task.repo.clone();
+        let issue_number = task.issue_number;
+        let cleaned_body = cleaned_body.clone();
+        if let Err(err) = spawn_blocking_op(move || {
+            github::update_issue_body(&owner, &repo, issue_number, &cleaned_body)
+        })
+        .await
+        {
+            eprintln!(
+                "warning: failed to update issue body for {}: {err}",
                 task.task_id
             );
         }

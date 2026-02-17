@@ -204,6 +204,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: refinement_comment_failure_non_blocking,
         },
         ConformanceTest {
+            name: "daemon::refinement_cleaned_body_dispatched",
+            func: refinement_cleaned_body_dispatched,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_no_cleaned_body_skips_edit",
+            func: refinement_no_cleaned_body_skips_edit,
+        },
+        ConformanceTest {
+            name: "daemon::refinement_cleaned_body_failure_non_blocking",
+            func: refinement_cleaned_body_failure_non_blocking,
+        },
+        ConformanceTest {
             name: "daemon::refinement_strict_ordering",
             func: refinement_strict_ordering,
         },
@@ -4257,6 +4269,478 @@ exit 0
         // Child received the idea
         let idea = fs::read_to_string(&idea_log).expect("read idea log");
         assert_eq!(idea, raw_idea_text);
+    })
+}
+
+/// Test that a valid cleaned-body section updates the issue body while keeping
+/// dispatch/comment `body` behavior unchanged.
+fn refinement_cleaned_body_dispatched(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let refine_script = dh
+            .write_mock_script(
+                "mock_refine_cleaned_body_success.sh",
+                r#"#!/bin/sh
+cat > /dev/null
+printf 'TITLE: Dispatch cleaned issue body\n---\nSTRUCTURED_BODY_ONLY_TOKEN: refined implementation brief with acceptance details.\n=== CLEANED BODY ===\nCLEANED_BODY_ONLY_TOKEN: cleaned issue body text with grammar fixes and preserved structure.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let body_edit_log = dh.temp_dir.path().join("cleaned_body_edit.log");
+        let body_edit_log_str = body_edit_log.to_string_lossy().into_owned();
+        let comment_log = dh.temp_dir.path().join("cleaned_body_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit)
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{body_edit_log_str}" ; shift 2 ;;
+            --title) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"test","body":"test"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{comment_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+
+        let idea_log = dh.temp_dir.path().join("cleaned_body_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-206",
+            "pending",
+            206,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Original issue title\n\nOriginal issue body text.");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-206"),
+            "task should be dispatched, stderr:\n{stderr}"
+        );
+
+        assert!(body_edit_log.exists(), "expected issue --body edit call");
+        let body_edits = fs::read_to_string(&body_edit_log).expect("read body edit log");
+        assert!(
+            body_edits.contains("CLEANED_BODY_ONLY_TOKEN"),
+            "expected cleaned body in issue edit, got:\n{body_edits}"
+        );
+        assert!(
+            !body_edits.contains("STRUCTURED_BODY_ONLY_TOKEN"),
+            "issue edit body should use cleaned body only, got:\n{body_edits}"
+        );
+
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert!(
+            idea.contains("STRUCTURED_BODY_ONLY_TOKEN"),
+            "--idea should receive structured body, got:\n{idea}"
+        );
+        assert!(
+            !idea.contains("CLEANED_BODY_ONLY_TOKEN"),
+            "--idea should not receive cleaned body, got:\n{idea}"
+        );
+
+        assert!(comment_log.exists(), "expected refined-prompt comment call");
+        let comments = fs::read_to_string(&comment_log).expect("read comment log");
+        assert!(
+            comments.contains("STRUCTURED_BODY_ONLY_TOKEN"),
+            "refined-prompt comment should include structured body, got:\n{comments}"
+        );
+        assert!(
+            !comments.contains("CLEANED_BODY_ONLY_TOKEN"),
+            "refined-prompt comment should exclude cleaned body, got:\n{comments}"
+        );
+    })
+}
+
+/// Test that two-section refinement output skips issue body edits.
+fn refinement_no_cleaned_body_skips_edit(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let refine_script = dh
+            .write_mock_script(
+                "mock_refine_no_cleaned_body.sh",
+                r#"#!/bin/sh
+cat > /dev/null
+printf 'TITLE: No cleaned body section\n---\nSTRUCTURED_ONLY_NO_CLEANED: refined dispatch body text for coding agent.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let body_edit_log = dh.temp_dir.path().join("no_cleaned_body_edit.log");
+        let body_edit_log_str = body_edit_log.to_string_lossy().into_owned();
+        let comment_log = dh.temp_dir.path().join("no_cleaned_body_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit)
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{body_edit_log_str}" ; shift 2 ;;
+            --title) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"test","body":"test"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) echo "$2" >> "{comment_log_str}" ; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+
+        let idea_log = dh.temp_dir.path().join("no_cleaned_body_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-207",
+            "pending",
+            207,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Issue title\n\nIssue body.");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("dispatched task acme-widgets-207"),
+            "task should be dispatched, stderr:\n{stderr}"
+        );
+
+        assert!(
+            !body_edit_log.exists(),
+            "issue --body edit should not be called without cleaned body section"
+        );
+
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert!(
+            idea.contains("STRUCTURED_ONLY_NO_CLEANED"),
+            "--idea should use structured body, got:\n{idea}"
+        );
+
+        assert!(comment_log.exists(), "expected refined-prompt comment call");
+        let comments = fs::read_to_string(&comment_log).expect("read comment log");
+        assert!(
+            comments.contains("STRUCTURED_ONLY_NO_CLEANED"),
+            "refined-prompt comment should include structured body, got:\n{comments}"
+        );
+    })
+}
+
+/// Test that issue-body update failure is non-blocking.
+fn refinement_cleaned_body_failure_non_blocking(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let refine_script = dh
+            .write_mock_script(
+                "mock_refine_cleaned_body_failure.sh",
+                r#"#!/bin/sh
+cat > /dev/null
+printf 'TITLE: Cleaned body failure non-blocking\n---\nSTRUCTURED_BODY_ON_FAILURE: structured body remains dispatch input.\n=== CLEANED BODY ===\nCLEANED_BODY_FAIL_TOKEN: this cleaned body update should fail but dispatch must continue.'
+exit 0
+"#,
+            )
+            .expect("write mock refine backend");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set claude command failed");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set claude args failed");
+
+        let body_edit_log = dh.temp_dir.path().join("cleaned_body_failure_edit.log");
+        let body_edit_log_str = body_edit_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      edit)
+        saw_body=0
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              saw_body=1
+              echo "$2" >> "{body_edit_log_str}"
+              shift 2
+              ;;
+            --title) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ "$saw_body" = "1" ]; then
+          echo "body update rejected" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      view)
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"test","body":"test"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+
+        let idea_log = dh.temp_dir.path().join("cleaned_body_failure_idea.log");
+        let idea_log_str = idea_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s' "$3" > "{idea_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let mut task = task_json(
+            "acme-widgets-208",
+            "pending",
+            208,
+            "acme",
+            "widgets",
+            None,
+            None,
+        );
+        task["raw_idea"] = json!("Issue title\n\nIssue body.");
+        write_tasks(&dh, vec![task]).expect("write_tasks failed");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        assert!(
+            body_edit_log.exists(),
+            "expected issue --body edit attempt before failure"
+        );
+        let body_edits = fs::read_to_string(&body_edit_log).expect("read body edit log");
+        assert!(
+            body_edits.contains("CLEANED_BODY_FAIL_TOKEN"),
+            "expected cleaned body update attempt, got:\n{body_edits}"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to update issue body"),
+            "expected non-blocking body update warning, stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("dispatched task acme-widgets-208"),
+            "dispatch should continue after body update failure, stderr:\n{stderr}"
+        );
+
+        let idea = fs::read_to_string(&idea_log).expect("read idea log");
+        assert!(
+            idea.contains("STRUCTURED_BODY_ON_FAILURE"),
+            "--idea should still use structured body, got:\n{idea}"
+        );
+        assert!(
+            !idea.contains("CLEANED_BODY_FAIL_TOKEN"),
+            "--idea should not switch to cleaned body, got:\n{idea}"
+        );
     })
 }
 

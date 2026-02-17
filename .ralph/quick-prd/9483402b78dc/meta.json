@@ -1,0 +1,17 @@
+{
+  "idea": "# Summary\n\nWhen the daemon refines a GitHub issue, it should update both the issue **title** and **body** with cleaned-up versions. Currently only the title is updated; the body remains untouched with original typos and unclear phrasing.\n\n# Requirements\n\n1. **Extend refinement backend output** to include two artifacts:\n   - Structured task description (existing: used for `ralph auto --idea` and posted as comment)\n   - Cleaned-up issue body (new: written back to GitHub issue)\n\n2. **Update refinement prompt** (`src/daemon/refine.rs`) to instruct the model to produce:\n   - Light editorial pass: fix typos, grammar, readability\n   - Preserve original intent, scope, and structure (bullets, headers, code blocks)\n   - Do NOT expand requirements or add new details\n\n3. **Parse both outputs** from backend response in refinement step\n\n4. **Write cleaned body back to GitHub** using `gh issue edit --body` (analogous to existing title update at `src/daemon/runtime.rs:633-649`)\n\n5. **Preserve existing behavior**:\n   - Structured task description still posted as `refined-prompt` comment\n   - Structured task description still passed to `ralph auto --idea`\n\n# Constraints\n\n- The cleaned body should be a **light edit** of the original, not a rewrite\n- Do NOT merge the structured task description into the issue body\n- Use existing GitHub update mechanism (`gh` CLI via `src/daemon/github.rs`)\n\n# Acceptance Criteria\n\n- [ ] Refinement prompt outputs both cleaned body and structured task description\n- [ ] Daemon parses both outputs from refinement response\n- [ ] Issue body updated via `gh issue edit --body` with cleaned version\n- [ ] Structured task description still posted as comment (existing behavior intact)\n- [ ] Structured task description still passed to `ralph auto --idea`\n- [ ] Manual test: create issue with typos → daemon refines it → issue body is cleaned up on GitHub",
+  "idea_hash": "9483402b78dc",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-16T23:29:26Z",
+  "completed_at": "2026-02-16T23:38:03Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 165.087473197,
+  "review_times_secs": [
+    131.896392808
+  ],
+  "revision_times_secs": [
+    219.96321306
+  ]
+}

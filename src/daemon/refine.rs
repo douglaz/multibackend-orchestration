@@ -10,25 +10,35 @@ Output format (required):
 TITLE: <concise title, max 80 chars>
 ---
 <refined task description>
+=== CLEANED BODY ===
+<cleaned issue body only>
 
 Include:
 - A concise summary of what needs to be done
 - Specific requirements and constraints
 - Acceptance criteria as a checklist
+- The cleaned-body section must be a light editorial pass of the original issue body
+- Preserve intent, scope, and structure (headers, bullets, code blocks)
+- Fix typos/grammar/readability only; do not add scope or merge with task description
+- The cleaned-body section must contain only issue body text, never the title
 
 Do NOT include meta-commentary. Output ONLY the required format.
+Delimiters must be exact and in the order shown above.
 
 --- ISSUE ---
 "#;
 
 /// Minimum length for refinement output to be considered valid.
 const MIN_OUTPUT_LENGTH: usize = 20;
+/// Minimum length for a cleaned body to be used (guards against truncated junk).
+const MIN_CLEANED_BODY_LENGTH: usize = 5;
 const MAX_TITLE_LENGTH: usize = 80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinedPrompt {
     pub title: Option<String>,
     pub body: String,
+    pub cleaned_body: Option<String>,
 }
 
 /// Build the refinement prompt by wrapping the raw idea with the system prompt.
@@ -67,6 +77,14 @@ fn validate_output(output: &str) -> Result<String> {
     Ok(trimmed)
 }
 
+fn validate_cleaned_body(output: &str) -> Option<String> {
+    let trimmed = output.trim().to_owned();
+    if trimmed.len() < MIN_CLEANED_BODY_LENGTH {
+        return None;
+    }
+    Some(trimmed)
+}
+
 /// Parse backend output into optional structured title + body.
 fn parse_refined_output(output: &str) -> Result<RefinedPrompt> {
     let lines: Vec<&str> = output.lines().collect();
@@ -94,18 +112,35 @@ fn parse_refined_output(output: &str) -> Result<RefinedPrompt> {
                 }
 
                 let delim_idx = first_idx + 1 + delim_rel_idx;
-                let body_raw = lines[delim_idx + 1..].join("\n");
+                let output_lines = &lines[delim_idx + 1..];
+                let cleaned_delim_idx = output_lines
+                    .iter()
+                    .position(|line| line.trim() == "=== CLEANED BODY ===");
+                let (body_raw, cleaned_body_raw) = if let Some(idx) = cleaned_delim_idx {
+                    (
+                        output_lines[..idx].join("\n"),
+                        Some(output_lines[idx + 1..].join("\n")),
+                    )
+                } else {
+                    (output_lines.join("\n"), None)
+                };
                 let body = validate_output(&body_raw)?;
+                let cleaned_body = cleaned_body_raw.as_deref().and_then(validate_cleaned_body);
                 return Ok(RefinedPrompt {
                     title: Some(title),
                     body,
+                    cleaned_body,
                 });
             }
         }
     }
 
     let body = validate_output(output)?;
-    Ok(RefinedPrompt { title: None, body })
+    Ok(RefinedPrompt {
+        title: None,
+        body,
+        cleaned_body: None,
+    })
 }
 
 /// Refine raw issue text into a structured ralph auto prompt.
@@ -142,6 +177,8 @@ mod tests {
         assert!(prompt.contains("prompt refinement assistant"));
         assert!(prompt.contains("TITLE: <concise title, max 80 chars>"));
         assert!(prompt.contains("\n---\n"));
+        assert!(prompt.contains("=== CLEANED BODY ==="));
+        assert!(prompt.contains("never the title"));
         assert!(prompt.contains("Acceptance criteria"));
         assert!(prompt.contains("--- ISSUE ---"));
     }
@@ -197,25 +234,105 @@ mod tests {
     }
 
     #[test]
-    fn parse_refined_output_structured_success() {
-        let input = "TITLE: Fix SSO login handling\n---\nImplement robust SSO login error handling and add regression coverage.";
+    fn parse_refined_output_three_section_success() {
+        let input = "TITLE: Fix SSO login handling\n---\nImplement robust SSO login error handling and add regression coverage.\n=== CLEANED BODY ===\nFix SSO login handling for users with clearer steps and corrected grammar.";
         let parsed = parse_refined_output(input).unwrap();
         assert_eq!(parsed.title, Some("Fix SSO login handling".to_owned()));
         assert_eq!(
             parsed.body,
             "Implement robust SSO login error handling and add regression coverage."
         );
+        assert_eq!(
+            parsed.cleaned_body,
+            Some(
+                "Fix SSO login handling for users with clearer steps and corrected grammar."
+                    .to_owned()
+            )
+        );
     }
 
     #[test]
-    fn parse_refined_output_missing_delimiter_falls_back() {
-        let input = "TITLE: This looks structured but has no delimiter line\nThis remains unstructured output content and should be preserved fully.";
+    fn parse_refined_output_no_cleaned_body_fallback() {
+        let input = "TITLE: This looks structured and has no cleaned body section\n---\nThis remains structured output content and should be preserved fully.";
         let parsed = parse_refined_output(input).unwrap();
-        assert_eq!(parsed.title, None);
+        assert_eq!(
+            parsed.title,
+            Some("This looks structured and has no cleaned body section".to_owned())
+        );
         assert_eq!(
             parsed.body,
-            "TITLE: This looks structured but has no delimiter line\nThis remains unstructured output content and should be preserved fully."
+            "This remains structured output content and should be preserved fully."
         );
+        assert_eq!(parsed.cleaned_body, None);
+    }
+
+    #[test]
+    fn parse_refined_output_empty_cleaned_body_degraded() {
+        let input = "TITLE: Keep validation strict\n---\nStructured body remains valid and long enough for strict checks.\n=== CLEANED BODY ===\n   ";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.body,
+            "Structured body remains valid and long enough for strict checks."
+        );
+        assert_eq!(parsed.cleaned_body, None);
+    }
+
+    #[test]
+    fn parse_refined_output_cleaned_body_preserves_structure() {
+        let input = "TITLE: Improve docs clarity\n---\nStructured implementation brief for coding agent with clear acceptance criteria.\n=== CLEANED BODY ===\n## Summary\n- Keep bullets\n- Keep headings\n\n```text\nexample block\n```";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.cleaned_body,
+            Some(
+                "## Summary\n- Keep bullets\n- Keep headings\n\n```text\nexample block\n```"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_delimiter_in_content_not_split() {
+        let input = "TITLE: Keep literal delimiter text\n---\nStructured body includes literal text like keep === CLEANED BODY === inline and should remain intact.";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.body,
+            "Structured body includes literal text like keep === CLEANED BODY === inline and should remain intact."
+        );
+        assert_eq!(parsed.cleaned_body, None);
+    }
+
+    #[test]
+    fn parse_refined_output_multi_delimiter_first_split_point() {
+        let input = "TITLE: Multiple cleaned delimiters\n---\nStructured body stays before first split marker and remains valid.\n=== CLEANED BODY ===\nFirst cleaned section.\n=== CLEANED BODY ===\nSecond marker remains content.";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.body,
+            "Structured body stays before first split marker and remains valid."
+        );
+        assert_eq!(
+            parsed.cleaned_body,
+            Some(
+                "First cleaned section.\n=== CLEANED BODY ===\nSecond marker remains content."
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_short_cleaned_body_accepted() {
+        let input = "TITLE: Fix typo in readme\n---\nCorrect the misspelling in the README file and verify formatting.\n=== CLEANED BODY ===\nFix typo";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.cleaned_body,
+            Some("Fix typo".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_truncated_cleaned_body_rejected() {
+        let input = "TITLE: Fix typo in readme\n---\nCorrect the misspelling in the README file and verify formatting.\n=== CLEANED BODY ===\nok";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(parsed.cleaned_body, None);
     }
 
     #[test]

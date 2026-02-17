@@ -307,6 +307,36 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
     Ok(())
 }
 
+/// Update the body of a GitHub issue.
+pub fn update_issue_body(owner: &str, repo: &str, issue_number: u32, body: &str) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "edit",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to run gh issue edit --body: {err}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue edit --body failed for {}#{}: {}",
+            full_repo,
+            issue_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Check whether a comment with the given marker already exists on the issue.
 pub fn comment_marker_exists(
     owner: &str,
