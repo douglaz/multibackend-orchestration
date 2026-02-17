@@ -60,7 +60,7 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = true
 prompt_review_backend = "codex(gpt-5.3-codex-xhigh)"
-qa_enabled = true
+qa_enabled = false
 max_qa_iterations = 3
 
 [templates]
