@@ -268,7 +268,9 @@ impl Orchestrator {
                 &registry,
                 "prompt_reviewer",
                 "prompt_review",
+                0,
                 &prompt_reviewer_prompt,
+                None,
                 parse_prompt_reviewer_output,
                 &expected_format_template_for("prompt_reviewer", None),
                 registry
@@ -416,7 +418,9 @@ impl Orchestrator {
                         &registry,
                         "planner",
                         "planning",
+                        loop_number,
                         &planner_prompt,
+                        None,
                         parse_planner_output,
                         &expected_format_template_for("planner", None),
                         registry.timeout_for_role(&feature_backends.planner, "planner").as_secs(),
@@ -600,7 +604,9 @@ impl Orchestrator {
                             &registry,
                             "implementer",
                             "implementing",
+                            loop_number,
                             &impl_prompt,
+                            session_id.as_deref(),
                             |raw| parse_implementer_output(raw, None),
                             &expected_format_template_for("implementer-notes", None),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
@@ -755,7 +761,9 @@ impl Orchestrator {
                             &registry,
                             "implementer",
                             "implementing",
+                            loop_number,
                             &impl_prompt,
+                            session_id.as_deref(),
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
@@ -912,7 +920,9 @@ impl Orchestrator {
                             &registry,
                             "implementer",
                             "implementing",
+                            loop_number,
                             &impl_prompt,
+                            session_id.as_deref(),
                             |raw| parse_implementer_output(raw, Some(iteration)),
                             &expected_format_template_for("implementer-response", Some(iteration)),
                             registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
@@ -1124,7 +1134,9 @@ impl Orchestrator {
                         &registry,
                         "qa",
                         "qa",
+                        loop_number,
                         &qa_prompt,
+                        qa_session_id.as_deref(),
                         parse_qa_output,
                         &expected_format_template_for("qa", None),
                         registry.timeout_for_role(&qa_backend_name, "qa").as_secs(),
@@ -1370,7 +1382,9 @@ impl Orchestrator {
                             &registry,
                             "reviewer",
                             "reviewing",
+                            loop_number,
                             &reviewer_prompt,
+                            reviewer_session_id.as_deref(),
                             parse_reviewer_output,
                             &expected_format_template_for("reviewer", None),
                             registry.timeout_for_role(&reviewer_backend_name, "reviewer").as_secs(),
@@ -1638,7 +1652,9 @@ impl Orchestrator {
                         &registry,
                         "completer",
                         "completing",
+                        loop_number,
                         &completer_prompt,
+                        None,
                         parse_completer_output,
                         &expected_format_template_for("completer", None),
                         registry.timeout_for_role(&completer_backend_name, "completer").as_secs(),
@@ -1738,7 +1754,9 @@ impl Orchestrator {
                                         &registry,
                                         "qa",
                                         "completing",
+                                        loop_number,
                                         &acceptance_prompt,
+                                        None,
                                         parse_qa_output,
                                         &expected_format_template_for("qa", None),
                                         registry.timeout_for_role(acceptance_qa_backend_name, "acceptance_qa").as_secs(),
@@ -3550,6 +3568,16 @@ OR\n\
     }
 }
 
+fn session_retry_correction_prompt(parse_error: &RalphError, expected_format: &str) -> String {
+    format!(
+        "Your previous response could not be parsed.\n\
+        Parse error: {parse_error}\n\n\
+        Reformat your previous answer to match this exact structure:\n\
+        {expected_format}\n\n\
+        Return only corrected markdown. Do not add commentary.",
+    )
+}
+
 /// Validate that session-aware arg rewriting would succeed for this backend.
 /// If rewriting fails, logs a warning, returns None to disable reuse for this
 /// invocation. The orchestrator continues with a fresh (non-resumed) call.
@@ -3612,6 +3640,115 @@ fn normalize_backend_output(
     }
 }
 
+fn log_parse_retry_token_metrics(
+    role: &str,
+    phase: &str,
+    loop_number: u32,
+    attempt: u8,
+    backend: &str,
+    session_reused: bool,
+    normalized: &crate::backend::output_normalizer::NormalizedOutput,
+) {
+    match (normalized.tokens_in, normalized.tokens_out, normalized.cached_in) {
+        (Some(tokens_in), Some(tokens_out), Some(cached_in)) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tokens_in,
+            tokens_out = tokens_out,
+            cached_in = cached_in,
+            "parse-retry normalization metrics"
+        ),
+        (Some(tokens_in), Some(tokens_out), None) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tokens_in,
+            tokens_out = tokens_out,
+            cached_in = tracing::field::Empty,
+            "parse-retry normalization metrics"
+        ),
+        (Some(tokens_in), None, Some(cached_in)) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tokens_in,
+            tokens_out = tracing::field::Empty,
+            cached_in = cached_in,
+            "parse-retry normalization metrics"
+        ),
+        (Some(tokens_in), None, None) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tokens_in,
+            tokens_out = tracing::field::Empty,
+            cached_in = tracing::field::Empty,
+            "parse-retry normalization metrics"
+        ),
+        (None, Some(tokens_out), Some(cached_in)) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tracing::field::Empty,
+            tokens_out = tokens_out,
+            cached_in = cached_in,
+            "parse-retry normalization metrics"
+        ),
+        (None, Some(tokens_out), None) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tracing::field::Empty,
+            tokens_out = tokens_out,
+            cached_in = tracing::field::Empty,
+            "parse-retry normalization metrics"
+        ),
+        (None, None, Some(cached_in)) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tracing::field::Empty,
+            tokens_out = tracing::field::Empty,
+            cached_in = cached_in,
+            "parse-retry normalization metrics"
+        ),
+        (None, None, None) => info!(
+            role = role,
+            phase = phase,
+            loop_number = loop_number,
+            attempt = attempt,
+            backend = backend,
+            session_reused = session_reused,
+            tokens_in = tracing::field::Empty,
+            tokens_out = tracing::field::Empty,
+            cached_in = tracing::field::Empty,
+            "parse-retry normalization metrics"
+        ),
+    }
+}
+
 /// Result from `execute_with_parse_retries` that includes the parsed value
 /// plus session metadata from output normalization.
 struct ParseRetryResult<T> {
@@ -3625,7 +3762,9 @@ async fn execute_with_parse_retries<T, F>(
     registry: &BackendRegistry,
     role: &str,
     phase: &str,
+    loop_number: u32,
     original_prompt: &str,
+    initial_session_id: Option<&str>,
     parse_fn: F,
     expected_format: &str,
     timeout_secs: u64,
@@ -3640,6 +3779,18 @@ where
     F: Fn(&str) -> Result<T>,
 {
     let backend_name = backend.name().to_owned();
+    let loop_dir_hint = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut attempts_executed: u8 = 0;
+    let mut active_session_id = validate_session_rewrite(
+        registry,
+        &backend_name,
+        initial_session_id.map(str::to_owned),
+        &loop_dir_hint,
+        role,
+    );
+    let mut last_session_id: Option<String> = None;
+
+    registry.override_session_id(active_session_id.clone()).await;
 
     let first_raw = execute_with_timeout_retries(
         backend.clone(),
@@ -3681,118 +3832,212 @@ where
         first_raw
     };
 
+    attempts_executed += 1;
     // Normalize output: extract structured text and session_id from Claude/Codex JSON.
     let normalized = normalize_backend_output(&backend_name, &first_raw);
     let first_session_id = normalized.session_id.clone();
+    log_parse_retry_token_metrics(
+        role,
+        phase,
+        loop_number,
+        attempts_executed,
+        &backend_name,
+        active_session_id.is_some(),
+        &normalized,
+    );
+    if first_session_id.is_some() {
+        active_session_id = first_session_id.clone();
+        last_session_id = first_session_id.clone();
+    }
     let first_output = normalized.text;
 
-    match parse_fn(&first_output) {
-        Ok(parsed) => Ok(ParseRetryResult {
-            parsed,
-            session_id: first_session_id,
-        }),
-        Err(parse_error_1) => {
-            // Parse failed but normalization may have yielded a session_id.
-            // Track it for the caller even if parse ultimately fails.
-            let mut last_session_id = first_session_id;
-
-            let reformatter_spec = registry
-                .opposite(backend.name())
-                .map(|opposite_name| {
-                    registry.resolve_backend_for_role(opposite_name, "reformatter")
-                })
-                .unwrap_or_else(|_| backend.name().to_owned());
-            let reformatter_backend = registry
-                .get(&reformatter_spec)
-                .unwrap_or_else(|| backend.clone());
-            let reformatter_name = reformatter_backend.name().to_owned();
-            let reformatter_timeout_secs = registry
-                .timeout_for_role(&reformatter_spec, "reformatter")
-                .as_secs();
-
-            warn!(
-                role = role,
-                backend = %reformatter_name,
-                error = %parse_error_1,
-                "parse failed, requesting reformat via {reformatter_name} (attempt 1/3)"
-            );
-            // Use ~~~ fences instead of --- to avoid triggering strip_frontmatter()
-            let reformat_prompt = format!(
-                "CRITICAL: Your previous response could not be parsed.\n\n\
-                Error: {parse_error_1}\n\n\
-                Your original response was:\n~~~\n{first_output}\n~~~\n\n\
-                Requirements:\n\
-                1. Your response MUST begin with the correct H1 heading as the VERY FIRST LINE\n\
-                2. No preamble, commentary, or explanation before the H1\n\
-                3. No YAML frontmatter (no lines starting with ---)\n\
-                4. Include ALL required H2 sections\n\n\
-                Required structure:\n{expected_format}\n\n\
-                Respond ONLY with the corrected markdown. No explanation.\n",
-            );
-
-            let second_raw = execute_with_timeout_retries(
-                reformatter_backend,
-                role,
-                phase,
-                &reformat_prompt,
-                reformatter_timeout_secs,
-                log_writer,
-                repo_root,
-            )
-            .await?;
-            // Normalize using reformatter's backend name, not the original
-            let second_normalized = normalize_backend_output(&reformatter_name, &second_raw);
-            if let Ok(parsed) = parse_fn(&second_normalized.text) {
-                return Ok(ParseRetryResult {
-                    parsed,
-                    session_id: last_session_id,
-                });
-            }
-
-            warn!(
-                role = role,
-                "reformat failed, retrying with format reminder (attempt 2/3)"
-            );
-            let reminded_prompt = format!(
-                "IMPORTANT: Format your response as parseable markdown. \
-                Your VERY FIRST LINE must be exactly:\n\n{expected_format}\n\n\
-                No preamble. No commentary before the H1. No YAML frontmatter. \
-                Include all required H2 sections.\n\n{original_prompt}",
-            );
-            let third_raw = execute_with_timeout_retries(
-                backend,
-                role,
-                phase,
-                &reminded_prompt,
-                timeout_secs,
-                log_writer,
-                repo_root,
-            )
-            .await?;
-            let third_normalized = normalize_backend_output(&backend_name, &third_raw);
-            // Update session_id if third attempt yielded one
-            if third_normalized.session_id.is_some() {
-                last_session_id = third_normalized.session_id;
-            }
-            if let Ok(parsed) = parse_fn(&third_normalized.text) {
-                return Ok(ParseRetryResult {
-                    parsed,
-                    session_id: last_session_id,
-                });
-            }
-
-            warn!(role = role, "all parse retries exhausted (attempt 3/3)");
-            // Write last discovered session_id even on failure (D6 lifecycle rule).
-            if let Some(out) = out_session_id {
-                *out = last_session_id;
-            }
-            Err(RalphError::ParseRetriesExhausted {
-                role: role.to_owned(),
-                phase: phase.to_owned(),
-                attempts: 3,
-            })
+    let parse_error_first = match parse_fn(&first_output) {
+        Ok(parsed) => {
+            return Ok(ParseRetryResult {
+                parsed,
+                session_id: first_session_id,
+            });
         }
+        Err(parse_error) => Some(parse_error),
+    };
+
+    let mut latest_unparsed_output = first_output;
+
+    // Attempt 2: in-session follow-up only when a session is active after attempt 1.
+    if active_session_id.is_some() {
+        let resume_session_id = validate_session_rewrite(
+            registry,
+            &backend_name,
+            active_session_id.clone(),
+            &loop_dir_hint,
+            role,
+        );
+        registry.override_session_id(resume_session_id.clone()).await;
+        if let Some(parse_error) = &parse_error_first {
+            warn!(
+                role = role,
+                backend = %backend_name,
+                error = %parse_error,
+                "parse failed, retrying with in-session correction prompt"
+            );
+        }
+        let correction_prompt = session_retry_correction_prompt(
+            parse_error_first
+                .as_ref()
+                .expect("parse_error_1 must exist after initial parse failure"),
+            expected_format,
+        );
+        let second_raw = execute_with_timeout_retries(
+            backend.clone(),
+            role,
+            phase,
+            &correction_prompt,
+            timeout_secs,
+            log_writer,
+            repo_root,
+        )
+        .await?;
+        attempts_executed += 1;
+        let second_normalized = normalize_backend_output(&backend_name, &second_raw);
+        log_parse_retry_token_metrics(
+            role,
+            phase,
+            loop_number,
+            attempts_executed,
+            &backend_name,
+            resume_session_id.is_some(),
+            &second_normalized,
+        );
+        if second_normalized.session_id.is_some() {
+            last_session_id = second_normalized.session_id.clone();
+        }
+        if let Ok(parsed) = parse_fn(&second_normalized.text) {
+            return Ok(ParseRetryResult {
+                parsed,
+                session_id: last_session_id,
+            });
+        }
+        latest_unparsed_output = second_normalized.text;
     }
+
+    // Attempt 3: opposite-backend reformatter.
+    let parse_error = parse_error_first
+        .as_ref()
+        .expect("parse_error_1 must exist before reformatter");
+    let reformatter_spec = registry
+        .opposite(backend.name())
+        .map(|opposite_name| registry.resolve_backend_for_role(opposite_name, "reformatter"))
+        .unwrap_or_else(|_| backend.name().to_owned());
+    let reformatter_backend = registry
+        .get(&reformatter_spec)
+        .unwrap_or_else(|| backend.clone());
+    let reformatter_name = reformatter_backend.name().to_owned();
+    let reformatter_timeout_secs = registry
+        .timeout_for_role(&reformatter_spec, "reformatter")
+        .as_secs();
+
+    warn!(
+        role = role,
+        backend = %reformatter_name,
+        error = %parse_error,
+        "parse failed, requesting reformat via opposite backend"
+    );
+    // Use ~~~ fences instead of --- to avoid triggering strip_frontmatter().
+    let reformat_prompt = format!(
+        "CRITICAL: Your previous response could not be parsed.\n\n\
+        Error: {parse_error}\n\n\
+        Your original response was:\n~~~\n{latest_unparsed_output}\n~~~\n\n\
+        Requirements:\n\
+        1. Your response MUST begin with the correct H1 heading as the VERY FIRST LINE\n\
+        2. No preamble, commentary, or explanation before the H1\n\
+        3. No YAML frontmatter (no lines starting with ---)\n\
+        4. Include ALL required H2 sections\n\n\
+        Required structure:\n{expected_format}\n\n\
+        Respond ONLY with the corrected markdown. No explanation.\n",
+    );
+    registry.override_session_id(None).await;
+    let third_raw = execute_with_timeout_retries(
+        reformatter_backend,
+        role,
+        phase,
+        &reformat_prompt,
+        reformatter_timeout_secs,
+        log_writer,
+        repo_root,
+    )
+    .await?;
+    attempts_executed += 1;
+    let third_normalized = normalize_backend_output(&reformatter_name, &third_raw);
+    log_parse_retry_token_metrics(
+        role,
+        phase,
+        loop_number,
+        attempts_executed,
+        &reformatter_name,
+        false,
+        &third_normalized,
+    );
+    if let Ok(parsed) = parse_fn(&third_normalized.text) {
+        return Ok(ParseRetryResult {
+            parsed,
+            session_id: last_session_id,
+        });
+    }
+
+    // Attempt 4: full reminded prompt on original backend as a forced fresh call.
+    warn!(
+        role = role,
+        backend = %backend_name,
+        "reformat failed, retrying with fresh full prompt"
+    );
+    let reminded_prompt = format!(
+        "IMPORTANT: Format your response as parseable markdown. \
+        Your VERY FIRST LINE must be exactly:\n\n{expected_format}\n\n\
+        No preamble. No commentary before the H1. No YAML frontmatter. \
+        Include all required H2 sections.\n\n{original_prompt}",
+    );
+    registry.override_session_id(None).await;
+    let fourth_raw = execute_with_timeout_retries(
+        backend,
+        role,
+        phase,
+        &reminded_prompt,
+        timeout_secs,
+        log_writer,
+        repo_root,
+    )
+    .await?;
+    attempts_executed += 1;
+    let fourth_normalized = normalize_backend_output(&backend_name, &fourth_raw);
+    log_parse_retry_token_metrics(
+        role,
+        phase,
+        loop_number,
+        attempts_executed,
+        &backend_name,
+        false,
+        &fourth_normalized,
+    );
+    if fourth_normalized.session_id.is_some() {
+        last_session_id = fourth_normalized.session_id;
+    }
+    if let Ok(parsed) = parse_fn(&fourth_normalized.text) {
+        return Ok(ParseRetryResult {
+            parsed,
+            session_id: last_session_id,
+        });
+    }
+
+    warn!(role = role, attempts = attempts_executed, "all parse retries exhausted");
+    // Write last discovered session_id even on failure (D6 lifecycle rule).
+    if let Some(out) = out_session_id {
+        *out = last_session_id;
+    }
+    Err(RalphError::ParseRetriesExhausted {
+        role: role.to_owned(),
+        phase: phase.to_owned(),
+        attempts: attempts_executed,
+    })
 }
 
 async fn execute_with_timeout_retries(
@@ -4017,21 +4262,29 @@ fn ensure_prompt_hash_at_loop_start(state: &mut ProjectState) {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use tempfile::tempdir;
+    use tokio::sync::Mutex as AsyncMutex;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
 
     use super::{
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
-        collect_review_history, collect_review_history_for_prompt, preload_role_model_backends,
-        resolve_tmux_settings, summarize_previous_specs_for_planner, summarize_state_for_planner,
-        validate_tmux_preflight,
+        collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
+        preload_role_model_backends, resolve_tmux_settings, summarize_previous_specs_for_planner,
+        summarize_state_for_planner, validate_tmux_preflight,
     };
-    use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
+    use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
     use crate::config::{resolve_effective_config, GlobalConfig, RunWorkflowOverrides};
     use crate::error::RalphError;
+    use crate::output_log::LogWriter;
     use crate::project::state::{
         FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType,
         ProjectState, QaExchange, ReviewExchange,
@@ -5100,6 +5353,275 @@ mod tests {
             summary.contains("verdict=failed"),
             "loop with failed QA should have verdict=failed"
         );
+    }
+
+    #[derive(Clone)]
+    struct SequencedBackend {
+        name: String,
+        responses: Arc<AsyncMutex<Vec<String>>>,
+        prompts: Arc<AsyncMutex<Vec<String>>>,
+    }
+
+    impl SequencedBackend {
+        fn new(name: &str, responses: Vec<String>) -> Self {
+            Self {
+                name: name.to_owned(),
+                responses: Arc::new(AsyncMutex::new(responses)),
+                prompts: Arc::new(AsyncMutex::new(Vec::new())),
+            }
+        }
+
+        async fn call_count(&self) -> usize {
+            self.prompts.lock().await.len()
+        }
+    }
+
+    #[async_trait]
+    impl Backend for SequencedBackend {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn execute(&self, prompt: &str) -> crate::Result<String> {
+            self.prompts.lock().await.push(prompt.to_owned());
+            let mut responses = self.responses.lock().await;
+            if responses.is_empty() {
+                return Ok("fallback backend response long enough for retry path".to_owned());
+            }
+            Ok(responses.remove(0))
+        }
+
+        async fn health_check(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ParseRetryMetricsEvent {
+        attempt: u8,
+        session_reused: bool,
+        tokens_in_seen: bool,
+        tokens_out_seen: bool,
+        cached_in_seen: bool,
+    }
+
+    #[derive(Default)]
+    struct MetricsVisitor {
+        attempt: Option<u8>,
+        session_reused: Option<bool>,
+        tokens_in_seen: bool,
+        tokens_out_seen: bool,
+        cached_in_seen: bool,
+    }
+
+    impl MetricsVisitor {
+        fn mark_token_field(&mut self, name: &str) {
+            match name {
+                "tokens_in" => self.tokens_in_seen = true,
+                "tokens_out" => self.tokens_out_seen = true,
+                "cached_in" => self.cached_in_seen = true,
+                _ => {}
+            }
+        }
+    }
+
+    impl Visit for MetricsVisitor {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            match field.name() {
+                "attempt" => self.attempt = Some(value as u8),
+                "tokens_in" | "tokens_out" | "cached_in" => self.mark_token_field(field.name()),
+                _ => {}
+            }
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            match field.name() {
+                "attempt" => self.attempt = u8::try_from(value).ok(),
+                "tokens_in" | "tokens_out" | "cached_in" => self.mark_token_field(field.name()),
+                _ => {}
+            }
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            if field.name() == "session_reused" {
+                self.session_reused = Some(value);
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            let _ = (field, value);
+        }
+
+        fn record_debug(&mut self, field: &Field, _value: &dyn std::fmt::Debug) {
+            self.mark_token_field(field.name());
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MetricsCaptureLayer {
+        events: Arc<Mutex<Vec<ParseRetryMetricsEvent>>>,
+    }
+
+    impl<S> Layer<S> for MetricsCaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = MetricsVisitor::default();
+            event.record(&mut visitor);
+            if let (Some(attempt), Some(session_reused)) = (visitor.attempt, visitor.session_reused) {
+                self.events
+                    .lock()
+                    .expect("capture lock")
+                    .push(ParseRetryMetricsEvent {
+                        attempt,
+                        session_reused,
+                        tokens_in_seen: visitor.tokens_in_seen,
+                        tokens_out_seen: visitor.tokens_out_seen,
+                        cached_in_seen: visitor.cached_in_seen,
+                    });
+            }
+        }
+    }
+
+    #[test]
+    fn parse_retry_attempts_are_three_without_session() {
+        let temp = tempdir().expect("temp dir");
+        let backend = SequencedBackend::new(
+            "mock-retry-backend",
+            vec![
+                "first long non-parseable response body for attempt one".to_owned(),
+                "second long non-parseable response body for attempt two".to_owned(),
+                "third long non-parseable response body for attempt three".to_owned(),
+            ],
+        );
+        let backend_handle = backend.clone();
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
+        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime.block_on(execute_with_parse_retries(
+            backend,
+            &registry,
+            "implementer",
+            "implementing",
+            1,
+            "original prompt",
+            None,
+            |_raw| -> crate::Result<()> {
+                Err(RalphError::ParseError("forced parse failure".to_owned()))
+            },
+            "# Implementation Notes",
+            30,
+            &mut log,
+            None,
+            None,
+        ));
+
+        match result {
+            Err(RalphError::ParseRetriesExhausted { attempts, .. }) => {
+                assert_eq!(attempts, 3, "without a session, exactly 3 attempts should run")
+            }
+            _ => panic!("expected ParseRetriesExhausted"),
+        }
+        assert_eq!(
+            runtime.block_on(backend_handle.call_count()),
+            3,
+            "backend should be called exactly 3 times without session follow-up"
+        );
+    }
+
+    #[test]
+    fn parse_retry_attempts_four_with_session_followup_and_token_metrics() {
+        let temp = tempdir().expect("temp dir");
+        let backend = SequencedBackend::new(
+            "claude-mock",
+            vec![
+                r#"{"session_id":"sess-from-attempt1","content":[{"type":"text","text":"attempt one not parseable but long enough"}],"usage":{"input_tokens":11,"output_tokens":22,"cache_read_input_tokens":33}}"#.to_owned(),
+                "attempt two still non-parseable output body".to_owned(),
+                "attempt three still non-parseable output body".to_owned(),
+                "attempt four still non-parseable output body".to_owned(),
+            ],
+        );
+        let backend_handle = backend.clone();
+        let backend: Arc<dyn Backend> = Arc::new(backend);
+        let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
+        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+
+        let capture_layer = MetricsCaptureLayer::default();
+        let captured = capture_layer.events.clone();
+        let subscriber = Registry::default().with(capture_layer);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(execute_with_parse_retries(
+                backend,
+                &registry,
+                "implementer",
+                "implementing",
+                1,
+                "original prompt",
+                None,
+                |_raw| -> crate::Result<()> {
+                    Err(RalphError::ParseError("forced parse failure".to_owned()))
+                },
+                "# Implementation Notes",
+                30,
+                &mut log,
+                None,
+                None,
+            ))
+        });
+
+        match result {
+            Err(RalphError::ParseRetriesExhausted { attempts, .. }) => {
+                assert_eq!(attempts, 4, "session-aware path should execute 4 attempts")
+            }
+            _ => panic!("expected ParseRetriesExhausted"),
+        }
+        assert_eq!(
+            runtime.block_on(backend_handle.call_count()),
+            4,
+            "backend should be called exactly 4 times with session follow-up"
+        );
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert_eq!(
+            events.len(),
+            4,
+            "expected one token-metrics log event per normalization call"
+        );
+        assert_eq!(
+            events.iter().map(|e| e.attempt).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "attempt numbers should be 1-based within the executed retry sequence"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e.session_reused)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, false],
+            "attempt 2 should reuse the session id discovered on attempt 1"
+        );
+
+        assert!(
+            events[0].tokens_in_seen && events[0].tokens_out_seen && events[0].cached_in_seen,
+            "attempt 1 should log all token fields when structured usage is present"
+        );
+        for event in events.iter().skip(1) {
+            assert!(
+                !event.tokens_in_seen && !event.tokens_out_seen && !event.cached_in_seen,
+                "token fields should be omitted (Empty) when usage data is unavailable"
+            );
+        }
     }
 
     // --- Bootstrap hash determinism and invalidation tests ---

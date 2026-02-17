@@ -737,6 +737,14 @@ impl BackendRegistry {
         self.tmux_context.set(ctx).await;
     }
 
+    /// Override only the session id in the current execution context.
+    /// Used by parse-retry stages to force resume/fresh behavior per attempt.
+    pub async fn override_session_id(&self, session_id: Option<String>) {
+        let mut ctx = self.tmux_context.get().await;
+        ctx.session_id = session_id;
+        self.set_tmux_context(ctx).await;
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
         self.backends.get(name).cloned()
     }

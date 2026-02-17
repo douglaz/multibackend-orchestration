@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "c268d43048b18da58fe0c3df19bb80ce5e6fd5c33e9561b8743d5f5d1deedc14",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 4,
+  "current_loop": 5,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -102,7 +102,7 @@
       "slug": "session-reuse-v1-core-d",
       "feature_name": "Session Reuse v1 Core (D)",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -138,10 +138,37 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "09fb45e92ad369939983f1cc867542e09584d1ea",
       "started_at": "2026-02-17T15:45:42.838250410Z",
+      "completed_at": "2026-02-17T17:46:43.533349212Z"
+    },
+    {
+      "loop_number": 5,
+      "slug": "session-aware-parse-retries-token-metrics-e-f",
+      "feature_name": "Session-Aware Parse Retries & Token Metrics (E + F)",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/005-session-aware-parse-retries-token-metrics-e-f/20260217175621-spec.md",
+        "impl_notes": "loops/005-session-aware-parse-retries-token-metrics-e-f/20260217181506-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/005-session-aware-parse-retries-token-metrics-e-f/20260217181643-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-17T17:56:21.408437270Z",
       "completed_at": null
     }
   ],
-  "completion_attempts": []
+  "completion_attempts": [],
+  "session_store": {
+    "records": []
+  }
 }
