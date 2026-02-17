@@ -2039,7 +2039,7 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 mod tests {
     use super::{
         build_pr_body, build_pr_title, extract_issue_body, extract_original_title,
-        extract_project_ref, write_body_file,
+        discover_latest_project_id, extract_project_ref, write_body_file,
     };
 
     #[test]
@@ -2181,6 +2181,45 @@ mod tests {
         assert_eq!(
             snowman_count, 4000,
             "issue context should be capped at 4000 chars, got {snowman_count}"
+        );
+    }
+
+    #[test]
+    fn discover_latest_project_id_prefers_newest_created_at() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        let projects_root = worktree.join(".ralph").join("projects");
+        std::fs::create_dir_all(&projects_root).expect("create projects root");
+
+        let project_a = projects_root.join("acme-project-a");
+        let project_b = projects_root.join("acme-project-b");
+        let project_c = projects_root.join("acme-project-c");
+        std::fs::create_dir_all(project_a.join("state.json").parent().expect("state dir"))
+            .expect("mkdir a");
+        std::fs::create_dir_all(project_b.join("state.json").parent().expect("state dir"))
+            .expect("mkdir b");
+        std::fs::create_dir_all(project_c.join("state.json").parent().expect("state dir"))
+            .expect("mkdir c");
+
+        std::fs::write(
+            project_a.join("state.json"),
+            r#"{"created_at":"2026-01-01T00:00:00Z","other":"a"}"#,
+        )
+        .expect("write a");
+        std::fs::write(
+            project_b.join("state.json"),
+            r#"{"created_at":"2026-01-03T00:00:00Z","other":"b"}"#,
+        )
+        .expect("write b");
+        std::fs::write(
+            project_c.join("state.json"),
+            r#"{"created_at":"2026-01-02T00:00:00Z","other":"c"}"#,
+        )
+        .expect("write c");
+
+        assert_eq!(
+            discover_latest_project_id(&worktree),
+            Some("acme-project-b".to_owned())
         );
     }
 }
