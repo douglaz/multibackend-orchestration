@@ -1,0 +1,17 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Testing coverage",
+      "feedback": "The spec omits validate conformance coverage, but AGENTS.md requires every new feature to have validate tests. Add cases in `src/validate/tests_init.rs` for `init --dry-run` and `init -n`, asserting expected stdout and that no workspace files/directories are created."
+    },
+    {
+      "area": "Behavior fidelity",
+      "feedback": "The proposed `print_dry_run` uses a hard-coded action list separate from `create_workspace`/`Workspace::init`. That creates drift risk and can break the guarantee that dry-run reflects real behavior. Use a shared action plan (print vs execute) so both paths stay in sync."
+    },
+    {
+      "area": "Edge cases / acceptance clarity",
+      "feedback": "Acceptance criteria are underspecified for output and error parity. Clarify that dry-run should not print `initialized workspace at ...`, and specify parity for existing non-directory/unreadable targets (currently error via `read_dir` in `Workspace::init`)."
+    }
+  ]
+}

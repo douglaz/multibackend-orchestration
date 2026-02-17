@@ -51,6 +51,8 @@ pub enum Commands {
 pub struct InitArgs {
     #[arg(long, default_value = ".ralph")]
     pub dir: PathBuf,
+    #[arg(short = 'n', long = "dry-run")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -355,6 +357,28 @@ mod tests {
     fn rejects_run_with_conflicting_tmux_flags() {
         let result = Cli::try_parse_from(["ralph", "run", "--tmux", "--no-tmux"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_init_with_dry_run_long_flag() {
+        let cli = Cli::parse_from(["ralph", "init", "--dry-run"]);
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init command");
+        };
+
+        assert_eq!(args.dir, std::path::PathBuf::from(".ralph"));
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_init_with_dry_run_short_flag() {
+        let cli = Cli::parse_from(["ralph", "init", "-n"]);
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init command");
+        };
+
+        assert_eq!(args.dir, std::path::PathBuf::from(".ralph"));
+        assert!(args.dry_run);
     }
 
     #[test]
