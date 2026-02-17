@@ -322,10 +322,7 @@ mod tests {
     fn parse_refined_output_short_cleaned_body_accepted() {
         let input = "TITLE: Fix typo in readme\n---\nCorrect the misspelling in the README file and verify formatting.\n=== CLEANED BODY ===\nFix typo";
         let parsed = parse_refined_output(input).unwrap();
-        assert_eq!(
-            parsed.cleaned_body,
-            Some("Fix typo".to_owned())
-        );
+        assert_eq!(parsed.cleaned_body, Some("Fix typo".to_owned()));
     }
 
     #[test]

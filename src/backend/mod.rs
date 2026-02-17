@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod mock;
+pub mod output_normalizer;
 pub mod tmux;
 pub mod tmux_backend;
 
@@ -202,6 +203,38 @@ pub(crate) async fn persist_cli_output(
     }
 }
 
+/// Context provided by the orchestrator for each backend invocation,
+/// enabling session-aware argument rewriting.
+#[derive(Debug, Clone)]
+pub struct BackendInvocationContext {
+    pub loop_dir: PathBuf,
+    pub role: String,
+    pub session_id: Option<String>,
+    pub json_output_required: bool,
+}
+
+/// Shared invocation context for session-aware arg rewriting.
+/// The orchestrator sets this before each backend call so both tmux and
+/// non-tmux CliBackend instances can pick up the session_id.
+#[derive(Clone, Default)]
+pub struct SharedInvocationContext(Arc<Mutex<Option<BackendInvocationContext>>>);
+
+impl SharedInvocationContext {
+    pub async fn set(&self, ctx: Option<BackendInvocationContext>) {
+        *self.0.lock().await = ctx;
+    }
+
+    pub async fn get(&self) -> Option<BackendInvocationContext> {
+        self.0.lock().await.clone()
+    }
+}
+
+impl std::fmt::Debug for SharedInvocationContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedInvocationContext(..)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CliBackend {
     name: String,
@@ -209,6 +242,9 @@ pub struct CliBackend {
     args: Vec<String>,
     timeout: Duration,
     env: BTreeMap<String, String>,
+    /// Shared invocation context for session-aware arg rewriting in non-tmux mode.
+    /// When set, `execute_streaming` uses `effective_args()` instead of raw `self.args`.
+    invocation_ctx: SharedInvocationContext,
 }
 
 impl CliBackend {
@@ -225,8 +261,10 @@ impl CliBackend {
             args,
             timeout,
             env,
+            invocation_ctx: SharedInvocationContext::default(),
         }
     }
+
 
     pub fn resolved_command_path(&self) -> PathBuf {
         which::which(&self.command).unwrap_or_else(|_| PathBuf::from(&self.command))
@@ -246,6 +284,170 @@ impl CliBackend {
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Rewrite CLI args for session resume and/or JSON output.
+    /// When a session_id is provided, adds resume flags and --output-format json.
+    /// When json_output_required is true but no session_id, adds only JSON output flags
+    /// so the normalizer can extract a session_id from the first invocation.
+    pub fn effective_args(&self, ctx: &BackendInvocationContext) -> Result<Vec<String>> {
+        match &ctx.session_id {
+            Some(id) => match self.name.as_str() {
+                n if n.starts_with("claude") || n == "claude" => {
+                    self.effective_args_claude(id)
+                }
+                n if n.starts_with("codex") || n == "codex" => {
+                    self.effective_args_codex(id)
+                }
+                _ => Ok(self.args.clone()),
+            },
+            None if ctx.json_output_required => {
+                self.ensure_json_output_args()
+            }
+            None => Ok(self.args.clone()),
+        }
+    }
+
+    /// Add JSON output flags without session resume args.
+    /// For Claude: adds --output-format json (keeps -p).
+    /// For Codex: adds --json.
+    fn ensure_json_output_args(&self) -> Result<Vec<String>> {
+        match self.name.as_str() {
+            n if n.starts_with("claude") || n == "claude" => {
+                let mut args = self.args.clone();
+                // Only add if not already present
+                if !args.iter().any(|a| a == "--output-format" || a.starts_with("--output-format=")) {
+                    args.push("--output-format".to_owned());
+                    args.push("json".to_owned());
+                }
+                Ok(args)
+            }
+            n if n.starts_with("codex") || n == "codex" => {
+                let mut args = self.args.clone();
+                if !args.contains(&"--json".to_owned()) {
+                    // Insert --json before trailing "-" if present
+                    if args.last().map(|s| s.as_str()) == Some("-") {
+                        let pos = args.len() - 1;
+                        args.insert(pos, "--json".to_owned());
+                    } else {
+                        args.push("--json".to_owned());
+                    }
+                }
+                Ok(args)
+            }
+            _ => Ok(self.args.clone()),
+        }
+    }
+
+    fn effective_args_claude(&self, session_id: &str) -> Result<Vec<String>> {
+        // Claude resume rules:
+        // 1. Require -p in base args; if missing => Err
+        // 2. Remove -p
+        // 3. Ensure exactly one --resume <id>
+        // 4. Ensure exactly one --output-format json
+        if !self.args.contains(&"-p".to_owned()) {
+            return Err(RalphError::Validation(
+                "claude backend args must include -p for session resume".to_owned(),
+            ));
+        }
+
+        let mut result = Vec::new();
+        let mut skip_next = false;
+
+        for arg in self.args.iter() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "-p" {
+                // Remove -p
+                continue;
+            }
+            if arg == "--resume" {
+                // Skip existing --resume and its value
+                skip_next = true;
+                continue;
+            }
+            if arg == "--output-format" {
+                // Skip existing --output-format and its value
+                skip_next = true;
+                continue;
+            }
+            // Handle --resume=value form
+            if arg.starts_with("--resume=") {
+                continue;
+            }
+            if arg.starts_with("--output-format=") {
+                continue;
+            }
+            result.push(arg.clone());
+        }
+
+        // Add --resume <id>
+        result.push("--resume".to_owned());
+        result.push(session_id.to_owned());
+
+        // Add --output-format json
+        result.push("--output-format".to_owned());
+        result.push("json".to_owned());
+
+        Ok(result)
+    }
+
+    fn effective_args_codex(&self, session_id: &str) -> Result<Vec<String>> {
+        // Codex resume rules:
+        // 1. Require valid `exec ... -` base form; otherwise Validation error
+        // 2. Deterministically produce: exec resume <id> [flags...] --json -
+        // 3. Ensure exactly one --json, one session ID, trailing "-"
+        // 4. Idempotent across repeated calls
+        if self.args.last().map(|s| s.as_str()) != Some("-") {
+            return Err(RalphError::Validation(
+                "codex backend args must end with '-' for session resume".to_owned(),
+            ));
+        }
+        // Require `exec` in base args (either plain `exec` or `exec resume ...`)
+        if !self.args.contains(&"exec".to_owned()) {
+            return Err(RalphError::Validation(
+                "codex backend args must contain 'exec' for session resume (expected `exec ... -` form)".to_owned(),
+            ));
+        }
+
+        // Collect non-structural flags (skip exec, resume, old session ids, --json, -)
+        let mut flags: Vec<String> = Vec::new();
+        let mut i = 0;
+        let args = &self.args;
+        while i < args.len() {
+            let arg = &args[i];
+            if arg == "-" || arg == "--json" || arg == "exec" {
+                if arg == "exec" {
+                    // Skip "exec" and then skip "resume <id>" if present
+                    i += 1;
+                    if i < args.len() && args[i] == "resume" {
+                        i += 1; // skip "resume"
+                        if i < args.len() && args[i] != "-" && args[i] != "--json" && !args[i].starts_with("--") {
+                            i += 1; // skip old session id
+                        }
+                    }
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            flags.push(arg.clone());
+            i += 1;
+        }
+
+        // Build deterministic form: exec resume <id> [flags...] --json -
+        let mut result = vec![
+            "exec".to_owned(),
+            "resume".to_owned(),
+            session_id.to_owned(),
+        ];
+        result.extend(flags);
+        result.push("--json".to_owned());
+        result.push("-".to_owned());
+
+        Ok(result)
     }
 
     async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
@@ -285,6 +487,29 @@ impl CliBackend {
         prompt: &str,
         mut log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
+        // Compute effective args: if an invocation context is set, use
+        // effective_args() for session-aware arg rewriting and/or JSON output
+        // flags. On failure, fall back to base args.
+        let effective_args = {
+            let ctx_opt = self.invocation_ctx.get().await;
+            match ctx_opt {
+                Some(ref ctx) => {
+                    match self.effective_args(ctx) {
+                        Ok(args) => args,
+                        Err(e) => {
+                            debug!(
+                                backend = self.name,
+                                error = %e,
+                                "effective_args rewrite failed in CliBackend, using base args"
+                            );
+                            self.args.clone()
+                        }
+                    }
+                }
+                None => self.args.clone(),
+            }
+        };
+
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
         #[cfg(unix)]
@@ -296,7 +521,7 @@ impl CliBackend {
                 Ok(())
             });
         }
-        cmd.args(&self.args)
+        cmd.args(&effective_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -490,6 +715,7 @@ pub struct BackendRegistry {
     backends: HashMap<String, Arc<dyn Backend>>,
     default_backend: String,
     tmux_context: SharedTmuxContext,
+    invocation_context: SharedInvocationContext,
     config: GlobalConfig,
     tmux: BackendRegistryTmuxConfig,
 }
@@ -505,13 +731,16 @@ impl BackendRegistry {
     pub fn new(config: &GlobalConfig, tmux: BackendRegistryTmuxConfig) -> Self {
         let mut backends: HashMap<String, Arc<dyn Backend>> = HashMap::new();
         let shared_ctx = SharedTmuxContext::default();
+        let shared_invocation = SharedInvocationContext::default();
 
-        let claude_backend = claude::backend_from_config(config, None, None);
+        let mut claude_backend = claude::backend_from_config(config, None, None);
+        claude_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
             "claude".to_owned(),
             backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
-        let codex_backend = codex::backend_from_config(config, None, None);
+        let mut codex_backend = codex::backend_from_config(config, None, None);
+        codex_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
@@ -521,15 +750,34 @@ impl BackendRegistry {
             backends,
             default_backend: config.workspace.default_backend.clone(),
             tmux_context: shared_ctx,
+            invocation_context: shared_invocation,
             config: config.clone(),
             tmux,
         }
     }
 
     /// Set the tmux execution context (loop number, role) for the next backend
-    /// invocation. This is a no-op when tmux mode is disabled.
+    /// invocation. Also propagates session_id to the shared invocation context
+    /// so non-tmux CliBackend instances can perform session-aware arg rewriting.
     pub async fn set_tmux_context(&self, ctx: TmuxExecutionContext) {
+        // Always propagate invocation context so that json_output_required is
+        // honoured even on first invocations without a session_id.
+        let invocation = Some(BackendInvocationContext {
+            loop_dir: ctx.loop_dir.clone().unwrap_or_default(),
+            role: ctx.role.clone().unwrap_or_default(),
+            session_id: ctx.session_id.clone(),
+            json_output_required: true,
+        });
+        self.invocation_context.set(invocation).await;
         self.tmux_context.set(ctx).await;
+    }
+
+    /// Override only the session id in the current execution context.
+    /// Used by parse-retry stages to force resume/fresh behavior per attempt.
+    pub async fn override_session_id(&self, session_id: Option<String>) {
+        let mut ctx = self.tmux_context.get().await;
+        ctx.session_id = session_id;
+        self.set_tmux_context(ctx).await;
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Backend>> {
@@ -540,19 +788,11 @@ impl BackendRegistry {
         self.get_or_create_inner(spec, None)
     }
 
-    pub fn get_or_create_for_role(
-        &mut self,
-        spec: &str,
-        role: &str,
-    ) -> Result<Arc<dyn Backend>> {
+    pub fn get_or_create_for_role(&mut self, spec: &str, role: &str) -> Result<Arc<dyn Backend>> {
         self.get_or_create_inner(spec, Some(role))
     }
 
-    fn get_or_create_inner(
-        &mut self,
-        spec: &str,
-        role: Option<&str>,
-    ) -> Result<Arc<dyn Backend>> {
+    fn get_or_create_inner(&mut self, spec: &str, role: Option<&str>) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
         let cache_key = match role {
             Some(r) => format!("{}:{r}", backend_spec_key(&parsed)),
@@ -563,8 +803,10 @@ impl BackendRegistry {
             return Ok(backend.clone());
         }
 
+        let mut cli_backend = self.create_cli_backend_for_spec(&parsed, role)?;
+        cli_backend.invocation_ctx = self.invocation_context.clone();
         let backend = backend_with_optional_tmux(
-            self.create_cli_backend_for_spec(&parsed, role)?,
+            cli_backend,
             &self.tmux,
             self.tmux_context.clone(),
         );
@@ -727,6 +969,13 @@ impl BackendRegistry {
             backend.health_check().await?;
         }
         Ok(())
+    }
+
+    /// Obtain a `CliBackend` for the given backend spec string (e.g. "claude(opus)").
+    /// Used by the orchestrator to pre-validate session arg rewriting.
+    pub fn cli_backend_for_spec(&self, spec_str: &str) -> Result<CliBackend> {
+        let parsed = parse_backend_spec(spec_str)?;
+        self.create_cli_backend_for_spec(&parsed, None)
     }
 
     fn create_cli_backend_for_spec(
@@ -963,5 +1212,343 @@ sleep 30
             .raw_os_error()
             .expect("raw os error should exist");
         assert_eq!(os_err, libc::ESRCH, "child pid should be fully reaped");
+    }
+
+    fn make_invocation_ctx(session_id: Option<&str>) -> super::BackendInvocationContext {
+        super::BackendInvocationContext {
+            loop_dir: std::path::PathBuf::from("/tmp/loop"),
+            role: "implementer".to_owned(),
+            session_id: session_id.map(|s| s.to_owned()),
+            json_output_required: true,
+        }
+    }
+
+    #[test]
+    fn effective_args_no_session_adds_json_output() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec!["-p".to_owned(), "--flag".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(None); // json_output_required = true
+        let args = backend.effective_args(&ctx).unwrap();
+        assert_eq!(args, vec!["-p", "--flag", "--output-format", "json"]);
+    }
+
+    #[test]
+    fn effective_args_no_session_no_json_returns_unchanged() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec!["-p".to_owned(), "--flag".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = super::BackendInvocationContext {
+            loop_dir: std::path::PathBuf::from("/tmp/loop"),
+            role: "implementer".to_owned(),
+            session_id: None,
+            json_output_required: false,
+        };
+        let args = backend.effective_args(&ctx).unwrap();
+        assert_eq!(args, vec!["-p", "--flag"]);
+    }
+
+    #[test]
+    fn effective_args_claude_rewrites_for_resume() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--permission-mode".to_owned(),
+                "acceptEdits".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("sess-abc"));
+        let args = backend.effective_args(&ctx).unwrap();
+        assert!(!args.contains(&"-p".to_owned()), "should remove -p");
+        assert!(args.contains(&"--resume".to_owned()));
+        assert!(args.contains(&"sess-abc".to_owned()));
+        assert!(args.contains(&"--output-format".to_owned()));
+        assert!(args.contains(&"json".to_owned()));
+    }
+
+    #[test]
+    fn effective_args_claude_idempotent() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--permission-mode".to_owned(),
+                "acceptEdits".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("sess-abc"));
+        let args1 = backend.effective_args(&ctx).unwrap();
+
+        // Create a new backend with the rewritten args plus -p to simulate re-call
+        let backend2 = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            {
+                let mut a = vec!["-p".to_owned()];
+                a.extend(args1.clone());
+                a
+            },
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let args2 = backend2.effective_args(&ctx).unwrap();
+        // Should have same structure
+        assert!(args2.contains(&"--resume".to_owned()));
+        assert!(args2.contains(&"sess-abc".to_owned()));
+    }
+
+    #[test]
+    fn effective_args_claude_requires_p_flag() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec!["--flag".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("sess-abc"));
+        assert!(backend.effective_args(&ctx).is_err());
+    }
+
+    #[test]
+    fn effective_args_codex_rewrites_for_resume() {
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec![
+                "exec".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "-".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("thread-xyz"));
+        let args = backend.effective_args(&ctx).unwrap();
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "resume");
+        assert_eq!(args[2], "thread-xyz");
+        assert_eq!(args.last().unwrap(), "-");
+        assert!(args.contains(&"--json".to_owned()));
+    }
+
+    #[test]
+    fn effective_args_codex_idempotent() {
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec![
+                "exec".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "-".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("thread-xyz"));
+        let args1 = backend.effective_args(&ctx).unwrap();
+
+        let backend2 = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            args1.clone(),
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let args2 = backend2.effective_args(&ctx).unwrap();
+        assert_eq!(args2.last().unwrap(), "-");
+        // Should not have multiple --json
+        assert_eq!(args2.iter().filter(|a| *a == "--json").count(), 1);
+    }
+
+    #[test]
+    fn effective_args_codex_requires_trailing_dash() {
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec!["exec".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("thread-xyz"));
+        assert!(backend.effective_args(&ctx).is_err());
+    }
+
+    #[test]
+    fn effective_args_codex_requires_exec_in_base_form() {
+        // Args with trailing `-` but no `exec` should be rejected
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec!["--flag".to_owned(), "-".to_owned()],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("thread-xyz"));
+        let result = backend.effective_args(&ctx);
+        assert!(result.is_err(), "codex without 'exec' should fail");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("exec"), "error should mention 'exec': {err_msg}");
+    }
+
+    // --- Strengthened arg-rewrite tests with full token sequence assertions ---
+
+    #[test]
+    fn effective_args_claude_produces_exact_token_sequence() {
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--permission-mode".to_owned(),
+                "acceptEdits".to_owned(),
+                "--model".to_owned(),
+                "opus".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("sess-123"));
+        let args = backend.effective_args(&ctx).unwrap();
+        // -p must be removed; no duplicate --resume or --output-format
+        assert!(!args.contains(&"-p".to_owned()), "-p must be removed");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--resume").count(),
+            1,
+            "exactly one --resume"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "--output-format").count(),
+            1,
+            "exactly one --output-format"
+        );
+        // Verify exact position: --resume must be followed by session id
+        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[resume_idx + 1], "sess-123");
+        // --output-format must be followed by "json"
+        let fmt_idx = args.iter().position(|a| a == "--output-format").unwrap();
+        assert_eq!(args[fmt_idx + 1], "json");
+        // Original flags preserved
+        assert!(args.contains(&"--permission-mode".to_owned()));
+        assert!(args.contains(&"acceptEdits".to_owned()));
+    }
+
+    #[test]
+    fn effective_args_codex_produces_exact_token_sequence() {
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec![
+                "exec".to_owned(),
+                "--dangerously-bypass-approvals-and-sandbox".to_owned(),
+                "--model".to_owned(),
+                "gpt-5.3".to_owned(),
+                "-".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("thread-abc"));
+        let args = backend.effective_args(&ctx).unwrap();
+        // Must be: exec resume <id> [flags...] --json -
+        assert_eq!(args[0], "exec", "first token must be 'exec'");
+        assert_eq!(args[1], "resume", "second token must be 'resume'");
+        assert_eq!(args[2], "thread-abc", "third token must be session id");
+        assert_eq!(args.last().unwrap(), "-", "last token must be '-'");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--json").count(),
+            1,
+            "exactly one --json"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "exec").count(),
+            1,
+            "exactly one 'exec'"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "resume").count(),
+            1,
+            "exactly one 'resume'"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "-").count(),
+            1,
+            "exactly one '-' (trailing)"
+        );
+        // Original flags preserved
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()));
+        assert!(args.contains(&"--model".to_owned()));
+        assert!(args.contains(&"gpt-5.3".to_owned()));
+    }
+
+    #[test]
+    fn effective_args_claude_with_existing_resume_replaces_cleanly() {
+        // If base args already contain --resume, it should be replaced
+        let backend = CliBackend::new(
+            "claude",
+            "claude".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--resume".to_owned(),
+                "old-session".to_owned(),
+                "--output-format".to_owned(),
+                "text".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("new-session"));
+        let args = backend.effective_args(&ctx).unwrap();
+        assert!(!args.contains(&"old-session".to_owned()), "old session id must be replaced");
+        assert!(!args.contains(&"text".to_owned()), "old output-format value must be replaced");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--resume").count(),
+            1,
+            "exactly one --resume after replacement"
+        );
+        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[resume_idx + 1], "new-session");
+    }
+
+    #[test]
+    fn effective_args_codex_with_existing_resume_replaces_cleanly() {
+        // If base args already contain exec resume <old-id>, replace id
+        let backend = CliBackend::new(
+            "codex",
+            "codex".to_owned(),
+            vec![
+                "exec".to_owned(),
+                "resume".to_owned(),
+                "old-thread".to_owned(),
+                "--json".to_owned(),
+                "-".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("new-thread"));
+        let args = backend.effective_args(&ctx).unwrap();
+        assert!(!args.contains(&"old-thread".to_owned()), "old session must be replaced");
+        assert_eq!(args[2], "new-thread", "new session id in correct position");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--json").count(),
+            1,
+            "exactly one --json"
+        );
     }
 }

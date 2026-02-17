@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::config::{
-    resolve_effective_config, CommitMessageStyle, ProjectConfig, PromptChangeAction,
-    RunWorkflowOverrides,
+    resolve_effective_config, CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    ProjectConfig, PromptChangeAction, RunWorkflowOverrides,
 };
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::ProjectLock;
@@ -139,6 +139,16 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "commit_message_style": effective.workflow.commit_message_style,
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
+                    "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
+                    "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
+                    "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
+                    "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
+                    "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
+                    "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
+                    "session_reuse_enabled": effective.workflow.session_reuse_enabled,
+                    "session_reuse_roles": effective.workflow.session_reuse_roles,
+                    "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
+                    "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -212,6 +222,16 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "commit_message_style": effective.workflow.commit_message_style,
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
+                    "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
+                    "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
+                    "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
+                    "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
+                    "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
+                    "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
+                    "session_reuse_enabled": effective.workflow.session_reuse_enabled,
+                    "session_reuse_roles": effective.workflow.session_reuse_roles,
+                    "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
+                    "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -414,6 +434,38 @@ fn set_global_value(
         "workflow.max_qa_iterations" => {
             config.workflow.max_qa_iterations = parse_u32(raw_value, key)?;
         }
+        "workflow.planner_state_in_prompt" => {
+            config.workflow.planner_state_in_prompt = parse_planner_state_in_prompt(raw_value)?;
+        }
+        "workflow.planner_previous_specs_in_prompt" => {
+            config.workflow.planner_previous_specs_in_prompt =
+                parse_previous_specs_in_prompt(raw_value)?;
+        }
+        "workflow.planner_max_prior_loops" => {
+            config.workflow.planner_max_prior_loops = parse_optional_usize_or_none(raw_value, key)?;
+        }
+        "workflow.max_review_history_entries_in_prompt" => {
+            config.workflow.max_review_history_entries_in_prompt = parse_usize(raw_value, key)?;
+        }
+        "workflow.max_qa_history_entries_in_prompt" => {
+            config.workflow.max_qa_history_entries_in_prompt = parse_usize(raw_value, key)?;
+        }
+        "workflow.include_history_when_session_reuse_enabled" => {
+            config.workflow.include_history_when_session_reuse_enabled =
+                parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_enabled" => {
+            config.workflow.session_reuse_enabled = parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_roles" => {
+            config.workflow.session_reuse_roles = parse_session_reuse_roles(raw_value)?;
+        }
+        "workflow.session_reuse_reset_on_prompt_change" => {
+            config.workflow.session_reuse_reset_on_prompt_change = parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_reset_on_rollback" => {
+            config.workflow.session_reuse_reset_on_rollback = parse_bool(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
@@ -520,6 +572,44 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "workflow.max_qa_iterations" => {
             config.workflow.max_qa_iterations = parse_optional_u32(raw_value, key)?;
         }
+        "workflow.planner_state_in_prompt" => {
+            config.workflow.planner_state_in_prompt =
+                parse_optional_planner_state_in_prompt(raw_value)?;
+        }
+        "workflow.planner_previous_specs_in_prompt" => {
+            config.workflow.planner_previous_specs_in_prompt =
+                parse_optional_previous_specs_in_prompt(raw_value)?;
+        }
+        "workflow.planner_max_prior_loops" => {
+            config.workflow.planner_max_prior_loops =
+                parse_project_optional_usize_or_none(raw_value, key)?;
+        }
+        "workflow.max_review_history_entries_in_prompt" => {
+            config.workflow.max_review_history_entries_in_prompt =
+                parse_optional_usize(raw_value, key)?;
+        }
+        "workflow.max_qa_history_entries_in_prompt" => {
+            config.workflow.max_qa_history_entries_in_prompt =
+                parse_optional_usize(raw_value, key)?;
+        }
+        "workflow.include_history_when_session_reuse_enabled" => {
+            config.workflow.include_history_when_session_reuse_enabled =
+                parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_enabled" => {
+            config.workflow.session_reuse_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_roles" => {
+            config.workflow.session_reuse_roles = parse_optional_session_reuse_roles(raw_value)?;
+        }
+        "workflow.session_reuse_reset_on_prompt_change" => {
+            config.workflow.session_reuse_reset_on_prompt_change =
+                parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_reset_on_rollback" => {
+            config.workflow.session_reuse_reset_on_rollback =
+                parse_optional_bool(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
@@ -581,6 +671,11 @@ fn parse_u64(raw: &str, key: &str) -> Result<u64> {
         .map_err(|_| RalphError::Validation(format!("key '{key}' expects unsigned integer value")))
 }
 
+fn parse_usize(raw: &str, key: &str) -> Result<usize> {
+    raw.parse::<usize>()
+        .map_err(|_| RalphError::Validation(format!("key '{key}' expects unsigned integer value")))
+}
+
 fn parse_optional_bool(raw: &str, key: &str) -> Result<Option<bool>> {
     if raw == "null" {
         return Ok(None);
@@ -600,6 +695,13 @@ fn parse_optional_u64(raw: &str, key: &str) -> Result<Option<u64>> {
         return Ok(None);
     }
     Ok(Some(parse_u64(raw, key)?))
+}
+
+fn parse_optional_usize(raw: &str, key: &str) -> Result<Option<usize>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_usize(raw, key)?))
 }
 
 fn parse_commit_message_style(raw: &str) -> Result<CommitMessageStyle> {
@@ -638,6 +740,62 @@ fn parse_optional_prompt_change_action(raw: &str) -> Result<Option<PromptChangeA
     Ok(Some(parse_prompt_change_action(raw)?))
 }
 
+fn parse_planner_state_in_prompt(raw: &str) -> Result<PlannerStateInPrompt> {
+    match raw {
+        "full-json" => Ok(PlannerStateInPrompt::FullJson),
+        "summary" => Ok(PlannerStateInPrompt::Summary),
+        _ => Err(RalphError::Validation(
+            "planner_state_in_prompt must be one of: full-json, summary".to_owned(),
+        )),
+    }
+}
+
+fn parse_optional_planner_state_in_prompt(raw: &str) -> Result<Option<PlannerStateInPrompt>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_planner_state_in_prompt(raw)?))
+}
+
+fn parse_previous_specs_in_prompt(raw: &str) -> Result<PreviousSpecsInPrompt> {
+    match raw {
+        "none" => Ok(PreviousSpecsInPrompt::None),
+        "titles" => Ok(PreviousSpecsInPrompt::Titles),
+        "full-text" => Ok(PreviousSpecsInPrompt::FullText),
+        _ => Err(RalphError::Validation(
+            "planner_previous_specs_in_prompt must be one of: none, titles, full-text".to_owned(),
+        )),
+    }
+}
+
+fn parse_optional_previous_specs_in_prompt(raw: &str) -> Result<Option<PreviousSpecsInPrompt>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_previous_specs_in_prompt(raw)?))
+}
+
+/// Parse `"none"` as `None` (unlimited), integer as `Some(n)`.
+fn parse_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<usize>> {
+    if raw == "none" {
+        return Ok(None);
+    }
+    let n = raw.parse::<usize>().map_err(|_| {
+        RalphError::Validation(format!(
+            "key '{key}' expects unsigned integer or \"none\" for unlimited"
+        ))
+    })?;
+    Ok(Some(n))
+}
+
+/// For project overrides: `"null"` = inherit, `"none"` = override to unlimited, integer = cap.
+fn parse_project_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<Option<usize>>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_optional_usize_or_none(raw, key)?))
+}
+
 fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
     if raw == "null" {
         return Ok(None);
@@ -648,6 +806,29 @@ fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
 
 fn ensure_backend(raw: &str) -> Result<()> {
     crate::cli::backend_spec::validate_backend_spec_name(raw)
+}
+
+const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+
+fn parse_session_reuse_roles(raw: &str) -> Result<Vec<String>> {
+    let roles = parse_string_list(raw)?;
+    for role in &roles {
+        if !KNOWN_ROLES.contains(&role.as_str()) {
+            return Err(RalphError::Validation(format!(
+                "unknown role '{}' in session_reuse_roles; valid roles: {}",
+                role,
+                KNOWN_ROLES.join(", ")
+            )));
+        }
+    }
+    Ok(roles)
+}
+
+fn parse_optional_session_reuse_roles(raw: &str) -> Result<Option<Vec<String>>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_session_reuse_roles(raw)?))
 }
 
 fn parse_optional_string(raw: &str) -> Option<String> {
@@ -859,5 +1040,67 @@ mod tests {
         let err = set_role_timeout(&mut role_timeouts, "bogus", "42")
             .expect_err("unknown timeout role should fail");
         assert!(err.to_string().contains("unknown backend timeout role"));
+    }
+
+    #[test]
+    fn set_global_value_updates_history_capping_fields() {
+        let mut config = crate::config::GlobalConfig::default();
+
+        set_global_value(
+            &mut config,
+            "workflow.max_review_history_entries_in_prompt",
+            "7",
+        )
+        .expect("set review history cap");
+        set_global_value(
+            &mut config,
+            "workflow.max_qa_history_entries_in_prompt",
+            "4",
+        )
+        .expect("set qa history cap");
+        set_global_value(
+            &mut config,
+            "workflow.include_history_when_session_reuse_enabled",
+            "true",
+        )
+        .expect("set include-history flag");
+
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 7);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 4);
+        assert!(config.workflow.include_history_when_session_reuse_enabled);
+    }
+
+    #[test]
+    fn set_project_value_updates_history_capping_fields() {
+        let mut config = crate::config::ProjectConfig::default();
+
+        set_project_value(
+            &mut config,
+            "workflow.max_review_history_entries_in_prompt",
+            "6",
+        )
+        .expect("set review history cap override");
+        set_project_value(
+            &mut config,
+            "workflow.max_qa_history_entries_in_prompt",
+            "3",
+        )
+        .expect("set qa history cap override");
+        set_project_value(
+            &mut config,
+            "workflow.include_history_when_session_reuse_enabled",
+            "false",
+        )
+        .expect("set include-history override");
+
+        assert_eq!(
+            config.workflow.max_review_history_entries_in_prompt,
+            Some(6)
+        );
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, Some(3));
+        assert_eq!(
+            config.workflow.include_history_when_session_reuse_enabled,
+            Some(false)
+        );
     }
 }

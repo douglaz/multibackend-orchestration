@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-use super::global::{CommitMessageStyle, PromptChangeAction};
+use super::global::{
+    CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt, PromptChangeAction,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +37,24 @@ pub struct ProjectWorkflowOverrides {
     pub qa_backend: Option<String>,
     pub qa_enabled: Option<bool>,
     pub completer_backend: Option<String>,
+    pub planner_state_in_prompt: Option<PlannerStateInPrompt>,
+    pub planner_previous_specs_in_prompt: Option<PreviousSpecsInPrompt>,
+    /// `None` = inherit from global; `Some(None)` = override to unlimited; `Some(Some(n))` = cap at n.
+    pub planner_max_prior_loops: Option<Option<usize>>,
+    #[serde(default)]
+    pub max_review_history_entries_in_prompt: Option<usize>,
+    #[serde(default)]
+    pub max_qa_history_entries_in_prompt: Option<usize>,
+    #[serde(default)]
+    pub include_history_when_session_reuse_enabled: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_enabled: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub session_reuse_reset_on_prompt_change: Option<bool>,
+    #[serde(default)]
+    pub session_reuse_reset_on_rollback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

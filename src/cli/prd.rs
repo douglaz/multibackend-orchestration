@@ -202,7 +202,10 @@ mod tests {
             backend: None,
         };
 
-        assert_eq!(resolved_ask_max(&args), PrdPreset::Discuss.default_ask_max());
+        assert_eq!(
+            resolved_ask_max(&args),
+            PrdPreset::Discuss.default_ask_max()
+        );
     }
 
     #[test]

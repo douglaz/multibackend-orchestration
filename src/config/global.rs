@@ -239,6 +239,26 @@ pub struct WorkflowConfig {
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
     pub max_qa_iterations: u32,
+    #[serde(default)]
+    pub planner_state_in_prompt: PlannerStateInPrompt,
+    #[serde(default)]
+    pub planner_previous_specs_in_prompt: PreviousSpecsInPrompt,
+    #[serde(default = "default_planner_max_prior_loops")]
+    pub planner_max_prior_loops: Option<usize>,
+    #[serde(default = "default_max_review_history_entries_in_prompt")]
+    pub max_review_history_entries_in_prompt: usize,
+    #[serde(default = "default_max_qa_history_entries_in_prompt")]
+    pub max_qa_history_entries_in_prompt: usize,
+    #[serde(default = "default_include_history_when_session_reuse_enabled")]
+    pub include_history_when_session_reuse_enabled: bool,
+    #[serde(default)]
+    pub session_reuse_enabled: bool,
+    #[serde(default = "default_session_reuse_roles")]
+    pub session_reuse_roles: Vec<String>,
+    #[serde(default = "default_session_reuse_reset_on_prompt_change")]
+    pub session_reuse_reset_on_prompt_change: bool,
+    #[serde(default = "default_session_reuse_reset_on_rollback")]
+    pub session_reuse_reset_on_rollback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -258,6 +278,23 @@ pub enum PromptChangeAction {
     RestartLoop,
     #[default]
     Abort,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlannerStateInPrompt {
+    FullJson,
+    #[default]
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviousSpecsInPrompt {
+    None,
+    #[default]
+    Titles,
+    FullText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +445,17 @@ impl Default for WorkflowConfig {
             completer_backend: None,
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
+            planner_state_in_prompt: PlannerStateInPrompt::default(),
+            planner_previous_specs_in_prompt: PreviousSpecsInPrompt::default(),
+            planner_max_prior_loops: default_planner_max_prior_loops(),
+            max_review_history_entries_in_prompt: default_max_review_history_entries_in_prompt(),
+            max_qa_history_entries_in_prompt: default_max_qa_history_entries_in_prompt(),
+            include_history_when_session_reuse_enabled:
+                default_include_history_when_session_reuse_enabled(),
+            session_reuse_enabled: false,
+            session_reuse_roles: default_session_reuse_roles(),
+            session_reuse_reset_on_prompt_change: default_session_reuse_reset_on_prompt_change(),
+            session_reuse_reset_on_rollback: default_session_reuse_reset_on_rollback(),
         }
     }
 }
@@ -600,6 +648,38 @@ fn default_daemon_rebase_timeout_seconds() -> u64 {
     120
 }
 
+fn default_planner_max_prior_loops() -> Option<usize> {
+    Some(10)
+}
+
+fn default_max_review_history_entries_in_prompt() -> usize {
+    3
+}
+
+fn default_max_qa_history_entries_in_prompt() -> usize {
+    2
+}
+
+fn default_include_history_when_session_reuse_enabled() -> bool {
+    false
+}
+
+fn default_session_reuse_roles() -> Vec<String> {
+    vec![
+        "implementer".to_owned(),
+        "reviewer".to_owned(),
+        "qa".to_owned(),
+    ]
+}
+
+fn default_session_reuse_reset_on_prompt_change() -> bool {
+    true
+}
+
+fn default_session_reuse_reset_on_rollback() -> bool {
+    true
+}
+
 fn default_qa_enabled() -> bool {
     true
 }
@@ -670,7 +750,8 @@ impl GlobalConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig, RoleTimeouts,
+        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig, PlannerStateInPrompt,
+        PreviousSpecsInPrompt, RoleTimeouts,
     };
 
     #[test]
@@ -780,6 +861,9 @@ command = "claude-custom"
         assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 120);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
+        assert!(!config.workflow.include_history_when_session_reuse_enabled);
         assert!(config.workflow.prompt_review_enabled);
         assert_eq!(
             config.workflow.prompt_review_backend,
@@ -873,6 +957,9 @@ base_branch = "master"
         assert_eq!(config.backends.codex.models, defaults.backends.codex.models);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
+        assert!(!config.workflow.include_history_when_session_reuse_enabled);
         assert!(config.workflow.qa_backend.is_none());
         assert!(config.workflow.prompt_review_enabled);
         assert_eq!(
@@ -1390,5 +1477,125 @@ base_branch = "master"
             config.backends.codex.models.reformatter.as_deref(),
             defaults.backends.codex.models.reformatter.as_deref(),
         );
+    }
+
+    #[test]
+    fn planner_state_in_prompt_default_is_summary() {
+        assert_eq!(
+            PlannerStateInPrompt::default(),
+            PlannerStateInPrompt::Summary
+        );
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_default_is_titles() {
+        assert_eq!(
+            PreviousSpecsInPrompt::default(),
+            PreviousSpecsInPrompt::Titles
+        );
+    }
+
+    #[test]
+    fn planner_state_in_prompt_serde_roundtrips() {
+        let variants = [
+            PlannerStateInPrompt::FullJson,
+            PlannerStateInPrompt::Summary,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: PlannerStateInPrompt = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_serde_roundtrips() {
+        let variants = [
+            PreviousSpecsInPrompt::None,
+            PreviousSpecsInPrompt::Titles,
+            PreviousSpecsInPrompt::FullText,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: PreviousSpecsInPrompt = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn planner_state_in_prompt_kebab_case_serde() {
+        let json = serde_json::to_string(&PlannerStateInPrompt::FullJson).expect("serialize");
+        assert_eq!(json, "\"full-json\"");
+
+        let json = serde_json::to_string(&PlannerStateInPrompt::Summary).expect("serialize");
+        assert_eq!(json, "\"summary\"");
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_kebab_case_serde() {
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::None).expect("serialize");
+        assert_eq!(json, "\"none\"");
+
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::Titles).expect("serialize");
+        assert_eq!(json, "\"titles\"");
+
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::FullText).expect("serialize");
+        assert_eq!(json, "\"full-text\"");
+    }
+
+    #[test]
+    fn workflow_config_default_planner_compression_fields() {
+        let config = GlobalConfig::default();
+        assert_eq!(
+            config.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::Summary
+        );
+        assert_eq!(
+            config.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::Titles
+        );
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(10));
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
+        assert!(!config.workflow.include_history_when_session_reuse_enabled);
+    }
+
+    #[test]
+    fn workflow_config_deserializes_planner_compression_fields() {
+        let raw = r#"
+[workflow]
+planner_state_in_prompt = "full-json"
+planner_previous_specs_in_prompt = "full-text"
+planner_max_prior_loops = 5
+max_review_history_entries_in_prompt = 4
+max_qa_history_entries_in_prompt = 6
+include_history_when_session_reuse_enabled = true
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(
+            config.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::FullJson
+        );
+        assert_eq!(
+            config.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::FullText
+        );
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(5));
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 4);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 6);
+        assert!(config.workflow.include_history_when_session_reuse_enabled);
+    }
+
+    #[test]
+    fn workflow_config_deserializes_planner_max_prior_loops_absent_uses_default() {
+        let raw = r#"
+[workflow]
+planner_state_in_prompt = "summary"
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(10));
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
+        assert!(!config.workflow.include_history_when_session_reuse_enabled);
     }
 }

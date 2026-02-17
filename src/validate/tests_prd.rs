@@ -33,12 +33,16 @@ fn preset_default_is_full_with_ask_max_3(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ask preset: full"), "expected full preset output");
-        assert!(stdout.contains("ask max rounds: 3"), "expected default ask max 3");
+        assert!(
+            stdout.contains("ask preset: full"),
+            "expected full preset output"
+        );
+        assert!(
+            stdout.contains("ask max rounds: 3"),
+            "expected default ask max 3"
+        );
 
-        let prd = h
-            .repo_root
-            .join("PRD.md");
+        let prd = h.repo_root.join("PRD.md");
         assert_file_exists(&prd);
         assert_file_contains(&prd, "## Executive Summary");
     })
@@ -53,7 +57,10 @@ fn preset_overrides_default_ask_max(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ask preset: discuss"), "expected discuss preset output");
+        assert!(
+            stdout.contains("ask preset: discuss"),
+            "expected discuss preset output"
+        );
         assert!(
             stdout.contains("ask max rounds: 1"),
             "expected discuss preset to resolve to ask max 1"
@@ -70,7 +77,10 @@ fn preset_fast_has_zero_ask_max(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ask preset: fast"), "expected fast preset output");
+        assert!(
+            stdout.contains("ask preset: fast"),
+            "expected fast preset output"
+        );
         assert!(
             stdout.contains("ask max rounds: 0"),
             "expected fast preset to resolve to ask max 0"
@@ -95,7 +105,10 @@ fn explicit_ask_max_preempts_preset(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("ask preset: fast"), "expected fast preset output");
+        assert!(
+            stdout.contains("ask preset: fast"),
+            "expected fast preset output"
+        );
         assert!(
             stdout.contains("ask max rounds: 2"),
             "expected explicit ask max to override preset"
@@ -108,7 +121,8 @@ fn setup_prd_mock(h: &RalphHarness) -> () {
     let script = h
         .write_mock_script("prd-mock.sh", &prd_mock_script())
         .expect("failed to write PRD mock script");
-    h.setup_mock_backends_stable(&script).expect("setup_mock_backends failed");
+    h.setup_mock_backends_stable(&script)
+        .expect("setup_mock_backends failed");
 }
 
 fn prd_mock_script() -> String {
