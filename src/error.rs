@@ -31,6 +31,9 @@ pub enum RalphError {
     #[error("invalid input: {0}")]
     Validation(String),
 
+    #[error("invalid init target '{path}': {reason}")]
+    InitTargetInvalid { path: PathBuf, reason: String },
+
     #[error("state is locked for project {project_id}: {lock_path}")]
     StateLocked {
         project_id: String,

@@ -1,0 +1,55 @@
+{
+  "project_id": "add-a-dry-run-n-flag-to-the-ralph-init-c",
+  "project_name": "Add a `--dry-run` / `-n` flag to the `ralph init` command th",
+  "created_at": "2026-02-17T21:12:57.913121336Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "c959469a3e341484d56415e9bc1c7f06cb0788b525d203f8c6e64152d67cc846",
+  "prompt_hash_at_loop_start": "c959469a3e341484d56415e9bc1c7f06cb0788b525d203f8c6e64152d67cc846",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "dry-run-support-for-ralph-init",
+      "feature_name": "Dry-run support for `ralph init`",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-dry-run-support-for-ralph-init/20260217211640-spec.md",
+        "impl_notes": "loops/001-dry-run-support-for-ralph-init/20260217212542-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-dry-run-support-for-ralph-init/20260217212748-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-17T21:16:40.493860094Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": [],
+  "session_store": {
+    "records": [
+      {
+        "session_id": "85db3eb1-c007-4994-9883-8d8c014f0280",
+        "backend_spec": "claude(opus)",
+        "role": "reviewer",
+        "loop_number": 1,
+        "bootstrap_hash": "bddbdd8878cf4c2c02f4a6e3386bc2f4c2eeb78f1e715e9e9f540f7d511d8bb4",
+        "call_count": 1,
+        "created_at": "2026-02-17T21:27:48.368122859Z",
+        "last_used_at": "2026-02-17T21:27:48.368123800Z"
+      }
+    ]
+  }
+}

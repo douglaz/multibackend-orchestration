@@ -82,16 +82,6 @@ impl Workspace {
     }
 
     pub fn init(root: &Path) -> Result<Self> {
-        if root.exists() {
-            let mut entries = fs::read_dir(root)?;
-            if entries.next().is_some() {
-                return Err(RalphError::Validation(format!(
-                    "workspace directory '{}' already exists and is not empty",
-                    root.display()
-                )));
-            }
-        }
-
         fs::create_dir_all(root.join("projects"))?;
         fs::create_dir_all(root.join("templates"))?;
 

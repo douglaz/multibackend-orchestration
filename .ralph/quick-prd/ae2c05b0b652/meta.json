@@ -1,0 +1,17 @@
+{
+  "idea": "Add a `--dry-run` / `-n` flag to the `ralph init` command that simulates initialization and prints what would be done without creating any files or directories.\n\n## Summary\n\nThe `ralph init` command needs a dry-run mode. When `--dry-run` is passed, the command should print each action it would take (e.g. \"would create .ralph/\", \"would create .ralph/ralph.toml\") instead of actually performing them. Default behavior (no flag) must remain unchanged.\n\n## Requirements\n\n- Add `dry_run: bool` field to `InitArgs` in `src/cli/mod.rs`, exposed as `--dry-run` / `-n`\n- Pass `dry_run` through to `execute()` in `src/cli/init.rs`\n- When `dry_run` is `true`: print each action that would be taken, create no files or directories\n- When `dry_run` is `false` (default): behavior is identical to current\n\n## Files to Modify\n\n- `src/cli/mod.rs` — add `dry_run` field to `InitArgs`\n- `src/cli/init.rs` — check the flag; print instead of writing when set\n\n## Acceptance Criteria\n\n- [ ] `--dry-run` and `-n` both accepted as CLI flags on `ralph init`\n- [ ] Running `ralph init --dry-run` prints lines like \"would create .ralph/\", \"would create .ralph/ralph.toml\" for each action\n- [ ] No files or directories are created when `--dry-run` is active\n- [ ] Running `ralph init` without the flag behaves exactly as before\n- [ ] No regressions in existing `init` tests; new test(s) cover dry-run output",
+  "idea_hash": "ae2c05b0b652",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-17T21:06:25Z",
+  "completed_at": "2026-02-17T21:12:57Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 53.574295086,
+  "review_times_secs": [
+    122.061934268
+  ],
+  "revision_times_secs": [
+    216.690200009
+  ]
+}
