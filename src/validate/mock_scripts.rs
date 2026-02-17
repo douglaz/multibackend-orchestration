@@ -960,6 +960,18 @@ esac
     .to_owned()
 }
 
+/// Mock refinement backend output used by daemon runtime tests when refinement is
+/// required but should remain fast and deterministic.
+pub fn daemon_mock_fast_refinement_script() -> String {
+    r###"#!/bin/sh
+# Minimal deterministic refinement output used by validate tests.
+printf 'TITLE: Refined task execution\n'
+printf '---\n'
+printf 'Refined task body with explicit steps and acceptance checks for safe deterministic execution in tests.\n'
+"###
+    .to_owned()
+}
+
 /// Mock `gh` script for daemon auto-rebase tests.
 ///
 /// Environment variables:

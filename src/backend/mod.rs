@@ -9,16 +9,17 @@ pub use mock::MockBackend;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::Mutex;
-use tokio::time::timeout;
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::config::GlobalConfig;
@@ -286,6 +287,15 @@ impl CliBackend {
     ) -> Result<String> {
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         cmd.args(&self.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -357,68 +367,80 @@ impl CliBackend {
             }
         });
 
-        let execution_result = timeout(self.timeout, async {
-            let mut captured_stdout = Vec::new();
-            let mut chunk = BytesMut::with_capacity(8192);
-            loop {
-                chunk.clear();
-                let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
-                    RalphError::BackendCommandFailed {
-                        backend: self.name.clone(),
-                        details: format!("failed to read stdout: {err}"),
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timed_out_watchdog = timed_out.clone();
+        let child_pid = child.id();
+        let (timeout_cancel_tx, timeout_cancel_rx) = oneshot::channel::<()>();
+        let timeout = self.timeout;
+        let watchdog = tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(timeout) => {
+                    timed_out_watchdog.store(true, Ordering::SeqCst);
+                    if let Some(pid) = child_pid {
+                        #[cfg(unix)]
+                        {
+                            let _ = unsafe {
+                                libc::kill(-(pid as libc::pid_t), libc::SIGKILL)
+                            };
+                        }
+                        #[cfg(not(unix))]
+                        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
                     }
-                })?;
-                if read == 0 {
-                    break;
                 }
-                let bytes = chunk.as_ref();
-                captured_stdout.extend_from_slice(bytes);
-                if let Some(writer) = log_writer.as_deref_mut() {
-                    writer.write_bytes(bytes);
-                }
+                _ = timeout_cancel_rx => {}
             }
+        });
 
-            let status = child
-                .wait()
-                .await
-                .map_err(|err| RalphError::BackendCommandFailed {
+        let mut captured_stdout = Vec::new();
+        let mut chunk = BytesMut::with_capacity(8192);
+        loop {
+            chunk.clear();
+            let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
+                RalphError::BackendCommandFailed {
                     backend: self.name.clone(),
-                    details: format!("failed waiting for child process: {err}"),
-                })?;
-
-            Ok::<(std::process::ExitStatus, Vec<u8>), RalphError>((status, captured_stdout))
-        })
-        .await;
-
-        match execution_result {
-            Ok(Ok((status, captured_stdout))) => {
-                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
-
-                if !status.success() {
-                    return Err(RalphError::BackendCommandFailed {
-                        backend: self.name.clone(),
-                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
-                    });
+                    details: format!("failed to read stdout: {err}"),
                 }
+            })?;
 
-                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
+            if read == 0 {
+                break;
             }
-            Ok(Err(err)) => {
-                self.kill_and_reap_child(&mut child).await;
-                let _ = self.collect_stderr(stderr_handle).await;
-                Err(err)
-            }
-            Err(_) => {
-                self.kill_and_reap_child(&mut child).await;
-                let _ = self.collect_stderr(stderr_handle).await;
-                if let Some(writer) = log_writer.as_deref_mut() {
-                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
-                }
-                Err(RalphError::BackendTimeout {
-                    backend: self.name.clone(),
-                })
+
+            let bytes = chunk.as_ref();
+            captured_stdout.extend_from_slice(bytes);
+            if let Some(writer) = log_writer.as_deref_mut() {
+                writer.write_bytes(bytes);
             }
         }
+
+        let status = child.wait().await.map_err(|err| RalphError::BackendCommandFailed {
+                    backend: self.name.clone(),
+                    details: format!("failed waiting for child process: {err}"),
+        })?;
+
+        let _ = timeout_cancel_tx.send(());
+        let _ = watchdog.await;
+
+        if timed_out.load(Ordering::SeqCst) {
+            let _ = self.collect_stderr(stderr_handle).await;
+            if let Some(writer) = log_writer.as_deref_mut() {
+                writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
+            }
+            return Err(RalphError::BackendTimeout {
+                backend: self.name.clone(),
+            });
+        }
+
+        let stderr_bytes = self.collect_stderr(stderr_handle).await?;
+
+        if !status.success() {
+            return Err(RalphError::BackendCommandFailed {
+                backend: self.name.clone(),
+                details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+            });
+        }
+
+        Ok(String::from_utf8_lossy(&captured_stdout).to_string())
     }
 }
 

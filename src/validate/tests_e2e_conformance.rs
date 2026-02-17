@@ -52,9 +52,9 @@ fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
             .expect("setup_mock_backends failed");
 
         // Backend timeout settings are global config keys.
-        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "2"])
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("config set backends.claude.timeout_seconds failed");
-        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "2"])
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("config set backends.codex.timeout_seconds failed");
 
         h.create_project(
@@ -551,9 +551,9 @@ fn sleeping_backend_script() -> String {
     r#"#!/bin/sh
 set -eu
 
-# Consume prompt input, then sleep long enough to exceed backend timeout.
+    # Consume prompt input, then sleep long enough to exceed backend timeout.
 cat >/dev/null
-sleep 30
+sleep 2.1
 echo "unreachable"
 "#
     .to_owned()
