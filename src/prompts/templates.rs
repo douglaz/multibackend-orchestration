@@ -85,13 +85,18 @@ If the project is COMPLETE, output:
 
 ## Context Provided
 
-### Master Prompt (prompt.md)
-{{prompt_content}}
+## System Guardrails
+{{system_guardrails}}
 
-### Project State
-{{state_content}}
+## Master Prompt
+{{master_prompt}}
 
-### Previous Specs
+## Current State
+```json
+{{state_json}}
+```
+
+## Previous Specs
 {{previous_specs}}
 "#
 }
@@ -144,14 +149,23 @@ If this is a review-response pass, output `<TS>-impl-response-III.md` in this fo
 
 ## Context Provided
 
-### Feature Specification
-{{spec_content}}
+## System Guardrails
+{{system_guardrails}}
 
-### Review Feedback (if responding to review)
-{{review_feedback_content}}
+## Feature Specification
+{{feature_spec}}
+
+## Review Feedback (if responding to review)
+{{review_feedback}}
 
 ### Review History (prior iterations)
 {{review_history}}
+
+## Master Prompt
+{{master_prompt}}
+
+## Current Diff
+{{current_diff}}
 "#
 }
 
@@ -215,20 +229,23 @@ OR:
 
 ## Context Provided
 
-### Master Prompt
-{{prompt_content}}
+## System Guardrails
+{{system_guardrails}}
 
-### Feature Specification
-{{spec_content}}
+## Master Prompt
+{{master_prompt}}
 
-### Implementation Notes
-{{impl_notes_content}}
+## Feature Specification
+{{feature_spec}}
 
-### Implementation Response (if reviewing iteration)
-{{impl_response_content}}
+## Implementation Notes
+{{implementation_notes}}
 
-### Implementation Diff
-{{git_diff}}
+## Implementation Response (if reviewing iteration)
+{{latest_implementation_response}}
+
+## Implementation Diff
+{{current_diff}}
 
 ### Review History (prior iterations)
 {{review_history}}
@@ -332,20 +349,23 @@ If any checks fail:
 
 ## Context Provided
 
-### Master Prompt
-{{prompt_content}}
+## System Guardrails
+{{system_guardrails}}
 
-### Feature Specification
-{{spec_content}}
+## Master Prompt
+{{master_prompt}}
 
-### Implementation Notes
-{{impl_notes_content}}
+## Feature Specification
+{{feature_spec}}
 
-### Implementation Diff
-{{git_diff}}
+## Implementation Notes
+{{implementation_notes}}
 
-### Prior QA History
-{{qa_history}}
+## Implementation Diff
+{{current_diff}}
+
+## Prior QA History
+{{prior_qa_history}}
 "#
 }
 
@@ -389,16 +409,18 @@ OR:
 
 ## Context Provided
 
-### Master Prompt
-{{prompt_content}}
+## Master Prompt
+{{master_prompt}}
 
-### Project State
-{{state_content}}
+## Project State
+```json
+{{state_json}}
+```
 
-### All Specs
-{{previous_specs}}
+## All Specs
+{{prior_specs}}
 
-### Termination Request
-{{termination_request_content}}
+## Termination Request
+{{completion_request}}
 "#
 }

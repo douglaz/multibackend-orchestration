@@ -34,6 +34,7 @@ use crate::project::state::{
     AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
     ProjectStatus, QaExchange, ReviewExchange,
 };
+use crate::prompts::template_introspection::{load_template_source, template_uses_var};
 use crate::prompts::templates::{
     default_completer_template, default_implementer_template, default_planner_template,
     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
@@ -2054,13 +2055,23 @@ fn build_planner_prompt(
     opposite_backend: &str,
     project_dir: &Path,
 ) -> Result<String> {
+    let template_source =
+        load_template_source(&effective.templates.planner, default_planner_template());
+
     let mut vars = base_vars(state, loop_number, "planning", 1, backend, opposite_backend);
     let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
+    let state_json_block = format!("```json\n{state_json}\n```");
+    let previous_specs = collect_previous_specs(state, project_dir)?;
+    let completion_feedback = latest_completion_feedback_context(state, project_dir)?;
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("state_content".to_owned(), state_json.clone());
+    vars.insert("state_json".to_owned(), state_json.clone());
+    vars.insert("previous_specs".to_owned(), previous_specs);
+    vars.insert("system_guardrails".to_owned(), PLANNER_GUARDRAILS.to_owned());
     vars.insert(
-        "previous_specs".to_owned(),
-        collect_previous_specs(state, project_dir)?,
+        "completion_feedback".to_owned(),
+        completion_feedback.clone().unwrap_or_default(),
     );
 
     let rendered = render_template_with_fallback(
@@ -2068,14 +2079,36 @@ fn build_planner_prompt(
         &vars,
         default_planner_template(),
     )?;
-    let mut prompt = format!(
-        "{rendered}\n\n## System Guardrails\n\n{PLANNER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Current State\n\n```json\n{state_json}\n```\n"
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["system_guardrails"],
+        "## System Guardrails",
+        PLANNER_GUARDRAILS,
     );
-
-    if let Some(completion_feedback) = latest_completion_feedback_context(state, project_dir)? {
-        prompt.push_str("\n## Completion Feedback\n\n");
-        prompt.push_str(&completion_feedback);
-        prompt.push('\n');
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["state_json", "state_content"],
+        "## Current State",
+        &state_json_block,
+    );
+    if let Some(completion_feedback) = completion_feedback {
+        append_section_if_missing(
+            &mut prompt,
+            &template_source,
+            &["completion_feedback"],
+            "## Completion Feedback",
+            &completion_feedback,
+        );
     }
 
     Ok(prompt)
@@ -2096,6 +2129,9 @@ fn build_implementer_prompt(
     review_feedback: Option<&str>,
     project_dir: &Path,
 ) -> Result<String> {
+    let template_source =
+        load_template_source(&effective.templates.implementer, default_implementer_template());
+
     let phase_iteration = iteration.unwrap_or(1);
     let mut vars = base_vars(
         state,
@@ -2108,15 +2144,27 @@ fn build_implementer_prompt(
     vars.insert("feature_name".to_owned(), feature_name.to_owned());
     vars.insert("loop_slug".to_owned(), loop_slug.to_owned());
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("spec_content".to_owned(), spec_content.to_owned());
+    vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
     vars.insert(
+        "current_diff".to_owned(),
+        format!("```diff\n{git_diff}\n```"),
+    );
+    let review_feedback_text = review_feedback.unwrap_or("(none)");
+    vars.insert("review_feedback".to_owned(), review_feedback_text.to_owned());
+    vars.insert(
         "review_feedback_content".to_owned(),
-        review_feedback.unwrap_or("").to_owned(),
+        review_feedback_text.to_owned(),
     );
     vars.insert(
         "review_history".to_owned(),
         collect_review_history(state, project_dir)?,
+    );
+    vars.insert(
+        "system_guardrails".to_owned(),
+        IMPLEMENTER_GUARDRAILS.to_owned(),
     );
 
     let rendered = render_template_with_fallback(
@@ -2124,10 +2172,44 @@ fn build_implementer_prompt(
         &vars,
         default_implementer_template(),
     )?;
-    Ok(format!(
-        "{rendered}\n\n## System Guardrails\n\n{IMPLEMENTER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Review Feedback\n\n{}\n",
-        review_feedback.unwrap_or("(none)")
-    ))
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["system_guardrails"],
+        "## System Guardrails",
+        IMPLEMENTER_GUARDRAILS,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["feature_spec", "spec_content"],
+        "## Feature Spec",
+        spec_content,
+    );
+    let current_diff_block = format!("```diff\n{git_diff}\n```");
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["current_diff", "git_diff"],
+        "## Current Diff",
+        &current_diff_block,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["review_feedback", "review_feedback_content"],
+        "## Review Feedback",
+        review_feedback_text,
+    );
+    Ok(prompt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2145,6 +2227,9 @@ fn build_reviewer_prompt(
     git_diff: &str,
     project_dir: &Path,
 ) -> Result<String> {
+    let template_source =
+        load_template_source(&effective.templates.reviewer, default_reviewer_template());
+
     let mut vars = base_vars(
         state,
         state.current_loop,
@@ -2156,30 +2241,87 @@ fn build_reviewer_prompt(
     vars.insert("feature_name".to_owned(), feature_name.to_owned());
     vars.insert("loop_slug".to_owned(), loop_slug.to_owned());
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("spec_content".to_owned(), spec_content.to_owned());
+    vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert(
         "impl_notes_content".to_owned(),
         impl_notes_content.to_owned(),
     );
+    vars.insert(
+        "implementation_notes".to_owned(),
+        impl_notes_content.to_owned(),
+    );
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
     vars.insert(
+        "current_diff".to_owned(),
+        format!("```diff\n{git_diff}\n```"),
+    );
+    let latest_impl_response = impl_response_content.unwrap_or("(none)");
+    vars.insert(
+        "latest_implementation_response".to_owned(),
+        latest_impl_response.to_owned(),
+    );
+    vars.insert(
         "impl_response_content".to_owned(),
-        impl_response_content.unwrap_or("").to_owned(),
+        latest_impl_response.to_owned(),
     );
     vars.insert(
         "review_history".to_owned(),
         collect_review_history(state, project_dir)?,
     );
+    vars.insert("system_guardrails".to_owned(), REVIEWER_GUARDRAILS.to_owned());
 
     let rendered = render_template_with_fallback(
         &effective.templates.reviewer,
         &vars,
         default_reviewer_template(),
     )?;
-    Ok(format!(
-        "{rendered}\n\n## System Guardrails\n\n{REVIEWER_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Latest Implementation Response\n\n{}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n",
-        impl_response_content.unwrap_or("(none)")
-    ))
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["system_guardrails"],
+        "## System Guardrails",
+        REVIEWER_GUARDRAILS,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["feature_spec", "spec_content"],
+        "## Feature Spec",
+        spec_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["implementation_notes", "impl_notes_content"],
+        "## Implementation Notes",
+        impl_notes_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["latest_implementation_response", "impl_response_content"],
+        "## Latest Implementation Response",
+        latest_impl_response,
+    );
+    let current_diff_block = format!("```diff\n{git_diff}\n```");
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["current_diff", "git_diff"],
+        "## Current Diff",
+        &current_diff_block,
+    );
+    Ok(prompt)
 }
 
 fn build_completer_prompt(
@@ -2191,6 +2333,9 @@ fn build_completer_prompt(
     termination_request_content: &str,
     previous_specs: &str,
 ) -> Result<String> {
+    let template_source =
+        load_template_source(&effective.templates.completer, default_completer_template());
+
     let mut vars = base_vars(
         state,
         state.current_loop,
@@ -2200,22 +2345,57 @@ fn build_completer_prompt(
         opposite_backend,
     );
     let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
+    let state_json_block = format!("```json\n{state_json}\n```");
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert(
         "termination_request_content".to_owned(),
         termination_request_content.to_owned(),
     );
+    vars.insert(
+        "completion_request".to_owned(),
+        termination_request_content.to_owned(),
+    );
     vars.insert("previous_specs".to_owned(), previous_specs.to_owned());
+    vars.insert("prior_specs".to_owned(), previous_specs.to_owned());
     vars.insert("state_content".to_owned(), state_json.clone());
+    vars.insert("state_json".to_owned(), state_json.clone());
 
     let rendered = render_template_with_fallback(
         &effective.templates.completer,
         &vars,
         default_completer_template(),
     )?;
-    Ok(format!(
-        "{rendered}\n\n## Master Prompt\n\n{prompt_content}\n\n## Completion Request\n\n{termination_request_content}\n\n## Prior Specs\n\n{previous_specs}\n\n## State\n\n```json\n{state_json}\n```\n"
-    ))
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["completion_request", "termination_request_content"],
+        "## Completion Request",
+        termination_request_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["prior_specs", "previous_specs"],
+        "## Prior Specs",
+        previous_specs,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["state_json", "state_content"],
+        "## State",
+        &state_json_block,
+    );
+    Ok(prompt)
 }
 
 fn build_acceptance_prompt(
@@ -2449,6 +2629,8 @@ fn build_qa_prompt(
     git_diff: &str,
     qa_history: &str,
 ) -> Result<String> {
+    let template_source = load_template_source(&effective.templates.qa, default_qa_template());
+
     let mut vars = base_vars(
         state,
         state.current_loop,
@@ -2460,20 +2642,97 @@ fn build_qa_prompt(
     vars.insert("feature_name".to_owned(), feature_name.to_owned());
     vars.insert("loop_slug".to_owned(), loop_slug.to_owned());
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("spec_content".to_owned(), spec_content.to_owned());
+    vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert(
         "impl_notes_content".to_owned(),
         impl_notes_content.to_owned(),
     );
+    vars.insert(
+        "implementation_notes".to_owned(),
+        impl_notes_content.to_owned(),
+    );
     vars.insert("git_diff".to_owned(), git_diff.to_owned());
-    vars.insert("qa_history".to_owned(), qa_history.to_owned());
+    vars.insert(
+        "current_diff".to_owned(),
+        format!("```diff\n{git_diff}\n```"),
+    );
+    let qa_history_text = if qa_history.is_empty() { "(none)" } else { qa_history };
+    vars.insert("qa_history".to_owned(), qa_history_text.to_owned());
+    vars.insert("prior_qa_history".to_owned(), qa_history_text.to_owned());
+    vars.insert("system_guardrails".to_owned(), QA_GUARDRAILS.to_owned());
 
     let rendered =
         render_template_with_fallback(&effective.templates.qa, &vars, default_qa_template())?;
-    Ok(format!(
-        "{rendered}\n\n## System Guardrails\n\n{QA_GUARDRAILS}\n\n## Master Prompt\n\n{prompt_content}\n\n## Feature Spec\n\n{spec_content}\n\n## Implementation Notes\n\n{impl_notes_content}\n\n## Current Diff\n\n```diff\n{git_diff}\n```\n\n## Prior QA History\n\n{}\n",
-        if qa_history.is_empty() { "(none)" } else { qa_history }
-    ))
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["system_guardrails"],
+        "## System Guardrails",
+        QA_GUARDRAILS,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["feature_spec", "spec_content"],
+        "## Feature Spec",
+        spec_content,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["implementation_notes", "impl_notes_content"],
+        "## Implementation Notes",
+        impl_notes_content,
+    );
+    let current_diff_block = format!("```diff\n{git_diff}\n```");
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["current_diff", "git_diff"],
+        "## Current Diff",
+        &current_diff_block,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["prior_qa_history", "qa_history"],
+        "## Prior QA History",
+        qa_history_text,
+    );
+    Ok(prompt)
+}
+
+fn template_uses_any_var(template_source: &str, var_names: &[&str]) -> bool {
+    var_names
+        .iter()
+        .any(|var_name| template_uses_var(template_source, var_name))
+}
+
+fn append_section_if_missing(
+    prompt: &mut String,
+    template_source: &str,
+    var_names: &[&str],
+    heading: &str,
+    content: &str,
+) {
+    if content.is_empty() || template_uses_any_var(template_source, var_names) {
+        return;
+    }
+
+    prompt.push_str("\n\n");
+    prompt.push_str(heading);
+    prompt.push_str("\n\n");
+    prompt.push_str(content);
 }
 
 fn feedback_rel_path(
@@ -2933,14 +3192,22 @@ async fn execute_with_timeout_retries(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    use super::{preload_role_model_backends, resolve_tmux_settings, validate_tmux_preflight};
+    use tempfile::tempdir;
+
+    use super::{
+        build_planner_prompt, preload_role_model_backends, resolve_tmux_settings,
+        validate_tmux_preflight,
+    };
     use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
+    use crate::config::{resolve_effective_config, RunWorkflowOverrides};
     use crate::config::global::BackendRoleModels;
     use crate::config::GlobalConfig;
     use crate::error::RalphError;
+    use crate::project::state::ProjectState;
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
         BackendRegistryTmuxConfig {
@@ -3115,5 +3382,82 @@ mod tests {
             qa.contains("## Failures"),
             "qa template should contain Failures section; got: {qa}"
         );
+    }
+
+    #[test]
+    fn planner_prompt_default_template_has_single_master_prompt_section() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert_eq!(prompt.matches("## Master Prompt").count(), 1);
+    }
+
+    #[test]
+    fn planner_prompt_custom_template_without_master_placeholder_appends_once() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let custom_template = temp.path().join("planner-custom.md");
+        fs::write(
+            &custom_template,
+            "Custom planner template\n\n{{system_guardrails}}\n\n{{state_json}}\n\n{{previous_specs}}\n",
+        )
+        .expect("write custom template");
+
+        let mut global = GlobalConfig::default();
+        global.templates.planner = custom_template.to_string_lossy().to_string();
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert_eq!(prompt.matches("## Master Prompt").count(), 1);
+
+        let custom_index = prompt
+            .find("Custom planner template")
+            .expect("custom template content should be present");
+        let master_index = prompt
+            .find("## Master Prompt")
+            .expect("appended master prompt section should be present");
+        assert!(master_index > custom_index);
     }
 }

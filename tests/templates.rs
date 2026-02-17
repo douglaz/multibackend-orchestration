@@ -87,8 +87,8 @@ fn test_default_planner_template_contains_required_sections() {
     assert!(template.contains("## Rationale"));
 
     // Check for template variables
-    assert!(template.contains("{{prompt_content}}"));
-    assert!(template.contains("{{state_content}}"));
+    assert!(template.contains("{{master_prompt}}"));
+    assert!(template.contains("{{state_json}}"));
     assert!(template.contains("{{previous_specs}}"));
 }
 
@@ -108,9 +108,11 @@ fn test_default_implementer_template_contains_required_sections() {
     assert!(template.contains("## Could Not Address"));
 
     // Check for template variables
-    assert!(template.contains("{{spec_content}}"));
-    assert!(template.contains("{{review_feedback_content}}"));
+    assert!(template.contains("{{feature_spec}}"));
+    assert!(template.contains("{{review_feedback}}"));
     assert!(template.contains("{{review_history}}"));
+    assert!(template.contains("{{master_prompt}}"));
+    assert!(template.contains("{{current_diff}}"));
 }
 
 #[test]
@@ -128,10 +130,10 @@ fn test_default_reviewer_template_contains_required_sections() {
     assert!(template.contains("## Recommended Improvements"));
 
     // Check for template variables
-    assert!(template.contains("{{prompt_content}}"));
-    assert!(template.contains("{{spec_content}}"));
-    assert!(template.contains("{{impl_notes_content}}"));
-    assert!(template.contains("{{git_diff}}"));
+    assert!(template.contains("{{master_prompt}}"));
+    assert!(template.contains("{{feature_spec}}"));
+    assert!(template.contains("{{implementation_notes}}"));
+    assert!(template.contains("{{current_diff}}"));
     assert!(template.contains("{{review_history}}"));
 }
 
@@ -148,10 +150,10 @@ fn test_default_completer_template_contains_required_sections() {
     assert!(template.contains("## Recommended Next Features"));
 
     // Check for template variables
-    assert!(template.contains("{{prompt_content}}"));
-    assert!(template.contains("{{state_content}}"));
-    assert!(template.contains("{{previous_specs}}"));
-    assert!(template.contains("{{termination_request_content}}"));
+    assert!(template.contains("{{master_prompt}}"));
+    assert!(template.contains("{{state_json}}"));
+    assert!(template.contains("{{prior_specs}}"));
+    assert!(template.contains("{{completion_request}}"));
 }
 
 #[test]

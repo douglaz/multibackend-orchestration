@@ -1,0 +1,53 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Config Surface Completeness",
+      "feedback": "The spec only calls out `src/config/global.rs`, but this codebase also requires updates in `src/config/project.rs`, `src/config/mod.rs`, and `src/cli/config.rs` for project overrides and `config get/set/show` support. Add explicit acceptance criteria/tests for global+project merge behavior and CLI key coverage."
+    },
+    {
+      "area": "Conformance Test Requirement",
+      "feedback": "Testing strategy omits `src/validate` conformance coverage, which is a project requirement for behavior changes. Add validate tests for session lifecycle, resume arg usage, rollback/prompt-change invalidation, and history-capping behavior."
+    },
+    {
+      "area": "Normalization Integration Point",
+      "feedback": "The spec introduces JSON/JSONL normalization but does not define where it runs in the parse-retry pipeline. If parse functions see raw JSON wrappers, parsing will fail. Acceptance criteria should require parsing normalized `text` on every attempt (initial + retries)."
+    },
+    {
+      "area": "Parse-Retry Attempt Semantics",
+      "feedback": "Section E implies an extra retry path (session follow-up + existing reformatter/reminder flow), but existing code/error reporting is fixed to 3 attempts. Define exact max attempts, log attempt numbering, and `ParseRetriesExhausted.attempts` semantics."
+    },
+    {
+      "area": "Session ID Lifecycle",
+      "feedback": "Missing rules for when resume responses omit `session_id/thread_id` and for first-call parse failures that still returned a new session id. Require: retain prior id when new id is absent, and define whether record updates happen only after successful parse."
+    },
+    {
+      "area": "Backend Arg Rewriting Robustness",
+      "feedback": "Arg rewrite logic assumes default shapes (`-p` for Claude, `exec ... -` for Codex). The spec needs explicit behavior for custom arg layouts (missing marker, reordered args, duplicate flags) and tests for both success and failure paths."
+    },
+    {
+      "area": "Bootstrap Hash Definition",
+      "feedback": "`template_hashes` is underspecified. Clarify exactly which template sources are hashed per role, whether fallback template content is hashed when files are missing, and canonical ordering/format to keep invalidation deterministic."
+    },
+    {
+      "area": "Isolation vs Reset Flags",
+      "feedback": "Strict isolation is required, but optional reset flags can permit stale session reuse when loop numbers are reused after rollback/restart. Either make loop-reuse invalidation unconditional or add a loop-epoch/run-id component to the session key/hash."
+    },
+    {
+      "area": "History Capping Consistency",
+      "feedback": "Requirements say cap by highest iteration number, but the technical approach describes taking the last N by collection order. Add explicit sorting by iteration before capping and test unsorted input."
+    },
+    {
+      "area": "Working Directory Invariant",
+      "feedback": "The requirement says backend cwd must remain repo root, but no acceptance criterion/test enforces it. Add a test/assertion that invocation context does not change process cwd to loop subdirectories."
+    },
+    {
+      "area": "Session Role Allowlist Validation",
+      "feedback": "`session_reuse_roles` is free-form; behavior for unknown/unsupported roles is undefined. Specify validation policy (reject/warn/ignore) and cover it in tests."
+    },
+    {
+      "area": "Token Metrics Semantics",
+      "feedback": "Metrics requirements do not define whether tokens are logged per attempt or only final successful output, especially with retries/session follow-ups. Specify logging semantics so metrics are comparable and actionable."
+    }
+  ]
+}
