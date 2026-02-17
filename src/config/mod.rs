@@ -7,7 +7,10 @@ use crate::backend::parse_backend_spec;
 use crate::error::RalphError;
 use crate::Result;
 
-pub use global::{CommitMessageStyle, GlobalConfig, PromptChangeAction};
+pub use global::{
+    CommitMessageStyle, GlobalConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    PromptChangeAction,
+};
 pub use project::{ProjectConfig, ProjectDaemonOverrides};
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,9 @@ pub struct EffectiveWorkflowConfig {
     pub commit_message_style: CommitMessageStyle,
     pub commit_tag_format: String,
     pub prompt_change_action: PromptChangeAction,
+    pub planner_state_in_prompt: PlannerStateInPrompt,
+    pub planner_previous_specs_in_prompt: PreviousSpecsInPrompt,
+    pub planner_max_prior_loops: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -171,6 +177,15 @@ pub fn resolve_effective_config(
         prompt_change_action: project_ref
             .and_then(|p| p.workflow.prompt_change_action)
             .unwrap_or(global.workflow.prompt_change_action),
+        planner_state_in_prompt: project_ref
+            .and_then(|p| p.workflow.planner_state_in_prompt)
+            .unwrap_or(global.workflow.planner_state_in_prompt),
+        planner_previous_specs_in_prompt: project_ref
+            .and_then(|p| p.workflow.planner_previous_specs_in_prompt)
+            .unwrap_or(global.workflow.planner_previous_specs_in_prompt),
+        planner_max_prior_loops: project_ref
+            .and_then(|p| p.workflow.planner_max_prior_loops)
+            .unwrap_or(global.workflow.planner_max_prior_loops),
     };
 
     let templates = EffectiveTemplateConfig {
@@ -299,6 +314,7 @@ mod tests {
     use std::path::Path;
 
     use crate::config::{
+        global::{PlannerStateInPrompt, PreviousSpecsInPrompt},
         project::{ProjectDaemonOverrides, ProjectWorkflowOverrides},
         resolve_daemon_config, resolve_effective_config, GlobalConfig, ProjectConfig,
         RunWorkflowOverrides,
@@ -539,5 +555,127 @@ mod tests {
         assert_eq!(no_project.rebase_interval_seconds, 1800);
         assert_eq!(no_project.max_rebases_per_cycle, 3);
         assert_eq!(no_project.rebase_timeout_seconds, 120);
+    }
+
+    #[test]
+    fn resolve_effective_config_defaults_planner_compression_fields() {
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve defaults");
+
+        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::Summary);
+        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::Titles);
+        assert_eq!(effective.workflow.planner_max_prior_loops, Some(10));
+    }
+
+    #[test]
+    fn resolve_effective_config_global_overrides_planner_compression() {
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::FullText;
+        global.workflow.planner_max_prior_loops = None;
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve global overrides");
+
+        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::FullJson);
+        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::FullText);
+        assert_eq!(effective.workflow.planner_max_prior_loops, None);
+    }
+
+    #[test]
+    fn resolve_effective_config_project_overrides_planner_compression() {
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::FullText;
+        global.workflow.planner_max_prior_loops = Some(10);
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                planner_state_in_prompt: Some(PlannerStateInPrompt::Summary),
+                planner_previous_specs_in_prompt: Some(PreviousSpecsInPrompt::None),
+                planner_max_prior_loops: Some(Some(5)),
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve project overrides");
+
+        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::Summary);
+        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::None);
+        assert_eq!(effective.workflow.planner_max_prior_loops, Some(5));
+    }
+
+    #[test]
+    fn resolve_effective_config_project_override_unlimited_loops() {
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_max_prior_loops = Some(10);
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                planner_max_prior_loops: Some(None), // override to unlimited
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve unlimited override");
+
+        assert_eq!(effective.workflow.planner_max_prior_loops, None);
+    }
+
+    #[test]
+    fn resolve_effective_config_project_absent_inherits_global() {
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::FullText;
+        global.workflow.planner_max_prior_loops = Some(3);
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                // All None => inherit from global
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve inherit");
+
+        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::FullJson);
+        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::FullText);
+        assert_eq!(effective.workflow.planner_max_prior_loops, Some(3));
     }
 }

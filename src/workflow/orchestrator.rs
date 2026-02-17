@@ -11,8 +11,8 @@ use tracing::{debug, info, warn};
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
-    resolve_effective_config, CommitMessageStyle, EffectiveConfig, PromptChangeAction,
-    RunWorkflowOverrides,
+    resolve_effective_config, CommitMessageStyle, EffectiveConfig, PlannerStateInPrompt,
+    PreviousSpecsInPrompt, PromptChangeAction, RunWorkflowOverrides,
 };
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
@@ -1329,7 +1329,6 @@ impl Orchestrator {
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
-                    let previous_specs = collect_previous_specs(&state, &project_dir)?;
 
                     let completer_prompt = build_completer_prompt(
                         &effective,
@@ -1338,7 +1337,7 @@ impl Orchestrator {
                         completer_backend.name(),
                         &planner_backend_name,
                         &termination_content,
-                        &previous_specs,
+                        &project_dir,
                     )?;
 
                     registry
@@ -2015,20 +2014,135 @@ fn handle_prompt_change(
     }
 }
 
-fn collect_previous_specs(state: &ProjectState, project_dir: &Path) -> Result<String> {
-    let mut parts = Vec::new();
-    let mut loops = state.loops.iter().collect::<Vec<&FeatureLoopState>>();
+/// Produce a deterministic summary of project state for the planner prompt.
+///
+/// Includes loop metadata (status, iteration, verdict, spec path) but excludes
+/// raw review feedback body and raw QA report body text.
+///
+/// Loops are sorted by loop_number ascending; when `max_loops` is `Some(n)`,
+/// only the latest `n` are included. `Some(0)` includes none. `None` = unlimited.
+fn summarize_state_for_planner(state: &ProjectState, max_loops: Option<usize>) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Project: {} ({})", state.project_name, state.project_id));
+    lines.push(format!("Status: {:?}", state.status));
+    lines.push(format!("Current loop: {}", state.current_loop));
+    lines.push(format!("Current phase: {:?}", state.current_phase));
+    lines.push(format!("Phase iteration: {}", state.phase_iteration));
+    lines.push(String::new());
+
+    let mut loops: Vec<&FeatureLoopState> = state.loops.iter().collect();
     loops.sort_by_key(|l| l.loop_number);
-    for loop_state in loops {
-        if let Ok(spec) = read_project_relative_file(project_dir, &loop_state.artifacts.spec) {
-            parts.push(format!(
-                "## Loop {}: {}\n\n{}",
-                loop_state.loop_number, loop_state.feature_name, spec
+
+    if let Some(cap) = max_loops {
+        if cap == 0 {
+            lines.push("Loops: (none shown)".to_owned());
+            return lines.join("\n");
+        }
+        let len = loops.len();
+        if cap < len {
+            loops = loops[len - cap..].to_vec();
+        }
+    }
+
+    if loops.is_empty() {
+        lines.push("Loops: (none)".to_owned());
+    } else {
+        lines.push("Loops:".to_owned());
+        for l in &loops {
+            let verdict = if l.artifacts.approval.is_some() {
+                "approved"
+            } else if l.status == LoopStatus::Completed {
+                "completed"
+            } else if l.artifacts.qa_results.last().is_some_and(|q| !q.passed) {
+                "failed"
+            } else {
+                "pending"
+            };
+            lines.push(format!(
+                "- Loop {} ({}): status={:?}, iterations={}, verdict={}, spec={}",
+                l.loop_number,
+                l.feature_name,
+                l.status,
+                l.artifacts.reviews.len() + 1,
+                verdict,
+                l.artifacts.spec,
             ));
         }
     }
 
-    Ok(parts.join("\n\n"))
+    if !state.completion_attempts.is_empty() {
+        lines.push(String::new());
+        lines.push("Completion attempts:".to_owned());
+        for c in &state.completion_attempts {
+            let verdict_str = match &c.verdict {
+                Some(v) => format!("{v:?}"),
+                None => "pending".to_owned(),
+            };
+            lines.push(format!("- Loop {} (completion): status={:?}, verdict={}",
+                c.loop_number,
+                c.status,
+                verdict_str,
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Produce previous spec content for the planner/completer prompt.
+///
+/// Mode semantics:
+/// - `None` => empty string
+/// - `Titles` => bullet list of loop number + feature name only
+/// - `FullText` => full prior spec content (like the old `collect_previous_specs`)
+///
+/// `max_specs`: `None` = unlimited; `Some(0)` = include none.
+/// Loops are sorted by loop_number ascending; latest N when capped.
+fn summarize_previous_specs_for_planner(
+    state: &ProjectState,
+    project_dir: &Path,
+    mode: PreviousSpecsInPrompt,
+    max_specs: Option<usize>,
+) -> Result<String> {
+    if matches!(mode, PreviousSpecsInPrompt::None) {
+        return Ok(String::new());
+    }
+
+    let mut loops: Vec<&FeatureLoopState> = state.loops.iter().collect();
+    loops.sort_by_key(|l| l.loop_number);
+
+    if let Some(cap) = max_specs {
+        if cap == 0 {
+            return Ok(String::new());
+        }
+        let len = loops.len();
+        if cap < len {
+            loops = loops[len - cap..].to_vec();
+        }
+    }
+
+    match mode {
+        PreviousSpecsInPrompt::None => Ok(String::new()),
+        PreviousSpecsInPrompt::Titles => {
+            let mut parts = Vec::new();
+            for l in &loops {
+                parts.push(format!("- Loop {}: {}", l.loop_number, l.feature_name));
+            }
+            Ok(parts.join("\n"))
+        }
+        PreviousSpecsInPrompt::FullText => {
+            let mut parts = Vec::new();
+            for l in &loops {
+                if let Ok(spec) = read_project_relative_file(project_dir, &l.artifacts.spec) {
+                    parts.push(format!(
+                        "## Loop {}: {}\n\n{}",
+                        l.loop_number, l.feature_name, spec
+                    ));
+                }
+            }
+            Ok(parts.join("\n\n"))
+        }
+    }
 }
 
 fn build_prompt_reviewer_prompt(
@@ -2059,14 +2173,27 @@ fn build_planner_prompt(
         load_template_source(&effective.templates.planner, default_planner_template());
 
     let mut vars = base_vars(state, loop_number, "planning", 1, backend, opposite_backend);
-    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
-    let state_json_block = format!("```json\n{state_json}\n```");
-    let previous_specs = collect_previous_specs(state, project_dir)?;
+
+    let max_loops = effective.workflow.planner_max_prior_loops;
+    // For template variables: raw content (no fencing). Templates apply their own
+    // fencing as needed. Fencing is only added for fallback-appended sections.
+    let state_text = match effective.workflow.planner_state_in_prompt {
+        PlannerStateInPrompt::FullJson => {
+            serde_json::to_string_pretty(state).unwrap_or_default()
+        }
+        PlannerStateInPrompt::Summary => summarize_state_for_planner(state, max_loops),
+    };
+    let previous_specs = summarize_previous_specs_for_planner(
+        state,
+        project_dir,
+        effective.workflow.planner_previous_specs_in_prompt,
+        max_loops,
+    )?;
     let completion_feedback = latest_completion_feedback_context(state, project_dir)?;
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("state_content".to_owned(), state_json.clone());
-    vars.insert("state_json".to_owned(), state_json.clone());
+    vars.insert("state_content".to_owned(), state_text.clone());
+    vars.insert("state_json".to_owned(), state_text.clone());
     vars.insert("previous_specs".to_owned(), previous_specs);
     vars.insert("system_guardrails".to_owned(), PLANNER_GUARDRAILS.to_owned());
     vars.insert(
@@ -2094,12 +2221,17 @@ fn build_planner_prompt(
         "## Master Prompt",
         prompt_content,
     );
+    // Fallback-appended state section gets fencing only here (not in the var).
+    let state_fallback = match effective.workflow.planner_state_in_prompt {
+        PlannerStateInPrompt::FullJson => format!("```json\n{state_text}\n```"),
+        PlannerStateInPrompt::Summary => state_text.clone(),
+    };
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["state_json", "state_content"],
         "## Current State",
-        &state_json_block,
+        &state_fallback,
     );
     if let Some(completion_feedback) = completion_feedback {
         append_section_if_missing(
@@ -2331,7 +2463,7 @@ fn build_completer_prompt(
     backend: &str,
     opposite_backend: &str,
     termination_request_content: &str,
-    previous_specs: &str,
+    project_dir: &Path,
 ) -> Result<String> {
     let template_source =
         load_template_source(&effective.templates.completer, default_completer_template());
@@ -2344,8 +2476,22 @@ fn build_completer_prompt(
         backend,
         opposite_backend,
     );
-    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
-    let state_json_block = format!("```json\n{state_json}\n```");
+
+    let max_loops = effective.workflow.planner_max_prior_loops;
+    // Raw content for template variables (no fencing). Templates apply their own fencing.
+    let state_text = match effective.workflow.planner_state_in_prompt {
+        PlannerStateInPrompt::FullJson => {
+            serde_json::to_string_pretty(state).unwrap_or_default()
+        }
+        PlannerStateInPrompt::Summary => summarize_state_for_planner(state, max_loops),
+    };
+    let previous_specs = summarize_previous_specs_for_planner(
+        state,
+        project_dir,
+        effective.workflow.planner_previous_specs_in_prompt,
+        max_loops,
+    )?;
+
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert(
@@ -2356,10 +2502,10 @@ fn build_completer_prompt(
         "completion_request".to_owned(),
         termination_request_content.to_owned(),
     );
-    vars.insert("previous_specs".to_owned(), previous_specs.to_owned());
-    vars.insert("prior_specs".to_owned(), previous_specs.to_owned());
-    vars.insert("state_content".to_owned(), state_json.clone());
-    vars.insert("state_json".to_owned(), state_json.clone());
+    vars.insert("previous_specs".to_owned(), previous_specs.clone());
+    vars.insert("prior_specs".to_owned(), previous_specs.clone());
+    vars.insert("state_content".to_owned(), state_text.clone());
+    vars.insert("state_json".to_owned(), state_text.clone());
 
     let rendered = render_template_with_fallback(
         &effective.templates.completer,
@@ -2386,14 +2532,19 @@ fn build_completer_prompt(
         &template_source,
         &["prior_specs", "previous_specs"],
         "## Prior Specs",
-        previous_specs,
+        &previous_specs,
     );
+    // Fallback-appended state section gets fencing only here.
+    let state_fallback = match effective.workflow.planner_state_in_prompt {
+        PlannerStateInPrompt::FullJson => format!("```json\n{state_text}\n```"),
+        PlannerStateInPrompt::Summary => state_text.clone(),
+    };
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["state_json", "state_content"],
         "## State",
-        &state_json_block,
+        &state_fallback,
     );
     Ok(prompt)
 }
@@ -3200,14 +3351,17 @@ mod tests {
 
     use super::{
         build_planner_prompt, preload_role_model_backends, resolve_tmux_settings,
+        summarize_previous_specs_for_planner, summarize_state_for_planner,
         validate_tmux_preflight,
     };
     use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
-    use crate::config::{resolve_effective_config, RunWorkflowOverrides};
-    use crate::config::global::BackendRoleModels;
-    use crate::config::GlobalConfig;
+    use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
+    use crate::config::{resolve_effective_config, GlobalConfig, RunWorkflowOverrides};
     use crate::error::RalphError;
-    use crate::project::state::ProjectState;
+    use crate::project::state::{
+        FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType,
+        ProjectState, ReviewExchange, QaExchange,
+    };
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
         BackendRegistryTmuxConfig {
@@ -3459,5 +3613,470 @@ mod tests {
             .find("## Master Prompt")
             .expect("appended master prompt section should be present");
         assert!(master_index > custom_index);
+    }
+
+    fn make_feature_loop(
+        loop_number: u32,
+        name: &str,
+        status: LoopStatus,
+        reviews: Vec<ReviewExchange>,
+        qa_results: Vec<QaExchange>,
+    ) -> FeatureLoopState {
+        FeatureLoopState {
+            loop_number,
+            slug: name.to_lowercase().replace(' ', "-"),
+            feature_name: name.to_owned(),
+            loop_type: LoopType::Feature,
+            status,
+            backends: FeatureLoopBackends {
+                planner: "claude".to_owned(),
+                implementer: "codex".to_owned(),
+                reviewer: "claude".to_owned(),
+                qa: "codex".to_owned(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: format!("loops/{loop_number:03}-{}/spec.md", name.to_lowercase().replace(' ', "-")),
+                impl_notes: None,
+                reviews,
+                approval: None,
+                qa_results,
+                pending_qa_feedback: None,
+            },
+            commit: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn summarize_state_includes_loop_metadata_excludes_feedback_body() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::Completed,
+            vec![ReviewExchange {
+                iteration: 1,
+                feedback: "loops/001-feature-a/review-1.md".to_owned(),
+                response: "loops/001-feature-a/response-1.md".to_owned(),
+            }],
+            vec![QaExchange {
+                iteration: 1,
+                passed: true,
+                report: "loops/001-feature-a/qa-1.md".to_owned(),
+                implementer_response: None,
+            }],
+        ));
+        state.loops.push(make_feature_loop(
+            2,
+            "Feature B",
+            LoopStatus::InProgress,
+            vec![],
+            vec![],
+        ));
+        state.current_loop = 2;
+
+        let summary = summarize_state_for_planner(&state, None);
+
+        // Must include metadata
+        assert!(summary.contains("Feature A"), "should include feature name");
+        assert!(summary.contains("Loop 1"), "should include loop number");
+        assert!(summary.contains("Completed"), "should include status");
+        assert!(summary.contains("spec="), "should include spec path");
+
+        // Verdict must be deterministic for every loop entry
+        assert!(summary.contains("verdict=completed"), "completed loop should have verdict=completed");
+        assert!(summary.contains("verdict=pending"), "in-progress loop should have verdict=pending");
+
+        // Must NOT include raw feedback/report file paths as body text
+        // (the function does not read files, so feedback bodies are excluded by design)
+        assert!(!summary.contains("review-1.md"), "should not include feedback file path as body");
+        assert!(!summary.contains("qa-1.md"), "should not include qa report file path as body");
+    }
+
+    #[test]
+    fn summarize_state_cap_limits_to_latest_n() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        for i in 1..=5 {
+            state.loops.push(make_feature_loop(
+                i,
+                &format!("Feature {i}"),
+                LoopStatus::Completed,
+                vec![],
+                vec![],
+            ));
+        }
+
+        // Cap to 2 => only loops 4, 5
+        let summary = summarize_state_for_planner(&state, Some(2));
+        assert!(!summary.contains("Feature 1"), "loop 1 should be excluded");
+        assert!(!summary.contains("Feature 3"), "loop 3 should be excluded");
+        assert!(summary.contains("Feature 4"), "loop 4 should be included");
+        assert!(summary.contains("Feature 5"), "loop 5 should be included");
+    }
+
+    #[test]
+    fn summarize_state_cap_zero_shows_none() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.loops.push(make_feature_loop(1, "Feature A", LoopStatus::Completed, vec![], vec![]));
+
+        let summary = summarize_state_for_planner(&state, Some(0));
+        assert!(summary.contains("(none shown)"), "cap=0 should show none");
+        assert!(!summary.contains("Feature A"), "should not include any features");
+    }
+
+    #[test]
+    fn summarize_state_unlimited_includes_all() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        for i in 1..=20 {
+            state.loops.push(make_feature_loop(
+                i,
+                &format!("Feature {i}"),
+                LoopStatus::Completed,
+                vec![],
+                vec![],
+            ));
+        }
+
+        let summary = summarize_state_for_planner(&state, None);
+        assert!(summary.contains("Feature 1"), "should include first feature");
+        assert!(summary.contains("Feature 20"), "should include last feature");
+    }
+
+    #[test]
+    fn summarize_specs_none_mode_returns_empty() {
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+        let temp = tempdir().expect("temp dir");
+        let result = summarize_previous_specs_for_planner(
+            &state,
+            temp.path(),
+            PreviousSpecsInPrompt::None,
+            None,
+        )
+        .expect("should succeed");
+        assert!(result.is_empty(), "None mode should return empty string");
+    }
+
+    #[test]
+    fn summarize_specs_titles_mode_produces_bullet_titles() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.loops.push(make_feature_loop(1, "Auth System", LoopStatus::Completed, vec![], vec![]));
+        state.loops.push(make_feature_loop(2, "API Layer", LoopStatus::Completed, vec![], vec![]));
+
+        let temp = tempdir().expect("temp dir");
+        let result = summarize_previous_specs_for_planner(
+            &state,
+            temp.path(),
+            PreviousSpecsInPrompt::Titles,
+            None,
+        )
+        .expect("should succeed");
+
+        assert!(result.contains("- Loop 1: Auth System"), "should have bullet for loop 1");
+        assert!(result.contains("- Loop 2: API Layer"), "should have bullet for loop 2");
+        // Must NOT contain spec file content (since we didn't write any files)
+        assert!(!result.contains("##"), "titles mode should not have markdown headers");
+    }
+
+    #[test]
+    fn summarize_specs_titles_mode_cap_zero_returns_empty() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.loops.push(make_feature_loop(1, "Feature A", LoopStatus::Completed, vec![], vec![]));
+
+        let temp = tempdir().expect("temp dir");
+        let result = summarize_previous_specs_for_planner(
+            &state,
+            temp.path(),
+            PreviousSpecsInPrompt::Titles,
+            Some(0),
+        )
+        .expect("should succeed");
+        assert!(result.is_empty(), "cap=0 should return empty");
+    }
+
+    #[test]
+    fn summarize_specs_fulltext_mode_reads_spec_files() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path();
+
+        // Create a spec file
+        let loop_dir = project_dir.join("loops/001-auth");
+        fs::create_dir_all(&loop_dir).expect("create loop dir");
+        fs::write(loop_dir.join("spec.md"), "# Auth Feature\nSpec content here").expect("write spec");
+
+        state.loops.push(FeatureLoopState {
+            loop_number: 1,
+            slug: "auth".to_owned(),
+            feature_name: "Auth Feature".to_owned(),
+            loop_type: LoopType::Feature,
+            status: LoopStatus::Completed,
+            backends: FeatureLoopBackends {
+                planner: "claude".to_owned(),
+                implementer: "codex".to_owned(),
+                reviewer: "claude".to_owned(),
+                qa: "codex".to_owned(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: "loops/001-auth/spec.md".to_owned(),
+                impl_notes: None,
+                reviews: vec![],
+                approval: None,
+                qa_results: vec![],
+                pending_qa_feedback: None,
+            },
+            commit: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+        });
+
+        let result = summarize_previous_specs_for_planner(
+            &state,
+            project_dir,
+            PreviousSpecsInPrompt::FullText,
+            None,
+        )
+        .expect("should succeed");
+
+        assert!(result.contains("Auth Feature"), "should include feature name");
+        assert!(result.contains("Spec content here"), "should include spec file content");
+    }
+
+    #[test]
+    fn summarize_specs_cap_limits_to_latest_n() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        for i in 1..=5 {
+            state.loops.push(make_feature_loop(
+                i,
+                &format!("Feature {i}"),
+                LoopStatus::Completed,
+                vec![],
+                vec![],
+            ));
+        }
+
+        let temp = tempdir().expect("temp dir");
+        let result = summarize_previous_specs_for_planner(
+            &state,
+            temp.path(),
+            PreviousSpecsInPrompt::Titles,
+            Some(2),
+        )
+        .expect("should succeed");
+
+        assert!(!result.contains("Feature 1"), "loop 1 should be excluded by cap");
+        assert!(!result.contains("Feature 3"), "loop 3 should be excluded by cap");
+        assert!(result.contains("Feature 4"), "loop 4 should be included");
+        assert!(result.contains("Feature 5"), "loop 5 should be included");
+    }
+
+    #[test]
+    fn planner_prompt_with_summary_mode_excludes_full_json() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt =
+            PlannerStateInPrompt::Summary;
+        global.workflow.planner_previous_specs_in_prompt =
+            PreviousSpecsInPrompt::Titles;
+        global.workflow.planner_max_prior_loops = Some(10);
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.loops.push(make_feature_loop(
+            1, "Feature A", LoopStatus::Completed, vec![], vec![],
+        ));
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "Master prompt body",
+            2,
+            "claude",
+            "codex",
+            &project_dir,
+        )
+        .expect("build planner prompt");
+
+        // Summary mode should NOT include the full JSON state
+        assert!(
+            !prompt.contains("\"project_id\""),
+            "summary mode should not include full JSON state keys"
+        );
+        // Should include loop summary metadata
+        assert!(
+            prompt.contains("Feature A"),
+            "summary should include feature name"
+        );
+        // Should include titles-only spec listing
+        assert!(
+            prompt.contains("- Loop 1: Feature A"),
+            "should include titles-mode spec listing"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_with_full_json_mode_includes_json() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt =
+            PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt =
+            PreviousSpecsInPrompt::None;
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "Master prompt body",
+            1,
+            "claude",
+            "codex",
+            &project_dir,
+        )
+        .expect("build planner prompt");
+
+        // FullJson mode should include the full JSON state
+        assert!(
+            prompt.contains("\"project_id\""),
+            "full-json mode should include JSON state keys"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_full_json_has_no_nested_code_fences() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::None;
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "Master prompt body",
+            1,
+            "claude",
+            "codex",
+            &project_dir,
+        )
+        .expect("build planner prompt");
+
+        // Count occurrences of ```json — there should be exactly one (from template),
+        // not two (which would indicate nested fences).
+        let fence_count = prompt.matches("```json").count();
+        assert_eq!(
+            fence_count, 1,
+            "FullJson mode should produce exactly one ```json fence, got {fence_count}"
+        );
+    }
+
+    #[test]
+    fn summarize_state_verdict_deterministic_for_all_statuses() {
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+
+        // Approved loop (has approval artifact)
+        let mut approved_loop =
+            make_feature_loop(1, "Approved", LoopStatus::Completed, vec![], vec![]);
+        approved_loop.artifacts.approval = Some("loops/001-approved/approval.md".to_owned());
+        state.loops.push(approved_loop);
+
+        // Completed loop (no approval)
+        state.loops.push(make_feature_loop(
+            2,
+            "Completed",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
+        ));
+
+        // In-progress loop
+        state.loops.push(make_feature_loop(
+            3,
+            "InProgress",
+            LoopStatus::InProgress,
+            vec![],
+            vec![],
+        ));
+
+        // Failed loop (last QA failed)
+        state.loops.push(make_feature_loop(
+            4,
+            "Failed",
+            LoopStatus::InProgress,
+            vec![],
+            vec![QaExchange {
+                iteration: 1,
+                passed: false,
+                report: "loops/004-failed/qa-1.md".to_owned(),
+                implementer_response: None,
+            }],
+        ));
+
+        let summary = summarize_state_for_planner(&state, None);
+
+        // Every loop line must include a verdict= token
+        for line in summary.lines() {
+            if line.starts_with("- Loop ") {
+                assert!(
+                    line.contains("verdict="),
+                    "every loop line must include verdict=, got: {line}"
+                );
+            }
+        }
+
+        // Specific verdicts
+        assert!(
+            summary.contains("verdict=approved"),
+            "loop with approval should have verdict=approved"
+        );
+        assert!(
+            summary.contains("verdict=completed"),
+            "completed loop without approval should have verdict=completed"
+        );
+        assert!(
+            summary.contains("verdict=pending"),
+            "in-progress loop should have verdict=pending"
+        );
+        assert!(
+            summary.contains("verdict=failed"),
+            "loop with failed QA should have verdict=failed"
+        );
     }
 }

@@ -239,6 +239,12 @@ pub struct WorkflowConfig {
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
     pub max_qa_iterations: u32,
+    #[serde(default)]
+    pub planner_state_in_prompt: PlannerStateInPrompt,
+    #[serde(default)]
+    pub planner_previous_specs_in_prompt: PreviousSpecsInPrompt,
+    #[serde(default = "default_planner_max_prior_loops")]
+    pub planner_max_prior_loops: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -258,6 +264,23 @@ pub enum PromptChangeAction {
     RestartLoop,
     #[default]
     Abort,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlannerStateInPrompt {
+    FullJson,
+    #[default]
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviousSpecsInPrompt {
+    None,
+    #[default]
+    Titles,
+    FullText,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +431,9 @@ impl Default for WorkflowConfig {
             completer_backend: None,
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
+            planner_state_in_prompt: PlannerStateInPrompt::default(),
+            planner_previous_specs_in_prompt: PreviousSpecsInPrompt::default(),
+            planner_max_prior_loops: default_planner_max_prior_loops(),
         }
     }
 }
@@ -600,6 +626,10 @@ fn default_daemon_rebase_timeout_seconds() -> u64 {
     120
 }
 
+fn default_planner_max_prior_loops() -> Option<usize> {
+    Some(10)
+}
+
 fn default_qa_enabled() -> bool {
     true
 }
@@ -670,7 +700,8 @@ impl GlobalConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig, RoleTimeouts,
+        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig,
+        PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
     };
 
     #[test]
@@ -1390,5 +1421,92 @@ base_branch = "master"
             config.backends.codex.models.reformatter.as_deref(),
             defaults.backends.codex.models.reformatter.as_deref(),
         );
+    }
+
+    #[test]
+    fn planner_state_in_prompt_default_is_summary() {
+        assert_eq!(PlannerStateInPrompt::default(), PlannerStateInPrompt::Summary);
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_default_is_titles() {
+        assert_eq!(PreviousSpecsInPrompt::default(), PreviousSpecsInPrompt::Titles);
+    }
+
+    #[test]
+    fn planner_state_in_prompt_serde_roundtrips() {
+        let variants = [PlannerStateInPrompt::FullJson, PlannerStateInPrompt::Summary];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: PlannerStateInPrompt = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_serde_roundtrips() {
+        let variants = [
+            PreviousSpecsInPrompt::None,
+            PreviousSpecsInPrompt::Titles,
+            PreviousSpecsInPrompt::FullText,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: PreviousSpecsInPrompt = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn planner_state_in_prompt_kebab_case_serde() {
+        let json = serde_json::to_string(&PlannerStateInPrompt::FullJson).expect("serialize");
+        assert_eq!(json, "\"full-json\"");
+
+        let json = serde_json::to_string(&PlannerStateInPrompt::Summary).expect("serialize");
+        assert_eq!(json, "\"summary\"");
+    }
+
+    #[test]
+    fn previous_specs_in_prompt_kebab_case_serde() {
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::None).expect("serialize");
+        assert_eq!(json, "\"none\"");
+
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::Titles).expect("serialize");
+        assert_eq!(json, "\"titles\"");
+
+        let json = serde_json::to_string(&PreviousSpecsInPrompt::FullText).expect("serialize");
+        assert_eq!(json, "\"full-text\"");
+    }
+
+    #[test]
+    fn workflow_config_default_planner_compression_fields() {
+        let config = GlobalConfig::default();
+        assert_eq!(config.workflow.planner_state_in_prompt, PlannerStateInPrompt::Summary);
+        assert_eq!(config.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::Titles);
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(10));
+    }
+
+    #[test]
+    fn workflow_config_deserializes_planner_compression_fields() {
+        let raw = r#"
+[workflow]
+planner_state_in_prompt = "full-json"
+planner_previous_specs_in_prompt = "full-text"
+planner_max_prior_loops = 5
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(config.workflow.planner_state_in_prompt, PlannerStateInPrompt::FullJson);
+        assert_eq!(config.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::FullText);
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(5));
+    }
+
+    #[test]
+    fn workflow_config_deserializes_planner_max_prior_loops_absent_uses_default() {
+        let raw = r#"
+[workflow]
+planner_state_in_prompt = "summary"
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(10));
     }
 }

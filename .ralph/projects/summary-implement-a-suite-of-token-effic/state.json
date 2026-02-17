@@ -7,8 +7,8 @@
   "prompt_hash_at_loop_start": "c268d43048b18da58fe0c3df19bb80ce5e6fd5c33e9561b8743d5f5d1deedc14",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
-  "current_phase": "planning",
+  "current_loop": 2,
+  "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
   "loops": [
@@ -42,6 +42,36 @@
       "commit": "e2fa80f",
       "started_at": "2026-02-17T01:53:33.302783468Z",
       "completed_at": "2026-02-17T14:31:00Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "plannercompleter-prompt-compression-b",
+      "feature_name": "Planner/Completer Prompt Compression (B)",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-plannercompleter-prompt-compression-b/20260217145634-spec.md",
+        "impl_notes": "loops/002-plannercompleter-prompt-compression-b/20260217150656-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-plannercompleter-prompt-compression-b/20260217150844-review-001-feedback.md",
+            "response": "loops/002-plannercompleter-prompt-compression-b/20260217151354-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-plannercompleter-prompt-compression-b/20260217151643-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-17T14:56:34.349383864Z",
+      "completed_at": null
     }
   ],
   "completion_attempts": []

@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::cli::{ConfigArgs, ConfigCommand};
 use crate::config::{
-    resolve_effective_config, CommitMessageStyle, ProjectConfig, PromptChangeAction,
-    RunWorkflowOverrides,
+    resolve_effective_config, CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    ProjectConfig, PromptChangeAction, RunWorkflowOverrides,
 };
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::ProjectLock;
@@ -139,6 +139,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "commit_message_style": effective.workflow.commit_message_style,
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
+                    "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
+                    "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
+                    "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -212,6 +215,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "commit_message_style": effective.workflow.commit_message_style,
                     "commit_tag_format": effective.workflow.commit_tag_format,
                     "prompt_change_action": effective.workflow.prompt_change_action,
+                    "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
+                    "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
+                    "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -414,6 +420,16 @@ fn set_global_value(
         "workflow.max_qa_iterations" => {
             config.workflow.max_qa_iterations = parse_u32(raw_value, key)?;
         }
+        "workflow.planner_state_in_prompt" => {
+            config.workflow.planner_state_in_prompt = parse_planner_state_in_prompt(raw_value)?;
+        }
+        "workflow.planner_previous_specs_in_prompt" => {
+            config.workflow.planner_previous_specs_in_prompt =
+                parse_previous_specs_in_prompt(raw_value)?;
+        }
+        "workflow.planner_max_prior_loops" => {
+            config.workflow.planner_max_prior_loops = parse_optional_usize_or_none(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
@@ -519,6 +535,18 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.max_qa_iterations" => {
             config.workflow.max_qa_iterations = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.planner_state_in_prompt" => {
+            config.workflow.planner_state_in_prompt =
+                parse_optional_planner_state_in_prompt(raw_value)?;
+        }
+        "workflow.planner_previous_specs_in_prompt" => {
+            config.workflow.planner_previous_specs_in_prompt =
+                parse_optional_previous_specs_in_prompt(raw_value)?;
+        }
+        "workflow.planner_max_prior_loops" => {
+            config.workflow.planner_max_prior_loops =
+                parse_project_optional_usize_or_none(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
@@ -636,6 +664,65 @@ fn parse_optional_prompt_change_action(raw: &str) -> Result<Option<PromptChangeA
         return Ok(None);
     }
     Ok(Some(parse_prompt_change_action(raw)?))
+}
+
+fn parse_planner_state_in_prompt(raw: &str) -> Result<PlannerStateInPrompt> {
+    match raw {
+        "full-json" => Ok(PlannerStateInPrompt::FullJson),
+        "summary" => Ok(PlannerStateInPrompt::Summary),
+        _ => Err(RalphError::Validation(
+            "planner_state_in_prompt must be one of: full-json, summary".to_owned(),
+        )),
+    }
+}
+
+fn parse_optional_planner_state_in_prompt(raw: &str) -> Result<Option<PlannerStateInPrompt>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_planner_state_in_prompt(raw)?))
+}
+
+fn parse_previous_specs_in_prompt(raw: &str) -> Result<PreviousSpecsInPrompt> {
+    match raw {
+        "none" => Ok(PreviousSpecsInPrompt::None),
+        "titles" => Ok(PreviousSpecsInPrompt::Titles),
+        "full-text" => Ok(PreviousSpecsInPrompt::FullText),
+        _ => Err(RalphError::Validation(
+            "planner_previous_specs_in_prompt must be one of: none, titles, full-text".to_owned(),
+        )),
+    }
+}
+
+fn parse_optional_previous_specs_in_prompt(raw: &str) -> Result<Option<PreviousSpecsInPrompt>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_previous_specs_in_prompt(raw)?))
+}
+
+/// Parse `"none"` as `None` (unlimited), integer as `Some(n)`.
+fn parse_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<usize>> {
+    if raw == "none" {
+        return Ok(None);
+    }
+    let n = raw.parse::<usize>().map_err(|_| {
+        RalphError::Validation(format!(
+            "key '{key}' expects unsigned integer or \"none\" for unlimited"
+        ))
+    })?;
+    Ok(Some(n))
+}
+
+/// For project overrides: `"null"` = inherit, `"none"` = override to unlimited, integer = cap.
+fn parse_project_optional_usize_or_none(
+    raw: &str,
+    key: &str,
+) -> Result<Option<Option<usize>>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_optional_usize_or_none(raw, key)?))
 }
 
 fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
