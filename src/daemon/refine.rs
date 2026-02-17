@@ -30,6 +30,8 @@ Delimiters must be exact and in the order shown above.
 
 /// Minimum length for refinement output to be considered valid.
 const MIN_OUTPUT_LENGTH: usize = 20;
+/// Minimum length for a cleaned body to be used (guards against truncated junk).
+const MIN_CLEANED_BODY_LENGTH: usize = 5;
 const MAX_TITLE_LENGTH: usize = 80;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +79,7 @@ fn validate_output(output: &str) -> Result<String> {
 
 fn validate_cleaned_body(output: &str) -> Option<String> {
     let trimmed = output.trim().to_owned();
-    if trimmed.is_empty() {
+    if trimmed.len() < MIN_CLEANED_BODY_LENGTH {
         return None;
     }
     Some(trimmed)
@@ -324,6 +326,13 @@ mod tests {
             parsed.cleaned_body,
             Some("Fix typo".to_owned())
         );
+    }
+
+    #[test]
+    fn parse_refined_output_truncated_cleaned_body_rejected() {
+        let input = "TITLE: Fix typo in readme\n---\nCorrect the misspelling in the README file and verify formatting.\n=== CLEANED BODY ===\nok";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(parsed.cleaned_body, None);
     }
 
     #[test]
