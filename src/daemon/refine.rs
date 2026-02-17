@@ -77,7 +77,7 @@ fn validate_output(output: &str) -> Result<String> {
 
 fn validate_cleaned_body(output: &str) -> Option<String> {
     let trimmed = output.trim().to_owned();
-    if trimmed.is_empty() || trimmed.len() < MIN_OUTPUT_LENGTH {
+    if trimmed.is_empty() {
         return None;
     }
     Some(trimmed)
@@ -313,6 +313,16 @@ mod tests {
                 "First cleaned section.\n=== CLEANED BODY ===\nSecond marker remains content."
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn parse_refined_output_short_cleaned_body_accepted() {
+        let input = "TITLE: Fix typo in readme\n---\nCorrect the misspelling in the README file and verify formatting.\n=== CLEANED BODY ===\nFix typo";
+        let parsed = parse_refined_output(input).unwrap();
+        assert_eq!(
+            parsed.cleaned_body,
+            Some("Fix typo".to_owned())
         );
     }
 
