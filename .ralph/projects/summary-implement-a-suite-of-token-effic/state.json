@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "c268d43048b18da58fe0c3df19bb80ce5e6fd5c33e9561b8743d5f5d1deedc14",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -48,7 +48,7 @@
       "slug": "plannercompleter-prompt-compression-b",
       "feature_name": "Planner/Completer Prompt Compression (B)",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -69,8 +69,32 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "c27dfbb2c32f711cf500c5937856482772ecc2c3",
       "started_at": "2026-02-17T14:56:34.349383864Z",
+      "completed_at": "2026-02-17T15:16:43.436453495Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "deterministic-history-capping-c",
+      "feature_name": "Deterministic History Capping (C)",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-deterministic-history-capping-c/20260217153325-spec.md",
+        "impl_notes": "loops/003-deterministic-history-capping-c/20260217153952-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-deterministic-history-capping-c/20260217154027-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-17T15:33:25.628748866Z",
       "completed_at": null
     }
   ],

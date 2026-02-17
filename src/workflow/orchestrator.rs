@@ -266,7 +266,9 @@ impl Orchestrator {
                 &prompt_reviewer_prompt,
                 parse_prompt_reviewer_output,
                 &expected_format_template_for("prompt_reviewer", None),
-                registry.timeout_for_role(pr_backend_spec, "prompt_reviewer").as_secs(),
+                registry
+                    .timeout_for_role(pr_backend_spec, "prompt_reviewer")
+                    .as_secs(),
                 &mut pr_log,
             )
             .await?;
@@ -518,6 +520,7 @@ impl Orchestrator {
                             None,
                             None,
                             &project_dir,
+                            false,
                         )?;
 
                         registry
@@ -624,6 +627,7 @@ impl Orchestrator {
                             Some(iteration),
                             Some(&qa_feedback_content),
                             &project_dir,
+                            false,
                         )?;
 
                         registry
@@ -734,6 +738,7 @@ impl Orchestrator {
                             Some(iteration),
                             Some(&feedback_content),
                             &project_dir,
+                            false,
                         )?;
 
                         registry
@@ -886,7 +891,8 @@ impl Orchestrator {
                     let impl_notes_content =
                         read_project_relative_file(&project_dir, &impl_notes_rel)?;
                     let git_diff = current_git_diff(&self.workspace.root)?;
-                    let qa_history = collect_qa_history(&state, &project_dir)?;
+                    let qa_history =
+                        collect_qa_history_for_prompt(&effective, &state, &project_dir, false)?;
 
                     let qa_prompt = build_qa_prompt(
                         &effective,
@@ -1098,6 +1104,7 @@ impl Orchestrator {
                             impl_response_content.as_deref(),
                             &git_diff,
                             &project_dir,
+                            false,
                         )?;
 
                         registry
@@ -2023,7 +2030,10 @@ fn handle_prompt_change(
 /// only the latest `n` are included. `Some(0)` includes none. `None` = unlimited.
 fn summarize_state_for_planner(state: &ProjectState, max_loops: Option<usize>) -> String {
     let mut lines = Vec::new();
-    lines.push(format!("Project: {} ({})", state.project_name, state.project_id));
+    lines.push(format!(
+        "Project: {} ({})",
+        state.project_name, state.project_id
+    ));
     lines.push(format!("Status: {:?}", state.status));
     lines.push(format!("Current loop: {}", state.current_loop));
     lines.push(format!("Current phase: {:?}", state.current_phase));
@@ -2078,10 +2088,9 @@ fn summarize_state_for_planner(state: &ProjectState, max_loops: Option<usize>) -
                 Some(v) => format!("{v:?}"),
                 None => "pending".to_owned(),
             };
-            lines.push(format!("- Loop {} (completion): status={:?}, verdict={}",
-                c.loop_number,
-                c.status,
-                verdict_str,
+            lines.push(format!(
+                "- Loop {} (completion): status={:?}, verdict={}",
+                c.loop_number, c.status, verdict_str,
             ));
         }
     }
@@ -2178,9 +2187,7 @@ fn build_planner_prompt(
     // For template variables: raw content (no fencing). Templates apply their own
     // fencing as needed. Fencing is only added for fallback-appended sections.
     let state_text = match effective.workflow.planner_state_in_prompt {
-        PlannerStateInPrompt::FullJson => {
-            serde_json::to_string_pretty(state).unwrap_or_default()
-        }
+        PlannerStateInPrompt::FullJson => serde_json::to_string_pretty(state).unwrap_or_default(),
         PlannerStateInPrompt::Summary => summarize_state_for_planner(state, max_loops),
     };
     let previous_specs = summarize_previous_specs_for_planner(
@@ -2195,7 +2202,10 @@ fn build_planner_prompt(
     vars.insert("state_content".to_owned(), state_text.clone());
     vars.insert("state_json".to_owned(), state_text.clone());
     vars.insert("previous_specs".to_owned(), previous_specs);
-    vars.insert("system_guardrails".to_owned(), PLANNER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        PLANNER_GUARDRAILS.to_owned(),
+    );
     vars.insert(
         "completion_feedback".to_owned(),
         completion_feedback.clone().unwrap_or_default(),
@@ -2260,9 +2270,12 @@ fn build_implementer_prompt(
     iteration: Option<u32>,
     review_feedback: Option<&str>,
     project_dir: &Path,
+    session_reused_this_call: bool,
 ) -> Result<String> {
-    let template_source =
-        load_template_source(&effective.templates.implementer, default_implementer_template());
+    let template_source = load_template_source(
+        &effective.templates.implementer,
+        default_implementer_template(),
+    );
 
     let phase_iteration = iteration.unwrap_or(1);
     let mut vars = base_vars(
@@ -2285,14 +2298,17 @@ fn build_implementer_prompt(
         format!("```diff\n{git_diff}\n```"),
     );
     let review_feedback_text = review_feedback.unwrap_or("(none)");
-    vars.insert("review_feedback".to_owned(), review_feedback_text.to_owned());
+    vars.insert(
+        "review_feedback".to_owned(),
+        review_feedback_text.to_owned(),
+    );
     vars.insert(
         "review_feedback_content".to_owned(),
         review_feedback_text.to_owned(),
     );
     vars.insert(
         "review_history".to_owned(),
-        collect_review_history(state, project_dir)?,
+        collect_review_history_for_prompt(effective, state, project_dir, session_reused_this_call)?,
     );
     vars.insert(
         "system_guardrails".to_owned(),
@@ -2358,6 +2374,7 @@ fn build_reviewer_prompt(
     impl_response_content: Option<&str>,
     git_diff: &str,
     project_dir: &Path,
+    session_reused_this_call: bool,
 ) -> Result<String> {
     let template_source =
         load_template_source(&effective.templates.reviewer, default_reviewer_template());
@@ -2400,9 +2417,12 @@ fn build_reviewer_prompt(
     );
     vars.insert(
         "review_history".to_owned(),
-        collect_review_history(state, project_dir)?,
+        collect_review_history_for_prompt(effective, state, project_dir, session_reused_this_call)?,
     );
-    vars.insert("system_guardrails".to_owned(), REVIEWER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        REVIEWER_GUARDRAILS.to_owned(),
+    );
 
     let rendered = render_template_with_fallback(
         &effective.templates.reviewer,
@@ -2480,9 +2500,7 @@ fn build_completer_prompt(
     let max_loops = effective.workflow.planner_max_prior_loops;
     // Raw content for template variables (no fencing). Templates apply their own fencing.
     let state_text = match effective.workflow.planner_state_in_prompt {
-        PlannerStateInPrompt::FullJson => {
-            serde_json::to_string_pretty(state).unwrap_or_default()
-        }
+        PlannerStateInPrompt::FullJson => serde_json::to_string_pretty(state).unwrap_or_default(),
         PlannerStateInPrompt::Summary => summarize_state_for_planner(state, max_loops),
     };
     let previous_specs = summarize_previous_specs_for_planner(
@@ -2654,13 +2672,57 @@ fn base_vars(
     vars
 }
 
-fn collect_review_history(state: &ProjectState, project_dir: &Path) -> Result<String> {
+fn should_omit_history_for_this_call(
+    include_history_when_session_reuse_enabled: bool,
+    session_reused_this_call: bool,
+) -> bool {
+    session_reused_this_call && !include_history_when_session_reuse_enabled
+}
+
+fn collect_review_history_for_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    project_dir: &Path,
+    session_reused_this_call: bool,
+) -> Result<String> {
+    if should_omit_history_for_this_call(
+        effective
+            .workflow
+            .include_history_when_session_reuse_enabled,
+        session_reused_this_call,
+    ) {
+        return Ok(String::new());
+    }
+
+    collect_review_history(
+        state,
+        project_dir,
+        effective.workflow.max_review_history_entries_in_prompt,
+    )
+}
+
+fn collect_review_history(
+    state: &ProjectState,
+    project_dir: &Path,
+    max_entries: usize,
+) -> Result<String> {
+    if max_entries == 0 {
+        return Ok(String::new());
+    }
+
     let Some(loop_state) = state.current_feature_loop() else {
         return Ok(String::new());
     };
 
+    let mut exchanges = loop_state.artifacts.reviews.iter().collect::<Vec<_>>();
+    exchanges.sort_by_key(|exchange| exchange.iteration);
+    if exchanges.len() > max_entries {
+        let start = exchanges.len() - max_entries;
+        exchanges = exchanges.split_off(start);
+    }
+
     let mut history = Vec::new();
-    for exchange in &loop_state.artifacts.reviews {
+    for exchange in exchanges {
         let feedback = read_project_relative_file(project_dir, &exchange.feedback)?;
         let response = read_project_relative_file(project_dir, &exchange.response)?;
         history.push(format!(
@@ -2672,13 +2734,50 @@ fn collect_review_history(state: &ProjectState, project_dir: &Path) -> Result<St
     Ok(history.join("\n\n"))
 }
 
-fn collect_qa_history(state: &ProjectState, project_dir: &Path) -> Result<String> {
+fn collect_qa_history_for_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    project_dir: &Path,
+    session_reused_this_call: bool,
+) -> Result<String> {
+    if should_omit_history_for_this_call(
+        effective
+            .workflow
+            .include_history_when_session_reuse_enabled,
+        session_reused_this_call,
+    ) {
+        return Ok(String::new());
+    }
+
+    collect_qa_history(
+        state,
+        project_dir,
+        effective.workflow.max_qa_history_entries_in_prompt,
+    )
+}
+
+fn collect_qa_history(
+    state: &ProjectState,
+    project_dir: &Path,
+    max_entries: usize,
+) -> Result<String> {
+    if max_entries == 0 {
+        return Ok(String::new());
+    }
+
     let Some(loop_state) = state.current_feature_loop() else {
         return Ok(String::new());
     };
 
+    let mut exchanges = loop_state.artifacts.qa_results.iter().collect::<Vec<_>>();
+    exchanges.sort_by_key(|exchange| exchange.iteration);
+    if exchanges.len() > max_entries {
+        let start = exchanges.len() - max_entries;
+        exchanges = exchanges.split_off(start);
+    }
+
     let mut history = Vec::new();
-    for exchange in &loop_state.artifacts.qa_results {
+    for exchange in exchanges {
         let report = read_project_relative_file(project_dir, &exchange.report)?;
         let response_section = if let Some(ref response_rel) = exchange.implementer_response {
             let response = read_project_relative_file(project_dir, response_rel)?;
@@ -2809,7 +2908,11 @@ fn build_qa_prompt(
         "current_diff".to_owned(),
         format!("```diff\n{git_diff}\n```"),
     );
-    let qa_history_text = if qa_history.is_empty() { "(none)" } else { qa_history };
+    let qa_history_text = if qa_history.is_empty() {
+        "(none)"
+    } else {
+        qa_history
+    };
     vars.insert("qa_history".to_owned(), qa_history_text.to_owned());
     vars.insert("prior_qa_history".to_owned(), qa_history_text.to_owned());
     vars.insert("system_guardrails".to_owned(), QA_GUARDRAILS.to_owned());
@@ -3344,14 +3447,16 @@ async fn execute_with_timeout_retries(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use tempfile::tempdir;
 
     use super::{
-        build_planner_prompt, preload_role_model_backends, resolve_tmux_settings,
-        summarize_previous_specs_for_planner, summarize_state_for_planner,
+        build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
+        collect_review_history, collect_review_history_for_prompt, preload_role_model_backends,
+        resolve_tmux_settings, summarize_previous_specs_for_planner, summarize_state_for_planner,
         validate_tmux_preflight,
     };
     use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
@@ -3360,7 +3465,7 @@ mod tests {
     use crate::error::RalphError;
     use crate::project::state::{
         FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType,
-        ProjectState, ReviewExchange, QaExchange,
+        ProjectState, QaExchange, ReviewExchange,
     };
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
@@ -3635,7 +3740,10 @@ mod tests {
                 qa: "codex".to_owned(),
             },
             artifacts: FeatureLoopArtifacts {
-                spec: format!("loops/{loop_number:03}-{}/spec.md", name.to_lowercase().replace(' ', "-")),
+                spec: format!(
+                    "loops/{loop_number:03}-{}/spec.md",
+                    name.to_lowercase().replace(' ', "-")
+                ),
                 impl_notes: None,
                 reviews,
                 approval: None,
@@ -3646,6 +3754,281 @@ mod tests {
             started_at: chrono::Utc::now(),
             completed_at: None,
         }
+    }
+
+    fn write_test_file(project_dir: &Path, relative: &str, content: &str) {
+        let path = project_dir.join(relative);
+        let parent = path
+            .parent()
+            .expect("test artifact path should have parent");
+        fs::create_dir_all(parent).expect("create parent dir");
+        fs::write(path, content).expect("write test artifact");
+    }
+
+    fn parse_iteration_headers(history: &str, prefix: &str) -> Vec<u32> {
+        history
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix(prefix).and_then(|rest| {
+                    rest.split_whitespace()
+                        .next()
+                        .and_then(|token| token.parse::<u32>().ok())
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collect_review_history_caps_to_latest_three_sequential() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path();
+
+        let mut reviews = Vec::new();
+        for iteration in 1..=5 {
+            let feedback = format!("loops/001-feature-a/review-{iteration:03}.md");
+            let response = format!("loops/001-feature-a/response-{iteration:03}.md");
+            write_test_file(project_dir, &feedback, &format!("feedback-{iteration}"));
+            write_test_file(project_dir, &response, &format!("response-{iteration}"));
+            reviews.push(ReviewExchange {
+                iteration,
+                feedback,
+                response,
+            });
+        }
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            reviews,
+            vec![],
+        ));
+
+        let history =
+            collect_review_history(&state, project_dir, 3).expect("collect review history");
+        assert_eq!(
+            parse_iteration_headers(&history, "### Iteration "),
+            vec![3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn collect_review_history_caps_to_highest_two_non_sequential() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path();
+
+        let mut reviews = Vec::new();
+        for iteration in [1, 3, 7, 2, 5] {
+            let feedback = format!("loops/001-feature-a/review-{iteration:03}.md");
+            let response = format!("loops/001-feature-a/response-{iteration:03}.md");
+            write_test_file(project_dir, &feedback, &format!("feedback-{iteration}"));
+            write_test_file(project_dir, &response, &format!("response-{iteration}"));
+            reviews.push(ReviewExchange {
+                iteration,
+                feedback,
+                response,
+            });
+        }
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            reviews,
+            vec![],
+        ));
+
+        let history =
+            collect_review_history(&state, project_dir, 2).expect("collect review history");
+        assert_eq!(
+            parse_iteration_headers(&history, "### Iteration "),
+            vec![5, 7]
+        );
+    }
+
+    #[test]
+    fn collect_qa_history_caps_to_highest_two_non_sequential() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path();
+
+        let mut qa_results = Vec::new();
+        for iteration in [1, 3, 7, 2, 5] {
+            let report = format!("loops/001-feature-a/qa-{iteration:03}.md");
+            write_test_file(project_dir, &report, &format!("qa-{iteration}"));
+            qa_results.push(QaExchange {
+                iteration,
+                passed: iteration % 2 == 0,
+                report,
+                implementer_response: None,
+            });
+        }
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            vec![],
+            qa_results,
+        ));
+
+        let history = collect_qa_history(&state, project_dir, 2).expect("collect qa history");
+        assert_eq!(
+            parse_iteration_headers(&history, "### QA Iteration "),
+            vec![5, 7]
+        );
+    }
+
+    #[test]
+    fn collect_history_returns_empty_when_cap_is_zero() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path();
+
+        let review_feedback = "loops/001-feature-a/review-001.md";
+        let review_response = "loops/001-feature-a/response-001.md";
+        let qa_report = "loops/001-feature-a/qa-001.md";
+        write_test_file(project_dir, review_feedback, "feedback");
+        write_test_file(project_dir, review_response, "response");
+        write_test_file(project_dir, qa_report, "qa report");
+
+        let reviews = vec![ReviewExchange {
+            iteration: 1,
+            feedback: review_feedback.to_owned(),
+            response: review_response.to_owned(),
+        }];
+        let qa_results = vec![QaExchange {
+            iteration: 1,
+            passed: false,
+            report: qa_report.to_owned(),
+            implementer_response: None,
+        }];
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            reviews,
+            qa_results,
+        ));
+
+        assert!(collect_review_history(&state, project_dir, 0)
+            .expect("collect review history")
+            .is_empty());
+        assert!(collect_qa_history(&state, project_dir, 0)
+            .expect("collect qa history")
+            .is_empty());
+    }
+
+    #[test]
+    fn history_omitted_when_session_reused_and_config_disables_reused_history() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let review_feedback = "loops/001-feature-a/review-001.md";
+        let review_response = "loops/001-feature-a/response-001.md";
+        let qa_report = "loops/001-feature-a/qa-001.md";
+        write_test_file(&project_dir, review_feedback, "feedback");
+        write_test_file(&project_dir, review_response, "response");
+        write_test_file(&project_dir, qa_report, "qa report");
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            vec![ReviewExchange {
+                iteration: 1,
+                feedback: review_feedback.to_owned(),
+                response: review_response.to_owned(),
+            }],
+            vec![QaExchange {
+                iteration: 1,
+                passed: false,
+                report: qa_report.to_owned(),
+                implementer_response: None,
+            }],
+        ));
+
+        let mut global = GlobalConfig::default();
+        global.workflow.include_history_when_session_reuse_enabled = false;
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+
+        assert!(
+            collect_review_history_for_prompt(&effective, &state, &project_dir, true)
+                .expect("collect review history")
+                .is_empty()
+        );
+        assert!(
+            collect_qa_history_for_prompt(&effective, &state, &project_dir, true)
+                .expect("collect qa history")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn history_included_when_resume_rewrite_fallback_uses_fresh_prompt() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut reviews = Vec::new();
+        for iteration in 1..=3 {
+            let feedback = format!("loops/001-feature-a/review-{iteration:03}.md");
+            let response = format!("loops/001-feature-a/response-{iteration:03}.md");
+            write_test_file(&project_dir, &feedback, &format!("feedback-{iteration}"));
+            write_test_file(&project_dir, &response, &format!("response-{iteration}"));
+            reviews.push(ReviewExchange {
+                iteration,
+                feedback,
+                response,
+            });
+        }
+
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.current_loop = 1;
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::InProgress,
+            reviews,
+            vec![],
+        ));
+
+        let mut global = GlobalConfig::default();
+        global.workflow.max_review_history_entries_in_prompt = 2;
+        global.workflow.include_history_when_session_reuse_enabled = false;
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+
+        // Simulates resume-arg rewrite failure where the invocation falls back
+        // to a fresh prompt (`session_reused_this_call = false`).
+        let history = collect_review_history_for_prompt(&effective, &state, &project_dir, false)
+            .expect("collect review history");
+        assert_eq!(
+            parse_iteration_headers(&history, "### Iteration "),
+            vec![2, 3]
+        );
     }
 
     #[test]
@@ -3685,13 +4068,25 @@ mod tests {
         assert!(summary.contains("spec="), "should include spec path");
 
         // Verdict must be deterministic for every loop entry
-        assert!(summary.contains("verdict=completed"), "completed loop should have verdict=completed");
-        assert!(summary.contains("verdict=pending"), "in-progress loop should have verdict=pending");
+        assert!(
+            summary.contains("verdict=completed"),
+            "completed loop should have verdict=completed"
+        );
+        assert!(
+            summary.contains("verdict=pending"),
+            "in-progress loop should have verdict=pending"
+        );
 
         // Must NOT include raw feedback/report file paths as body text
         // (the function does not read files, so feedback bodies are excluded by design)
-        assert!(!summary.contains("review-1.md"), "should not include feedback file path as body");
-        assert!(!summary.contains("qa-1.md"), "should not include qa report file path as body");
+        assert!(
+            !summary.contains("review-1.md"),
+            "should not include feedback file path as body"
+        );
+        assert!(
+            !summary.contains("qa-1.md"),
+            "should not include qa report file path as body"
+        );
     }
 
     #[test]
@@ -3718,11 +4113,20 @@ mod tests {
     #[test]
     fn summarize_state_cap_zero_shows_none() {
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
-        state.loops.push(make_feature_loop(1, "Feature A", LoopStatus::Completed, vec![], vec![]));
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
+        ));
 
         let summary = summarize_state_for_planner(&state, Some(0));
         assert!(summary.contains("(none shown)"), "cap=0 should show none");
-        assert!(!summary.contains("Feature A"), "should not include any features");
+        assert!(
+            !summary.contains("Feature A"),
+            "should not include any features"
+        );
     }
 
     #[test]
@@ -3739,8 +4143,14 @@ mod tests {
         }
 
         let summary = summarize_state_for_planner(&state, None);
-        assert!(summary.contains("Feature 1"), "should include first feature");
-        assert!(summary.contains("Feature 20"), "should include last feature");
+        assert!(
+            summary.contains("Feature 1"),
+            "should include first feature"
+        );
+        assert!(
+            summary.contains("Feature 20"),
+            "should include last feature"
+        );
     }
 
     #[test]
@@ -3760,8 +4170,20 @@ mod tests {
     #[test]
     fn summarize_specs_titles_mode_produces_bullet_titles() {
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
-        state.loops.push(make_feature_loop(1, "Auth System", LoopStatus::Completed, vec![], vec![]));
-        state.loops.push(make_feature_loop(2, "API Layer", LoopStatus::Completed, vec![], vec![]));
+        state.loops.push(make_feature_loop(
+            1,
+            "Auth System",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
+        ));
+        state.loops.push(make_feature_loop(
+            2,
+            "API Layer",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
+        ));
 
         let temp = tempdir().expect("temp dir");
         let result = summarize_previous_specs_for_planner(
@@ -3772,16 +4194,31 @@ mod tests {
         )
         .expect("should succeed");
 
-        assert!(result.contains("- Loop 1: Auth System"), "should have bullet for loop 1");
-        assert!(result.contains("- Loop 2: API Layer"), "should have bullet for loop 2");
+        assert!(
+            result.contains("- Loop 1: Auth System"),
+            "should have bullet for loop 1"
+        );
+        assert!(
+            result.contains("- Loop 2: API Layer"),
+            "should have bullet for loop 2"
+        );
         // Must NOT contain spec file content (since we didn't write any files)
-        assert!(!result.contains("##"), "titles mode should not have markdown headers");
+        assert!(
+            !result.contains("##"),
+            "titles mode should not have markdown headers"
+        );
     }
 
     #[test]
     fn summarize_specs_titles_mode_cap_zero_returns_empty() {
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
-        state.loops.push(make_feature_loop(1, "Feature A", LoopStatus::Completed, vec![], vec![]));
+        state.loops.push(make_feature_loop(
+            1,
+            "Feature A",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
+        ));
 
         let temp = tempdir().expect("temp dir");
         let result = summarize_previous_specs_for_planner(
@@ -3803,7 +4240,11 @@ mod tests {
         // Create a spec file
         let loop_dir = project_dir.join("loops/001-auth");
         fs::create_dir_all(&loop_dir).expect("create loop dir");
-        fs::write(loop_dir.join("spec.md"), "# Auth Feature\nSpec content here").expect("write spec");
+        fs::write(
+            loop_dir.join("spec.md"),
+            "# Auth Feature\nSpec content here",
+        )
+        .expect("write spec");
 
         state.loops.push(FeatureLoopState {
             loop_number: 1,
@@ -3838,8 +4279,14 @@ mod tests {
         )
         .expect("should succeed");
 
-        assert!(result.contains("Auth Feature"), "should include feature name");
-        assert!(result.contains("Spec content here"), "should include spec file content");
+        assert!(
+            result.contains("Auth Feature"),
+            "should include feature name"
+        );
+        assert!(
+            result.contains("Spec content here"),
+            "should include spec file content"
+        );
     }
 
     #[test]
@@ -3864,8 +4311,14 @@ mod tests {
         )
         .expect("should succeed");
 
-        assert!(!result.contains("Feature 1"), "loop 1 should be excluded by cap");
-        assert!(!result.contains("Feature 3"), "loop 3 should be excluded by cap");
+        assert!(
+            !result.contains("Feature 1"),
+            "loop 1 should be excluded by cap"
+        );
+        assert!(
+            !result.contains("Feature 3"),
+            "loop 3 should be excluded by cap"
+        );
         assert!(result.contains("Feature 4"), "loop 4 should be included");
         assert!(result.contains("Feature 5"), "loop 5 should be included");
     }
@@ -3877,10 +4330,8 @@ mod tests {
         fs::create_dir_all(&project_dir).expect("create project dir");
 
         let mut global = GlobalConfig::default();
-        global.workflow.planner_state_in_prompt =
-            PlannerStateInPrompt::Summary;
-        global.workflow.planner_previous_specs_in_prompt =
-            PreviousSpecsInPrompt::Titles;
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::Summary;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::Titles;
         global.workflow.planner_max_prior_loops = Some(10);
 
         let effective = resolve_effective_config(
@@ -3894,7 +4345,11 @@ mod tests {
 
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
         state.loops.push(make_feature_loop(
-            1, "Feature A", LoopStatus::Completed, vec![], vec![],
+            1,
+            "Feature A",
+            LoopStatus::Completed,
+            vec![],
+            vec![],
         ));
 
         let prompt = build_planner_prompt(
@@ -3932,10 +4387,8 @@ mod tests {
         fs::create_dir_all(&project_dir).expect("create project dir");
 
         let mut global = GlobalConfig::default();
-        global.workflow.planner_state_in_prompt =
-            PlannerStateInPrompt::FullJson;
-        global.workflow.planner_previous_specs_in_prompt =
-            PreviousSpecsInPrompt::None;
+        global.workflow.planner_state_in_prompt = PlannerStateInPrompt::FullJson;
+        global.workflow.planner_previous_specs_in_prompt = PreviousSpecsInPrompt::None;
 
         let effective = resolve_effective_config(
             temp.path(),

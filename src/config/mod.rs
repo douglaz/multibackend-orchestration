@@ -33,6 +33,9 @@ pub struct EffectiveWorkflowConfig {
     pub planner_state_in_prompt: PlannerStateInPrompt,
     pub planner_previous_specs_in_prompt: PreviousSpecsInPrompt,
     pub planner_max_prior_loops: Option<usize>,
+    pub max_review_history_entries_in_prompt: usize,
+    pub max_qa_history_entries_in_prompt: usize,
+    pub include_history_when_session_reuse_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -186,6 +189,15 @@ pub fn resolve_effective_config(
         planner_max_prior_loops: project_ref
             .and_then(|p| p.workflow.planner_max_prior_loops)
             .unwrap_or(global.workflow.planner_max_prior_loops),
+        max_review_history_entries_in_prompt: project_ref
+            .and_then(|p| p.workflow.max_review_history_entries_in_prompt)
+            .unwrap_or(global.workflow.max_review_history_entries_in_prompt),
+        max_qa_history_entries_in_prompt: project_ref
+            .and_then(|p| p.workflow.max_qa_history_entries_in_prompt)
+            .unwrap_or(global.workflow.max_qa_history_entries_in_prompt),
+        include_history_when_session_reuse_enabled: project_ref
+            .and_then(|p| p.workflow.include_history_when_session_reuse_enabled)
+            .unwrap_or(global.workflow.include_history_when_session_reuse_enabled),
     };
 
     let templates = EffectiveTemplateConfig {
@@ -568,9 +580,22 @@ mod tests {
         )
         .expect("resolve defaults");
 
-        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::Summary);
-        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::Titles);
+        assert_eq!(
+            effective.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::Summary
+        );
+        assert_eq!(
+            effective.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::Titles
+        );
         assert_eq!(effective.workflow.planner_max_prior_loops, Some(10));
+        assert_eq!(effective.workflow.max_review_history_entries_in_prompt, 3);
+        assert_eq!(effective.workflow.max_qa_history_entries_in_prompt, 2);
+        assert!(
+            !effective
+                .workflow
+                .include_history_when_session_reuse_enabled
+        );
     }
 
     #[test]
@@ -589,8 +614,14 @@ mod tests {
         )
         .expect("resolve global overrides");
 
-        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::FullJson);
-        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::FullText);
+        assert_eq!(
+            effective.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::FullJson
+        );
+        assert_eq!(
+            effective.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::FullText
+        );
         assert_eq!(effective.workflow.planner_max_prior_loops, None);
     }
 
@@ -620,8 +651,14 @@ mod tests {
         )
         .expect("resolve project overrides");
 
-        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::Summary);
-        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::None);
+        assert_eq!(
+            effective.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::Summary
+        );
+        assert_eq!(
+            effective.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::None
+        );
         assert_eq!(effective.workflow.planner_max_prior_loops, Some(5));
     }
 
@@ -674,8 +711,49 @@ mod tests {
         )
         .expect("resolve inherit");
 
-        assert_eq!(effective.workflow.planner_state_in_prompt, PlannerStateInPrompt::FullJson);
-        assert_eq!(effective.workflow.planner_previous_specs_in_prompt, PreviousSpecsInPrompt::FullText);
+        assert_eq!(
+            effective.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::FullJson
+        );
+        assert_eq!(
+            effective.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::FullText
+        );
         assert_eq!(effective.workflow.planner_max_prior_loops, Some(3));
+    }
+
+    #[test]
+    fn resolve_effective_config_history_capping_fields_follow_precedence() {
+        let mut global = GlobalConfig::default();
+        global.workflow.max_review_history_entries_in_prompt = 9;
+        global.workflow.max_qa_history_entries_in_prompt = 8;
+        global.workflow.include_history_when_session_reuse_enabled = true;
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                max_review_history_entries_in_prompt: Some(4),
+                max_qa_history_entries_in_prompt: None,
+                include_history_when_session_reuse_enabled: Some(false),
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve history capping config");
+
+        assert_eq!(effective.workflow.max_review_history_entries_in_prompt, 4);
+        assert_eq!(effective.workflow.max_qa_history_entries_in_prompt, 8);
+        assert!(
+            !effective
+                .workflow
+                .include_history_when_session_reuse_enabled
+        );
     }
 }

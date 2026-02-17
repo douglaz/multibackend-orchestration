@@ -142,6 +142,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
                     "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
                     "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
+                    "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
+                    "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
+                    "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -218,6 +221,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "planner_state_in_prompt": effective.workflow.planner_state_in_prompt,
                     "planner_previous_specs_in_prompt": effective.workflow.planner_previous_specs_in_prompt,
                     "planner_max_prior_loops": effective.workflow.planner_max_prior_loops,
+                    "max_review_history_entries_in_prompt": effective.workflow.max_review_history_entries_in_prompt,
+                    "max_qa_history_entries_in_prompt": effective.workflow.max_qa_history_entries_in_prompt,
+                    "include_history_when_session_reuse_enabled": effective.workflow.include_history_when_session_reuse_enabled,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -430,6 +436,16 @@ fn set_global_value(
         "workflow.planner_max_prior_loops" => {
             config.workflow.planner_max_prior_loops = parse_optional_usize_or_none(raw_value, key)?;
         }
+        "workflow.max_review_history_entries_in_prompt" => {
+            config.workflow.max_review_history_entries_in_prompt = parse_usize(raw_value, key)?;
+        }
+        "workflow.max_qa_history_entries_in_prompt" => {
+            config.workflow.max_qa_history_entries_in_prompt = parse_usize(raw_value, key)?;
+        }
+        "workflow.include_history_when_session_reuse_enabled" => {
+            config.workflow.include_history_when_session_reuse_enabled =
+                parse_bool(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
@@ -548,6 +564,18 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
             config.workflow.planner_max_prior_loops =
                 parse_project_optional_usize_or_none(raw_value, key)?;
         }
+        "workflow.max_review_history_entries_in_prompt" => {
+            config.workflow.max_review_history_entries_in_prompt =
+                parse_optional_usize(raw_value, key)?;
+        }
+        "workflow.max_qa_history_entries_in_prompt" => {
+            config.workflow.max_qa_history_entries_in_prompt =
+                parse_optional_usize(raw_value, key)?;
+        }
+        "workflow.include_history_when_session_reuse_enabled" => {
+            config.workflow.include_history_when_session_reuse_enabled =
+                parse_optional_bool(raw_value, key)?;
+        }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
@@ -609,6 +637,11 @@ fn parse_u64(raw: &str, key: &str) -> Result<u64> {
         .map_err(|_| RalphError::Validation(format!("key '{key}' expects unsigned integer value")))
 }
 
+fn parse_usize(raw: &str, key: &str) -> Result<usize> {
+    raw.parse::<usize>()
+        .map_err(|_| RalphError::Validation(format!("key '{key}' expects unsigned integer value")))
+}
+
 fn parse_optional_bool(raw: &str, key: &str) -> Result<Option<bool>> {
     if raw == "null" {
         return Ok(None);
@@ -628,6 +661,13 @@ fn parse_optional_u64(raw: &str, key: &str) -> Result<Option<u64>> {
         return Ok(None);
     }
     Ok(Some(parse_u64(raw, key)?))
+}
+
+fn parse_optional_usize(raw: &str, key: &str) -> Result<Option<usize>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(parse_usize(raw, key)?))
 }
 
 fn parse_commit_message_style(raw: &str) -> Result<CommitMessageStyle> {
@@ -715,10 +755,7 @@ fn parse_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<usize>> {
 }
 
 /// For project overrides: `"null"` = inherit, `"none"` = override to unlimited, integer = cap.
-fn parse_project_optional_usize_or_none(
-    raw: &str,
-    key: &str,
-) -> Result<Option<Option<usize>>> {
+fn parse_project_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<Option<usize>>> {
     if raw == "null" {
         return Ok(None);
     }
@@ -946,5 +983,67 @@ mod tests {
         let err = set_role_timeout(&mut role_timeouts, "bogus", "42")
             .expect_err("unknown timeout role should fail");
         assert!(err.to_string().contains("unknown backend timeout role"));
+    }
+
+    #[test]
+    fn set_global_value_updates_history_capping_fields() {
+        let mut config = crate::config::GlobalConfig::default();
+
+        set_global_value(
+            &mut config,
+            "workflow.max_review_history_entries_in_prompt",
+            "7",
+        )
+        .expect("set review history cap");
+        set_global_value(
+            &mut config,
+            "workflow.max_qa_history_entries_in_prompt",
+            "4",
+        )
+        .expect("set qa history cap");
+        set_global_value(
+            &mut config,
+            "workflow.include_history_when_session_reuse_enabled",
+            "true",
+        )
+        .expect("set include-history flag");
+
+        assert_eq!(config.workflow.max_review_history_entries_in_prompt, 7);
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 4);
+        assert!(config.workflow.include_history_when_session_reuse_enabled);
+    }
+
+    #[test]
+    fn set_project_value_updates_history_capping_fields() {
+        let mut config = crate::config::ProjectConfig::default();
+
+        set_project_value(
+            &mut config,
+            "workflow.max_review_history_entries_in_prompt",
+            "6",
+        )
+        .expect("set review history cap override");
+        set_project_value(
+            &mut config,
+            "workflow.max_qa_history_entries_in_prompt",
+            "3",
+        )
+        .expect("set qa history cap override");
+        set_project_value(
+            &mut config,
+            "workflow.include_history_when_session_reuse_enabled",
+            "false",
+        )
+        .expect("set include-history override");
+
+        assert_eq!(
+            config.workflow.max_review_history_entries_in_prompt,
+            Some(6)
+        );
+        assert_eq!(config.workflow.max_qa_history_entries_in_prompt, Some(3));
+        assert_eq!(
+            config.workflow.include_history_when_session_reuse_enabled,
+            Some(false)
+        );
     }
 }

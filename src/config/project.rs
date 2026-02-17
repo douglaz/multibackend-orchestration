@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-use super::global::{CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt, PromptChangeAction};
+use super::global::{
+    CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt, PromptChangeAction,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +41,12 @@ pub struct ProjectWorkflowOverrides {
     pub planner_previous_specs_in_prompt: Option<PreviousSpecsInPrompt>,
     /// `None` = inherit from global; `Some(None)` = override to unlimited; `Some(Some(n))` = cap at n.
     pub planner_max_prior_loops: Option<Option<usize>>,
+    #[serde(default)]
+    pub max_review_history_entries_in_prompt: Option<usize>,
+    #[serde(default)]
+    pub max_qa_history_entries_in_prompt: Option<usize>,
+    #[serde(default)]
+    pub include_history_when_session_reuse_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

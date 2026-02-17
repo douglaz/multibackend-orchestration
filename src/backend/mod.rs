@@ -540,19 +540,11 @@ impl BackendRegistry {
         self.get_or_create_inner(spec, None)
     }
 
-    pub fn get_or_create_for_role(
-        &mut self,
-        spec: &str,
-        role: &str,
-    ) -> Result<Arc<dyn Backend>> {
+    pub fn get_or_create_for_role(&mut self, spec: &str, role: &str) -> Result<Arc<dyn Backend>> {
         self.get_or_create_inner(spec, Some(role))
     }
 
-    fn get_or_create_inner(
-        &mut self,
-        spec: &str,
-        role: Option<&str>,
-    ) -> Result<Arc<dyn Backend>> {
+    fn get_or_create_inner(&mut self, spec: &str, role: Option<&str>) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
         let cache_key = match role {
             Some(r) => format!("{}:{r}", backend_spec_key(&parsed)),

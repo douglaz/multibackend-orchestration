@@ -1162,12 +1162,11 @@ async fn complete_task(
             .to_path_buf();
         let tid = task.task_id.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, &tid);
-        let discovered =
-            spawn_blocking_op(move || Ok(discover_latest_project_id(&wt_path))).await.unwrap_or(None);
+        let discovered = spawn_blocking_op(move || Ok(discover_latest_project_id(&wt_path)))
+            .await
+            .unwrap_or(None);
         if let Some(project_id) = discovered {
-            eprintln!(
-                "complete-task: backfill project_id={project_id} for task {task_id}"
-            );
+            eprintln!("complete-task: backfill project_id={project_id} for task {task_id}");
             task.project_id = Some(project_id.clone());
             let store_clone = store.clone();
             let tid = task.task_id.clone();
@@ -1180,9 +1179,7 @@ async fn complete_task(
             })
             .await
             {
-                eprintln!(
-                    "warning: failed to backfill project_id for task {task_id}: {err}"
-                );
+                eprintln!("warning: failed to backfill project_id for task {task_id}: {err}");
             }
         }
     }
