@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::validate::harness::RalphHarness;
 use crate::Result;
@@ -56,16 +57,21 @@ impl TestRunner {
         let mut passed = 0usize;
         let mut skipped: Vec<(&'static str, String)> = Vec::new();
         let mut failures: Vec<(&'static str, String)> = Vec::new();
+        let mut durations: Vec<(&'static str, Duration)> = Vec::new();
 
         for test in filtered {
+            let start = Instant::now();
             let harness = RalphHarness::new(&self.ralph_bin)?;
-            match (test.func)(&harness) {
+            let result = (test.func)(&harness);
+            let elapsed = start.elapsed();
+            durations.push((test.name, elapsed));
+            match result {
                 TestResult::Pass => {
                     passed += 1;
-                    println!("test {} ... ok", test.name);
+                    println!("test {} ... ok ({})", test.name, format_duration(elapsed));
                 }
                 TestResult::Skip(reason) => {
-                    println!("test {} ... skipped", test.name);
+                    println!("test {} ... skipped ({})", test.name, format_duration(elapsed));
                     if self.verbose {
                         for line in reason.lines() {
                             println!("  {line}");
@@ -74,7 +80,7 @@ impl TestRunner {
                     skipped.push((test.name, reason));
                 }
                 TestResult::Fail(message) => {
-                    println!("test {} ... FAILED", test.name);
+                    println!("test {} ... FAILED ({})", test.name, format_duration(elapsed));
                     if self.verbose {
                         for line in message.lines() {
                             println!("  {line}");
@@ -102,11 +108,17 @@ impl TestRunner {
         let skipped_count = skipped.len();
 
         if failed == 0 {
+            let total = durations.iter().map(|(_, duration)| duration).sum::<Duration>();
             println!("test result: ok. {passed} passed; 0 failed; {skipped_count} skipped");
+            println!("test result: total {}", format_duration(total));
             return Ok(true);
         }
 
-        println!("test result: FAILED. {passed} passed; {failed} failed; {skipped_count} skipped");
+        let total = durations.iter().map(|(_, duration)| duration).sum::<Duration>();
+        println!(
+            "test result: FAILED. {passed} passed; {failed} failed; {skipped_count} skipped"
+        );
+        println!("test result: total {}", format_duration(total));
         Ok(false)
     }
 
@@ -122,4 +134,10 @@ impl TestRunner {
             })
             .collect()
     }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let millis = duration.subsec_millis();
+    format!("{seconds}.{millis:03}s")
 }

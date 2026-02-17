@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::daemon::github::has_origin_remote;
 use crate::error::RalphError;
 use crate::Result;
 
@@ -39,10 +40,21 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
 
     prune_worktrees(repo_root, task_id);
 
-    if let Err(err) = sync_remote_master(repo_root, task_id) {
-        eprintln!(
-            "warning: failed to sync origin master for task {task_id}; using local base ref: {err}"
-        );
+    match has_origin_remote(repo_root) {
+        Ok(has_origin) => {
+            if has_origin {
+                if let Err(err) = sync_remote_master(repo_root, task_id) {
+                    eprintln!(
+                        "warning: failed to sync origin master for task {task_id}; using local base ref: {err}"
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "warning: failed to detect origin remote for task {task_id}; using local base ref: {err}"
+            );
+        }
     }
 
     let base_ref = if revision_exists(repo_root, "origin/master")? {

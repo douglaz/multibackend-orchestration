@@ -1506,6 +1506,13 @@ fn runtime_reconciliation_on_startup(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         // Pre-populate tasks with in_progress state and fake PID/PGID
         write_tasks(
@@ -1618,6 +1625,13 @@ fn runtime_polling_filter_overflow(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         // Create a mock gh that returns exactly 100 issues, some with ralph:* labels.
         // Issues 1-5 have ralph:in-progress labels (should be filtered).
@@ -1718,6 +1732,7 @@ fn runtime_worktree_isolation(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         // Pre-populate a pending task
         write_tasks(
@@ -1793,6 +1808,7 @@ fn runtime_pid_pgid_persistence(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         // Pre-populate a pending task
         write_tasks(
@@ -1876,6 +1892,13 @@ fn runtime_idempotent_comments(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         // Create a mock gh that tracks comment calls via a file.
         // The "view" handler returns previously posted comments so the
@@ -2022,6 +2045,13 @@ fn runtime_pr_reuse_no_diff(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         // Track whether `pr create` was called
         let pr_create_log = dh.temp_dir.path().join("pr_create_called.txt");
@@ -2173,6 +2203,13 @@ fn runtime_pr_create_failure_terminal(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         let pr_create_log = dh.temp_dir.path().join("pr_create_attempted.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
@@ -2304,6 +2341,7 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
@@ -2727,6 +2765,13 @@ fn runtime_task_fails_worktree_preserved(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let ralph_script = r#"#!/bin/sh
@@ -2815,6 +2860,13 @@ fn runtime_activation_failed_task_preserved(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         let task_id = "acme-widgets-351";
         let project_id = "retry-proj-351";
@@ -2941,7 +2993,7 @@ exit 1
 printf 'spawned' > "{spawn_marker_str}"
 sleep 30
 exit 0
-"#
+            "#
         );
         let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
@@ -2996,6 +3048,13 @@ fn runtime_failed_worktree_preserved_and_reused_on_retry(h: &RalphHarness) -> Te
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         let task_id = "acme-widgets-360";
         let project_id = "retry-proj-360";
@@ -3183,6 +3242,13 @@ fn runtime_succeeded_task_worktree_cleaned(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement for this test");
 
         let task_id = "acme-widgets-362";
         write_tasks(
@@ -3255,6 +3321,7 @@ fn runtime_fresh_dispatch_ignores_discovered_project(h: &RalphHarness) -> TestRe
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         dh.create_project(
             "discovered-proj",
@@ -3349,6 +3416,7 @@ fn runtime_no_diff_pr_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         // Track `pr create` calls
         let pr_create_log = dh.temp_dir.path().join("pr_create_no_diff.txt");
@@ -5099,6 +5167,7 @@ fn runtime_push_before_pr_create(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         let pr_create_log = dh.temp_dir.path().join("pr_create_push_test.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
@@ -5220,6 +5289,7 @@ fn runtime_branch_switch_updates_task_and_pr(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         let gh_head_log = dh.temp_dir.path().join("gh_head_arg.txt");
         let gh_head_log_str = gh_head_log.to_string_lossy().into_owned();
@@ -5363,6 +5433,7 @@ fn runtime_branch_unchanged_no_switch_log(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         let pr_create_log = dh.temp_dir.path().join("pr_create_no_switch.txt");
         let pr_create_log_str = pr_create_log.to_string_lossy().into_owned();
@@ -5493,6 +5564,7 @@ fn runtime_child_output_captured_in_log(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
@@ -8910,6 +8982,28 @@ fn write_daemon_mock_ralph_with_branch_switch(h: &RalphHarness) -> crate::Result
         h,
         &mock_scripts::daemon_mock_ralph_with_branch_switch_script(),
     )
+}
+
+fn enable_fast_daemon_refinement(h: &RalphHarness) -> crate::Result<()> {
+    let refine_script = h.write_mock_script(
+        "mock_refine_fast.sh",
+        &mock_scripts::daemon_mock_fast_refinement_script(),
+    )?;
+    let refine_script_str = refine_script.to_string_lossy().into_owned();
+    h.ralph_ok([
+        "config",
+        "set",
+        "backends.claude.command",
+        &refine_script_str,
+    ])?;
+    h.ralph_ok(["config", "set", "backends.claude.args", "[]"])?;
+    h.ralph_ok([
+        "config",
+        "set",
+        "workspace.daemon_refinement_enabled",
+        "true",
+    ])?;
+    Ok(())
 }
 
 fn write_daemon_mock_gh_rebase(h: &RalphHarness) -> crate::Result<String> {

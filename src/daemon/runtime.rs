@@ -511,21 +511,21 @@ fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let state_path = entry.path().join("state.json");
         if let Ok(contents) = std::fs::read_to_string(&state_path) {
-            // Extract created_at without pulling in a full JSON parse dependency.
-            // state.json contains `"created_at": "2026-..."`.
             if let Some(pos) = contents.find("\"created_at\"") {
-                // Find the value string after the key
-                if let Some(start) = contents[pos..].find('"').and_then(|p| {
-                    contents[pos + p + 1..].find('"').map(|q| pos + p + 1 + q + 1)
-                }) {
-                    if let Some(end) = contents[start..].find('"') {
-                        let created_at = &contents[start..start + end];
-                        let dominated = match &best {
-                            Some((_, prev)) => created_at > prev.as_str(),
-                            None => true,
-                        };
-                        if dominated {
-                            best = Some((name, created_at.to_owned()));
+                let mut tail = &contents[pos + "\"created_at\"".len()..];
+                if let Some(colon_pos) = tail.find(':') {
+                    tail = &tail[colon_pos + 1..];
+                    if let Some(start) = tail.find('"') {
+                        let value_start = start + 1;
+                        if let Some(end) = tail[value_start..].find('"') {
+                            let created_at = &tail[value_start..value_start + end];
+                            let dominated = match &best {
+                                Some((_, prev)) => created_at > prev.as_str(),
+                                None => true,
+                            };
+                            if dominated {
+                                best = Some((name, created_at.to_owned()));
+                            }
                         }
                     }
                 }
@@ -2039,7 +2039,7 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 mod tests {
     use super::{
         build_pr_body, build_pr_title, extract_issue_body, extract_original_title,
-        extract_project_ref, write_body_file,
+        discover_latest_project_id, extract_project_ref, write_body_file,
     };
 
     #[test]
@@ -2181,6 +2181,45 @@ mod tests {
         assert_eq!(
             snowman_count, 4000,
             "issue context should be capped at 4000 chars, got {snowman_count}"
+        );
+    }
+
+    #[test]
+    fn discover_latest_project_id_prefers_newest_created_at() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        let projects_root = worktree.join(".ralph").join("projects");
+        std::fs::create_dir_all(&projects_root).expect("create projects root");
+
+        let project_a = projects_root.join("acme-project-a");
+        let project_b = projects_root.join("acme-project-b");
+        let project_c = projects_root.join("acme-project-c");
+        std::fs::create_dir_all(project_a.join("state.json").parent().expect("state dir"))
+            .expect("mkdir a");
+        std::fs::create_dir_all(project_b.join("state.json").parent().expect("state dir"))
+            .expect("mkdir b");
+        std::fs::create_dir_all(project_c.join("state.json").parent().expect("state dir"))
+            .expect("mkdir c");
+
+        std::fs::write(
+            project_a.join("state.json"),
+            r#"{"created_at":"2026-01-01T00:00:00Z","other":"a"}"#,
+        )
+        .expect("write a");
+        std::fs::write(
+            project_b.join("state.json"),
+            r#"{"created_at":"2026-01-03T00:00:00Z","other":"b"}"#,
+        )
+        .expect("write b");
+        std::fs::write(
+            project_c.join("state.json"),
+            r#"{"created_at":"2026-01-02T00:00:00Z","other":"c"}"#,
+        )
+        .expect("write c");
+
+        assert_eq!(
+            discover_latest_project_id(&worktree),
+            Some("acme-project-b".to_owned())
         );
     }
 }
