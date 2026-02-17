@@ -511,21 +511,21 @@ fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let state_path = entry.path().join("state.json");
         if let Ok(contents) = std::fs::read_to_string(&state_path) {
-            // Extract created_at without pulling in a full JSON parse dependency.
-            // state.json contains `"created_at": "2026-..."`.
             if let Some(pos) = contents.find("\"created_at\"") {
-                // Find the value string after the key
-                if let Some(start) = contents[pos..].find('"').and_then(|p| {
-                    contents[pos + p + 1..].find('"').map(|q| pos + p + 1 + q + 1)
-                }) {
-                    if let Some(end) = contents[start..].find('"') {
-                        let created_at = &contents[start..start + end];
-                        let dominated = match &best {
-                            Some((_, prev)) => created_at > prev.as_str(),
-                            None => true,
-                        };
-                        if dominated {
-                            best = Some((name, created_at.to_owned()));
+                let mut tail = &contents[pos + "\"created_at\"".len()..];
+                if let Some(colon_pos) = tail.find(':') {
+                    tail = &tail[colon_pos + 1..];
+                    if let Some(start) = tail.find('"') {
+                        let value_start = start + 1;
+                        if let Some(end) = tail[value_start..].find('"') {
+                            let created_at = &tail[value_start..value_start + end];
+                            let dominated = match &best {
+                                Some((_, prev)) => created_at > prev.as_str(),
+                                None => true,
+                            };
+                            if dominated {
+                                best = Some((name, created_at.to_owned()));
+                            }
                         }
                     }
                 }
