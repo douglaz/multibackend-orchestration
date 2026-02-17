@@ -1,0 +1,48 @@
+{
+  "project_id": "summary-when-the-daemon-refines-a-github",
+  "project_name": "# Summary\n\nWhen the daemon refines a GitHub issue, it should",
+  "created_at": "2026-02-16T23:38:03.245127454Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "08f49574e005c942ee0a8b87c8888811ea6c5aa947ac90661b399f35ee506c80",
+  "prompt_hash_at_loop_start": "08f49574e005c942ee0a8b87c8888811ea6c5aa947ac90661b399f35ee506c80",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "cleaned-github-issue-body-from-refinement",
+      "feature_name": "Cleaned GitHub Issue Body from Refinement",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-cleaned-github-issue-body-from-refinement/20260216234037-spec.md",
+        "impl_notes": "loops/001-cleaned-github-issue-body-from-refinement/20260216234649-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-cleaned-github-issue-body-from-refinement/20260217000346-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-cleaned-github-issue-body-from-refinement/20260217000320-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T23:40:37.357557204Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
