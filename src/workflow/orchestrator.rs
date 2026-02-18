@@ -4067,6 +4067,7 @@ async fn execute_with_timeout_retries(
         }
     }
 
+
     let retry_started = Instant::now();
 
     for attempt in 1..=3_u8 {
