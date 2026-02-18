@@ -116,7 +116,25 @@ pub async fn wait_for_exit(
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<i32> {
-    let started = Instant::now();
+    wait_for_exit_with_activity(exit_file_path, &[], timeout, poll_interval).await
+}
+
+/// Wait for the exit file with inactivity-based timeout. Activity is detected
+/// by file-size growth on any of the provided `capture_paths` (stdout/stderr
+/// capture files). If no capture paths are provided, the timeout degrades to
+/// wall-clock behavior (backwards-compatible with the original signature).
+pub async fn wait_for_exit_with_activity(
+    exit_file_path: &Path,
+    capture_paths: &[&Path],
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<i32> {
+    let mut last_activity = Instant::now();
+    let mut last_sizes: Vec<u64> = Vec::with_capacity(capture_paths.len());
+    for path in capture_paths {
+        let size = fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+        last_sizes.push(size);
+    }
 
     loop {
         if exit_file_path.exists() {
@@ -131,11 +149,25 @@ pub async fn wait_for_exit(
             return Ok(exit_code);
         }
 
-        if started.elapsed() >= timeout {
+        // Check for activity: any capture file growing counts as activity
+        let mut activity_detected = false;
+        for (i, path) in capture_paths.iter().enumerate() {
+            let current_size = fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+            if current_size > last_sizes[i] {
+                activity_detected = true;
+                last_sizes[i] = current_size;
+            }
+        }
+        if activity_detected {
+            last_activity = Instant::now();
+        }
+
+        let idle_elapsed = last_activity.elapsed();
+        if idle_elapsed >= timeout {
             return Err(RalphError::BackendTimeout {
                 backend: "tmux".to_owned(),
-                idle_seconds: timeout.as_secs(),
-                timeout_kind: TimeoutKind::Walltime,
+                idle_seconds: idle_elapsed.as_secs(),
+                timeout_kind: TimeoutKind::Idle,
             });
         }
 
@@ -451,7 +483,7 @@ mod tests {
             Err(RalphError::BackendTimeout {
                 backend,
                 idle_seconds: 0,
-                timeout_kind: TimeoutKind::Walltime,
+                timeout_kind: TimeoutKind::Idle,
             }) if backend == "tmux"
         ));
     }
@@ -651,5 +683,132 @@ mod tests {
             details: "can't find session: ralph".to_owned(),
         })]);
         assert!(!has_window(&runner, "ralph", "3").await.unwrap());
+    }
+
+    // --- wait_for_exit_with_activity tests ---
+
+    #[tokio::test]
+    async fn wait_for_exit_with_activity_file_growth_resets_idle() {
+        use super::wait_for_exit_with_activity;
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempdir().unwrap();
+        let exit_file = dir.path().join("exit.txt");
+        let capture_file = dir.path().join("stdout.log");
+        // Create initial capture file
+        fs::write(&capture_file, "").await.unwrap();
+
+        let exit_writer = exit_file.clone();
+        let capture_writer = capture_file.clone();
+
+        // Spawn task that appends to capture file periodically (keeping it alive)
+        // for 150ms, then writes exit file.
+        tokio::spawn(async move {
+            let file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&capture_writer)
+                .await
+                .unwrap();
+            let mut file = tokio::io::BufWriter::new(file);
+            for i in 0..6 {
+                sleep(Duration::from_millis(25)).await;
+                let content = format!("chunk-{i}\n");
+                file.write_all(content.as_bytes()).await.unwrap();
+                file.flush().await.unwrap();
+            }
+            // After activity, write exit file
+            fs::write(exit_writer, "0\n").await.unwrap();
+        });
+
+        // Use a short timeout (80ms). Total runtime ~150ms > timeout,
+        // but file growth keeps resetting the idle timer.
+        let result = wait_for_exit_with_activity(
+            &exit_file,
+            &[capture_file.as_path()],
+            Duration::from_millis(80),
+            Duration::from_millis(15),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "should not timeout when capture file is growing: {result:?}"
+        );
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_with_activity_stall_times_out_idle() {
+        use super::wait_for_exit_with_activity;
+
+        let dir = tempdir().unwrap();
+        let exit_file = dir.path().join("exit.txt");
+        let capture_file = dir.path().join("stdout.log");
+        // Create capture file with initial content (no further growth)
+        fs::write(&capture_file, "initial output").await.unwrap();
+
+        // Don't write exit file — simulate a stall
+        let result = wait_for_exit_with_activity(
+            &exit_file,
+            &[capture_file.as_path()],
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RalphError::BackendTimeout {
+                backend,
+                timeout_kind: TimeoutKind::Idle,
+                ..
+            }) if backend == "tmux"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_with_activity_stderr_growth_counts() {
+        use super::wait_for_exit_with_activity;
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempdir().unwrap();
+        let exit_file = dir.path().join("exit.txt");
+        let stdout_file = dir.path().join("stdout.log");
+        let stderr_file = dir.path().join("stderr.log");
+        fs::write(&stdout_file, "").await.unwrap();
+        fs::write(&stderr_file, "").await.unwrap();
+
+        let exit_writer = exit_file.clone();
+        let stderr_writer = stderr_file.clone();
+
+        // Only stderr grows (stdout stays empty)
+        tokio::spawn(async move {
+            let file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&stderr_writer)
+                .await
+                .unwrap();
+            let mut file = tokio::io::BufWriter::new(file);
+            for i in 0..4 {
+                sleep(Duration::from_millis(25)).await;
+                let content = format!("stderr-{i}\n");
+                file.write_all(content.as_bytes()).await.unwrap();
+                file.flush().await.unwrap();
+            }
+            fs::write(exit_writer, "0\n").await.unwrap();
+        });
+
+        let result = wait_for_exit_with_activity(
+            &exit_file,
+            &[stdout_file.as_path(), stderr_file.as_path()],
+            Duration::from_millis(60),
+            Duration::from_millis(15),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "stderr growth should count as activity: {result:?}"
+        );
     }
 }

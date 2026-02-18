@@ -84,6 +84,7 @@ fn spawn_file_watcher(
                         let file_prefix = name.trim_end_matches("-prompt.txt");
                         let prompt_path = tmp_dir.join(&name);
                         let output_path = tmp_dir.join(format!("{file_prefix}-output.txt"));
+                        let stderr_path = tmp_dir.join(format!("{file_prefix}-stderr.txt"));
                         let exit_path = tmp_dir.join(format!("{file_prefix}-exit.txt"));
 
                         fs::write(&output_path, &output).await.unwrap();
@@ -91,7 +92,7 @@ fn spawn_file_watcher(
                             .await
                             .unwrap();
 
-                        return vec![prompt_path, output_path, exit_path];
+                        return vec![prompt_path, output_path, stderr_path, exit_path];
                     }
                 }
             }
@@ -230,7 +231,7 @@ async fn tmux_backend_genuine_timeout_returns_backend_timeout() {
     match result {
         Err(RalphError::BackendTimeout {
             backend,
-            timeout_kind: TimeoutKind::Walltime,
+            timeout_kind: TimeoutKind::Idle,
             ..
         }) => {
             assert_eq!(backend, "timeout-backend");
@@ -397,7 +398,7 @@ async fn tmux_backend_command_preserves_env_and_args() {
 }
 
 #[tokio::test]
-async fn tmux_backend_no_stderr_redirect() {
+async fn tmux_backend_stderr_captured_separately() {
     let runner = MockTmuxRunner::with_responses(vec![
         Ok(String::new()),
         Ok("0\n".to_owned()),
@@ -419,9 +420,18 @@ async fn tmux_backend_no_stderr_redirect() {
 
     let calls = runner.calls().await;
     let shell_cmd = calls[1].last().unwrap();
+    // stderr should be redirected to a dedicated capture file, not merged with stdout
     assert!(
         !shell_cmd.contains("2>&1"),
-        "stderr must not be redirected: {shell_cmd}"
+        "stderr must not be merged with stdout: {shell_cmd}"
+    );
+    assert!(
+        shell_cmd.contains("2>"),
+        "stderr should be redirected to capture file: {shell_cmd}"
+    );
+    assert!(
+        shell_cmd.contains("-stderr.txt"),
+        "stderr capture file should have -stderr.txt suffix: {shell_cmd}"
     );
 }
 

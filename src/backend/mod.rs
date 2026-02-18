@@ -8,7 +8,6 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,7 +19,8 @@ use async_trait::async_trait;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::GlobalConfig;
@@ -450,25 +450,6 @@ impl CliBackend {
         Ok(result)
     }
 
-    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
-        if let Err(err) = child.kill().await {
-            if err.kind() != ErrorKind::InvalidInput {
-                warn!(
-                    backend = %self.name,
-                    error = %err,
-                    "failed to kill child process during cleanup"
-                );
-            }
-        }
-        if let Err(err) = child.wait().await {
-            warn!(
-                backend = %self.name,
-                error = %err,
-                "failed waiting for child process during cleanup"
-            );
-        }
-    }
-
     async fn collect_stderr(
         &self,
         handle: tokio::task::JoinHandle<Result<Vec<u8>>>,
@@ -512,20 +493,23 @@ impl CliBackend {
 
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
-        #[cfg(unix)]
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
         cmd.args(&effective_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .envs(self.env.clone());
+
+        // Place the child in its own process group so that
+        // `kill(-(pid), SIGKILL)` reliably terminates it and all its
+        // descendants on timeout.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         let mut child = cmd
             .spawn()
@@ -562,10 +546,16 @@ impl CliBackend {
                 details: "child stderr pipe unavailable".to_owned(),
             })?;
 
+        // Shared idle-tracking state: last_activity is updated by both stdout
+        // and stderr readers; the watchdog checks it periodically.
+        let last_activity = Arc::new(Mutex::new(Instant::now()));
+        let timed_out = Arc::new(AtomicBool::new(false));
+
         let stderr_backend = self.name.clone();
-        let stderr_log_file: Option<std::fs::File> = log_writer
-            .as_ref()
-            .and_then(|w| std::fs::OpenOptions::new().append(true).open(w.path()).ok());
+        let stderr_log_file: Option<std::fs::File> = log_writer.as_ref().and_then(|w| {
+            std::fs::OpenOptions::new().append(true).open(w.path()).ok()
+        });
+        let stderr_last_activity = last_activity.clone();
         let stderr_handle = tokio::spawn(async move {
             let mut log_file = stderr_log_file;
             let mut captured = Vec::new();
@@ -577,6 +567,7 @@ impl CliBackend {
                     Ok(n) => {
                         let bytes = &chunk[..n];
                         captured.extend_from_slice(bytes);
+                        *stderr_last_activity.lock().await = Instant::now();
                         if let Some(ref mut f) = log_file {
                             use std::io::Write;
                             let _ = f.write_all(bytes).and_then(|_| f.flush());
@@ -592,82 +583,117 @@ impl CliBackend {
             }
         });
 
-        let timed_out = Arc::new(AtomicBool::new(false));
-        let timed_out_watchdog = timed_out.clone();
-        let child_pid = child.id();
-        let (timeout_cancel_tx, timeout_cancel_rx) = oneshot::channel::<()>();
-        let timeout = self.timeout;
-        let watchdog = tokio::spawn(async move {
-            tokio::select! {
-                _ = tokio::time::sleep(timeout) => {
-                    timed_out_watchdog.store(true, Ordering::SeqCst);
-                    if let Some(pid) = child_pid {
-                        #[cfg(unix)]
-                        {
-                            let _ = unsafe {
-                                libc::kill(-(pid as libc::pid_t), libc::SIGKILL)
-                            };
+        // Inactivity watchdog: checks every ~1s whether idle duration >= timeout.
+        // Cancels via `timed_out` flag + killing the child process group.
+        let watchdog_timeout = self.timeout;
+        let watchdog_last_activity = last_activity.clone();
+        let watchdog_timed_out = timed_out.clone();
+        let watchdog_child_id = child.id();
+        let watchdog_handle = tokio::spawn(async move {
+            let poll_interval = Duration::from_secs(1).min(watchdog_timeout / 2).max(Duration::from_millis(10));
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                let idle_elapsed = watchdog_last_activity.lock().await.elapsed();
+                if idle_elapsed >= watchdog_timeout {
+                    watchdog_timed_out.store(true, Ordering::SeqCst);
+                    // Kill the process group to unblock stdout/stderr readers
+                    if let Some(pid) = watchdog_child_id {
+                        unsafe {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
                         }
-                        #[cfg(not(unix))]
-                        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
                     }
+                    return idle_elapsed;
                 }
-                _ = timeout_cancel_rx => {}
             }
         });
 
-        let mut captured_stdout = Vec::new();
-        let mut chunk = BytesMut::with_capacity(8192);
-        loop {
-            chunk.clear();
-            let read = stdout.read_buf(&mut chunk).await.map_err(|err| {
-                RalphError::BackendCommandFailed {
-                    backend: self.name.clone(),
-                    details: format!("failed to read stdout: {err}"),
+        // Read stdout with idle tracking
+        let stdout_last_activity = last_activity.clone();
+        let stdout_result: std::result::Result<
+            std::result::Result<(std::process::ExitStatus, Vec<u8>), RalphError>,
+            tokio::task::JoinError,
+        > = {
+            let backend_name = self.name.clone();
+            let handle = tokio::spawn(async move {
+                let mut captured_stdout = Vec::new();
+                let mut chunk = BytesMut::with_capacity(8192);
+                loop {
+                    chunk.clear();
+                    match stdout.read_buf(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            let bytes = &chunk[..read];
+                            captured_stdout.extend_from_slice(bytes);
+                            *stdout_last_activity.lock().await = Instant::now();
+                        }
+                        Err(err) => {
+                            return Err(RalphError::BackendCommandFailed {
+                                backend: backend_name,
+                                details: format!("failed to read stdout: {err}"),
+                            });
+                        }
+                    }
                 }
-            })?;
 
-            if read == 0 {
-                break;
+                let status = child.wait().await.map_err(|err| {
+                    RalphError::BackendCommandFailed {
+                        backend: backend_name,
+                        details: format!("failed waiting for child process: {err}"),
+                    }
+                })?;
+
+                Ok((status, captured_stdout))
+            });
+            handle.await
+        };
+
+        // Cancel the watchdog — normal completion arrived first
+        watchdog_handle.abort();
+
+        // Write stdout to log (we collected in the spawned task, now replay to log_writer)
+        let was_timeout = timed_out.load(Ordering::SeqCst);
+
+        match stdout_result {
+            Ok(Ok((status, captured_stdout))) if !was_timeout => {
+                // Write captured stdout to log
+                if let Some(writer) = log_writer.as_deref_mut() {
+                    writer.write_bytes(&captured_stdout);
+                }
+                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
+
+                if !status.success() {
+                    return Err(RalphError::BackendCommandFailed {
+                        backend: self.name.clone(),
+                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+                    });
+                }
+
+                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
             }
-
-            let bytes = chunk.as_ref();
-            captured_stdout.extend_from_slice(bytes);
-            if let Some(writer) = log_writer.as_deref_mut() {
-                writer.write_bytes(bytes);
+            Ok(Err(err)) if !was_timeout => {
+                let _ = self.collect_stderr(stderr_handle).await;
+                Err(err)
             }
-        }
-
-        let status = child.wait().await.map_err(|err| RalphError::BackendCommandFailed {
+            _ => {
+                // Timeout path (or stdout read error during timeout kill)
+                // Write any partial output to log before the footer
+                if let Ok(Ok((_, ref partial))) = stdout_result {
+                    if let Some(writer) = log_writer.as_deref_mut() {
+                        writer.write_bytes(partial);
+                    }
+                }
+                let _ = self.collect_stderr(stderr_handle).await;
+                if let Some(writer) = log_writer.as_deref_mut() {
+                    writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
+                }
+                let idle_secs = last_activity.lock().await.elapsed().as_secs();
+                Err(RalphError::BackendTimeout {
                     backend: self.name.clone(),
-                    details: format!("failed waiting for child process: {err}"),
-        })?;
-
-        let _ = timeout_cancel_tx.send(());
-        let _ = watchdog.await;
-
-        if timed_out.load(Ordering::SeqCst) {
-            let _ = self.collect_stderr(stderr_handle).await;
-            if let Some(writer) = log_writer.as_deref_mut() {
-                writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
+                    idle_seconds: idle_secs,
+                    timeout_kind: TimeoutKind::Idle,
+                })
             }
-            return Err(RalphError::BackendTimeout {
-                backend: self.name.clone(),
-                idle_seconds: self.timeout.as_secs(),
-                timeout_kind: TimeoutKind::Walltime,
-            });
         }
-
-        let stderr_bytes = self.collect_stderr(stderr_handle).await?;
-
-        if !status.success() {
-            return Err(RalphError::BackendCommandFailed {
-                backend: self.name.clone(),
-                details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
-            });
-        }
-
-        Ok(String::from_utf8_lossy(&captured_stdout).to_string())
     }
 }
 
@@ -1195,16 +1221,24 @@ sleep 30
         );
 
         let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
+        let start = std::time::Instant::now();
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
+        let elapsed = start.elapsed();
+
+        // Timeout must fire near the configured idle threshold (150ms), not
+        // after the full 30s sleep. Allow generous buffer for CI scheduling.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout should fire near idle threshold, not after full sleep; elapsed={elapsed:?}"
+        );
         match result {
             Err(RalphError::BackendTimeout {
                 backend,
-                idle_seconds,
                 timeout_kind,
+                ..
             }) => {
                 assert_eq!(backend, "timeout-test");
-                assert_eq!(idle_seconds, 0);
-                assert_eq!(timeout_kind, TimeoutKind::Walltime);
+                assert_eq!(timeout_kind, TimeoutKind::Idle);
             }
             other => panic!("expected BackendTimeout, got: {other:?}"),
         }
@@ -1559,6 +1593,101 @@ sleep 30
             args.iter().filter(|a| *a == "--json").count(),
             1,
             "exactly one --json"
+        );
+    }
+
+    /// Active streaming beyond timeout_seconds without timeout: the process emits
+    /// output at intervals shorter than timeout_seconds, with total runtime exceeding
+    /// timeout_seconds. Inactivity timeout must NOT fire.
+    #[tokio::test]
+    async fn cli_backend_active_stream_does_not_timeout() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = write_executable_script(
+            temp.path(),
+            "active-stream.sh",
+            r#"#!/bin/sh
+# Emit output every 50ms for 400ms total (total > timeout of 200ms)
+for i in 1 2 3 4 5 6 7 8; do
+  printf "chunk-%d\n" "$i"
+  sleep 0.05
+done
+"#,
+        );
+
+        let backend = CliBackend::new(
+            "active-stream-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_millis(200), // total runtime ~400ms > 200ms timeout
+            BTreeMap::new(),
+        );
+
+        let result = Backend::execute(&backend, "ignored").await;
+        assert!(
+            result.is_ok(),
+            "active streaming should not timeout: {result:?}"
+        );
+        let output = result.unwrap();
+        assert!(
+            output.contains("chunk-8"),
+            "should see all chunks: {output}"
+        );
+    }
+
+    /// Hanging after partial output: process emits some output then stalls beyond
+    /// timeout_seconds. Must timeout with Idle kind and preserve partial output.
+    #[tokio::test]
+    async fn cli_backend_stall_after_partial_output_times_out_idle() {
+        let temp = tempdir().expect("tempdir");
+        let script_path = write_executable_script(
+            temp.path(),
+            "stall-after-partial.sh",
+            r#"#!/bin/sh
+printf 'partial-data'
+sleep 30
+"#,
+        );
+
+        let backend = CliBackend::new(
+            "stall-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_millis(200),
+            BTreeMap::new(),
+        );
+
+        let mut writer = LogWriter::open(temp.path(), Some(3), None, "planner");
+        let start = std::time::Instant::now();
+        let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
+        let elapsed = start.elapsed();
+
+        // Timeout must fire near the configured idle threshold (200ms), not
+        // after the full 30s sleep. Allow generous buffer for CI scheduling.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout should fire near idle threshold, not after full sleep; elapsed={elapsed:?}"
+        );
+
+        match result {
+            Err(RalphError::BackendTimeout {
+                backend,
+                timeout_kind,
+                ..
+            }) => {
+                assert_eq!(backend, "stall-test");
+                assert_eq!(timeout_kind, TimeoutKind::Idle);
+            }
+            other => panic!("expected BackendTimeout with Idle kind, got: {other:?}"),
+        }
+
+        let log_content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(
+            log_content.contains("partial-data"),
+            "partial output should be preserved in log: {log_content}"
+        );
+        assert!(
+            log_content.contains("--- timeout ts="),
+            "timeout footer should be written: {log_content}"
         );
     }
 }

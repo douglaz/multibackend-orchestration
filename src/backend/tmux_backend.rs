@@ -79,7 +79,8 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
     /// The command:
     ///   1. Pipes the prompt file into the backend command via stdin
     ///   2. Pipes stdout through `tee` so it's visible in the tmux pane AND captured to the output file
-    ///   3. Writes the exit code to the exit file
+    ///   3. Captures stderr to a dedicated file
+    ///   4. Writes the exit code to the exit file
     ///
     /// When the execution context contains a `session_id`, this method
     /// delegates to `CliBackend::effective_args()` for session-aware arg
@@ -88,6 +89,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
         &self,
         prompt_file: &Path,
         output_file: &Path,
+        stderr_file: &Path,
         exit_file: &Path,
         ctx: &TmuxExecutionContext,
     ) -> String {
@@ -127,15 +129,16 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             ));
         }
 
-        // cat prompt | command args | tee output; echo ${PIPESTATUS[1]} > exit
+        // cat prompt | command args 2>stderr | tee output; echo ${PIPESTATUS[1]} > exit
         parts.push(format!(
-            "cat {} | {} {} | tee {}; echo ${{PIPESTATUS[1]}} > {}",
+            "cat {} | {} {} 2>{} | tee {}; echo ${{PIPESTATUS[1]}} > {}",
             shell_escape(&prompt_file.display().to_string()),
             shell_escape(&resolved),
             args.iter()
                 .map(|a| shell_escape(a))
                 .collect::<Vec<_>>()
                 .join(" "),
+            shell_escape(&stderr_file.display().to_string()),
             shell_escape(&output_file.display().to_string()),
             shell_escape(&exit_file.display().to_string()),
         ));
@@ -180,12 +183,14 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         let tmp_dir = std::env::temp_dir();
         let prompt_file = tmp_dir.join(format!("{prefix}-prompt.txt"));
         let output_file = tmp_dir.join(format!("{prefix}-output.txt"));
+        let stderr_file = tmp_dir.join(format!("{prefix}-stderr.txt"));
         let exit_file = tmp_dir.join(format!("{prefix}-exit.txt"));
 
         // RAII cleanup for all temp files, even on early return / panic.
         let _guard = TempFileGuard::new(vec![
             prompt_file.clone(),
             output_file.clone(),
+            stderr_file.clone(),
             exit_file.clone(),
         ]);
 
@@ -205,8 +210,17 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // 2. Ensure tmux session exists
         tmux::ensure_session(&self.runner, &self.session_name).await?;
 
+        // 2b. Create stderr capture file so the redirect target exists
+        fs::write(&stderr_file, "")
+            .await
+            .map_err(|err| RalphError::BackendCommandFailed {
+                backend: self.inner.name().to_owned(),
+                details: format!("failed to create stderr capture file: {err}"),
+            })?;
+
         // 3. Create tmux window with the shell command (with retry on session loss)
-        let shell_cmd = self.build_shell_command(&prompt_file, &output_file, &exit_file, &ctx);
+        let shell_cmd =
+            self.build_shell_command(&prompt_file, &output_file, &stderr_file, &exit_file, &ctx);
         let label = self.build_label(&ctx);
 
         debug!(
@@ -234,9 +248,14 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             }
         }
 
-        // 4. Wait for exit file (respecting backend timeout)
-        let wait_result =
-            tmux::wait_for_exit(&exit_file, self.inner.timeout(), POLL_INTERVAL).await;
+        // 4. Wait for exit file with inactivity tracking via capture-file growth
+        let wait_result = tmux::wait_for_exit_with_activity(
+            &exit_file,
+            &[output_file.as_path(), stderr_file.as_path()],
+            self.inner.timeout(),
+            POLL_INTERVAL,
+        )
+        .await;
 
         // 5. Classify timeout cause BEFORE cleanup.
         //
@@ -246,7 +265,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // external disappearance.
         let exit_code = match wait_result {
             Ok(code) => code,
-            Err(RalphError::BackendTimeout { .. }) => {
+            Err(RalphError::BackendTimeout { idle_seconds: measured_idle, .. }) => {
                 // Check the specific window, not just the session. A disappeared
                 // window in a still-alive session should be reported as a command
                 // failure with actionable diagnostics, not as a timeout.
@@ -258,7 +277,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
                 tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
 
                 if window_alive {
-                    // Window still alive — this is a genuine timeout.
+                    // Window still alive — this is a genuine idle timeout.
                     // Propagate as BackendTimeout so orchestrator can retry.
                     debug!(
                         backend = self.inner.name(),
@@ -267,8 +286,8 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
                     );
                     return Err(RalphError::BackendTimeout {
                         backend: self.inner.name().to_owned(),
-                        idle_seconds: self.inner.timeout().as_secs(),
-                        timeout_kind: TimeoutKind::Walltime,
+                        idle_seconds: measured_idle,
+                        timeout_kind: TimeoutKind::Idle,
                     });
                 }
                 debug!(
@@ -329,13 +348,26 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             }
         };
 
+        let stderr_bytes = match fs::read(&stderr_file).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                debug!(
+                    backend = self.inner.name(),
+                    path = %stderr_file.display(),
+                    error = %err,
+                    "could not read stderr capture file (non-fatal)"
+                );
+                Vec::new()
+            }
+        };
+
         persist_cli_output(
             ctx.loop_dir.as_deref(),
             self.inner.name(),
             ctx.role.as_deref(),
             Some(exit_code),
             &output_bytes,
-            &[],
+            &stderr_bytes,
         )
         .await;
 
@@ -465,6 +497,7 @@ mod tests {
         let cmd = backend.build_shell_command(
             Path::new("/tmp/prompt.txt"),
             Path::new("/tmp/output.txt"),
+            Path::new("/tmp/stderr.txt"),
             Path::new("/tmp/exit.txt"),
             &TmuxExecutionContext::default(),
         );
@@ -473,6 +506,10 @@ mod tests {
         assert!(
             cmd.contains("cat '/tmp/prompt.txt'"),
             "missing cat prompt: {cmd}"
+        );
+        assert!(
+            cmd.contains("2>'/tmp/stderr.txt'"),
+            "missing stderr redirect: {cmd}"
         );
         assert!(
             cmd.contains("| tee '/tmp/output.txt'"),
@@ -485,7 +522,7 @@ mod tests {
         // Should NOT contain 2>&1
         assert!(
             !cmd.contains("2>&1"),
-            "stderr must not be redirected: {cmd}"
+            "stderr must not be merged: {cmd}"
         );
     }
 
@@ -497,6 +534,7 @@ mod tests {
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
             Path::new("/tmp/e.txt"),
             &TmuxExecutionContext::default(),
         );
@@ -512,6 +550,7 @@ mod tests {
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
             Path::new("/tmp/e.txt"),
             &TmuxExecutionContext::default(),
         );
@@ -539,6 +578,7 @@ mod tests {
         let cmd = backend.build_shell_command(
             Path::new("/tmp/p.txt"),
             Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
             Path::new("/tmp/e.txt"),
             &TmuxExecutionContext::default(),
         );
@@ -705,7 +745,7 @@ mod tests {
         match result {
             Err(RalphError::BackendTimeout {
                 backend,
-                timeout_kind: TimeoutKind::Walltime,
+                timeout_kind: TimeoutKind::Idle,
                 ..
             }) => {
                 assert_eq!(backend, "slow-backend");
@@ -791,6 +831,7 @@ mod tests {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let prompt_path = tmp_dir.join(&name);
                             let output_path = tmp_dir.join(format!("{prefix}-output.txt"));
+                            let stderr_path = tmp_dir.join(format!("{prefix}-stderr.txt"));
                             let exit_path = tmp_dir.join(format!("{prefix}-exit.txt"));
 
                             fs::write(&output_path, "ok").await.unwrap();
@@ -799,6 +840,7 @@ mod tests {
                             let mut files = created_files_clone.lock().await;
                             files.push(prompt_path);
                             files.push(output_path);
+                            files.push(stderr_path);
                             files.push(exit_path);
                             return;
                         }
@@ -860,6 +902,7 @@ mod tests {
                             let prefix = name.trim_end_matches("-prompt.txt");
                             let prompt_path = tmp_dir.join(&name);
                             let output_path = tmp_dir.join(format!("{prefix}-output.txt"));
+                            let stderr_path = tmp_dir.join(format!("{prefix}-stderr.txt"));
                             let exit_path = tmp_dir.join(format!("{prefix}-exit.txt"));
 
                             fs::write(&output_path, "error output").await.unwrap();
@@ -868,6 +911,7 @@ mod tests {
                             let mut files = created_files_clone.lock().await;
                             files.push(prompt_path);
                             files.push(output_path);
+                            files.push(stderr_path);
                             files.push(exit_path);
                             return;
                         }

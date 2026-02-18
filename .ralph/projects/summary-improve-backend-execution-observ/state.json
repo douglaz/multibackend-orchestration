@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "1769b75aa850516da60008e559b7cbc3fcccecc8cefa232d71e8f9d6174f95c5",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "error-model-enrichment-timeoutkind-and",
       "feature_name": "Error model enrichment — TimeoutKind and BackendTimeout context",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -32,8 +32,43 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "0762c764297ec2656f4d784a376a899be8d06d3c",
       "started_at": "2026-02-18T22:10:05.381122156Z",
+      "completed_at": "2026-02-18T22:13:52.725529548Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "inactivity-timeout-semantics-for-cli-and-tmux",
+      "feature_name": "Inactivity timeout semantics for CLI and tmux execution paths",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218221638-spec.md",
+        "impl_notes": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218223008-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218223325-review-001-feedback.md",
+            "response": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218223655-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218224028-review-002-feedback.md",
+            "response": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218224226-impl-response-002.md"
+          }
+        ],
+        "approval": "loops/002-inactivity-timeout-semantics-for-cli-and-tmux/20260218224509-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-18T22:16:38.618886050Z",
       "completed_at": null
     }
   ],
@@ -59,6 +94,26 @@
         "call_count": 1,
         "created_at": "2026-02-18T22:13:52.694737923Z",
         "last_used_at": "2026-02-18T22:13:52.694738635Z"
+      },
+      {
+        "session_id": "a3a9c5cf-82c7-457b-97ce-c137f712ef7c",
+        "backend_spec": "claude(opus)",
+        "role": "implementer",
+        "loop_number": 2,
+        "bootstrap_hash": "afbf50c5a741bf4b59f709a58005533ad8f20da5b22b206e9b95184309b2864b",
+        "call_count": 3,
+        "created_at": "2026-02-18T22:30:08.891266990Z",
+        "last_used_at": "2026-02-18T22:42:26.088122426Z"
+      },
+      {
+        "session_id": "019c72eb-411d-7142-80ad-db7f610f3260",
+        "backend_spec": "codex(gpt-5.3-codex-high)",
+        "role": "reviewer",
+        "loop_number": 2,
+        "bootstrap_hash": "0e9fb8096cdaa41c99cd2a357126346f6e1a0989196049cddcc51224306155b0",
+        "call_count": 3,
+        "created_at": "2026-02-18T22:33:25.192801432Z",
+        "last_used_at": "2026-02-18T22:45:09.244471088Z"
       }
     ]
   }
