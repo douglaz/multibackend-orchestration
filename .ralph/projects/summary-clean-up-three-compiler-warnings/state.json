@@ -7,17 +7,17 @@
   "prompt_hash_at_loop_start": "0e3476b1987015201afb479b2c270eabada7fa0100fe5af45d175fea39509b79",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
-  "current_phase": "committing",
+  "current_loop": 2,
+  "current_phase": "completing",
   "phase_iteration": 1,
-  "status": "in_progress",
+  "status": "completed",
   "loops": [
     {
       "loop_number": 1,
       "slug": "apply-deterministic-dead-code-rule-for-kill-and",
       "feature_name": "Apply deterministic dead-code rule for kill_and_reap_child",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -32,12 +32,31 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "b7604e5c886650f645181090d10669c9cd09a100",
       "started_at": "2026-02-18T01:35:58.542966565Z",
-      "completed_at": null
+      "completed_at": "2026-02-18T01:36:48.249356932Z"
     }
   ],
-  "completion_attempts": [],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260218013747-termination-request.md",
+        "verdict": "loops/002-completion/20260218013830-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-18T01:37:47.441409784Z",
+      "completed_at": "2026-02-18T01:38:30.825342632Z"
+    }
+  ],
   "session_store": {
     "records": [
       {
