@@ -668,7 +668,14 @@ impl CliBackend {
                     });
                 }
 
-                Ok(String::from_utf8_lossy(&captured_stdout).to_string())
+                let raw = String::from_utf8_lossy(&captured_stdout).to_string();
+                // Normalize structured output (stream-json NDJSON, single-object JSON)
+                // to plain text so all callers receive clean content regardless of
+                // --output-format mode.
+                let normalized = output_normalizer::normalize_output(&raw)
+                    .map(|n| n.text)
+                    .unwrap_or(raw);
+                Ok(normalized)
             }
             Ok(Err(err)) if !was_timeout => {
                 let _ = self.collect_stderr(stderr_handle).await;
