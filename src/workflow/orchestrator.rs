@@ -8,6 +8,7 @@ use chrono::Utc;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
+use crate::backend::output_normalizer::normalize_output;
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
@@ -4076,7 +4077,8 @@ async fn execute_with_timeout_retries(
 
         match backend.execute_with_log(prompt, Some(log_writer)).await {
             Ok(output) => {
-                return Ok(output);
+                let normalized = normalize_output(&output)?;
+                return Ok(normalized.text);
             }
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
