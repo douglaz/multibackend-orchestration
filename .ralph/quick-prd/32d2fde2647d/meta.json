@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\n\n`normalize_codex_jsonl()` in `src/backend/output_normalizer.rs` parses the wrong JSON shape, causing every Codex backend call to fail and fall back to the Claude Sonnet reformatter. Fix it to correctly parse the agentic event format that `codex exec --json` actually emits.\n\n## Context\n\nThe normalizer currently looks for `{\"role\": \"assistant\", \"content\": \"...\"}` but real Codex output is a JSONL stream of typed events. The assistant response is at `item.type == \"agent_message\"` → `item.text`.\n\n## Requirements\n\n**File to modify:** `src/backend/output_normalizer.rs`, function `normalize_codex_jsonl()` (lines 113–201)\n\n### Parsing changes\n\n1. Extract `thread_id` from `{\"type\":\"thread.started\",\"thread_id\":\"...\"}` events → map to `session_id`\n2. Extract assistant text from `{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"...\"}}` — use the **last** such event if multiple exist\n3. Extract usage from `{\"type\":\"turn.completed\",\"usage\":{...}}`:\n   - `input_tokens` → `tokens_in`\n   - `output_tokens` → `tokens_out`\n   - `cached_input_tokens` → `cached_in` (field name differs from other backends)\n4. Retain the existing `{\"role\":\"assistant\",\"content\":\"...\"}` path as a secondary fallback (do not remove it)\n\n### Unit test to add\n\nAdd the following test to the existing test module in `output_normalizer.rs`:\n\n```rust\n#[test]\nfn codex_real_jsonl_extracts_text_and_session() {\n    let jsonl = r#\"{\"type\":\"thread.started\",\"thread_id\":\"019c6e78-abc\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"reasoning\",\"text\":\"thinking...\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"# Implementation Notes\\n\\nDone.\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":8790,\"cached_input_tokens\":6784,\"output_tokens\":24}}\"#;\n    let result = normalize_output(\"codex\", jsonl).unwrap();\n    assert_eq!(result.text, \"# Implementation Notes\\n\\nDone.\");\n    assert_eq!(result.session_id.as_deref(), Some(\"019c6e78-abc\"));\n    assert_eq!(result.tokens_in, Some(8790));\n    assert_eq!(result.tokens_out, Some(24));\n    assert_eq!(result.cached_in, Some(6784));\n}\n```\n\n## Acceptance Criteria\n\n- [ ] `normalize_codex_jsonl` extracts `thread_id` from `type:thread.started` events into `session_id`\n- [ ] `normalize_codex_jsonl` extracts text from `type:item.completed` + `item.type:agent_message`, using the last occurrence\n- [ ] `normalize_codex_jsonl` extracts usage from `type:turn.completed`, mapping `cached_input_tokens` → `cached_in`\n- [ ] Existing flat-format fallback (`role:assistant`) still works\n- [ ] New unit test with real Codex JSONL format passes\n- [ ] All existing unit tests still pass",
+  "idea_hash": "32d2fde2647d",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-18T03:55:28Z",
+  "completed_at": "2026-02-18T03:58:35Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 62.362097848,
+  "review_times_secs": [
+    44.448508807
+  ],
+  "revision_times_secs": [
+    79.56410267
+  ]
+}
