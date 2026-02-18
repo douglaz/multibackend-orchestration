@@ -12,7 +12,31 @@ pub struct NormalizedOutput {
     pub cached_in: Option<u64>,
 }
 
+/// Known Claude stream-json event types used to distinguish NDJSON streams
+/// from single-object JSON responses that happen to contain a `type` field.
+const CLAUDE_STREAM_EVENT_TYPES: &[&str] = &[
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+    "ping",
+    "summary",
+];
+
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
+    // Only attempt JSON routing if the first non-empty line looks like JSON.
+    // This prevents markdown responses containing embedded JSON examples
+    // (e.g. in code blocks) from being misrouted into JSON normalization.
+    let first_content_line = raw.lines().map(str::trim).find(|l| !l.is_empty());
+    if !first_content_line.is_some_and(|l| l.starts_with('{')) {
+        return Ok(NormalizedOutput {
+            text: raw.to_owned(),
+            ..NormalizedOutput::default()
+        });
+    }
+
     let Some(first_json) = first_valid_json_object(raw) else {
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
@@ -20,7 +44,14 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
         });
     };
 
-    if first_json.get("type").is_some() {
+    // Route to stream normalization only if the first JSON object's `type`
+    // matches a known Claude stream event type, not just any `type` field.
+    let is_stream = first_json
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| CLAUDE_STREAM_EVENT_TYPES.contains(&t));
+
+    if is_stream {
         normalize_claude_stream_json(raw)
     } else {
         normalize_claude_single_json(raw)
@@ -293,10 +324,8 @@ not-json
     }
 
     #[test]
-    fn normalize_output_routes_stream_json_when_first_json_has_type() {
-        let raw = r#"
-garbage
-{"type":"message_start","message":{"id":"msg_22"}}
+    fn normalize_output_routes_stream_json_when_first_line_is_stream_event() {
+        let raw = r#"{"type":"message_start","message":{"id":"msg_22"}}
 {"type":"content_block_delta","delta":{"text":"NDJSON"}}
 "#;
 
@@ -319,14 +348,12 @@ garbage
     }
 
     #[test]
-    fn normalize_output_skips_malformed_lines_before_detection() {
-        let raw = r#"
-nope
-still nope
-{"result":"from-json"}
-"#;
+    fn normalize_output_returns_raw_when_first_line_is_not_json() {
+        // First non-empty line is plain text, so even though later lines
+        // contain valid JSON, the response is treated as raw text.
+        let raw = "nope\nstill nope\n{\"result\":\"from-json\"}";
         let normalized = normalize_output(raw).expect("normalize_output");
-        assert_eq!(normalized.text, "from-json");
+        assert_eq!(normalized.text, raw);
     }
 
     #[test]
@@ -335,5 +362,40 @@ still nope
         let normalized = normalize_output(raw).expect("raw text fallback");
         assert_eq!(normalized.text, raw);
         assert_eq!(normalized.session_id, None);
+    }
+
+    // --- P1 regression: markdown with embedded JSON must not be misrouted ---
+
+    #[test]
+    fn normalize_output_markdown_with_embedded_json_returns_raw() {
+        // Markdown response that includes a JSON example in a code block.
+        // The first non-empty line is markdown, not JSON, so the whole
+        // response must be returned as raw text.
+        let raw = r#"# Implementation Notes
+
+Here's the JSON format:
+
+```json
+{"type":"message_start","message":{"id":"msg_1"}}
+{"type":"content_block_delta","delta":{"text":"example"}}
+```
+
+Done."#;
+        let normalized = normalize_output(raw).expect("should return raw");
+        assert_eq!(normalized.text, raw);
+        assert_eq!(normalized.session_id, None);
+    }
+
+    // --- P2 regression: unknown `type` field must route to single-json ---
+
+    #[test]
+    fn normalize_output_single_json_with_type_field_routes_to_single() {
+        // A single-object JSON response with a `type` field that is NOT
+        // a known Claude stream event type. Must be handled by the
+        // single-object path, not the stream normalizer.
+        let raw = r#"{"type":"result","text":"ok","session_id":"s1"}"#;
+        let normalized = normalize_output(raw).expect("should route to single-json");
+        assert_eq!(normalized.text, "ok");
+        assert_eq!(normalized.session_id.as_deref(), Some("s1"));
     }
 }
