@@ -338,12 +338,19 @@ impl QuickPrdPipeline {
             let revised = self.writer.execute(&revision_prompt).await?;
             revision_times_secs.push(revision_start.elapsed().as_secs_f64());
 
-            // Section-check revision output
-            let (cleaned, _missing) = check_spec_sections(&revised);
-            current_spec = cleaned;
+            // Section-check revision output; reject if all sections missing
+            let (cleaned, missing) = check_spec_sections(&revised);
 
-            // Cache revision
-            fs::write(cache_dir.join(format!("revision-{n}.md")), &current_spec)?;
+            // Cache revision (even if rejected, for debugging)
+            fs::write(cache_dir.join(format!("revision-{n}.md")), &cleaned)?;
+
+            if missing.len() >= REQUIRED_SECTIONS.len() {
+                eprintln!(
+                    "warning: revision {n} has no valid sections, keeping previous spec"
+                );
+            } else {
+                current_spec = cleaned;
+            }
             revision_count = n;
         }
 
@@ -681,5 +688,51 @@ mod tests {
             "SPEC.md should not be in repo root"
         );
         assert!(result.approved);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_revision_keeps_previous_spec() {
+        // Writer returns good draft, then malformed revision (no sections)
+        let malformed_revision = "Here's what I changed:\n- Fixed issue 1\n- Fixed issue 2";
+        let writer = Arc::new(MockBackend::new(
+            "writer",
+            vec![
+                valid_spec().to_string(),       // draft (good)
+                malformed_revision.to_string(), // revision (bad — no sections)
+            ],
+        ));
+        let reviewer = Arc::new(MockBackend::new(
+            "reviewer",
+            vec![
+                mock_rejected_review(), // review-1: rejected
+                mock_approved_review(), // review-2: approved (reviews the ORIGINAL good spec)
+            ],
+        ));
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let options = QuickPrdOptions {
+            idea: "malformed revision test".to_string(),
+            writer_spec: "mock-writer".to_string(),
+            reviewer_spec: "mock-reviewer".to_string(),
+            max_revisions: 3,
+            dry_run: false,
+        };
+
+        let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
+        let result = pipeline
+            .run_in(temp.path().to_path_buf())
+            .await
+            .expect("pipeline should succeed");
+
+        // The final spec should be the ORIGINAL draft, not the malformed revision
+        let final_spec = std::fs::read_to_string(&result.spec_path).unwrap();
+        assert!(
+            final_spec.contains("## Summary"),
+            "spec should retain sections from draft"
+        );
+        assert!(
+            !final_spec.contains("Here's what I changed"),
+            "spec should NOT contain revision prose"
+        );
     }
 }
