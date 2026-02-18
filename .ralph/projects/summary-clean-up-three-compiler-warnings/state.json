@@ -1,0 +1,55 @@
+{
+  "project_id": "summary-clean-up-three-compiler-warnings",
+  "project_name": "## Summary\n\nClean up three compiler warnings emitted by `car",
+  "created_at": "2026-02-18T01:34:20.737371705Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "0e3476b1987015201afb479b2c270eabada7fa0100fe5af45d175fea39509b79",
+  "prompt_hash_at_loop_start": "0e3476b1987015201afb479b2c270eabada7fa0100fe5af45d175fea39509b79",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "apply-deterministic-dead-code-rule-for-kill-and",
+      "feature_name": "Apply deterministic dead-code rule for kill_and_reap_child",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-apply-deterministic-dead-code-rule-for-kill-and/20260218013558-spec.md",
+        "impl_notes": "loops/001-apply-deterministic-dead-code-rule-for-kill-and/20260218013636-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-apply-deterministic-dead-code-rule-for-kill-and/20260218013648-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-18T01:35:58.542966565Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": [],
+  "session_store": {
+    "records": [
+      {
+        "session_id": "4f5b00ce-d2b3-498c-ac5c-dd0ee5a4047b",
+        "backend_spec": "claude(opus)",
+        "role": "reviewer",
+        "loop_number": 1,
+        "bootstrap_hash": "95dabbea04ecb234961ebff20f30f4e7508b5dd44d0862071eaba258b33c0788",
+        "call_count": 1,
+        "created_at": "2026-02-18T01:36:48.219695100Z",
+        "last_used_at": "2026-02-18T01:36:48.219699048Z"
+      }
+    ]
+  }
+}

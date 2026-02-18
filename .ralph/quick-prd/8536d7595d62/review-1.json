@@ -1,0 +1,13 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Missing edge case",
+      "feedback": "The preferred path (deleting `kill_and_reap_child`) will also make `use std::io::ErrorKind;` in `src/backend/mod.rs` unused. That creates a new warning and can fail the zero-warning goal unless that import is also removed or the function is kept with `#[allow(dead_code)]`."
+    },
+    {
+      "area": "Clarity",
+      "feedback": "`has no planned use` is not verifiable from code search alone. Make the delete-vs-allow rule deterministic (for example: delete when there are zero call-sites) or require explicit maintainer sign-off before using `#[allow(dead_code)]`."
+    }
+  ]
+}

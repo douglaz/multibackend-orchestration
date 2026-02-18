@@ -247,6 +247,7 @@ impl CliBackend {
         self.timeout
     }
 
+    #[allow(dead_code)]
     async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
         if let Err(err) = child.kill().await {
             if err.kind() != ErrorKind::InvalidInput {
