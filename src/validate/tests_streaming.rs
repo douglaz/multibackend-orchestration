@@ -542,6 +542,7 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
     })
 }
 
+
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
     h.init_workspace().expect("init failed");
     let script = h
