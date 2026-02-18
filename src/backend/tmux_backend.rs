@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
 use super::{persist_cli_output, Backend, CliBackend, SharedTmuxContext};
-use crate::error::RalphError;
+use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
 use crate::Result;
 
@@ -267,6 +267,8 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
                     );
                     return Err(RalphError::BackendTimeout {
                         backend: self.inner.name().to_owned(),
+                        idle_seconds: self.inner.timeout().as_secs(),
+                        timeout_kind: TimeoutKind::Walltime,
                     });
                 }
                 debug!(
@@ -701,7 +703,11 @@ mod tests {
         let result = backend.execute("test prompt").await;
 
         match result {
-            Err(RalphError::BackendTimeout { backend }) => {
+            Err(RalphError::BackendTimeout {
+                backend,
+                timeout_kind: TimeoutKind::Walltime,
+                ..
+            }) => {
                 assert_eq!(backend, "slow-backend");
             }
             other => panic!("expected BackendTimeout, got: {other:?}"),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
 use crate::backend::tmux_backend::TmuxExecutionContext;
@@ -4067,6 +4067,8 @@ async fn execute_with_timeout_retries(
         }
     }
 
+    let retry_started = Instant::now();
+
     for attempt in 1..=3_u8 {
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
@@ -4077,11 +4079,18 @@ async fn execute_with_timeout_retries(
             }
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
+                idle_seconds,
+                timeout_kind,
             }) => {
+                let total_elapsed_secs = retry_started.elapsed().as_secs();
                 if attempt == 3 {
                     warn!(
                         role = role,
                         backend = %backend_name,
+                        attempt = attempt,
+                        idle_seconds = idle_seconds,
+                        total_elapsed_secs = total_elapsed_secs,
+                        timeout_kind = ?timeout_kind,
                         "backend timeout, retries exhausted"
                     );
                     return Err(RalphError::BackendTimeoutExhausted {
@@ -4097,6 +4106,9 @@ async fn execute_with_timeout_retries(
                     role = role,
                     backend = %backend_name,
                     attempt = attempt,
+                    idle_seconds = idle_seconds,
+                    total_elapsed_secs = total_elapsed_secs,
+                    timeout_kind = ?timeout_kind,
                     backoff_secs = backoff,
                     "backend timeout, retrying..."
                 );

@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, warn};
 
-use crate::error::RalphError;
+use crate::error::{RalphError, TimeoutKind};
 use crate::Result;
 
 #[async_trait]
@@ -134,6 +134,8 @@ pub async fn wait_for_exit(
         if started.elapsed() >= timeout {
             return Err(RalphError::BackendTimeout {
                 backend: "tmux".to_owned(),
+                idle_seconds: timeout.as_secs(),
+                timeout_kind: TimeoutKind::Walltime,
             });
         }
 
@@ -320,7 +322,7 @@ mod tests {
         has_window, kill_window, kill_window_best_effort, sanitize_tmux_label, set_remain_on_exit,
         wait_for_exit, TmuxCommandRunner,
     };
-    use crate::error::RalphError;
+    use crate::error::{RalphError, TimeoutKind};
     use crate::Result;
 
     #[derive(Clone, Default)]
@@ -446,7 +448,11 @@ mod tests {
         .await;
         assert!(matches!(
             result,
-            Err(RalphError::BackendTimeout { backend }) if backend == "tmux"
+            Err(RalphError::BackendTimeout {
+                backend,
+                idle_seconds: 0,
+                timeout_kind: TimeoutKind::Walltime,
+            }) if backend == "tmux"
         ));
     }
 

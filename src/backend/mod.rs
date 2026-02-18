@@ -24,7 +24,7 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::config::GlobalConfig;
-use crate::error::RalphError;
+use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
 use crate::util::time::now_timestamp_yyyymmddhhmmss;
@@ -653,6 +653,8 @@ impl CliBackend {
             }
             return Err(RalphError::BackendTimeout {
                 backend: self.name.clone(),
+                idle_seconds: self.timeout.as_secs(),
+                timeout_kind: TimeoutKind::Walltime,
             });
         }
 
@@ -1034,7 +1036,7 @@ mod tests {
         CliBackend,
     };
     use crate::config::GlobalConfig;
-    use crate::error::RalphError;
+    use crate::error::{RalphError, TimeoutKind};
     use crate::output_log::LogWriter;
 
     #[test]
@@ -1195,7 +1197,15 @@ sleep 30
         let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         match result {
-            Err(RalphError::BackendTimeout { backend }) => assert_eq!(backend, "timeout-test"),
+            Err(RalphError::BackendTimeout {
+                backend,
+                idle_seconds,
+                timeout_kind,
+            }) => {
+                assert_eq!(backend, "timeout-test");
+                assert_eq!(idle_seconds, 0);
+                assert_eq!(timeout_kind, TimeoutKind::Walltime);
+            }
             other => panic!("expected BackendTimeout, got: {other:?}"),
         }
 

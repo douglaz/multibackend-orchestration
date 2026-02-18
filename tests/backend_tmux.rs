@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use ralph::backend::tmux::TmuxCommandRunner;
 use ralph::backend::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 use ralph::backend::{Backend, CliBackend, SharedTmuxContext};
-use ralph::error::RalphError;
+use ralph::error::{RalphError, TimeoutKind};
 use ralph::Result;
 
 #[derive(Clone, Default)]
@@ -228,7 +228,11 @@ async fn tmux_backend_genuine_timeout_returns_backend_timeout() {
     let result = backend.execute("prompt").await;
 
     match result {
-        Err(RalphError::BackendTimeout { backend }) => {
+        Err(RalphError::BackendTimeout {
+            backend,
+            timeout_kind: TimeoutKind::Walltime,
+            ..
+        }) => {
             assert_eq!(backend, "timeout-backend");
         }
         other => panic!("expected BackendTimeout, got: {other:?}"),
