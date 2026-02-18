@@ -3,8 +3,6 @@ use serde_json::Value;
 use crate::error::RalphError;
 use crate::Result;
 
-/// Normalized output from a backend execution, extracting structured metadata
-/// when available (Claude JSON, Codex JSONL) and falling back to raw text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NormalizedOutput {
     pub text: String,
@@ -14,118 +12,24 @@ pub struct NormalizedOutput {
     pub cached_in: Option<u64>,
 }
 
-/// Normalize raw stdout from a backend execution.
-///
-/// - Claude JSON: extract response text, session_id, usage.
-/// - Codex JSONL: extract thread/session id, last assistant message text, usage.
-/// - Non-JSON fallback: text=raw, metadata None.
-/// - Malformed JSON/JSONL must not panic; fall back to raw text.
-/// - If structured JSON exists but assistant message text is missing, return Err.
-pub fn normalize_output(backend_name: &str, raw_stdout: &str) -> Result<NormalizedOutput> {
-    let trimmed = raw_stdout.trim();
-
-    if trimmed.is_empty() {
+pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
+    let Some(first_json) = first_valid_json_object(raw) else {
         return Ok(NormalizedOutput {
-            text: raw_stdout.to_owned(),
-            ..Default::default()
+            text: raw.to_owned(),
+            ..NormalizedOutput::default()
         });
-    }
-
-    // Strip parenthesized model qualifier: "codex(gpt-5.3-codex-high)" -> "codex"
-    let base_name = backend_name
-        .split_once('(')
-        .map(|(name, _)| name)
-        .unwrap_or(backend_name);
-
-    if base_name.starts_with("claude") {
-        if trimmed.starts_with('{') {
-            return normalize_claude_json(trimmed, raw_stdout);
-        }
-    } else if base_name.starts_with("codex") {
-        return normalize_codex_jsonl(raw_stdout);
-    }
-
-    // Non-JSON fallback
-    Ok(NormalizedOutput {
-        text: raw_stdout.to_owned(),
-        ..Default::default()
-    })
-}
-
-fn normalize_claude_json(raw: &str, raw_fallback: &str) -> Result<NormalizedOutput> {
-    let value: Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(_) => {
-            // Malformed JSON: fall back to raw text without panic
-            return Ok(NormalizedOutput {
-                text: raw_fallback.to_owned(),
-                ..Default::default()
-            });
-        }
     };
 
-    let session_id = value
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
-
-    // Extract usage
-    let usage = value.get("usage");
-    let tokens_in = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64());
-    let tokens_out = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64());
-    let cached_in = usage
-        .and_then(|u| u.get("cache_read_input_tokens"))
-        .and_then(|v| v.as_u64());
-
-    // Extract text from content array or result field.
-    let text = extract_claude_text(&value)?;
-
-    Ok(NormalizedOutput {
-        text,
-        session_id,
-        tokens_in,
-        tokens_out,
-        cached_in,
-    })
+    if first_json.get("type").is_some() {
+        normalize_claude_stream_json(raw)
+    } else {
+        normalize_claude_single_json(raw)
+    }
 }
 
-fn extract_claude_text(value: &Value) -> Result<String> {
-    // Try content array first
-    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
-        let mut texts = Vec::new();
-        for block in content {
-            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                texts.push(text);
-            }
-        }
-        if !texts.is_empty() {
-            return Ok(texts.join(""));
-        }
-    }
-
-    // Try result field
-    if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
-        return Ok(result.to_owned());
-    }
-
-    // Structured JSON exists but no text found
-    Err(RalphError::ParseError(
-        "claude JSON response has no assistant message text".to_owned(),
-    ))
-}
-
-pub fn normalize_codex_jsonl(raw: &str) -> Result<NormalizedOutput> {
-    let mut event_text: Option<String> = None;
-    let mut flat_text: Option<String> = None;
-    let mut event_session_id: Option<String> = None;
-    let mut flat_session_id: Option<String> = None;
-    let mut event_tokens_in: Option<u64> = None;
-    let mut event_tokens_out: Option<u64> = None;
-    let mut event_cached_in: Option<u64> = None;
-    let mut flat_tokens_in: Option<u64> = None;
-    let mut flat_tokens_out: Option<u64> = None;
-    let mut flat_cached_in: Option<u64> = None;
-    let mut saw_json_object = false;
+pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
+    let mut output = NormalizedOutput::default();
+    let mut json_event_count = 0_usize;
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -133,313 +37,303 @@ pub fn normalize_codex_jsonl(raw: &str) -> Result<NormalizedOutput> {
             continue;
         }
 
-        let value = match serde_json::from_str::<Value>(trimmed) {
-            Ok(value) => value,
-            Err(_) => continue,
+        let Ok(event) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
         };
-
-        saw_json_object = true;
-        let has_type_field = value.get("type").is_some();
-
-        if let Some(event_type) = value.get("type").and_then(Value::as_str) {
-            match event_type {
-                "thread.started" => {
-                    if let Some(thread_id) = value.get("thread_id").and_then(Value::as_str) {
-                        event_session_id = Some(thread_id.to_owned());
-                    }
-                }
-                "item.completed" => {
-                    if let Some(item) = value.get("item").and_then(Value::as_object) {
-                        let item_type = item.get("type").and_then(Value::as_str);
-                        if item_type == Some("agent_message") {
-                            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                                event_text = Some(text.to_owned());
-                            }
-                        }
-                    }
-                }
-                "turn.completed" => {
-                    if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-                        let (tokens_in, tokens_out, cached_in) = extract_usage_fields(usage);
-                        if let Some(value) = tokens_in {
-                            event_tokens_in = Some(value);
-                        }
-                        if let Some(value) = tokens_out {
-                            event_tokens_out = Some(value);
-                        }
-                        if let Some(value) = cached_in {
-                            event_cached_in = Some(value);
-                        }
-                    }
-                }
-                _ => {}
-            }
+        if !event.is_object() {
             continue;
         }
+        json_event_count += 1;
 
-        if has_type_field {
-            continue;
-        }
-
-        flat_text = extract_flat_text(&value).or(flat_text);
-        flat_session_id = value
-            .get("thread_id")
+        let event_type = event
+            .get("type")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .or(flat_session_id);
-
-        if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-            let (tokens_in, tokens_out, cached_in) = extract_usage_fields(usage);
-            if let Some(value) = tokens_in {
-                flat_tokens_in = Some(value);
+            .unwrap_or_default();
+        match event_type {
+            "message_start" => {
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                merge_usage_from_event(&event, &mut output);
             }
-            if let Some(value) = tokens_out {
-                flat_tokens_out = Some(value);
+            "content_block_delta" => {
+                if let Some(text) = event.pointer("/delta/text").and_then(Value::as_str) {
+                    output.text.push_str(text);
+                }
+                merge_usage_from_event(&event, &mut output);
             }
-            if let Some(value) = cached_in {
-                flat_cached_in = Some(value);
+            "message_delta" | "message_stop" | "summary" => {
+                merge_usage_from_event(&event, &mut output);
             }
+            "content_block_start" | "content_block_stop" | "ping" => {}
+            _ => {}
         }
     }
 
-    if !saw_json_object {
+    if json_event_count == 0 {
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
-            ..Default::default()
+            ..output
         });
     }
 
-    let text = match event_text.or(flat_text) {
-        Some(t) => t,
-        None => {
-            return Err(RalphError::ParseError(
-                "codex JSONL response has no assistant message text".to_owned(),
-            ));
-        }
-    };
-
-    Ok(NormalizedOutput {
-        text,
-        session_id: event_session_id.or(flat_session_id),
-        tokens_in: event_tokens_in.or(flat_tokens_in),
-        tokens_out: event_tokens_out.or(flat_tokens_out),
-        cached_in: event_cached_in.or(flat_cached_in),
-    })
-}
-
-fn extract_flat_text(value: &Value) -> Option<String> {
-    if value.get("role").and_then(Value::as_str) == Some("assistant") {
-        return value
-            .get("content")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+    if output.text.is_empty() {
+        return Err(RalphError::ParseError(
+            "claude stream-json output contained JSON events but no text deltas".to_owned(),
+        ));
     }
 
-    value
-        .get("message")
-        .and_then(Value::as_object)
-        .and_then(|message| {
-            let role = message.get("role").and_then(Value::as_str);
-            if role == Some("assistant") {
-                return message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
-            }
-            None
-        })
+    Ok(output)
 }
 
-fn extract_usage_fields(
-    usage: &serde_json::Map<String, Value>,
-) -> (Option<u64>, Option<u64>, Option<u64>) {
-    let tokens_in = usage.get("input_tokens").and_then(Value::as_u64);
-    let tokens_out = usage.get("output_tokens").and_then(Value::as_u64);
-    let cached_in = usage
-        .get("cached_input_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64));
+pub fn normalize_claude_single_json(raw: &str) -> Result<NormalizedOutput> {
+    let value = first_valid_json_object(raw).ok_or_else(|| {
+        RalphError::ParseError("claude json output did not contain a valid JSON object".to_owned())
+    })?;
 
-    (tokens_in, tokens_out, cached_in)
+    let text = extract_single_json_text(&value).ok_or_else(|| {
+        RalphError::ParseError("claude json output contained no text content".to_owned())
+    })?;
+
+    let mut output = NormalizedOutput {
+        text,
+        session_id: value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                value
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
+        ..NormalizedOutput::default()
+    };
+    merge_usage_from_event(&value, &mut output);
+    Ok(output)
+}
+
+fn first_valid_json_object(raw: &str) -> Option<Value> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                serde_json::from_str::<Value>(trimmed).ok()
+            }
+        })
+        .find(|value| value.is_object())
+}
+
+fn extract_single_json_text(value: &Value) -> Option<String> {
+    for key in ["result", "output", "text", "completion"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+    }
+
+    if let Some(content) = value.get("content") {
+        if let Some(text) = extract_text_from_content(content) {
+            return Some(text);
+        }
+    }
+
+    if let Some(message) = value.get("message") {
+        if let Some(text) = message.get("text").and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+        if let Some(content) = message.get("content") {
+            if let Some(text) = extract_text_from_content(content) {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_text_from_content(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_owned());
+    }
+
+    let mut parts = Vec::new();
+    let Some(items) = content.as_array() else {
+        return None;
+    };
+
+    for item in items {
+        if let Some(text) = item.as_str() {
+            parts.push(text);
+            continue;
+        }
+        if let Some(text) = item.get("text").and_then(Value::as_str) {
+            parts.push(text);
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.concat())
+    }
+}
+
+fn merge_usage_from_event(event: &Value, output: &mut NormalizedOutput) {
+    for pointer in ["/usage", "/message/usage", "/delta/usage", "/summary/usage"] {
+        if let Some(usage) = event.pointer(pointer) {
+            merge_usage_fields(usage, output);
+        }
+    }
+    merge_usage_fields(event, output);
+}
+
+fn merge_usage_fields(usage: &Value, output: &mut NormalizedOutput) {
+    output.tokens_in = extract_u64(usage, &["tokens_in", "input_tokens"]).or(output.tokens_in);
+    output.tokens_out =
+        extract_u64(usage, &["tokens_out", "output_tokens"]).or(output.tokens_out);
+    output.cached_in = extract_u64(
+        usage,
+        &[
+            "cached_in",
+            "cache_read_input_tokens",
+            "cached_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
+    .or(output.cached_in);
+}
+
+fn extract_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    for key in keys {
+        let Some(field) = value.get(*key) else {
+            continue;
+        };
+        if let Some(n) = field.as_u64() {
+            return Some(n);
+        }
+        if let Some(n) = field.as_i64().and_then(|n| u64::try_from(n).ok()) {
+            return Some(n);
+        }
+        if let Some(parsed) = field.as_str().and_then(|s| s.parse::<u64>().ok()) {
+            return Some(parsed);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // --- Claude tests ---
+    use super::{normalize_claude_stream_json, normalize_output};
+    use crate::error::RalphError;
 
     #[test]
-    fn claude_json_extracts_text_and_session() {
-        let json = r#"{
-            "session_id": "sess-123",
-            "content": [{"type": "text", "text": "Hello world"}],
-            "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 20}
-        }"#;
-        let result = normalize_output("claude", json).unwrap();
-        assert_eq!(result.text, "Hello world");
-        assert_eq!(result.session_id.as_deref(), Some("sess-123"));
-        assert_eq!(result.tokens_in, Some(100));
-        assert_eq!(result.tokens_out, Some(50));
-        assert_eq!(result.cached_in, Some(20));
+    fn stream_json_concatenates_deltas_in_order_and_extracts_metadata() {
+        let raw = r#"
+{"type":"message_start","message":{"id":"msg_123"}}
+{"type":"content_block_delta","delta":{"text":"Hello "}}
+{"type":"content_block_delta","delta":{"text":"world"}}
+{"type":"message_delta","usage":{"tokens_in":12,"tokens_out":34,"cached_in":5}}
+"#;
+
+        let normalized = normalize_claude_stream_json(raw).expect("stream normalization");
+        assert_eq!(normalized.text, "Hello world");
+        assert_eq!(normalized.session_id.as_deref(), Some("msg_123"));
+        assert_eq!(normalized.tokens_in, Some(12));
+        assert_eq!(normalized.tokens_out, Some(34));
+        assert_eq!(normalized.cached_in, Some(5));
     }
 
     #[test]
-    fn claude_json_missing_text_returns_err() {
-        let json = r#"{"session_id": "sess-123", "content": []}"#;
-        let result = normalize_output("claude", json);
-        assert!(result.is_err(), "expected Err for missing assistant text in structured JSON");
+    fn stream_json_extracts_usage_from_summary_event() {
+        let raw = r#"
+{"type":"message_start","message":{"id":"msg_1"}}
+{"type":"content_block_delta","delta":{"text":"ok"}}
+{"type":"summary","usage":{"tokens_in":7,"tokens_out":9,"cached_in":2}}
+"#;
+
+        let normalized = normalize_claude_stream_json(raw).expect("stream normalization");
+        assert_eq!(normalized.text, "ok");
+        assert_eq!(normalized.tokens_in, Some(7));
+        assert_eq!(normalized.tokens_out, Some(9));
+        assert_eq!(normalized.cached_in, Some(2));
     }
 
     #[test]
-    fn claude_non_json_returns_raw() {
-        let raw = "# Implementation Notes\n\nSome markdown output";
-        let result = normalize_output("claude", raw).unwrap();
-        assert_eq!(result.text, raw);
-        assert!(result.session_id.is_none());
+    fn stream_json_errors_when_events_exist_without_text_deltas() {
+        let raw = r#"
+{"type":"message_start","message":{"id":"msg_1"}}
+{"type":"ping"}
+{"type":"message_stop"}
+"#;
+
+        match normalize_claude_stream_json(raw) {
+            Err(RalphError::ParseError(message)) => {
+                assert!(message.contains("no text deltas"), "message={message}");
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn claude_result_field_extracts_text() {
-        let json = r#"{"session_id": "s1", "result": "extracted text"}"#;
-        let result = normalize_output("claude", json).unwrap();
-        assert_eq!(result.text, "extracted text");
-        assert_eq!(result.session_id.as_deref(), Some("s1"));
+    fn stream_json_skips_unknown_events_and_malformed_lines() {
+        let raw = r#"
+not-json
+{"type":"unknown_event","foo":"bar"}
+{"type":"content_block_delta","delta":{"text":"A"}}
+{"type":"content_block_delta","delta":{"text":"B"}}
+"#;
+
+        let normalized = normalize_claude_stream_json(raw).expect("stream normalization");
+        assert_eq!(normalized.text, "AB");
     }
 
     #[test]
-    fn malformed_json_does_not_panic() {
-        let malformed = r#"{"invalid json..."#;
-        let result = normalize_output("claude", malformed).unwrap();
-        assert_eq!(result.text, malformed);
+    fn normalize_output_routes_stream_json_when_first_json_has_type() {
+        let raw = r#"
+garbage
+{"type":"message_start","message":{"id":"msg_22"}}
+{"type":"content_block_delta","delta":{"text":"NDJSON"}}
+"#;
+
+        let normalized = normalize_output(raw).expect("normalize_output");
+        assert_eq!(normalized.text, "NDJSON");
+        assert_eq!(normalized.session_id.as_deref(), Some("msg_22"));
     }
 
     #[test]
-    fn empty_output_returns_raw() {
-        let result = normalize_output("claude", "").unwrap();
-        assert_eq!(result.text, "");
-        assert!(result.session_id.is_none());
+    fn normalize_output_routes_single_json_when_first_json_has_no_type() {
+        let raw =
+            r#"{"result":"single-json","session_id":"sess_1","usage":{"tokens_in":1,"tokens_out":2,"cached_in":3}}"#;
+
+        let normalized = normalize_output(raw).expect("normalize_output");
+        assert_eq!(normalized.text, "single-json");
+        assert_eq!(normalized.session_id.as_deref(), Some("sess_1"));
+        assert_eq!(normalized.tokens_in, Some(1));
+        assert_eq!(normalized.tokens_out, Some(2));
+        assert_eq!(normalized.cached_in, Some(3));
     }
 
     #[test]
-    fn unknown_backend_returns_raw() {
-        let raw = "some output";
-        let result = normalize_output("unknown-backend", raw).unwrap();
-        assert_eq!(result.text, raw);
+    fn normalize_output_skips_malformed_lines_before_detection() {
+        let raw = r#"
+nope
+still nope
+{"result":"from-json"}
+"#;
+        let normalized = normalize_output(raw).expect("normalize_output");
+        assert_eq!(normalized.text, "from-json");
     }
 
     #[test]
-    fn normalize_output_idempotent_for_plain_text() {
-        let raw = "# Review: APPROVED\n\n## Checklist\n- [x] done";
-        let r1 = normalize_output("claude", raw).unwrap();
-        let r2 = normalize_output("claude", &r1.text).unwrap();
-        assert_eq!(r1.text, r2.text);
-    }
-
-    // --- Codex tests ---
-
-    #[test]
-    fn codex_real_jsonl_extracts_text_and_session() {
-        let raw = r#"{"type":"thread.started","thread_id":"thread_abc123"}
-{"type":"item.completed","item":{"type":"reasoning","text":"thinking"}}
-{"type":"item.completed","item":{"type":"agent_message","text":"Event stream answer"}}
-{"type":"turn.completed","usage":{"input_tokens":42,"output_tokens":9,"cached_input_tokens":7}}"#;
-
-        let output = normalize_output("codex", raw).unwrap();
-
-        assert_eq!(output.text, "Event stream answer");
-        assert_eq!(output.session_id.as_deref(), Some("thread_abc123"));
-        assert_eq!(output.tokens_in, Some(42));
-        assert_eq!(output.tokens_out, Some(9));
-        assert_eq!(output.cached_in, Some(7));
-    }
-
-    #[test]
-    fn codex_last_agent_message_wins() {
-        let raw = r#"{"type":"item.completed","item":{"type":"agent_message","text":"First answer"}}
-{"type":"item.completed","item":{"type":"agent_message","text":"Second answer"}}"#;
-
-        let output = normalize_output("codex", raw).unwrap();
-
-        assert_eq!(output.text, "Second answer");
-    }
-
-    #[test]
-    fn codex_event_text_precedes_flat_text() {
-        let raw = r#"{"role":"assistant","content":"Flat assistant content"}
-{"type":"item.completed","item":{"type":"agent_message","text":"Event assistant content"}}
-{"message":{"role":"assistant","content":"Flat message assistant content"}}"#;
-
-        let output = normalize_output("codex", raw).unwrap();
-
-        assert_eq!(output.text, "Event assistant content");
-    }
-
-    #[test]
-    fn codex_thread_and_usage_are_type_scoped() {
-        let raw = r#"{"type":"thread.updated","thread_id":"wrong-thread"}
-{"type":"item.completed","usage":{"input_tokens":999,"output_tokens":999,"cached_input_tokens":999}}
-{"type":"thread.started","thread_id":"right-thread"}
-{"type":"item.completed","item":{"type":"agent_message","text":"Scoped answer"}}
-{"type":"turn.completed","usage":{"input_tokens":8,"output_tokens":5,"cache_read_input_tokens":3}}"#;
-
-        let output = normalize_output("codex", raw).unwrap();
-
-        assert_eq!(output.text, "Scoped answer");
-        assert_eq!(output.session_id.as_deref(), Some("right-thread"));
-        assert_eq!(output.tokens_in, Some(8));
-        assert_eq!(output.tokens_out, Some(5));
-        assert_eq!(output.cached_in, Some(3));
-    }
-
-    #[test]
-    fn codex_jsonl_extracts_text_and_session() {
-        let raw = r#"{"thread_id":"legacy-thread"}
-{"role":"assistant","content":"Legacy assistant response"}
-{"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":2}}"#;
-
-        let output = normalize_output("codex", raw).unwrap();
-
-        assert_eq!(output.text, "Legacy assistant response");
-        assert_eq!(output.session_id.as_deref(), Some("legacy-thread"));
-        assert_eq!(output.tokens_in, Some(11));
-        assert_eq!(output.tokens_out, Some(4));
-        assert_eq!(output.cached_in, Some(2));
-    }
-
-    #[test]
-    fn codex_jsonl_missing_assistant_returns_err() {
-        let raw = r#"{"type":"thread.started","thread_id":"thread_abc123"}
-{"type":"turn.completed","usage":{"input_tokens":42,"output_tokens":9,"cached_input_tokens":7}}"#;
-
-        let result = normalize_output("codex", raw);
-        assert!(result.is_err(), "expected Err for missing assistant text in structured JSONL");
-    }
-
-    #[test]
-    fn codex_non_json_returns_raw() {
-        let raw = "plain text output without json";
-        let result = normalize_output("codex", raw).unwrap();
-        assert_eq!(result.text, raw);
-    }
-
-    #[test]
-    fn codex_malformed_json_skips_bad_lines() {
-        let raw = "{this is malformed json\n{\"role\":\"assistant\",\"content\":\"Recovered\"}";
-        let output = normalize_output("codex", raw).unwrap();
-        assert_eq!(output.text, "Recovered");
-    }
-
-    #[test]
-    fn normalize_output_dispatches_backends() {
-        let codex = normalize_output(
-            "codex",
-            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"codex\"}}",
-        )
-        .unwrap();
-        assert_eq!(codex.text, "codex");
-
-        let claude = normalize_output("claude", "claude output").unwrap();
-        assert_eq!(claude.text, "claude output");
+    fn normalize_output_returns_raw_text_when_no_json_events_exist() {
+        let raw = "# Implementation Notes\n\n## Decisions Made\n- text";
+        let normalized = normalize_output(raw).expect("raw text fallback");
+        assert_eq!(normalized.text, raw);
+        assert_eq!(normalized.session_id, None);
     }
 }
