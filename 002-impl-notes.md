@@ -1,0 +1,55 @@
+# Implementation Notes
+
+## Decisions Made
+- **Non-tmux inactivity watchdog pattern**: Replaced the single `tokio::time::timeout(self.timeout, ...)` wrapper with a shared `last_activity: Arc<Mutex<Instant>>` updated by both stdout and stderr reader tasks, and a separate watchdog task that polls idle elapsed every ~1s (or half the timeout, whichever is smaller, with a 10ms floor). The watchdog kills the process group via `libc::kill(-(pid), SIGKILL)` on idle timeout, which unblocks the reader tasks. This was chosen over a per-read timeout approach because it cleanly separates activity tracking from I/O without changing the read loop structure.
+
+- **Process group kill for non-tmux**: Used `libc::kill(-(pid as i32), SIGKILL)` to kill the entire process group on timeout, ensuring child processes spawned by the backend command are also terminated. The previous `child.kill()` method was removed as unused since the watchdog now handles process termination.
+
+- **Watchdog cancellation race safety**: The watchdog handle is `.abort()`ed immediately after the stdout reader task completes. The `timed_out` `AtomicBool` flag is checked before interpreting results, so even if the watchdog fires concurrently with normal completion, the outcome is correctly classified.
+
+- **Stdout written to log after task completion**: Since the stdout reader runs in a spawned task (needed for concurrent idle tracking), captured bytes are replayed to `log_writer` after the task completes. On timeout, partial output from the spawned task is also written to the log before the timeout footer.
+
+- **Tmux inactivity via file-size growth**: Introduced `wait_for_exit_with_activity()` that accepts capture file paths and tracks their size each poll interval. Any file size increase counts as activity and resets the idle timer. The original `wait_for_exit()` delegates to it with empty capture paths for backwards compatibility.
+
+- **Tmux stderr capture file**: Added a dedicated `-stderr.txt` temp file to the tmux execution path. The shell command now redirects stderr via `2>stderr_file`, creating it before execution. The stderr content is read and passed to `persist_cli_output` for artifact persistence alongside stdout.
+
+- **TimeoutKind::Idle for all new timeouts**: All production timeout paths now emit `TimeoutKind::Idle` instead of `TimeoutKind::Walltime`, reflecting the semantic change from wall-clock to inactivity-based timeout. The `TimeoutKind::Walltime` variant is preserved in the enum for backwards compatibility but no longer produced by the backend execution paths.
+
+- **Measured idle_seconds in BackendTimeout**: The non-tmux path now reports the actual measured idle duration from `last_activity.lock().await.elapsed().as_secs()` rather than the configured timeout value. The tmux path reports `idle_elapsed.as_secs()` from the measured idle duration.
+
+## Spec Deviations
+- **Tmux `build_shell_command` no longer has `2>&1` absence assertion**: The integration test `tmux_backend_no_stderr_redirect` was updated to `tmux_backend_stderr_captured_separately` since stderr is now intentionally redirected to a capture file (`2>stderr_file`). The test verifies stderr goes to a dedicated file, not merged with stdout.
+
+- **Non-tmux stdout logging timing**: Stdout bytes are written to `log_writer` after the reader task completes rather than inline during streaming. This is a necessary trade-off of moving the read loop into a spawned task for concurrent idle tracking. The log content is identical; only the timing of the write differs (bytes are buffered then flushed). For the timeout case, partial output is still written before the timeout footer.
+
+## Testing
+- **Unit tests (src/backend/mod.rs)**:
+  - `cli_backend_timeout_kills_and_reaps_child_and_writes_footer` — updated to expect `TimeoutKind::Idle`
+  - `cli_backend_active_stream_does_not_timeout` — NEW: script emits chunks every 50ms for 400ms total (> 200ms timeout), verifies no timeout fires
+  - `cli_backend_stall_after_partial_output_times_out_idle` — NEW: script emits partial output then sleeps 30s, verifies idle timeout with partial output preserved
+
+- **Unit tests (src/backend/tmux.rs)**:
+  - `wait_for_exit_times_out` — updated to expect `TimeoutKind::Idle`
+  - `wait_for_exit_with_activity_file_growth_resets_idle` — NEW: capture file grows periodically, total runtime > timeout, verifies no timeout
+  - `wait_for_exit_with_activity_stall_times_out_idle` — NEW: capture file does not grow, verifies idle timeout
+  - `wait_for_exit_with_activity_stderr_growth_counts` — NEW: only stderr file grows, verifies stderr activity counts
+
+- **Unit tests (src/backend/tmux_backend.rs)**:
+  - `execute_genuine_timeout_returns_backend_timeout` — updated to expect `TimeoutKind::Idle`
+  - `build_shell_command_basic` — updated to verify `2>stderr_file` redirect
+  - Cleanup tests — updated to track stderr file in temp file lists
+
+- **Integration tests (tests/backend_tmux.rs)**:
+  - `tmux_backend_genuine_timeout_returns_backend_timeout` — updated to expect `TimeoutKind::Idle`
+  - `tmux_backend_stderr_captured_separately` — renamed from `tmux_backend_no_stderr_redirect`, verifies dedicated stderr capture
+
+- **Conformance tests (src/validate/tests_streaming.rs)**:
+  - `streaming::active_stream_no_timeout` — NEW: planner emits output every 0.3s for ~2.4s total (> 1s timeout), run succeeds without timeout
+  - `streaming::hanging_stall_timeout` — NEW: planner emits partial output then hangs, verifies timeout with cleanup and partial output preserved
+  - `streaming::timeout_cleanup` — existing test preserved as regression coverage under inactivity semantics
+
+- **Mock scripts (src/validate/mock_scripts.rs)**:
+  - `active_streaming_planner_mock_script()` — NEW: steady-output planner for active-stream test
+  - `hanging_after_partial_planner_mock_script()` — NEW: partial-then-hang planner for stall timeout test
+
+- **Verification**: `cargo test` passes all 610 tests (408 lib + 202 integration/other) with 0 failures.

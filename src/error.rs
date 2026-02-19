@@ -2,6 +2,12 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutKind {
+    Idle,
+    Walltime,
+}
+
 #[derive(Debug, Error)]
 pub enum RalphError {
     #[error("io error: {0}")]
@@ -49,8 +55,14 @@ pub enum RalphError {
     #[error("tmux is not installed or not on PATH; install tmux to use tmux mode")]
     TmuxUnavailable,
 
-    #[error("backend timeout: {backend}")]
-    BackendTimeout { backend: String },
+    #[error(
+        "backend timeout: {backend} (idle_seconds={idle_seconds}, timeout_kind={timeout_kind:?})"
+    )]
+    BackendTimeout {
+        backend: String,
+        idle_seconds: u64,
+        timeout_kind: TimeoutKind,
+    },
 
     #[error("backend command failed for {backend}: {details}")]
     BackendCommandFailed { backend: String, details: String },
@@ -128,5 +140,46 @@ impl RalphError {
             Self::QuickPrdFailed(_) => 13,
             _ => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RalphError, TimeoutKind};
+
+    #[test]
+    fn backend_timeout_display_and_debug_include_idle_variant_context() {
+        let err = RalphError::BackendTimeout {
+            backend: "claude".to_owned(),
+            idle_seconds: 12,
+            timeout_kind: TimeoutKind::Idle,
+        };
+
+        let display = err.to_string();
+        assert!(display.contains("claude"));
+        assert!(display.contains("idle_seconds=12"));
+        assert!(display.contains("timeout_kind=Idle"));
+
+        let debug = format!("{err:?}");
+        assert!(debug.contains("idle_seconds: 12"));
+        assert!(debug.contains("timeout_kind: Idle"));
+    }
+
+    #[test]
+    fn backend_timeout_display_and_debug_include_walltime_variant_context() {
+        let err = RalphError::BackendTimeout {
+            backend: "codex".to_owned(),
+            idle_seconds: 30,
+            timeout_kind: TimeoutKind::Walltime,
+        };
+
+        let display = err.to_string();
+        assert!(display.contains("codex"));
+        assert!(display.contains("idle_seconds=30"));
+        assert!(display.contains("timeout_kind=Walltime"));
+
+        let debug = format!("{err:?}");
+        assert!(debug.contains("idle_seconds: 30"));
+        assert!(debug.contains("timeout_kind: Walltime"));
     }
 }

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
+    active_streaming_planner_mock_script, hanging_after_partial_planner_mock_script,
     planner_parse_fail_then_pass_mock_script, slow_streaming_planner_mock_script,
     standard_mock_script, timeout_hanging_planner_mock_script,
 };
@@ -29,6 +30,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "streaming::timeout_cleanup",
             func: timeout_cleanup,
+        },
+        ConformanceTest {
+            name: "streaming::active_stream_no_timeout",
+            func: active_stream_no_timeout,
+        },
+        ConformanceTest {
+            name: "streaming::hanging_stall_timeout",
+            func: hanging_stall_timeout,
         },
     ]
 }
@@ -319,6 +328,149 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
             os_err,
             libc::ESRCH,
             "timed-out planner process should be fully reaped"
+        );
+    })
+}
+
+/// Active streaming beyond timeout_seconds without timeout: the planner mock
+/// emits output at intervals shorter than timeout_seconds (0.3s < 1s), with total
+/// runtime exceeding timeout_seconds (~2.4s > 1s). Must succeed (no timeout).
+fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "streaming-active-no-timeout";
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "active-streaming.sh",
+                &active_streaming_planner_mock_script(),
+            )
+            .expect("failed to write active streaming mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        // Set timeout to 1s — total planner runtime ~2.4s > 1s, but each
+        // chunk arrives every 0.3s < 1s, so inactivity timeout must NOT fire.
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Active Stream No Timeout",
+            "Active stream inactivity test",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 0);
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        // All 8 chunks should be present
+        assert!(
+            content.contains("chunk-8"),
+            "planner log should contain all chunks: {content}"
+        );
+        // No timeout footer should appear
+        assert!(
+            !content.contains("--- timeout ts="),
+            "planner log should NOT contain timeout footer: {content}"
+        );
+    })
+}
+
+/// Hanging-after-partial-output timeout with cleanup: the planner emits partial
+/// output then stalls beyond timeout_seconds. Must timeout with cleanup and
+/// retain partial output in the log.
+fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "streaming-hanging-stall-timeout";
+        let pid_file = h.temp_dir.path().join("hanging-stall.pid");
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "hanging-stall.sh",
+                &hanging_after_partial_planner_mock_script(&pid_file),
+            )
+            .expect("failed to write hanging stall mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Hanging Stall Timeout",
+            "Hanging stall inactivity timeout test",
+        )
+        .expect("create_project failed");
+
+        let start = Instant::now();
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        let elapsed = start.elapsed();
+        assert_exit_code(&output, 1);
+
+        // The timeout is 1s and the mock sleeps for 30s. With retries (up to 3
+        // attempts), the run should finish well under 30s if the idle timeout
+        // actually kills the process promptly.
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "hanging stall should be killed by idle timeout, not run for full 30s; elapsed={elapsed:?}"
+        );
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        assert!(
+            content.contains("partial-output-before-stall"),
+            "planner log should contain partial output: {content}"
+        );
+        assert!(
+            content.contains("--- timeout ts="),
+            "planner log should contain timeout footer: {content}"
+        );
+
+        // Verify the hanging process was killed
+        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
+        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
+        let kill_rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(kill_rc, -1, "stalled planner process should be dead");
+        let os_err = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("raw os error should be present");
+        assert_eq!(
+            os_err,
+            libc::ESRCH,
+            "stalled planner process should be fully reaped"
         );
     })
 }

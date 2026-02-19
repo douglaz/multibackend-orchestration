@@ -817,7 +817,10 @@ printf '%s\n' "$*"
         .execute("hello")
         .await
         .expect("model backend should execute");
-    assert_eq!(output.trim(), "--model opus --base-flag value");
+    assert_eq!(
+        output.trim(),
+        "--model opus --base-flag value --output-format stream-json"
+    );
 }
 
 #[tokio::test]

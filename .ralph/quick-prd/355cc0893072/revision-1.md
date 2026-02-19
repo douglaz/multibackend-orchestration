@@ -1,0 +1,17 @@
+Here's a summary of how each review issue was addressed in the revised spec:
+
+**Issue 1 — tmux fresh Claude calls bypass `ensure_json_output_args`**: Added explicit coverage in §1 and the acceptance criteria. `TmuxBackend::build_shell_command` now constructs a `BackendInvocationContext` with `json_output_required: true` for the fresh (no `session_id`) path and calls `self.inner.effective_args()`, which dispatches to `ensure_json_output_args`. The acceptance criterion now explicitly states "both `CliBackend` and `TmuxBackend` paths." Code sketch included.
+
+**Issue 2 — session_id field precedence in `message_start`**: Replaced the vague "extract `message.id`" with a defined 3-level field-precedence rule: (1) `message.session_id`, (2) top-level `session_id`, (3) `message.id` as fallback. Added a dedicated unit test (`claude_stream_json_extracts_session_id_precedence`) with three sub-cases.
+
+**Issue 3 — detection heuristic too broad / inconsistent**: Replaced the generic "any/first line has `type` field" with a deterministic first-line-only check against a `CLAUDE_STREAM_EVENT_TYPES` **allowlist** of known Claude stream event types. Added a test case (`claude_detection_heuristic_allowlist`) that verifies a single-object JSON with `"type": "text"` (not in allowlist) is NOT misrouted to stream-json.
+
+**Issue 4 — normalizer error contract conflict**: Added an explicit "Error contract clarification" paragraph. `normalize_claude_stream_json` returns `Err(ParseError)` when JSON events parsed but no text found. `normalize_output` propagates this error directly (no silent fallback). The "must return valid `NormalizedOutput`" guarantee applies only to the non-JSON fallback path. The orchestrator's parse-retry catches `ParseError` as intended.
+
+**Issue 5 — conformance test #13 timing contradiction**: Redesigned `streaming::heartbeat_prevents_timeout` — the mock now emits one line every 500ms for 4s total, with `timeout_seconds=2`. Each heartbeat arrives well within the 2s window, so no timeout fires despite 4s wall-clock. Clear explanation of why this validates heartbeat semantics.
+
+**Issue 6 — no tmux heartbeat tests**: Added three dedicated tmux conformance tests: `tmux_heartbeat_prevents_timeout` (stdout growth resets timer), `tmux_stderr_resets_heartbeat` (stderr-only growth resets timer), and `tmux_stderr_captured_in_artifacts` (stderr persistence). Also added `wait_for_exit` unit tests for both stdout and stderr-only growth. All tmux tests skip gracefully if tmux unavailable.
+
+**Issue 7 — timeout logging fields / attempt context**: Defined a **single canonical logging point** in `execute_with_timeout_retries` where all five required fields (`backend`, `role`, `attempt`, `idle_seconds`, `total_elapsed_secs`) are naturally in scope. Low-level kill sites (`execute_streaming`, `wait_for_exit`) construct and return the enriched `BackendTimeout` error but do **not** emit warn logs with attempt/role context. This prevents partial or duplicated logging.
+
+**Issue 8 — Codex parity test must explicitly use Codex**: The `streaming::codex_inactivity_timeout` test now explicitly requires configuring a Codex backend (e.g., backend name starts with `codex`, using `planner_backend=codex(...)` in test config) rather than relying on default Claude paths.

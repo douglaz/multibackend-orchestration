@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
+use crate::backend::output_normalizer::normalize_output;
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
@@ -3626,7 +3627,7 @@ fn normalize_backend_output(
     raw: &str,
 ) -> crate::backend::output_normalizer::NormalizedOutput {
     use crate::backend::output_normalizer::{normalize_output, NormalizedOutput};
-    match normalize_output(backend_name, raw) {
+    match normalize_output(raw) {
         Ok(normalized) => normalized,
         Err(e) => {
             warn!(
@@ -4067,21 +4068,36 @@ async fn execute_with_timeout_retries(
         }
     }
 
+    let retry_started = Instant::now();
+
     for attempt in 1..=3_u8 {
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
 
         match backend.execute_with_log(prompt, Some(log_writer)).await {
             Ok(output) => {
-                return Ok(output);
+                // Normalization extracts text from structured JSON/NDJSON.
+                // If it fails (unexpected format), fall back to raw output
+                // so the parse-retry path can still attempt reformatting.
+                let text = normalize_output(&output)
+                    .map(|n| n.text)
+                    .unwrap_or(output);
+                return Ok(text);
             }
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
+                idle_seconds,
+                timeout_kind,
             }) => {
+                let total_elapsed_secs = retry_started.elapsed().as_secs();
                 if attempt == 3 {
                     warn!(
                         role = role,
                         backend = %backend_name,
+                        attempt = attempt,
+                        idle_seconds = idle_seconds,
+                        total_elapsed_secs = total_elapsed_secs,
+                        timeout_kind = ?timeout_kind,
                         "backend timeout, retries exhausted"
                     );
                     return Err(RalphError::BackendTimeoutExhausted {
@@ -4097,6 +4113,9 @@ async fn execute_with_timeout_retries(
                     role = role,
                     backend = %backend_name,
                     attempt = attempt,
+                    idle_seconds = idle_seconds,
+                    total_elapsed_secs = total_elapsed_secs,
+                    timeout_kind = ?timeout_kind,
                     backoff_secs = backoff,
                     "backend timeout, retrying..."
                 );
