@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use crate::config::resolve_daemon_config;
 use crate::daemon::bootstrap;
 use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
-use crate::daemon::{abort_task, github, resolve_task_index, TaskStore};
+use crate::daemon::github;
 use crate::project::load_project_config_if_exists;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
@@ -50,18 +50,29 @@ pub struct DaemonStartArgs {
 pub struct DaemonStatusArgs {
     #[arg(long)]
     pub data_dir: PathBuf,
+    /// Owner/repo to query status for. If omitted, scans all repos in data-dir.
+    #[arg(long = "repo")]
+    pub repo: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct DaemonAbortArgs {
     #[arg(long)]
     pub data_dir: PathBuf,
-    pub task_id_or_number: String,
+    /// Issue number to abort (fetches current labels from GitHub).
+    pub issue_number: String,
+    /// Owner/repo of the issue to abort.
+    #[arg(long)]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct DaemonRetriggerArgs {
-    pub task_id: String,
+    /// Issue number to retrigger.
+    pub issue_number: String,
+    /// Owner/repo of the issue.
+    #[arg(long)]
+    pub repo: Option<String>,
 }
 
 pub async fn execute(args: DaemonArgs) -> Result<()> {
@@ -100,8 +111,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         normalized_repos.push(normalized);
     }
 
-    // Guard: --data-dir must not be inside a git working tree (runs before
-    // preflight_check_gh so it works even when gh is not installed)
+    // Guard: --data-dir must not be inside a git working tree
     guard_not_git_repo(&args.data_dir)?;
 
     preflight_check_gh()?;
@@ -114,7 +124,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         ))
     })?;
 
-    // Resolve ralph binary path (env override for testing, else current executable)
+    // Resolve ralph binary path
     let ralph_bin = match std::env::var("RALPH_DAEMON_BIN") {
         Ok(path) if !path.is_empty() => PathBuf::from(path),
         _ => std::env::current_exe().map_err(|err| {
@@ -122,11 +132,9 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         })?,
     };
 
-    // Track whether we've already printed the deprecation warning
     let mut deprecation_warned = false;
 
-    // Per-repo provisioning
-    let mut repo_configs: Vec<(TaskStore, DaemonRuntimeConfig)> = Vec::new();
+    let mut repo_configs: Vec<DaemonRuntimeConfig> = Vec::new();
 
     for slug in &normalized_repos {
         let (owner, repo_name) = parse_repo_slug(slug)?;
@@ -151,7 +159,6 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
 
         let daemon_cfg = resolve_daemon_config(&workspace.config, project_config.as_ref());
 
-        // Deprecation warning for daemon.repo config key
         if !deprecation_warned && daemon_cfg.repo.is_some() {
             eprintln!(
                 "warning: daemon.repo config key is ignored by `daemon start`; use --repo flag instead"
@@ -176,7 +183,6 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             labels.join(",")
         );
 
-        let store = TaskStore::new(&workspace.root);
         let runtime_config = DaemonRuntimeConfig {
             owner,
             repo: repo_name,
@@ -194,19 +200,19 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             rebase_interval_seconds: daemon_cfg.rebase_interval_seconds,
             max_rebases_per_cycle: daemon_cfg.max_rebases_per_cycle,
             rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
+            workspace_root: workspace.root.clone(),
         };
 
-        repo_configs.push((store, runtime_config));
+        repo_configs.push(runtime_config);
     }
 
     // Run one runtime::run() per repo using JoinSet
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (store, config) in repo_configs {
-        join_set.spawn(async move { crate::daemon::runtime::run(&store, &config).await });
+    for config in repo_configs {
+        join_set.spawn(async move { crate::daemon::runtime::run(&config).await });
     }
 
-    // Wait for tasks; first error triggers abort_all
     while let Some(result) = join_set.join_next().await {
         match result {
             Err(join_err) => {
@@ -226,112 +232,140 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     Ok(())
 }
 
+/// Status: query GitHub labels to show current issue lifecycle state.
 fn execute_status(args: DaemonStatusArgs) -> Result<()> {
-    let stores = scan_task_stores(&args.data_dir)?;
+    let repos = if args.repo.is_empty() {
+        // Scan data-dir for owner/repo directories
+        scan_repo_slugs(&args.data_dir)?
+    } else {
+        args.repo
+            .iter()
+            .map(|r| {
+                validate_repo_slug(r)?;
+                Ok(r.trim().to_ascii_lowercase())
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
 
-    if stores.is_empty() {
-        println!("no daemon tasks");
+    if repos.is_empty() {
+        println!("no daemon repos found");
         return Ok(());
     }
 
-    let mut all_tasks = Vec::new();
-    for store in &stores {
-        let tasks = store.load()?;
-        all_tasks.extend(tasks);
+    let mut found_any = false;
+
+    for slug in &repos {
+        let (owner, repo_name) = parse_repo_slug(slug)?;
+
+        // Query issues with lifecycle labels from GitHub.
+        // Each label requires a separate query because `gh issue list --label`
+        // uses AND semantics (repeated --label only returns issues matching ALL).
+        let mut issues: Vec<github::GhIssue> = Vec::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for label in &["ralph:ready", "ralph:in-progress"] {
+            let query_labels = vec![label.to_string()];
+            match github::poll_issues(&owner, &repo_name, &query_labels) {
+                Ok((batch, _overflow)) => {
+                    for issue in batch {
+                        if seen.insert(issue.number) {
+                            issues.push(issue);
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("warning: failed to query {label} issues for {slug}: {err}");
+                }
+            }
+        }
+
+        if issues.is_empty() {
+            continue;
+        }
+
+        if !found_any {
+            println!("DAEMON ISSUES");
+            println!(
+                "{:<20} {:<8} {:<30}",
+                "REPO", "ISSUE", "LIFECYCLE LABELS"
+            );
+            found_any = true;
+        }
+
+        for issue in &issues {
+            let lifecycle = github::classify_lifecycle_labels(&issue.labels);
+            println!(
+                "{:<20} {:<8} {:<30}",
+                slug,
+                issue.number,
+                lifecycle.join(", ")
+            );
+        }
     }
 
-    if all_tasks.is_empty() {
+    if !found_any {
         println!("no daemon tasks");
-        return Ok(());
-    }
-
-    println!("DAEMON TASKS");
-    println!(
-        "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8} {:<20}",
-        "TASK ID", "STATE", "ISSUE", "REPO", "PID", "PGID", "LAST REBASE"
-    );
-    for task in all_tasks {
-        println!(
-            "{:<36} {:<12} {:<8} {:<20} {:<8} {:<8} {:<20}",
-            task.task_id,
-            task.state,
-            task.issue_number,
-            format!("{}/{}", task.owner, task.repo),
-            task.child_pid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_owned()),
-            task.child_pgid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_owned()),
-            task.last_rebase_at.unwrap_or_else(|| "-".to_owned())
-        );
     }
 
     Ok(())
 }
 
+/// Abort: kill child (if running locally) and swap label to `ralph:failed`.
 fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
-    let stores = scan_task_stores(&args.data_dir)?;
+    let issue_number: u32 = args.issue_number.parse().map_err(|_| {
+        RalphError::Validation(format!(
+            "invalid issue number: {}",
+            args.issue_number
+        ))
+    })?;
 
-    // Collect all tasks across all stores to handle ambiguity
-    let mut all_tasks = Vec::new();
-    let mut task_store_map: Vec<(usize, usize)> = Vec::new(); // (store_idx, task_idx_in_store)
+    let slug = args.repo.ok_or_else(|| {
+        RalphError::Validation("--repo is required for abort".to_owned())
+    })?;
+    let (owner, repo_name) = parse_repo_slug(&slug)?;
 
-    for (store_idx, store) in stores.iter().enumerate() {
-        let tasks = store.load()?;
-        for (task_idx, task) in tasks.iter().enumerate() {
-            task_store_map.push((store_idx, task_idx));
-            all_tasks.push(task.clone());
-        }
+    // Verify the issue is currently in-progress
+    let labels = github::fetch_issue_labels(&owner, &repo_name, issue_number)?;
+    let lifecycle = github::classify_lifecycle_labels(&labels);
+
+    if !lifecycle.iter().any(|l| l == "ralph:in-progress") {
+        return Err(RalphError::Validation(format!(
+            "issue {slug}#{issue_number} is not in-progress (labels: {})",
+            lifecycle.join(", ")
+        )));
     }
 
-    // Use resolve_task_index on the combined list to get the index
-    let index = resolve_task_index(&all_tasks, &args.task_id_or_number)?;
-    let (store_idx, _) = task_store_map[index];
-    let store = &stores[store_idx];
+    // Swap label: in-progress -> failed (no PID info available from CLI)
+    crate::daemon::abort_task_by_labels(&owner, &repo_name, issue_number, None, None)?;
 
-    let task = abort_task(store, &args.task_id_or_number)?;
-    println!("aborted task {}", task.task_id);
+    println!("aborted issue {slug}#{issue_number}");
     Ok(())
 }
 
 fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
-    let workspace = Workspace::discover()?;
-    let store = TaskStore::new(&workspace.root);
-    let task = retrigger_failed_task(&store, &args.task_id)?;
-    println!("retriggered task {}", task.task_id);
+    let issue_number: u32 = args.issue_number.parse().map_err(|_| {
+        RalphError::Validation(format!(
+            "invalid issue number: {}",
+            args.issue_number
+        ))
+    })?;
+
+    let slug = args.repo.ok_or_else(|| {
+        RalphError::Validation("--repo is required for retrigger".to_owned())
+    })?;
+    let (owner, repo_name) = parse_repo_slug(&slug)?;
+
+    retrigger_failed_task(&owner, &repo_name, issue_number)?;
+    println!("retriggered issue {slug}#{issue_number}");
     Ok(())
 }
 
-#[allow(dead_code)]
-fn effective_daemon_config(workspace: &Workspace) -> Result<crate::config::EffectiveDaemonConfig> {
-    let project_config = match workspace.active_project_id() {
-        Some(project_id) if workspace.project_exists(&project_id) => {
-            load_project_config_if_exists(&workspace.project_dir(&project_id))?
-        }
-        Some(project_id) => {
-            eprintln!(
-                "warning: active project '{}' no longer exists; using workspace daemon config",
-                project_id
-            );
-            None
-        }
-        None => None,
-    };
-
-    Ok(resolve_daemon_config(
-        &workspace.config,
-        project_config.as_ref(),
-    ))
-}
-
-/// Scan `<data-dir>/*/*/.ralph/daemon/tasks.json` for task stores.
-fn scan_task_stores(data_dir: &Path) -> Result<Vec<TaskStore>> {
-    let mut stores = Vec::new();
+/// Scan `<data-dir>/<owner>/<repo>` directories and return owner/repo slugs.
+fn scan_repo_slugs(data_dir: &Path) -> Result<Vec<String>> {
+    let mut slugs = Vec::new();
 
     let owners = match std::fs::read_dir(data_dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(stores),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(slugs),
         Err(err) => return Err(err.into()),
     };
 
@@ -341,6 +375,7 @@ fn scan_task_stores(data_dir: &Path) -> Result<Vec<TaskStore>> {
             continue;
         }
 
+        let owner_name = owner_entry.file_name().to_string_lossy().into_owned();
         let repos = match std::fs::read_dir(owner_entry.path()) {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -352,20 +387,19 @@ fn scan_task_stores(data_dir: &Path) -> Result<Vec<TaskStore>> {
                 continue;
             }
 
-            let ralph_dir = repo_entry.path().join(".ralph");
-            let tasks_path = ralph_dir.join("daemon").join("tasks.json");
-            if tasks_path.exists() {
-                stores.push(TaskStore::new(&ralph_dir));
+            let repo_name = repo_entry.file_name().to_string_lossy().into_owned();
+            // Check if it looks like a git repo
+            if repo_entry.path().join(".git").exists() {
+                slugs.push(format!("{owner_name}/{repo_name}"));
             }
         }
     }
 
-    Ok(stores)
+    Ok(slugs)
 }
 
 /// Reject `--data-dir` paths inside a git working tree.
 fn guard_not_git_repo(data_dir: &Path) -> Result<()> {
-    // Walk up from data_dir to find the nearest existing ancestor
     let check_dir = nearest_existing_ancestor(data_dir);
 
     let output = Command::new("git")
@@ -383,7 +417,6 @@ fn guard_not_git_repo(data_dir: &Path) -> Result<()> {
     }
 }
 
-/// Walk up from `path` to find the nearest existing ancestor directory.
 fn nearest_existing_ancestor(path: &Path) -> PathBuf {
     let mut current = path.to_path_buf();
     loop {
@@ -396,15 +429,12 @@ fn nearest_existing_ancestor(path: &Path) -> PathBuf {
     }
 }
 
-/// Clone a repo from GitHub or skip if already cloned, then bootstrap.
 fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
     if repo_dir.join(".git").exists() {
-        // Already cloned — skip to bootstrap
         bootstrap::ensure_repo_ready_sync(repo_dir)?;
         return Ok(());
     }
 
-    // Create parent directories
     if let Some(parent) = repo_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             RalphError::Orchestration(format!(
@@ -414,7 +444,6 @@ fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
         })?;
     }
 
-    // Clone via gh
     let slug = format!("{owner}/{repo}");
     let repo_dir_str = repo_dir.to_string_lossy();
     let output = Command::new("gh")
@@ -432,14 +461,12 @@ fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
         )));
     }
 
-    // Switch origin from HTTPS to SSH so git push works without a credential helper
     let ssh_url = format!("git@github.com:{owner}/{repo}.git");
     let _ = Command::new("git")
         .args(["remote", "set-url", "origin", &ssh_url])
         .current_dir(repo_dir)
         .output();
 
-    // Bootstrap after successful clone
     bootstrap::ensure_repo_ready_sync(repo_dir)?;
     Ok(())
 }

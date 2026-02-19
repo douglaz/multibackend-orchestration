@@ -754,8 +754,9 @@ fi
 
 /// Mock `gh` script for daemon runtime tests. Handles:
 /// - `gh issue list ...` — returns configurable JSON issues
-/// - `gh issue edit ...` — no-op success
+/// - `gh issue edit ...` — logs label add/remove, always succeeds
 /// - `gh issue view --json title,body ...` — returns title/body JSON
+/// - `gh issue view --json labels ...` — returns labels JSON
 /// - `gh issue view ... -q .comments[].body` — returns empty comments
 /// - `gh issue comment ...` — no-op success
 /// - `gh pr list ...` — returns empty
@@ -764,11 +765,15 @@ fi
 ///
 /// Set `MOCK_GH_ISSUES` env var to a JSON array of issues for poll responses.
 /// Set `MOCK_GH_OVERFLOW` to "true" to return exactly 100 issues.
+/// Set `MOCK_GH_LABEL_LOG` to a file path to log label add/remove operations.
+/// Set `MOCK_GH_ISSUE_LABELS` to JSON for `issue view --json labels` responses.
 pub fn daemon_mock_gh_script() -> String {
     r###"#!/bin/sh
 # Mock gh for daemon runtime tests.
 # Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
 # Env: MOCK_GH_OVERFLOW - if "true", return 100 identical issues
+# Env: MOCK_GH_LABEL_LOG - file to log label add/remove operations
+# Env: MOCK_GH_ISSUE_LABELS - JSON for `issue view --json labels`
 
 case "$1" in
   issue)
@@ -794,17 +799,36 @@ case "$1" in
         exit 0
         ;;
       edit)
+        # Log label operations if logging enabled
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
         # Claiming / label update — always succeed
         exit 0
         ;;
       view)
-        # Title/body fetch used by pending-task hydration.
+        # Check for --json labels query
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+
+        # Title/body fetch used by pending-task hydration.
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
@@ -1001,8 +1025,29 @@ case "$1" in
   issue)
     case "$2" in
       list) printf '[]' ; exit 0 ;;
-      edit) exit 0 ;;
-      view) printf '' ; exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        printf '' ; exit 0
+        ;;
       comment) exit 0 ;;
     esac
     ;;
@@ -1113,6 +1158,8 @@ printf 'Refined task body with explicit steps and acceptance checks for safe det
 /// - `MOCK_PR_VIEW_JSON` — JSON response for `gh pr view --json ...`
 /// - `MOCK_PR_VIEW_EXIT` — exit code for `gh pr view` (default: 0)
 /// - `MOCK_PR_COMMENT_LOG` — file path to log pr comment bodies
+/// - `MOCK_GH_LABEL_LOG` — file path to log label add/remove operations
+/// - `MOCK_GH_ISSUE_LABELS` — JSON for `issue view --json labels` responses
 pub fn daemon_mock_gh_rebase_script() -> String {
     r###"#!/bin/sh
 # Mock gh for daemon auto-rebase tests.
@@ -1120,6 +1167,8 @@ pub fn daemon_mock_gh_rebase_script() -> String {
 # Env: MOCK_PR_VIEW_JSON - JSON response for `pr view --json`
 # Env: MOCK_PR_VIEW_EXIT - exit code for `pr view` (default 0)
 # Env: MOCK_PR_COMMENT_LOG - file to log pr comment bodies
+# Env: MOCK_GH_LABEL_LOG - file to log label add/remove operations
+# Env: MOCK_GH_ISSUE_LABELS - JSON for `issue view --json labels`
 
 case "$1" in
   issue)
@@ -1132,14 +1181,31 @@ case "$1" in
         fi
         exit 0
         ;;
-      edit) exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
       view)
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
@@ -1434,14 +1500,31 @@ case "$1" in
         fi
         exit 0
         ;;
-      edit) exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
       view)
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"

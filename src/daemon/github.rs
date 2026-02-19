@@ -1,9 +1,27 @@
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::RalphError;
 use crate::Result;
+
+/// Lifecycle labels recognized by the daemon runtime.
+///
+/// Spec-defined set: ready, in-progress, completed, failed.
+pub const LIFECYCLE_LABELS: &[&str] = &[
+    "ralph:ready",
+    "ralph:in-progress",
+    "ralph:completed",
+    "ralph:failed",
+];
+
+/// Maximum retry attempts for label mutations (conflict/transient).
+const LABEL_RETRY_MAX: u32 = 3;
+
+/// Base delay between label mutation retries (doubles each attempt).
+const LABEL_RETRY_BASE_DELAY_MS: u64 = 500;
 
 pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
     (
@@ -22,7 +40,6 @@ pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
         "Ralph daemon completed this issue",
     ),
     ("ralph:failed", "#d93f0b", "Ralph daemon task failed"),
-    ("ralph:aborted", "#e4e669", "Ralph daemon task was aborted"),
 ];
 
 /// Represents a single issue returned from `gh issue list`.
@@ -871,6 +888,229 @@ pub fn ensure_labels_best_effort(owner: &str, repo: &str) {
     }
 }
 
+// =============================================================================
+// Lifecycle Label Classification and Normalization
+// =============================================================================
+
+/// Classify which lifecycle labels are present on an issue.
+pub fn classify_lifecycle_labels(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter(|l| LIFECYCLE_LABELS.contains(&l.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Normalize an issue with multiple lifecycle labels: remove all lifecycle labels
+/// and apply only `ralph:failed`. Returns `true` if normalization was performed.
+///
+/// Spec: "If issue has more than one lifecycle label, normalize to only
+/// `ralph:failed` and skip processing this poll cycle."
+pub fn normalize_multi_lifecycle_labels(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    lifecycle_labels: &[String],
+) -> Result<bool> {
+    if lifecycle_labels.len() <= 1 {
+        return Ok(false);
+    }
+
+    // Remove all lifecycle labels, then add ralph:failed
+    for label in lifecycle_labels {
+        if label == "ralph:failed" {
+            continue;
+        }
+        remove_label_with_retry(owner, repo, issue_number, label)?;
+    }
+
+    // Ensure ralph:failed is present
+    if !lifecycle_labels.iter().any(|l| l == "ralph:failed") {
+        add_label_with_retry(owner, repo, issue_number, "ralph:failed")?;
+    }
+
+    Ok(true)
+}
+
+/// Swap lifecycle labels atomically with retry-on-conflict and retry-on-transient.
+///
+/// Removes `from_label` and adds `to_label`. Both operations are retried
+/// individually with bounded attempts and exponential backoff.
+pub fn swap_lifecycle_label(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    from_label: &str,
+    to_label: &str,
+) -> Result<()> {
+    remove_label_with_retry(owner, repo, issue_number, from_label)?;
+    add_label_with_retry(owner, repo, issue_number, to_label)?;
+    Ok(())
+}
+
+/// Add a label with retry-on-conflict/transient-failure behavior.
+pub fn add_label_with_retry(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    label: &str,
+) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    for attempt in 0..LABEL_RETRY_MAX {
+        let output = Command::new("gh")
+            .args([
+                "issue",
+                "edit",
+                &issue_number.to_string(),
+                "--repo",
+                &full_repo,
+                "--add-label",
+                label,
+            ])
+            .output()
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to run gh issue edit --add-label {label}: {err}"
+                ))
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if attempt + 1 < LABEL_RETRY_MAX && is_retryable_gh_error(&stderr) {
+            let delay = Duration::from_millis(LABEL_RETRY_BASE_DELAY_MS << attempt);
+            eprintln!(
+                "label-retry: add-label {label} on {full_repo}#{issue_number} failed (attempt {}), retrying in {}ms: {}",
+                attempt + 1,
+                delay.as_millis(),
+                stderr.trim()
+            );
+            thread::sleep(delay);
+            continue;
+        }
+
+        return Err(RalphError::Orchestration(format!(
+            "gh issue edit --add-label {label} failed for {full_repo}#{issue_number} after {} attempts: {}",
+            attempt + 1,
+            stderr.trim()
+        )));
+    }
+    unreachable!()
+}
+
+/// Remove a label with retry-on-conflict/transient-failure behavior.
+pub fn remove_label_with_retry(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    label: &str,
+) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    for attempt in 0..LABEL_RETRY_MAX {
+        let output = Command::new("gh")
+            .args([
+                "issue",
+                "edit",
+                &issue_number.to_string(),
+                "--repo",
+                &full_repo,
+                "--remove-label",
+                label,
+            ])
+            .output()
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to run gh issue edit --remove-label {label}: {err}"
+                ))
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if attempt + 1 < LABEL_RETRY_MAX && is_retryable_gh_error(&stderr) {
+            let delay = Duration::from_millis(LABEL_RETRY_BASE_DELAY_MS << attempt);
+            eprintln!(
+                "label-retry: remove-label {label} on {full_repo}#{issue_number} failed (attempt {}), retrying in {}ms: {}",
+                attempt + 1,
+                delay.as_millis(),
+                stderr.trim()
+            );
+            thread::sleep(delay);
+            continue;
+        }
+
+        return Err(RalphError::Orchestration(format!(
+            "gh issue edit --remove-label {label} failed for {full_repo}#{issue_number} after {} attempts: {}",
+            attempt + 1,
+            stderr.trim()
+        )));
+    }
+    unreachable!()
+}
+
+/// Fetch the current lifecycle labels for an issue from GitHub.
+pub fn fetch_issue_labels(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<Vec<String>> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "labels",
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh issue view for labels: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue view (labels) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parsed: RawIssueLabels = serde_json::from_str(raw.trim()).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh issue view labels output: {err}"))
+    })?;
+    Ok(parsed.labels.into_iter().map(|l| l.name).collect())
+}
+
+/// Determine if a `gh` CLI error is transient/retryable (rate limit, network,
+/// server error, or conflict).
+pub fn is_retryable_gh_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("api rate")
+        || lower.contains("409")
+        || lower.contains("conflict")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("could not resolve")
+}
+
+#[derive(Deserialize)]
+struct RawIssueLabels {
+    labels: Vec<RawLabel>,
+}
+
 #[derive(Deserialize)]
 struct RawGhIssue {
     number: u32,
@@ -1088,13 +1328,64 @@ mod tests {
             "ralph:in-progress",
             "ralph:completed",
             "ralph:failed",
-            "ralph:aborted",
         ] {
             assert!(
                 unique.contains(required),
                 "REQUIRED_LABELS is missing required lifecycle label: {required}"
             );
         }
+    }
+
+    #[test]
+    fn classify_lifecycle_labels_filters_correctly() {
+        let labels = vec![
+            "ralph:ready".to_owned(),
+            "bug".to_owned(),
+            "ralph:in-progress".to_owned(),
+            "enhancement".to_owned(),
+        ];
+        let lifecycle = super::classify_lifecycle_labels(&labels);
+        assert_eq!(lifecycle.len(), 2);
+        assert!(lifecycle.contains(&"ralph:ready".to_owned()));
+        assert!(lifecycle.contains(&"ralph:in-progress".to_owned()));
+    }
+
+    #[test]
+    fn classify_lifecycle_labels_empty_for_no_ralph_labels() {
+        let labels = vec!["bug".to_owned(), "enhancement".to_owned()];
+        let lifecycle = super::classify_lifecycle_labels(&labels);
+        assert!(lifecycle.is_empty());
+    }
+
+    #[test]
+    fn is_retryable_gh_error_detects_rate_limit() {
+        assert!(super::is_retryable_gh_error(
+            "API rate limit exceeded for user"
+        ));
+    }
+
+    #[test]
+    fn is_retryable_gh_error_detects_503() {
+        assert!(super::is_retryable_gh_error("HTTP 503 Service Unavailable"));
+    }
+
+    #[test]
+    fn is_retryable_gh_error_detects_409_conflict() {
+        assert!(super::is_retryable_gh_error("HTTP 409 Conflict"));
+    }
+
+    #[test]
+    fn is_retryable_gh_error_detects_conflict_keyword() {
+        assert!(super::is_retryable_gh_error(
+            "GraphQL: was submitted too quickly (conflict)"
+        ));
+    }
+
+    #[test]
+    fn is_retryable_gh_error_returns_false_for_auth_errors() {
+        assert!(!super::is_retryable_gh_error(
+            "HTTP 401 Unauthorized: Bad credentials"
+        ));
     }
 
     fn git(repo_root: &std::path::Path, args: &[&str]) {

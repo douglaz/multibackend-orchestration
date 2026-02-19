@@ -5,12 +5,12 @@ use std::time::Duration;
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
+
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
-use crate::daemon::{format_task_id, DaemonTask, TaskState, TaskStore};
+use crate::daemon::{format_task_id, ChildHandle};
 use crate::error::RalphError;
-use crate::util::time::now_iso8601;
 use crate::Result;
 
 /// Configuration for the daemon runtime loop.
@@ -29,9 +29,9 @@ pub struct DaemonRuntimeConfig {
     pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
     pub repo_root: PathBuf,
-    /// Prompt refinement feature toggle (plumbed for upcoming loops).
+    /// Prompt refinement feature toggle.
     pub refinement_enabled: bool,
-    /// Backend spec used for prompt refinement (plumbed for upcoming loops).
+    /// Backend spec used for prompt refinement.
     pub refinement_backend: String,
     /// Global config snapshot for runtime backend operations.
     pub global_config: GlobalConfig,
@@ -43,14 +43,8 @@ pub struct DaemonRuntimeConfig {
     pub max_rebases_per_cycle: u32,
     /// Per-attempt timeout (seconds) for rebase operations.
     pub rebase_timeout_seconds: u64,
-}
-
-/// Active child process handle tracked by the runtime.
-struct ActiveChild {
-    pid: u32,
-    pgid: u32,
-    child: tokio::process::Child,
-    log_file: PathBuf,
+    /// Workspace root (`.ralph/` directory).
+    pub workspace_root: PathBuf,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -63,121 +57,44 @@ where
         .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
 }
 
-/// Re-trigger a failed task by claiming its GitHub issue first, then applying a
-/// CAS-style `failed -> pending` transition.
-///
-/// Claim ordering is strict:
-/// 1. Claim issue (`ralph:in-progress`) on GitHub.
-/// 2. Under exclusive store lock, transition only if current state is `failed`.
-/// 3. On CAS conflict, best-effort release claim and return conflict.
-pub fn retrigger_failed_task(store: &TaskStore, task_id: &str) -> Result<DaemonTask> {
-    let snapshot = store
-        .load()?
-        .into_iter()
-        .find(|task| task.task_id == task_id)
-        .ok_or_else(|| RalphError::Validation(format!("task not found: {task_id}")))?;
+/// Re-trigger a failed task by claiming its GitHub issue via label swap:
+/// `ralph:failed` -> `ralph:ready`.
+pub fn retrigger_failed_task(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<()> {
+    // Verify current label state from GitHub
+    let labels = github::fetch_issue_labels(owner, repo, issue_number)?;
+    let lifecycle = github::classify_lifecycle_labels(&labels);
 
-    if snapshot.state != TaskState::Failed {
+    if !lifecycle.iter().any(|l| l == "ralph:failed") {
         return Err(RalphError::Validation(format!(
-            "task {task_id} is not failed (current state: {})",
-            snapshot.state
+            "issue {owner}/{repo}#{issue_number} is not in failed state (labels: {})",
+            lifecycle.join(", ")
         )));
     }
 
-    // Claim first: never mutate state out of failed unless issue claim succeeds.
-    if let Err(err) = github::claim_issue(&snapshot.owner, &snapshot.repo, snapshot.issue_number) {
-        eprintln!(
-            "retrigger: event=claim_failure task_id={} repo={}/{} issue_number={} error={}",
-            snapshot.task_id, snapshot.owner, snapshot.repo, snapshot.issue_number, err
-        );
-        return Err(RalphError::Orchestration(format!(
-            "failed to claim issue for retrigger {}: {err}",
-            snapshot.task_id
-        )));
-    }
+    // Swap failed -> ready so the daemon picks it up on next poll
+    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:failed", "ralph:ready")?;
 
-    enum CasOutcome {
-        Updated(DaemonTask),
-        Conflict(TaskState),
-        Missing,
-    }
-
-    let cas_outcome = store.with_exclusive_tasks(|tasks| {
-        let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) else {
-            return Ok(CasOutcome::Missing);
-        };
-
-        if task.state != TaskState::Failed {
-            return Ok(CasOutcome::Conflict(task.state.clone()));
-        }
-
-        task.state = TaskState::Pending;
-        task.child_pid = None;
-        task.child_pgid = None;
-        task.updated_at = now_iso8601();
-        Ok(CasOutcome::Updated(task.clone()))
-    })?;
-
-    match cas_outcome {
-        CasOutcome::Updated(task) => {
-            eprintln!(
-                "retrigger: event=success task_id={} repo={}/{} issue_number={} transition=failed_to_pending",
-                task.task_id, task.owner, task.repo, task.issue_number
-            );
-            Ok(task)
-        }
-        CasOutcome::Conflict(actual_state) => {
-            eprintln!(
-                "retrigger: event=cas_conflict task_id={} expected_state=failed actual_state={}",
-                snapshot.task_id, actual_state
-            );
-            best_effort_release_claim(&snapshot);
-            Err(RalphError::GitConflict {
-                details: format!(
-                    "task {} changed state before retrigger CAS (expected failed, got {})",
-                    snapshot.task_id, actual_state
-                ),
-            })
-        }
-        CasOutcome::Missing => {
-            eprintln!(
-                "retrigger: event=cas_conflict task_id={} expected_state=failed actual_state=missing",
-                snapshot.task_id
-            );
-            best_effort_release_claim(&snapshot);
-            Err(RalphError::GitConflict {
-                details: format!(
-                    "task {} disappeared before retrigger CAS transition",
-                    snapshot.task_id
-                ),
-            })
-        }
-    }
-}
-
-fn best_effort_release_claim(task: &DaemonTask) {
-    if let Err(err) = github::release_claim(&task.owner, &task.repo, task.issue_number) {
-        eprintln!(
-            "retrigger: event=claim_release_failure task_id={} repo={}/{} issue_number={} error={}",
-            task.task_id, task.owner, task.repo, task.issue_number, err
-        );
-    }
+    eprintln!(
+        "retrigger: event=success repo={owner}/{repo} issue_number={issue_number} transition=failed_to_ready"
+    );
+    Ok(())
 }
 
 /// Terminal cleanup policy:
 /// - completed: cleanup worktree
-/// - aborted: cleanup worktree
 /// - failed: preserve worktree for retry
-fn should_cleanup_worktree(state: &TaskState) -> bool {
-    matches!(state, TaskState::Completed | TaskState::Aborted)
+fn should_cleanup_worktree(terminal_label: &str) -> bool {
+    terminal_label == "ralph:completed"
 }
 
 /// Return the log file path for a task.
-fn task_log_path(store: &TaskStore, task_id: &str) -> PathBuf {
-    store
-        .path()
-        .parent()
-        .unwrap_or(Path::new("."))
+fn task_log_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    workspace_root
+        .join("tmp")
         .join("logs")
         .join(format!("{task_id}.log"))
 }
@@ -199,34 +116,47 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
 }
 
 /// Run the daemon loop: reconcile, then poll/claim/dispatch/collect.
-pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
-    // Phase 1: Startup reconciliation
+///
+/// All task state is in-memory (`children: HashMap<u32, ChildHandle>`).
+/// GitHub lifecycle labels are the only durable task lifecycle source of truth.
+pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
+    // Phase 0: Clean .ralph/tmp and recreate logs directory
     {
-        let store = store.clone();
+        let tmp_dir = config.workspace_root.join("tmp");
+        if tmp_dir.exists() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+        let logs_dir = tmp_dir.join("logs");
+        std::fs::create_dir_all(&logs_dir).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to create logs directory {}: {err}",
+                logs_dir.display()
+            ))
+        })?;
+    }
+
+    // Phase 1: Startup reconciliation — reset all `ralph:in-progress` to `ralph:ready`.
+    // Always queries `ralph:in-progress` regardless of configured poll labels.
+    {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
         let verbose = config.verbose;
-        spawn_blocking_op(move || reconcile_tasks(&store, verbose)).await?;
-    }
-    {
-        let store = store.clone();
-        let config = config.clone();
-        spawn_blocking_op(move || reconcile_worktrees(&store, &config)).await?;
+        spawn_blocking_op(move || reconcile_in_progress_labels(&owner, &repo, verbose))
+            .await?;
     }
 
-    // Phase 2: Main loop
-    let mut children: HashMap<String, ActiveChild> = HashMap::new();
+    // Phase 2: Main loop with in-memory child tracking
+    let mut children: HashMap<u32, ChildHandle> = HashMap::new();
     let mut iteration: u64 = 0;
-
-    // Re-adopt pending tasks from reconciliation
-    adopt_pending_tasks(store, config, &mut children).await?;
 
     loop {
         iteration = iteration.saturating_add(1);
 
         // Collect finished children
-        collect_children(store, config, &mut children).await;
+        collect_children(config, &mut children).await;
 
-        // Auto-rebase phase: rebase eligible PR-backed task branches
-        auto_rebase_phase(store, config).await;
+        // Auto-rebase phase: rebase eligible PR-backed child branches
+        auto_rebase_phase(config, &children).await;
 
         // Poll for new issues
         let active_count = children.len() as u32;
@@ -243,18 +173,18 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
         }
 
         if slots > 0 {
-            if let Err(err) = poll_and_claim(store, config, &mut children, slots).await {
+            if let Err(err) = poll_and_claim(config, &mut children, slots).await {
                 eprintln!("warning: poll/claim cycle failed: {err}");
             }
         }
 
         // Collect again after spawning
-        collect_children(store, config, &mut children).await;
+        collect_children(config, &mut children).await;
 
         if config.single_iteration {
             // In single-iteration mode, wait for all spawned children to
             // reach a terminal state so the outcome is deterministic.
-            drain_all_children(store, config, &mut children).await;
+            drain_all_children(config, &mut children).await;
             break;
         }
 
@@ -264,113 +194,56 @@ pub async fn run(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> 
     Ok(())
 }
 
-/// Reconcile task state on startup: move all `in_progress` tasks to `pending`
-/// and clear their PID/PGID.
-fn reconcile_tasks(store: &TaskStore, verbose: bool) -> Result<()> {
-    store.with_exclusive_tasks(|tasks| {
-        let mut reconciled = 0u32;
-        for task in tasks.iter_mut() {
-            if task.state == TaskState::InProgress {
-                task.state = TaskState::Pending;
-                task.child_pid = None;
-                task.child_pgid = None;
-                task.updated_at = now_iso8601();
-                reconciled += 1;
-                if verbose {
-                    eprintln!(
-                        "verbose: reconcile reset task_id={} in_progress->pending",
-                        task.task_id
-                    );
-                }
-            }
-        }
-        if reconciled > 0 {
-            eprintln!("reconcile: reset {reconciled} in_progress task(s) to pending");
-        }
-        Ok(())
-    })
-}
-
-/// Reconcile orphaned/stale worktrees at startup.
+/// Startup reconciliation: every issue currently labeled `ralph:in-progress`
+/// is reset to `ralph:ready` (children map is empty on fresh daemon start).
 ///
-/// Only tasks whose state should *not* be cleaned are considered "active".
-/// This preserves failed-task worktrees for retry while still cleaning up
-/// completed/aborted worktrees.
-fn reconcile_worktrees(store: &TaskStore, config: &DaemonRuntimeConfig) -> Result<()> {
-    let tasks = store.load()?;
-    let active_ids: Vec<String> = tasks
-        .iter()
-        .filter(|t| !should_cleanup_worktree(&t.state))
-        .map(|t| t.task_id.clone())
-        .collect();
-    let workspace_root = store
-        .path()
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?;
-    worktree::reconcile_worktrees(&config.repo_root, workspace_root, &active_ids);
-    Ok(())
-}
-
-/// Re-adopt pending tasks by spawning children for them.
-async fn adopt_pending_tasks(
-    store: &TaskStore,
-    config: &DaemonRuntimeConfig,
-    children: &mut HashMap<String, ActiveChild>,
+/// Always queries `ralph:in-progress` directly rather than using configured
+/// poll labels, ensuring stale issues are caught regardless of label config.
+fn reconcile_in_progress_labels(
+    owner: &str,
+    repo: &str,
+    verbose: bool,
 ) -> Result<()> {
-    let pending: Vec<DaemonTask> = {
-        let store = store.clone();
-        spawn_blocking_op(move || {
-            let tasks = store.load()?;
-            Ok(tasks
-                .iter()
-                .filter(|t| t.state == TaskState::Pending)
-                .cloned()
-                .collect())
-        })
-        .await?
-    };
+    // Always query ralph:in-progress explicitly to catch all stale issues
+    let reconcile_labels = vec!["ralph:in-progress".to_owned()];
+    let (issues, _overflow) = github::poll_issues(owner, repo, &reconcile_labels)?;
 
-    for mut task in pending {
-        if children.len() as u32 >= config.max_concurrent {
-            break;
-        }
-        if config.verbose {
-            eprintln!(
-                "verbose: adopt pending task_id={} action=re-adopt",
-                task.task_id
-            );
-        }
-        if task.raw_idea.is_none() {
-            let store_clone = store.clone();
-            let task_clone = task.clone();
-            match spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone))
-                .await
-            {
-                Ok(raw_idea) => task.raw_idea = Some(raw_idea),
-                Err(err) => {
-                    eprintln!(
-                        "warning: failed to hydrate raw idea for pending task {}: {err}",
-                        task.task_id
-                    );
-                    continue;
-                }
+    let mut reconciled = 0u32;
+    for issue in &issues {
+        let lifecycle = github::classify_lifecycle_labels(&issue.labels);
+        if lifecycle.iter().any(|l| l == "ralph:in-progress") {
+            if let Err(err) = github::swap_lifecycle_label(
+                owner,
+                repo,
+                issue.number,
+                "ralph:in-progress",
+                "ralph:ready",
+            ) {
+                eprintln!(
+                    "reconcile: failed to reset issue #{} from in-progress to ready: {err}",
+                    issue.number
+                );
+                continue;
             }
-        }
-        if let Err(err) = dispatch_task(store, config, children, &task).await {
-            eprintln!("warning: failed to re-adopt task {}: {err}", task.task_id);
-            complete_task(store, config, &task.task_id, TaskState::Failed).await;
+            reconciled += 1;
+            if verbose {
+                eprintln!(
+                    "verbose: reconcile reset issue #{} in-progress->ready",
+                    issue.number
+                );
+            }
         }
     }
-
+    if reconciled > 0 {
+        eprintln!("reconcile: reset {reconciled} in-progress issue(s) to ready");
+    }
     Ok(())
 }
 
 /// Poll for new issues, filter, claim, and dispatch.
 async fn poll_and_claim(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<String, ActiveChild>,
+    children: &mut HashMap<u32, ChildHandle>,
     slots: u32,
 ) -> Result<()> {
     let (issues, overflow) = {
@@ -384,88 +257,102 @@ async fn poll_and_claim(
         eprintln!("warning: gh issue list returned exactly 100 issues; results may be truncated");
     }
 
-    let claimable = github::filter_claimable(issues);
-
-    let existing_ids: Vec<String> = {
-        let store = store.clone();
-        spawn_blocking_op(move || {
-            let existing_tasks = store.load()?;
-            Ok(existing_tasks.iter().map(|t| t.task_id.clone()).collect())
-        })
-        .await?
-    };
-
     let mut claimed = 0u32;
-    for issue in claimable {
+    for issue in &issues {
         if claimed >= slots {
             break;
         }
 
-        let task_id = format_task_id(&config.owner, &config.repo, issue.number);
+        // Classify lifecycle labels
+        let lifecycle = github::classify_lifecycle_labels(&issue.labels);
 
-        // Skip if we already have a task for this issue
-        if existing_ids.contains(&task_id) {
+        // Multi-lifecycle-label normalization
+        if lifecycle.len() > 1 {
+            let owner = config.owner.clone();
+            let repo = config.repo.clone();
+            let issue_number = issue.number;
+            let lifecycle_clone = lifecycle.clone();
+            match spawn_blocking_op(move || {
+                github::normalize_multi_lifecycle_labels(
+                    &owner,
+                    &repo,
+                    issue_number,
+                    &lifecycle_clone,
+                )
+            })
+            .await
+            {
+                Ok(true) => {
+                    eprintln!(
+                        "poll: normalized multi-lifecycle issue #{} to ralph:failed, skipping",
+                        issue.number
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to normalize multi-lifecycle labels on #{}: {err}",
+                        issue.number
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Only claim issues with `ralph:ready` and no other lifecycle labels
+        if lifecycle.len() != 1 || lifecycle[0] != "ralph:ready" {
             continue;
         }
 
-        // Claim on GitHub
+        // Skip if we already have a child for this issue
+        if children.contains_key(&issue.number) {
+            continue;
+        }
+
+        // Claim: ready -> in-progress
         {
             let owner = config.owner.clone();
             let repo = config.repo.clone();
             let issue_number = issue.number;
-            if let Err(err) =
-                spawn_blocking_op(move || github::claim_issue(&owner, &repo, issue_number)).await
+            if let Err(err) = spawn_blocking_op(move || {
+                github::swap_lifecycle_label(
+                    &owner,
+                    &repo,
+                    issue_number,
+                    "ralph:ready",
+                    "ralph:in-progress",
+                )
+            })
+            .await
             {
                 eprintln!("warning: failed to claim issue #{}: {err}", issue.number);
                 continue;
             }
         }
 
-        // Create task record
-        let now = now_iso8601();
-        let task = DaemonTask {
-            task_id: task_id.clone(),
-            state: TaskState::Pending,
-            issue_number: issue.number,
-            owner: config.owner.clone(),
-            repo: config.repo.clone(),
-            raw_idea: Some(format!(
-                "{}\n\n{}",
-                issue.title,
-                issue.body.unwrap_or_default()
-            )),
-            refined_title: None,
-            project_id: None,
-            child_pid: None,
-            child_pgid: None,
-            branch: Some(format!("ralph/daemon/{task_id}")),
-            pr_url: None,
-            last_rebase_at: None,
-            last_rebase_head_sha: None,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-
-        {
-            let store = store.clone();
-            let task_id = task_id.clone();
-            let task_for_store = task.clone();
-            spawn_blocking_op(move || {
-                store.with_exclusive_tasks(|tasks| {
-                    // Double-check no duplicate
-                    if !tasks.iter().any(|t| t.task_id == task_id) {
-                        tasks.push(task_for_store.clone());
-                    }
-                    Ok(())
-                })
-            })
-            .await?;
-        }
-
         // Dispatch
-        if let Err(err) = dispatch_task(store, config, children, &task).await {
-            eprintln!("warning: failed to dispatch task {}: {err}", task_id);
-            complete_task(store, config, &task_id, TaskState::Failed).await;
+        let raw_idea = format!(
+            "{}\n\n{}",
+            issue.title,
+            issue.body.as_deref().unwrap_or_default()
+        );
+        if let Err(err) = dispatch_task(config, children, issue.number, &raw_idea).await {
+            eprintln!("warning: failed to dispatch issue #{}: {err}", issue.number);
+            // Mark as failed since we already claimed it
+            let owner = config.owner.clone();
+            let repo = config.repo.clone();
+            let issue_number = issue.number;
+            let _ = spawn_blocking_op(move || {
+                github::swap_lifecycle_label(
+                    &owner,
+                    &repo,
+                    issue_number,
+                    "ralph:in-progress",
+                    "ralph:failed",
+                )
+            })
+            .await;
         }
 
         claimed += 1;
@@ -475,10 +362,6 @@ async fn poll_and_claim(
 }
 
 /// Scan a task worktree for valid projects under `.ralph/projects/*/state.json`.
-///
-/// Returns a list of project IDs where `state.json` exists. Directories without
-/// `state.json` are silently ignored. Filesystem errors on individual entries are
-/// logged and skipped.
 fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
     let projects_dir = worktree_path.join(".ralph").join("projects");
     let entries = match std::fs::read_dir(&projects_dir) {
@@ -499,6 +382,7 @@ fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
 
 /// Find the most recently created project in a worktree by parsing
 /// `created_at` from each `state.json`. Returns `None` if no projects exist.
+#[cfg(test)]
 fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
     let projects_dir = worktree_path.join(".ralph").join("projects");
     let entries = match std::fs::read_dir(&projects_dir) {
@@ -535,50 +419,35 @@ fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
     best.map(|(id, _)| id)
 }
 
-/// Dispatch a single task: create worktree, spawn child, update state.
-///
-/// Uses a CAS-style transition: after spawning the child, the task is only
-/// moved to `in_progress` if it is still in a non-terminal state. If another
-/// process (e.g. `ralph daemon abort`) already moved the task to a terminal
-/// state, the just-spawned child is immediately killed and cleaned up, and
-/// the terminal state is preserved.
+/// Dispatch a single task: create worktree, spawn child, track in-memory.
 async fn dispatch_task(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<String, ActiveChild>,
-    task: &DaemonTask,
+    children: &mut HashMap<u32, ChildHandle>,
+    issue_number: u32,
+    raw_idea: &str,
 ) -> Result<()> {
+    let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+
     bootstrap::ensure_repo_ready(&config.repo_root).await?;
 
-    let workspace_root = store
-        .path()
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| RalphError::Orchestration("cannot derive workspace root".into()))?
-        .to_path_buf();
+    let workspace_root = config.workspace_root.clone();
 
     // Create worktree (reuses existing branch if present)
     let wt_path = {
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
-        let tid = task.task_id.clone();
+        let tid = task_id.clone();
         spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid)).await?
     };
 
-    // Clean worktree of any dirty files from previous runs or backend
-    // side-effects. This prevents the orchestrator from aborting due to
-    // uncommitted changes outside `.ralph/`.
+    // Clean worktree of any dirty files from previous runs
     {
         let wt = wt_path.clone();
         spawn_blocking_op(move || worktree::clean_worktree(&wt)).await?;
     }
 
-    // Dispatch-time project discovery for legacy failed tasks that were stored
-    // without a project_id. Scan the worktree for `.ralph/projects/*/state.json`
-    // and persist the discovered project_id before spawn.
-    let effective_project_id = if task.project_id.is_some() {
-        task.project_id.clone()
-    } else {
+    // Dispatch-time project discovery
+    let effective_project_id = {
         let wt = wt_path.clone();
         let discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
         match discovered.len() {
@@ -586,68 +455,41 @@ async fn dispatch_task(
             1 => {
                 let project_id = discovered.into_iter().next().unwrap();
                 eprintln!(
-                    "dispatch: event=project_backfill task_id={} discovered_project_id={project_id}",
-                    task.task_id
+                    "dispatch: event=project_backfill task_id={task_id} discovered_project_id={project_id}"
                 );
-                let store_clone = store.clone();
-                let tid = task.task_id.clone();
-                let pid = project_id.clone();
-                if let Err(err) = spawn_blocking_op(move || {
-                    store_clone.update_task(&tid, |t| {
-                        t.project_id = Some(pid.clone());
-                        Ok(())
-                    })
-                })
-                .await
-                {
-                    eprintln!(
-                        "dispatch: event=project_backfill_persist_failure task_id={} project_id={project_id} error={err}",
-                        task.task_id
-                    );
-                    return Err(err);
-                }
                 Some(project_id)
             }
             n => {
                 eprintln!(
-                    "dispatch: event=project_discovery_ambiguous task_id={} count={n} projects={:?}",
-                    task.task_id, discovered
+                    "dispatch: event=project_discovery_ambiguous task_id={task_id} count={n} projects={:?}",
+                    discovered
                 );
                 None
             }
         }
     };
 
-    // Remote-first project branch sync: align the worktree to the remote
-    // project branch before invoking `ralph run`. This ensures local-only
-    // diverged commits are discarded and the branch matches remote truth.
+    // Remote-first project branch sync
     {
         let wt = wt_path.clone();
-        let issue_number = task.issue_number;
         match spawn_blocking_op(move || crate::git::branch::sync_project_branch(&wt, issue_number))
             .await
         {
             Ok(()) => {
                 eprintln!(
-                    "dispatch: remote-first sync completed for issue {} (task {})",
-                    task.issue_number, task.task_id
+                    "dispatch: remote-first sync completed for issue {issue_number} (task {task_id})"
                 );
             }
             Err(err) => {
                 eprintln!(
-                    "dispatch: remote-first sync failed for issue {} (task {}): {err}",
-                    task.issue_number, task.task_id
+                    "dispatch: remote-first sync failed for issue {issue_number} (task {task_id}): {err}"
                 );
                 return Err(err);
             }
         }
     }
 
-    // When resuming a project (`ralph run --project`), the project state lives
-    // on the project branch (e.g. `ralph/<project_id>`), not on the daemon task
-    // branch. Checkout the project branch so `ralph run` can find state.json.
-    // Only attempt if the branch actually exists (it won't for fresh projects
-    // that haven't committed yet).
+    // Checkout project branch if resuming
     if let Some(ref project_id) = effective_project_id {
         let wt = wt_path.clone();
         let branch = format!("ralph/{project_id}");
@@ -658,75 +500,38 @@ async fn dispatch_task(
         match checkout_result {
             Ok(()) => {
                 eprintln!(
-                    "dispatch: checked out project branch {branch} for task {}",
-                    task.task_id
+                    "dispatch: checked out project branch {branch} for task {task_id}"
                 );
             }
             Err(err) => {
                 eprintln!(
-                    "dispatch: project branch {branch} checkout failed for task {} (may not exist yet): {err}",
-                    task.task_id
+                    "dispatch: project branch {branch} checkout failed for task {task_id} (may not exist yet): {err}"
                 );
-                // Not fatal — the orchestrator will create the branch if needed.
             }
         }
     }
 
-    // Resolve raw idea. Legacy tasks are hydrated from GitHub if `raw_idea`
-    // is missing.
-    let raw_idea = match &task.raw_idea {
-        Some(idea) => idea.clone(),
-        None => {
-            let store_clone = store.clone();
-            let task_clone = task.clone();
-            spawn_blocking_op(move || fetch_and_persist_raw_idea(&store_clone, &task_clone)).await?
-        }
-    };
-
-    // Refine the prompt if enabled, falling back to raw idea on failure.
+    // Refine the prompt if enabled
     let (idea, refined_title, cleaned_body) = if config.refinement_enabled {
-        match refine::refine_prompt(&raw_idea, &config.refinement_backend, &config.global_config)
+        match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
             .await
         {
             Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
             Err(err) => {
                 eprintln!(
-                    "warning: refinement failed for task {}, using raw idea: {err}",
-                    task.task_id
+                    "warning: refinement failed for task {task_id}, using raw idea: {err}"
                 );
-                (raw_idea, None, None)
+                (raw_idea.to_owned(), None, None)
             }
         }
     } else {
-        (raw_idea, None, None)
+        (raw_idea.to_owned(), None, None)
     };
 
-    // Persist refined_title best-effort (do not abort dispatch on failure).
-    // Always write (even None) to clear any stale title from a previous attempt.
-    {
-        let store_clone = store.clone();
-        let tid = task.task_id.clone();
-        let title_clone = refined_title.clone();
-        if let Err(err) = spawn_blocking_op(move || {
-            store_clone.update_task(&tid, |t| {
-                t.refined_title = title_clone.clone();
-                Ok(())
-            })
-        })
-        .await
-        {
-            eprintln!(
-                "warning: failed to persist refined_title for {}: {err}",
-                task.task_id
-            );
-        }
-    }
-
-    // Update GitHub issue title with refined title (best-effort).
+    // Update GitHub issue title with refined title (best-effort)
     if let Some(ref title) = refined_title {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
         let title = title.clone();
         if let Err(err) = spawn_blocking_op(move || {
             github::update_issue_title(&owner, &repo, issue_number, &title)
@@ -734,36 +539,32 @@ async fn dispatch_task(
         .await
         {
             eprintln!(
-                "warning: failed to update issue title for {}: {err}",
-                task.task_id
+                "warning: failed to update issue title for {task_id}: {err}"
             );
         }
     }
 
-    // Update GitHub issue body with cleaned body (best-effort).
+    // Update GitHub issue body with cleaned body (best-effort)
     if let Some(ref cleaned_body) = cleaned_body {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
-        let cleaned_body = cleaned_body.clone();
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let cb = cleaned_body.clone();
         if let Err(err) = spawn_blocking_op(move || {
-            github::update_issue_body(&owner, &repo, issue_number, &cleaned_body)
+            github::update_issue_body(&owner, &repo, issue_number, &cb)
         })
         .await
         {
             eprintln!(
-                "warning: failed to update issue body for {}: {err}",
-                task.task_id
+                "warning: failed to update issue body for {task_id}: {err}"
             );
         }
     }
 
-    // Post refined-prompt comment (best-effort, never aborts dispatch).
+    // Post refined-prompt comment (best-effort)
     {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
-        let tid = task.task_id.clone();
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let tid = task_id.clone();
         let comment_body = match &refined_title {
             Some(title) => format!("**{title}**\n\n{idea}"),
             None => idea.clone(),
@@ -781,20 +582,21 @@ async fn dispatch_task(
         .await
         {
             eprintln!(
-                "warning: failed to post refined-prompt comment for {}: {err}",
-                task.task_id
+                "warning: failed to post refined-prompt comment for {task_id}: {err}"
             );
         }
     }
 
     // Create log file for child output
-    let log_path = task_log_path(store, &task.task_id);
+    let log_path = task_log_path(&config.workspace_root, &task_id);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Spawn child process. Routing uses persisted context only:
-    // effective_project_id includes any dispatch-time backfill discovery.
+    // Determine branch name for the child handle
+    let branch_name = format!("ralph/daemon/{task_id}");
+
+    // Spawn child process
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
@@ -802,159 +604,33 @@ async fn dispatch_task(
         match effective_project_id.as_deref() {
             Some(project_id) => {
                 eprintln!(
-                    "dispatch: task {} has project_id={project_id}; using ralph run --project",
-                    task.task_id
+                    "dispatch: task {task_id} has project_id={project_id}; using ralph run --project"
                 );
                 process::spawn_ralph_run(&ralph_bin, &wt, project_id, &log_path).await?
             }
             None => {
                 eprintln!(
-                    "dispatch: task {} has no project_id; using ralph auto --idea (fresh dispatch)",
-                    task.task_id
+                    "dispatch: task {task_id} has no project_id; using ralph auto --idea (fresh dispatch)"
                 );
                 process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
             }
         }
     };
 
-    // CAS-style update: only transition to in_progress if task is not
-    // already terminal (e.g. concurrently aborted).
-    let task_id_owned = task.task_id.clone();
-    let pid = spawned.pid;
-    let pgid = spawned.pgid;
-    let verbose = config.verbose;
-    let activated = {
-        let store = store.clone();
-        let task_id_owned = task_id_owned.clone();
-        spawn_blocking_op(move || {
-            store.with_exclusive_tasks(|tasks| {
-                let t = tasks
-                    .iter_mut()
-                    .find(|t| t.task_id == task_id_owned)
-                    .ok_or_else(|| {
-                        RalphError::Validation(format!("task not found: {task_id_owned}"))
-                    })?;
-
-                if t.state.is_terminal() {
-                    // Task was moved to a terminal state (e.g. aborted) between
-                    // when we read it and now. Preserve terminal state.
-                    eprintln!(
-                        "dispatch: task {task_id_owned} already terminal ({}); killing just-spawned child (pid={pid})",
-                        t.state
-                    );
-                    if verbose {
-                        eprintln!(
-                            "verbose: dispatch abort-race task_id={task_id_owned} terminal_state={} spawned_pid={pid}",
-                            t.state
-                        );
-                    }
-                    return Ok(false);
-                }
-
-                t.state = TaskState::InProgress;
-                t.child_pid = Some(pid);
-                t.child_pgid = Some(pgid);
-                t.updated_at = crate::util::time::now_iso8601();
-                if verbose {
-                    eprintln!(
-                        "verbose: dispatch transition task_id={task_id_owned} pending->in_progress pid={pid}"
-                    );
-                }
-                Ok(true)
-            })
-        })
-        .await?
-    };
-
-    if !activated {
-        // Task was already terminal — kill the just-spawned child and then
-        // apply terminal-state cleanup policy from persisted state.
-        let mut child = spawned.child;
-        if let Err(err) = child.kill().await {
-            eprintln!(
-                "warning: failed to kill child for terminal-race task {} (pid={}): {err}",
-                task.task_id, pid
-            );
-        }
-        if let Err(err) = child.wait().await {
-            eprintln!(
-                "warning: failed to wait child for terminal-race task {} (pid={}): {err}",
-                task.task_id, pid
-            );
-        }
-
-        let persisted_state = {
-            let store = store.clone();
-            let tid = task.task_id.clone();
-            spawn_blocking_op(move || {
-                let tasks = store.load()?;
-                Ok(tasks
-                    .iter()
-                    .find(|t| t.task_id == tid)
-                    .map(|t| t.state.clone()))
-            })
-            .await
-        };
-
-        match persisted_state {
-            Ok(Some(state)) => {
-                cleanup_worktree_for_terminal_state(
-                    store,
-                    config,
-                    &task.task_id,
-                    &state,
-                    "dispatch-terminal-race",
-                )
-                .await;
-            }
-            Ok(None) => {
-                eprintln!(
-                    "warning: task {} missing from store after terminal-race; preserving worktree",
-                    task.task_id
-                );
-            }
-            Err(err) => {
-                eprintln!(
-                    "warning: failed to re-read state for terminal-race task {}: {err}; preserving worktree",
-                    task.task_id
-                );
-            }
-        }
-        return Ok(());
-    }
-
     children.insert(
-        task.task_id.clone(),
-        ActiveChild {
+        issue_number,
+        ChildHandle {
             pid: spawned.pid,
             pgid: spawned.pgid,
             child: spawned.child,
+            branch: branch_name,
             log_file: log_path,
         },
     );
 
-    eprintln!("dispatched task {} (pid={})", task.task_id, spawned.pid);
+    eprintln!("dispatched task {task_id} (pid={})", spawned.pid);
 
     Ok(())
-}
-
-fn fetch_and_persist_raw_idea(store: &TaskStore, task: &DaemonTask) -> Result<String> {
-    let raw_idea = match github::fetch_issue_body(&task.owner, &task.repo, task.issue_number) {
-        Ok((title, body)) => compose_raw_idea(&title, body.as_deref()),
-        Err(err) => {
-            eprintln!(
-                "warning: failed to fetch issue title/body for task {}: {err}; using metadata fallback",
-                task.task_id
-            );
-            metadata_fallback_raw_idea(task)
-        }
-    };
-    let raw_idea_for_store = raw_idea.clone();
-    store.update_task(&task.task_id, |t| {
-        t.raw_idea = Some(raw_idea_for_store.clone());
-        Ok(())
-    })?;
-    Ok(raw_idea)
 }
 
 fn compose_raw_idea(title: &str, body: Option<&str>) -> String {
@@ -962,9 +638,6 @@ fn compose_raw_idea(title: &str, body: Option<&str>) -> String {
 }
 
 /// Extract the original title from a raw idea string.
-///
-/// Takes the segment before the first `\n\n`, trims it, and returns `None` if
-/// empty; otherwise `Some(title)`.
 pub fn extract_original_title(raw_idea: &str) -> Option<String> {
     let segment = match raw_idea.split_once("\n\n") {
         Some((before, _)) => before,
@@ -978,31 +651,18 @@ pub fn extract_original_title(raw_idea: &str) -> Option<String> {
     }
 }
 
-fn metadata_fallback_raw_idea(task: &DaemonTask) -> String {
-    let title = format!(
-        "Issue #{} ({}/{})",
-        task.issue_number, task.owner, task.repo
-    );
-    let body = "Issue body unavailable from GitHub; using daemon task metadata.";
-    compose_raw_idea(&title, Some(body))
-}
-
-/// Collect finished children and transition them to terminal states.
-///
-/// If a task has already been aborted (e.g. via `ralph daemon abort`), the
-/// aborted state is preserved — we only perform cleanup, not a state
-/// transition.
+/// Collect finished children and transition them to terminal states via labels.
 async fn collect_children(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<String, ActiveChild>,
+    children: &mut HashMap<u32, ChildHandle>,
 ) {
     let mut finished = Vec::new();
     let mut still_running = 0u32;
 
-    for (task_id, active) in children.iter_mut() {
-        match active.child.try_wait() {
+    for (issue_number, handle) in children.iter_mut() {
+        match handle.child.try_wait() {
             Ok(Some(status)) => {
+                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
                 if config.verbose {
                     let exit_code = status
                         .code()
@@ -1010,25 +670,26 @@ async fn collect_children(
                         .unwrap_or_else(|| "signal".to_owned());
                     eprintln!(
                         "verbose: child terminal task_id={task_id} pid={} exit_status={} exit_code={exit_code}",
-                        active.pid, status
+                        handle.pid, status
                     );
                 }
-                let terminal_state = if status.success() {
-                    TaskState::Completed
+                let terminal_label = if status.success() {
+                    "ralph:completed"
                 } else {
-                    TaskState::Failed
+                    "ralph:failed"
                 };
-                finished.push((task_id.clone(), terminal_state));
+                finished.push((*issue_number, terminal_label));
             }
             Ok(None) => {
                 still_running = still_running.saturating_add(1);
             }
             Err(err) => {
+                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
                 eprintln!(
                     "warning: failed to check child for {task_id} (pid={} pgid={}): {err}",
-                    active.pid, active.pgid
+                    handle.pid, handle.pgid
                 );
-                finished.push((task_id.clone(), TaskState::Failed));
+                finished.push((*issue_number, "ralph:failed"));
             }
         }
     }
@@ -1037,193 +698,68 @@ async fn collect_children(
         eprintln!("verbose: child collection still_running={still_running}");
     }
 
-    for (task_id, terminal_state) in finished {
-        if terminal_state == TaskState::Failed {
-            if let Some(active) = children.get(&task_id) {
-                print_log_tail(&task_id, &active.log_file);
+    for (issue_number, terminal_label) in finished {
+        let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+        if terminal_label == "ralph:failed" {
+            if let Some(handle) = children.get(&issue_number) {
+                print_log_tail(&task_id, &handle.log_file);
             }
         }
-        children.remove(&task_id);
-        // complete_task uses an atomic CAS — if the task was already moved
-        // to a terminal state (e.g. aborted), it will preserve that state
-        // and only perform cleanup.
-        complete_task(store, config, &task_id, terminal_state).await;
+        children.remove(&issue_number);
+        complete_task(config, issue_number, &task_id, terminal_label).await;
     }
 }
 
-/// Wait until all active children have exited, collecting each into its
-/// terminal state. Used by `--single-iteration` mode to guarantee
-/// deterministic outcomes.
+/// Wait until all active children have exited.
 async fn drain_all_children(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<String, ActiveChild>,
+    children: &mut HashMap<u32, ChildHandle>,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
-        collect_children(store, config, children).await;
+        collect_children(config, children).await;
         if children.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // If any children are still running after the deadline, forcibly
-    // terminate them and mark as failed.
+    // Force-kill remaining children
     if !children.is_empty() {
-        let remaining: Vec<String> = children.keys().cloned().collect();
-        for task_id in remaining {
-            if let Some(mut active) = children.remove(&task_id) {
+        let remaining: Vec<u32> = children.keys().cloned().collect();
+        for issue_number in remaining {
+            let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+            if let Some(mut handle) = children.remove(&issue_number) {
                 eprintln!(
                     "warning: force-killing child for {task_id} (pid={} pgid={}, drain timeout)",
-                    active.pid, active.pgid
+                    handle.pid, handle.pgid
                 );
-                if let Err(err) = active.child.kill().await {
+                if let Err(err) = handle.child.kill().await {
                     eprintln!("warning: failed to kill child for {task_id}: {err}");
                 }
-                if let Err(err) = active.child.wait().await {
+                if let Err(err) = handle.child.wait().await {
                     eprintln!("warning: failed to wait child for {task_id}: {err}");
                 }
             }
-            complete_task(store, config, &task_id, TaskState::Failed).await;
+            complete_task(config, issue_number, &task_id, "ralph:failed").await;
         }
     }
 }
 
-/// Transition a task to terminal state, handle GitHub completion, cleanup worktree.
-///
-/// Uses an atomic CAS-style update: the transition only occurs if the task is
-/// not already in a terminal state. This prevents the runtime from overwriting
-/// an externally-set `aborted` state.
+/// Transition a task to terminal state via GitHub labels.
 async fn complete_task(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
+    issue_number: u32,
     task_id: &str,
-    terminal_state: TaskState,
+    terminal_label: &str,
 ) {
-    // Atomic CAS: only transition if not already terminal.
-    let task_id_owned = task_id.to_owned();
-    let ts = terminal_state.clone();
-    let verbose = config.verbose;
-    let updated = {
-        let store = store.clone();
-        let task_id_owned = task_id_owned.clone();
-        spawn_blocking_op(move || {
-            store.with_exclusive_tasks(|tasks| {
-                let task = tasks
-                    .iter_mut()
-                    .find(|t| t.task_id == task_id_owned)
-                    .ok_or_else(|| {
-                        RalphError::Validation(format!("task not found: {task_id_owned}"))
-                    })?;
-
-                if task.state.is_terminal() {
-                    // Already terminal (e.g. aborted externally) — preserve that
-                    // state, just clear PID/PGID.
-                    task.child_pid = None;
-                    task.child_pgid = None;
-                    task.updated_at = now_iso8601();
-                    eprintln!(
-                        "task {task_id_owned} child exited; already in terminal state: {}",
-                        task.state
-                    );
-                    if verbose {
-                        eprintln!(
-                            "verbose: complete preserve-terminal task_id={task_id_owned} state={}",
-                            task.state
-                        );
-                    }
-                    return Ok((None, Some(task.state.clone())));
-                }
-
-                let prior_state = task.state.clone();
-                task.state = ts.clone();
-                task.child_pid = None;
-                task.child_pgid = None;
-                task.updated_at = now_iso8601();
-                if verbose {
-                    eprintln!(
-                        "verbose: complete transition task_id={task_id_owned} {prior_state}->{}",
-                        task.state
-                    );
-                }
-                Ok((Some(task.clone()), None))
-            })
-        })
-        .await
-    };
-
-    let mut task = match updated {
-        Ok((Some(t), _)) => t,
-        Ok((None, Some(existing_state))) => {
-            cleanup_worktree_for_terminal_state(
-                store,
-                config,
-                task_id,
-                &existing_state,
-                "complete-task-already-terminal",
-            )
-            .await;
-            return;
-        }
-        Ok((None, None)) => return,
-        Err(err) => {
-            eprintln!("warning: failed to update task {task_id} to terminal state: {err}");
-            return;
-        }
-    };
-
-    // Backfill project_id if still missing (fresh `ralph auto --idea` dispatches
-    // create the project during execution, so the task record never got updated).
-    // The worktree may contain many projects from the cloned repo history, so we
-    // pick the most recently created one rather than requiring exactly one.
-    if task.project_id.is_none() {
-        let workspace_root = store
-            .path()
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
-        let tid = task.task_id.clone();
-        let wt_path = worktree::task_worktree_path(&workspace_root, &tid);
-        let discovered = spawn_blocking_op(move || Ok(discover_latest_project_id(&wt_path)))
-            .await
-            .unwrap_or(None);
-        if let Some(project_id) = discovered {
-            eprintln!("complete-task: backfill project_id={project_id} for task {task_id}");
-            task.project_id = Some(project_id.clone());
-            let store_clone = store.clone();
-            let tid = task.task_id.clone();
-            let pid = project_id.clone();
-            if let Err(err) = spawn_blocking_op(move || {
-                store_clone.update_task(&tid, |t| {
-                    t.project_id = Some(pid.clone());
-                    Ok(())
-                })
-            })
-            .await
-            {
-                eprintln!("warning: failed to backfill project_id for task {task_id}: {err}");
-            }
-        }
-    }
-
-    // GitHub completion flow
-    let terminal_label = match terminal_state {
-        TaskState::Completed => "ralph:completed",
-        TaskState::Failed => "ralph:failed",
-        TaskState::Aborted => "ralph:aborted",
-        _ => return,
-    };
-
     // Post completion comment (best-effort, idempotent)
     {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
         let tid = task_id.to_owned();
-        let phase = terminal_state.as_str().to_owned();
+        let phase = terminal_label.trim_start_matches("ralph:").to_owned();
         let comment_body = format!("Task `{tid}` finished with status: **{phase}**.");
         if let Err(err) = spawn_blocking_op(move || {
             github::post_idempotent_comment(
@@ -1242,55 +778,24 @@ async fn complete_task(
     }
 
     // PR flow (only on success)
-    if terminal_state == TaskState::Completed {
-        // The orchestrator may have switched the worktree to a different
-        // branch (e.g. ralph/{project_id}) from the one the daemon created
-        // (ralph/daemon/{task_id}). Resolve the actual branch so push and
-        // PR creation target the right ref.
-        let mut task = task.clone();
-        let workspace_root = store
-            .path()
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+    if terminal_label == "ralph:completed" {
+        // Resolve actual worktree branch for PR creation
+        let workspace_root = config.workspace_root.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
-            let wt = wt_path.clone();
-            if let Ok(actual_branch) = spawn_blocking_op(move || github::current_branch(&wt)).await
-            {
-                if task.branch.as_deref() != Some(&actual_branch) {
-                    eprintln!(
-                        "task {task_id}: worktree branch changed from {:?} to {actual_branch}",
-                        task.branch
-                    );
-                    task.branch = Some(actual_branch.clone());
-                    let store_clone = store.clone();
-                    let tid = task_id.to_owned();
-                    let _ = spawn_blocking_op(move || {
-                        store_clone.update_task(&tid, |t| {
-                            t.branch = Some(actual_branch.clone());
-                            Ok(())
-                        })
-                    })
-                    .await;
-                }
+            if let Err(err) = handle_pr_flow(config, task_id, issue_number, &wt_path).await {
+                eprintln!("warning: PR flow failed for {task_id}: {err}");
             }
-        }
-        if let Err(err) = handle_pr_flow(store, config, &task).await {
-            eprintln!("warning: PR flow failed for {}: {err}", task.task_id);
         }
     }
 
-    // Update labels (best-effort)
+    // Swap lifecycle label: in-progress -> terminal
     {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
         let label = terminal_label.to_owned();
         if let Err(err) = spawn_blocking_op(move || {
-            github::update_terminal_labels_best_effort(&owner, &repo, issue_number, &label);
-            Ok(())
+            github::swap_lifecycle_label(&owner, &repo, issue_number, "ralph:in-progress", &label)
         })
         .await
         {
@@ -1298,47 +803,33 @@ async fn complete_task(
         }
     }
 
-    cleanup_worktree_for_terminal_state(
-        store,
-        config,
-        task_id,
-        &terminal_state,
-        "complete-task-terminal",
-    )
-    .await;
+    // Worktree cleanup
+    cleanup_worktree_for_terminal_state(config, task_id, terminal_label).await;
 
-    let log_path = task_log_path(store, task_id);
+    let log_path = task_log_path(&config.workspace_root, task_id);
     eprintln!(
-        "task {task_id} completed with state: {terminal_state} (log: {})",
+        "task {task_id} completed with label: {terminal_label} (log: {})",
         log_path.display()
     );
 }
 
 async fn cleanup_worktree_for_terminal_state(
-    store: &TaskStore,
     config: &DaemonRuntimeConfig,
     task_id: &str,
-    state: &TaskState,
-    context: &str,
+    terminal_label: &str,
 ) {
-    if should_cleanup_worktree(state) {
-        eprintln!("{context}: cleaning worktree for {task_id} (state={state})");
-        cleanup_worktree(store, config, task_id).await;
+    if should_cleanup_worktree(terminal_label) {
+        eprintln!("complete-task-terminal: cleaning worktree for {task_id} (label={terminal_label})");
+        cleanup_worktree(config, task_id).await;
         return;
     }
 
-    eprintln!("{context}: preserving worktree for {task_id} (state={state})");
+    eprintln!("complete-task-terminal: preserving worktree for {task_id} (label={terminal_label})");
 }
 
 /// Remove the worktree for a task (best-effort).
-async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_id: &str) {
-    let workspace_root = store
-        .path()
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-
+async fn cleanup_worktree(config: &DaemonRuntimeConfig, task_id: &str) {
+    let workspace_root = config.workspace_root.clone();
     let repo_root = config.repo_root.clone();
     let tid = task_id.to_owned();
     if let Err(err) = spawn_blocking_op(move || {
@@ -1358,42 +849,30 @@ async fn cleanup_worktree(store: &TaskStore, config: &DaemonRuntimeConfig, task_
 /// Run the auto-rebase phase: rebase eligible PR-backed task branches onto
 /// their PR base branch.
 ///
-/// Processes tasks in deterministic ascending `task_id` order, capped at
-/// `max_rebases_per_cycle`. Each rebase attempt is bounded by
+/// Iterates active children in deterministic ascending issue_number order,
+/// capped at `max_rebases_per_cycle`. Each rebase attempt is bounded by
 /// `rebase_timeout_seconds`.
-async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
+async fn auto_rebase_phase(
+    config: &DaemonRuntimeConfig,
+    children: &HashMap<u32, ChildHandle>,
+) {
     if !config.auto_rebase_enabled {
         eprintln!("auto-rebase: skipped (disabled by config)");
         return;
     }
 
-    let tasks = {
-        let store = store.clone();
-        match spawn_blocking_op(move || store.load()).await {
-            Ok(tasks) => tasks,
-            Err(err) => {
-                eprintln!("auto-rebase: failed to load tasks: {err}");
-                return;
-            }
-        }
-    };
-
-    // Deterministic ascending task_id order
-    let mut all_tasks = tasks;
-    all_tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    // Collect children sorted by issue number for deterministic processing
+    let mut issue_numbers: Vec<u32> = children.keys().cloned().collect();
+    issue_numbers.sort();
 
     let mut rebase_count = 0u32;
 
-    for task in &all_tasks {
-        // Explicit skip reasons for missing PR URL / branch
-        if task.pr_url.is_none() {
-            eprintln!("auto-rebase: skip {} — no PR URL", task.task_id);
-            continue;
-        }
-        if task.branch.is_none() {
-            eprintln!("auto-rebase: skip {} — no task branch", task.task_id);
-            continue;
-        }
+    for issue_number in &issue_numbers {
+        let handle = match children.get(issue_number) {
+            Some(h) => h,
+            None => continue,
+        };
+
         if rebase_count >= config.max_rebases_per_cycle {
             eprintln!(
                 "auto-rebase: per-cycle cap reached ({}/{})",
@@ -1402,48 +881,48 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
             break;
         }
 
-        let pr_url = task.pr_url.as_deref().unwrap();
-        let pr_number = match github::extract_pr_number(pr_url) {
+        let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
+        let branch = &handle.branch;
+
+        // Check if there's an existing PR for this branch
+        let pr_url = {
+            let owner = config.owner.clone();
+            let repo = config.repo.clone();
+            let br = branch.clone();
+            match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+                Ok(Some(url)) => url,
+                Ok(None) => {
+                    eprintln!("auto-rebase: skip {task_id} — no PR URL");
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!("auto-rebase: skip {task_id} — PR lookup failed: {err}");
+                    continue;
+                }
+            }
+        };
+
+        let pr_number = match github::extract_pr_number(&pr_url) {
             Some(n) => n,
             None => {
                 eprintln!(
-                    "auto-rebase: skip {} — unparsable PR URL: {}",
-                    task.task_id, pr_url
+                    "auto-rebase: skip {task_id} — unparsable PR URL: {pr_url}"
                 );
                 continue;
             }
         };
 
-        let task_branch = task.branch.as_deref().unwrap();
-
-        // Check interval-based skip
-        if let Some(ref last) = task.last_rebase_at {
-            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(last) {
-                let elapsed = chrono::Utc::now()
-                    .signed_duration_since(parsed)
-                    .num_seconds();
-                if elapsed < config.rebase_interval_seconds as i64 {
-                    eprintln!(
-                        "auto-rebase: skip {} — last rebased {}s ago (interval={}s)",
-                        task.task_id, elapsed, config.rebase_interval_seconds
-                    );
-                    continue;
-                }
-            }
-        }
-
         // Query PR merge info — on failure, break the loop (rate limit safety)
         let merge_info = {
-            let owner = task.owner.clone();
-            let repo = task.repo.clone();
+            let owner = config.owner.clone();
+            let repo = config.repo.clone();
             match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
                 .await
             {
                 Ok(info) => info,
                 Err(err) => {
                     eprintln!(
-                        "auto-rebase: gh pr view failed for {} (PR #{}): {err} — stopping rebase processing for this cycle",
-                        task.task_id, pr_number
+                        "auto-rebase: gh pr view failed for {task_id} (PR #{pr_number}): {err} — stopping rebase processing for this cycle"
                     );
                     break;
                 }
@@ -1453,8 +932,8 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         // Skip non-open PRs
         if merge_info.state != "OPEN" {
             eprintln!(
-                "auto-rebase: skip {} — PR state is {} (not OPEN)",
-                task.task_id, merge_info.state
+                "auto-rebase: skip {task_id} — PR state is {} (not OPEN)",
+                merge_info.state
             );
             continue;
         }
@@ -1462,17 +941,11 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         // Skip conflicting or unknown merge status
         match merge_info.merge_status {
             PrMergeStatus::Conflicting => {
-                eprintln!(
-                    "auto-rebase: skip {} — PR merge status is Conflicting",
-                    task.task_id
-                );
+                eprintln!("auto-rebase: skip {task_id} — PR merge status is Conflicting");
                 continue;
             }
             PrMergeStatus::Unknown => {
-                eprintln!(
-                    "auto-rebase: skip {} — PR merge status is Unknown",
-                    task.task_id
-                );
+                eprintln!("auto-rebase: skip {task_id} — PR merge status is Unknown");
                 continue;
             }
             PrMergeStatus::Mergeable => {}
@@ -1483,34 +956,23 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         let head_sha = merge_info.head_oid.clone();
 
         eprintln!(
-            "auto-rebase: rebasing {} (branch={}, target={}, head={})",
-            task.task_id, task_branch, rebase_target, head_sha
+            "auto-rebase: rebasing {task_id} (branch={branch}, target={rebase_target}, head={head_sha})"
         );
-
-        let workspace_root = store
-            .path()
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
 
         // Create worktree on the task's branch
         let wt_path = {
             let repo_root = config.repo_root.clone();
-            let ws_root = workspace_root.clone();
-            let tid = task.task_id.clone();
-            let branch = task_branch.to_owned();
+            let ws_root = config.workspace_root.clone();
+            let tid = task_id.clone();
+            let br = branch.clone();
             match spawn_blocking_op(move || {
-                worktree::create_worktree_on_branch(&repo_root, &ws_root, &tid, &branch)
+                worktree::create_worktree_on_branch(&repo_root, &ws_root, &tid, &br)
             })
             .await
             {
                 Ok(path) => path,
                 Err(err) => {
-                    eprintln!(
-                        "auto-rebase: failed to create worktree for {}: {err}",
-                        task.task_id
-                    );
+                    eprintln!("auto-rebase: failed to create worktree for {task_id}: {err}");
                     rebase_count += 1;
                     continue;
                 }
@@ -1522,16 +984,16 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
         let rebase_result = {
             let wt = wt_path.clone();
             let target = rebase_target.clone();
-            let branch = task_branch.to_owned();
+            let br = branch.clone();
             let timeout_dur = timeout;
-            spawn_blocking_op(move || execute_rebase(&wt, &target, &branch, timeout_dur)).await
+            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur)).await
         };
 
         // Clean up rebase worktree (best-effort)
         {
             let repo_root = config.repo_root.clone();
-            let ws_root = workspace_root.clone();
-            let tid = task.task_id.clone();
+            let ws_root = config.workspace_root.clone();
+            let tid = task_id.clone();
             let _ = spawn_blocking_op(move || {
                 worktree::remove_rebase_worktree(&repo_root, &ws_root, &tid);
                 Ok(())
@@ -1543,17 +1005,7 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
 
         match rebase_result {
             Ok(()) => {
-                eprintln!("auto-rebase: success for {}", task.task_id);
-                // Update last_rebase_at
-                let store = store.clone();
-                let tid = task.task_id.clone();
-                let _ = spawn_blocking_op(move || {
-                    store.update_task(&tid, |t| {
-                        t.last_rebase_at = Some(now_iso8601());
-                        Ok(())
-                    })
-                })
-                .await;
+                eprintln!("auto-rebase: success for {task_id}");
             }
             Err(err) => {
                 let err_msg = err.to_string();
@@ -1561,58 +1013,25 @@ async fn auto_rebase_phase(store: &TaskStore, config: &DaemonRuntimeConfig) {
 
                 if is_lease {
                     eprintln!(
-                        "auto-rebase: lease mismatch for {} — skipping for this cycle",
-                        task.task_id
+                        "auto-rebase: lease mismatch for {task_id} — skipping for this cycle"
                     );
-                    // Lease mismatch: per-task failure, continue to next task
                     continue;
                 }
 
-                eprintln!("auto-rebase: failure for {}: {err_msg}", task.task_id);
+                eprintln!("auto-rebase: failure for {task_id}: {err_msg}");
 
-                // Post failure comment on PR (deduplicated by head_sha)
-                let should_post = task.last_rebase_head_sha.as_deref() != Some(&head_sha);
-
-                if should_post {
-                    let marker =
-                        format!("<!-- ralph:rebase:{}:failed:{} -->", task.task_id, head_sha);
-                    let body = format!(
-                        "{marker}\nAuto-rebase failed for task `{}` (head: `{}`).\n\nError: {err_msg}",
-                        task.task_id, head_sha
-                    );
-                    let owner = task.owner.clone();
-                    let repo = task.repo.clone();
-                    let comment_result = spawn_blocking_op(move || {
-                        github::post_pr_comment(&owner, &repo, pr_number, &body)
-                    })
-                    .await;
-
-                    // Only update dedup state if the comment was posted successfully.
-                    // If posting failed, we leave last_rebase_head_sha unchanged so
-                    // the next cycle retries.
-                    if comment_result.is_ok() {
-                        let store = store.clone();
-                        let tid = task.task_id.clone();
-                        let sha = head_sha.clone();
-                        let _ = spawn_blocking_op(move || {
-                            store.update_task(&tid, |t| {
-                                t.last_rebase_head_sha = Some(sha.clone());
-                                Ok(())
-                            })
-                        })
-                        .await;
-                    } else {
-                        eprintln!(
-                            "auto-rebase: failed to post PR comment for {} — will retry next cycle",
-                            task.task_id
-                        );
-                    }
-                } else {
-                    eprintln!(
-                        "auto-rebase: dedup — already posted failure for {} at head {}",
-                        task.task_id, head_sha
-                    );
-                }
+                // Post failure comment on PR
+                let marker =
+                    format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
+                let body = format!(
+                    "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {err_msg}"
+                );
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                let _ = spawn_blocking_op(move || {
+                    github::post_pr_comment(&owner, &repo, pr_number, &body)
+                })
+                .await;
             }
         }
     }
@@ -1795,152 +1214,129 @@ pub(crate) fn build_pr_body(
 }
 
 /// Handle the PR creation/update flow for a completed task.
-///
-/// Deterministic flow:
-/// 1. Check for diff; if none, post no-diff comment and return.
-/// 2. Push branch to remote.
-/// 3. Gather context (diff stat, issue body) — failures degrade gracefully.
-/// 4. Build title via `build_pr_title` and body via `build_pr_body`.
-/// 5. Check for existing PR via `find_existing_pr`.
-/// 6. If existing PR: attempt `edit_pr` only; on failure, return error, do NOT create.
-/// 7. If no existing PR: create via `create_pr_with_body_file`, persist URL.
 async fn handle_pr_flow(
-    store: &TaskStore,
-    _config: &DaemonRuntimeConfig,
-    task: &DaemonTask,
+    config: &DaemonRuntimeConfig,
+    task_id: &str,
+    issue_number: u32,
+    wt_path: &Path,
 ) -> Result<()> {
-    let workspace_root = store
-        .path()
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-
-    let branch = match &task.branch {
-        Some(b) => b.clone(),
-        None => return Ok(()),
+    // Resolve branch from worktree
+    let branch = {
+        let wt = wt_path.to_path_buf();
+        match spawn_blocking_op(move || github::current_branch(&wt)).await {
+            Ok(b) => b,
+            Err(err) => {
+                eprintln!("warning: failed to read current branch for {task_id}: {err}");
+                return Ok(());
+            }
+        }
     };
-
-    let wt_path = worktree::task_worktree_path(&workspace_root, &task.task_id);
 
     // Step 1: Check if there's a diff
     let has_changes = {
-        let wt = wt_path.clone();
+        let wt = wt_path.to_path_buf();
         match spawn_blocking_op(move || github::has_diff(&wt)).await {
             Ok(v) => v,
             Err(err) => {
-                eprintln!("warning: failed to check diff for {}: {err}", task.task_id);
+                eprintln!("warning: failed to check diff for {task_id}: {err}");
                 return Ok(());
             }
         }
     };
 
     if !has_changes {
-        // No diff: post idempotent "no changes" comment (best-effort)
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
-        let issue_number = task.issue_number;
-        let tid = task.task_id.clone();
-        let body = format!(
-            "Task `{}` completed with no code changes. No PR created.",
-            task.task_id
-        );
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let tid = task_id.to_owned();
+        let body = format!("Task `{task_id}` completed with no code changes. No PR created.");
         if let Err(err) = spawn_blocking_op(move || {
             github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
         })
         .await
         {
-            eprintln!(
-                "warning: failed to post no-diff comment for {}: {err}",
-                task.task_id
-            );
+            eprintln!("warning: failed to post no-diff comment for {task_id}: {err}");
         }
         return Ok(());
     }
 
-    // Skip push/PR flow when no origin remote exists in the task worktree.
+    // Skip push/PR flow when no origin remote exists
     {
-        let wt = wt_path.clone();
+        let wt = wt_path.to_path_buf();
         let has_origin = match spawn_blocking_op(move || github::has_origin_remote(&wt)).await {
             Ok(v) => v,
             Err(err) => {
                 eprintln!(
-                    "warning: failed to check origin remote for {}; skipping push/PR: {err}",
-                    task.task_id
+                    "warning: failed to check origin remote for {task_id}; skipping push/PR: {err}"
                 );
                 return Ok(());
             }
         };
         if !has_origin {
-            eprintln!(
-                "warning: origin remote missing for {}; skipping push/PR flow",
-                task.task_id
-            );
+            eprintln!("warning: origin remote missing for {task_id}; skipping push/PR flow");
             return Ok(());
         }
     }
 
-    // Step 2: Push branch to remote before PR creation/edit
+    // Step 2: Push branch
     {
-        let wt = wt_path.clone();
+        let wt = wt_path.to_path_buf();
         let br = branch.clone();
         match spawn_blocking_op(move || github::push_branch(&wt, &br)).await {
             Ok(()) => {}
             Err(err) => {
-                eprintln!(
-                    "warning: failed to push branch {} for {}: {err}",
-                    branch, task.task_id
-                );
+                eprintln!("warning: failed to push branch {branch} for {task_id}: {err}");
                 return Ok(());
             }
         }
     }
 
-    // Step 3: Gather context for PR body
-    // Diff stat — failure produces fallback text, does not abort.
+    // Step 3: Gather context
     let diff_stat: Option<String> = {
-        let wt = wt_path.clone();
+        let wt = wt_path.to_path_buf();
         match spawn_blocking_op(move || github::diff_stat(&wt)).await {
             Ok(stat) => stat,
             Err(err) => {
-                eprintln!(
-                    "warning: diff stat failed for {}: {err}; using fallback",
-                    task.task_id
-                );
+                eprintln!("warning: diff stat failed for {task_id}: {err}; using fallback");
                 None
             }
         }
     };
 
-    // Issue body context from raw_idea
-    let issue_body = extract_issue_body(task.raw_idea.as_deref());
+    // Fetch raw_idea from GitHub for PR body context
+    let raw_idea = {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number))
+            .await
+        {
+            Ok((title, body)) => Some(compose_raw_idea(&title, body.as_deref())),
+            Err(_) => None,
+        }
+    };
+    let issue_body = extract_issue_body(raw_idea.as_deref());
 
-    // Step 4: Build title and body via pure helpers
-    let title = build_pr_title(&format!("ralph: {}", task.task_id));
+    // Step 4: Build title and body
+    let title = build_pr_title(&format!("ralph: {task_id}"));
     let pr_body = build_pr_body(
         &branch,
         diff_stat.as_deref(),
         issue_body.as_deref(),
-        &task.task_id,
-        task.issue_number,
+        task_id,
+        issue_number,
     );
 
-    // Write body to a temp file for --body-file usage
     let body_file = match write_body_file(&pr_body) {
         Ok(f) => f,
         Err(err) => {
-            eprintln!(
-                "warning: failed to write PR body file for {}: {err}",
-                task.task_id
-            );
+            eprintln!("warning: failed to write PR body file for {task_id}: {err}");
             return Ok(());
         }
     };
 
     // Step 5: Check for existing PR
     let existing_pr_url = {
-        let owner = task.owner.clone();
-        let repo = task.repo.clone();
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
         let br = branch.clone();
         match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
             Ok(url) => url,
@@ -1951,17 +1347,27 @@ async fn handle_pr_flow(
         }
     };
 
-    // Override title with refined_title if available
-    let title = task
-        .refined_title
-        .clone()
-        .or_else(|| extract_original_title(task.raw_idea.as_deref().unwrap_or_default()))
+    // Try to get refined title from GitHub issue
+    let refined_title = {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number))
+            .await
+        {
+            Ok((title, _)) => {
+                if title.is_empty() { None } else { Some(title) }
+            }
+            Err(_) => None,
+        }
+    };
+
+    let title = refined_title
+        .or_else(|| extract_original_title(raw_idea.as_deref().unwrap_or_default()))
         .unwrap_or(title);
 
     match existing_pr_url {
         Some(url) => {
-            // Step 6: Existing PR — edit only, never fall through to create
-            eprintln!("editing existing PR for {}: {url}", task.task_id);
+            eprintln!("editing existing PR for {task_id}: {url}");
             let url_for_edit = url.clone();
             let title_clone = title.clone();
             let body_path = body_file.path().to_path_buf();
@@ -1970,38 +1376,17 @@ async fn handle_pr_flow(
             })
             .await
             {
-                Ok(()) => {
-                    // Persist the PR URL
-                    let store = store.clone();
-                    let tid = task.task_id.clone();
-                    let url_clone = url.clone();
-                    if let Err(err) = spawn_blocking_op(move || {
-                        store.update_task(&tid, |t| {
-                            t.pr_url = Some(url_clone.clone());
-                            Ok(())
-                        })
-                    })
-                    .await
-                    {
-                        eprintln!(
-                            "warning: failed to persist PR URL for {}: {err}",
-                            task.task_id
-                        );
-                    }
-                }
+                Ok(()) => {}
                 Err(err) => {
-                    // Edit failed — return error, do NOT fall through to create
                     return Err(RalphError::Orchestration(format!(
-                        "failed to edit PR for {}: {err}",
-                        task.task_id
+                        "failed to edit PR for {task_id}: {err}"
                     )));
                 }
             }
         }
         None => {
-            // Step 7: No existing PR — create new
-            let owner = task.owner.clone();
-            let repo = task.repo.clone();
+            let owner = config.owner.clone();
+            let repo = config.repo.clone();
             let br = branch.clone();
             let title_clone = title.clone();
             let body_path = body_file.path().to_path_buf();
@@ -2011,28 +1396,11 @@ async fn handle_pr_flow(
             .await
             {
                 Ok(url) => {
-                    eprintln!("created PR for {}: {url}", task.task_id);
-                    let store = store.clone();
-                    let tid = task.task_id.clone();
-                    let url_clone = url.clone();
-                    if let Err(err) = spawn_blocking_op(move || {
-                        store.update_task(&tid, |t| {
-                            t.pr_url = Some(url_clone.clone());
-                            Ok(())
-                        })
-                    })
-                    .await
-                    {
-                        eprintln!(
-                            "warning: failed to persist PR URL for {}: {err}",
-                            task.task_id
-                        );
-                    }
+                    eprintln!("created PR for {task_id}: {url}");
                 }
                 Err(err) => {
                     eprintln!(
-                        "warning: failed to create PR for {}; continuing to terminal state: {err}",
-                        task.task_id
+                        "warning: failed to create PR for {task_id}; continuing to terminal state: {err}"
                     );
                 }
             }
@@ -2147,15 +1515,11 @@ mod tests {
         assert_eq!(extract_issue_body(Some("Title\n\n   ")), None);
     }
 
-    /// Verify that when diff stat is None (failure/unavailable), build_pr_body
-    /// still produces a valid body with fallback text. This exercises the
-    /// "diff stat failure → fallback" path at the helper level.
     #[test]
     fn runtime_pr_diff_stat_failure_fallback() {
-        // Simulate: diff stat generation failed (None), but we have issue context
         let body = build_pr_body(
             "ralph/my-project",
-            None, // diff stat unavailable
+            None,
             Some("Issue body context here"),
             "acme-widgets-1",
             1,
@@ -2167,9 +1531,6 @@ mod tests {
         assert!(body.contains("Closes #1"));
     }
 
-    /// Verify that write_body_file produces a temp file whose content matches
-    /// the provided body string. This is a building block of the --body-file
-    /// integration.
     #[test]
     fn write_body_file_creates_readable_temp() {
         let content = "Test PR body\n\nWith multiple lines";
@@ -2178,26 +1539,20 @@ mod tests {
         assert_eq!(read_back, content);
     }
 
-    /// Verify that build_pr_body with diff stat present respects the 100-line cap.
     #[test]
     fn build_pr_body_diff_stat_cap() {
         let lines: Vec<String> = (1..=150).map(|i| format!("file{i}.rs | 1 +")).collect();
         let stat = lines.join("\n");
         let body = build_pr_body("ralph/proj", Some(&stat), None, "task-2", 2);
-        // Should contain first 100 lines and truncation marker
         assert!(body.contains("file1.rs | 1 +"));
         assert!(body.contains("file100.rs | 1 +"));
         assert!(body.contains("... (truncated)"));
-        // Should NOT contain line 101+
         assert!(!body.contains("file101.rs"));
     }
 
-    /// Verify that build_pr_body caps issue context to 4000 chars.
     #[test]
     fn build_pr_body_context_cap() {
-        // Use a character that doesn't appear in the template to avoid
-        // counting template content.
-        let long_context = "\u{2603}".repeat(5000); // snowman
+        let long_context = "\u{2603}".repeat(5000);
         let body = build_pr_body("ralph/proj", None, Some(&long_context), "task-3", 3);
         let snowman_count = body.matches('\u{2603}').count();
         assert_eq!(

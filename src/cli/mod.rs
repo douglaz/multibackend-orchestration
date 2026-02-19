@@ -684,7 +684,7 @@ mod tests {
         };
 
         assert_eq!(abort_args.data_dir, std::path::PathBuf::from("/tmp/test"));
-        assert_eq!(abort_args.task_id_or_number, "acme-widgets-42");
+        assert_eq!(abort_args.issue_number, "acme-widgets-42");
     }
 
     #[test]
@@ -697,6 +697,6 @@ mod tests {
             panic!("expected daemon retrigger command");
         };
 
-        assert_eq!(retrigger_args.task_id, "acme-widgets-42");
+        assert_eq!(retrigger_args.issue_number, "acme-widgets-42");
     }
 }
