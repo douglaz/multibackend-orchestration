@@ -607,8 +607,7 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
                 parse_optional_bool(raw_value, key)?;
         }
         "workflow.session_reuse_reset_on_rollback" => {
-            config.workflow.session_reuse_reset_on_rollback =
-                parse_optional_bool(raw_value, key)?;
+            config.workflow.session_reuse_reset_on_rollback = parse_optional_bool(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),

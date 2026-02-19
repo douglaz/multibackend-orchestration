@@ -265,7 +265,10 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // external disappearance.
         let exit_code = match wait_result {
             Ok(code) => code,
-            Err(RalphError::BackendTimeout { idle_seconds: measured_idle, .. }) => {
+            Err(RalphError::BackendTimeout {
+                idle_seconds: measured_idle,
+                ..
+            }) => {
                 // Check the specific window, not just the session. A disappeared
                 // window in a still-alive session should be reported as a command
                 // failure with actionable diagnostics, not as a timeout.
@@ -520,10 +523,7 @@ mod tests {
             "missing exit capture: {cmd}"
         );
         // Should NOT contain 2>&1
-        assert!(
-            !cmd.contains("2>&1"),
-            "stderr must not be merged: {cmd}"
-        );
+        assert!(!cmd.contains("2>&1"), "stderr must not be merged: {cmd}");
     }
 
     #[test]

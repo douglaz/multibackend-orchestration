@@ -56,7 +56,12 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn lookup(&self, loop_number: u32, role: &str, backend_spec: &str) -> Option<&SessionRecord> {
+    pub fn lookup(
+        &self,
+        loop_number: u32,
+        role: &str,
+        backend_spec: &str,
+    ) -> Option<&SessionRecord> {
         self.records.iter().find(|r| {
             r.loop_number == loop_number && r.role == role && r.backend_spec == backend_spec
         })
@@ -580,8 +585,7 @@ mod tests {
             .expect("state should serialize as object")
             .remove("session_store");
 
-        let parsed: ProjectState =
-            serde_json::from_value(value).expect("deserialize legacy state");
+        let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
         assert!(parsed.session_store.records.is_empty());
     }
 
@@ -714,7 +718,11 @@ mod tests {
         });
         // remove_loop must clear session records for that loop (spec D1)
         state.remove_loop(1);
-        assert_eq!(state.session_store.records.len(), 1, "only loop 2 session should remain");
+        assert_eq!(
+            state.session_store.records.len(),
+            1,
+            "only loop 2 session should remain"
+        );
         assert_eq!(state.session_store.records[0].loop_number, 2);
     }
 }

@@ -64,14 +64,16 @@ fn history_capping_limits_review_entries(h: &RalphHarness) -> TestResult {
 
         // Read back value
         let value = h
-            .ralph_ok(["config", "get", "workflow.max_review_history_entries_in_prompt"])
+            .ralph_ok([
+                "config",
+                "get",
+                "workflow.max_review_history_entries_in_prompt",
+            ])
             .expect("config get max_review_history_entries_in_prompt failed");
         assert_eq!(value.trim(), "2", "expected review history cap of 2");
 
         // Show effective config (config show always outputs JSON; no --json flag needed)
-        let show_json = h
-            .ralph_ok(["config", "show"])
-            .expect("config show failed");
+        let show_json = h.ralph_ok(["config", "show"]).expect("config show failed");
         let config: serde_json::Value =
             serde_json::from_str(&show_json).expect("config show output is not valid JSON");
 
@@ -115,9 +117,7 @@ fn history_capping_limits_qa_entries(h: &RalphHarness) -> TestResult {
         assert_eq!(value.trim(), "1", "expected QA history cap of 1");
 
         // Show effective config (config show always outputs JSON; no --json flag needed)
-        let show_json = h
-            .ralph_ok(["config", "show"])
-            .expect("config show failed");
+        let show_json = h.ralph_ok(["config", "show"]).expect("config show failed");
         let config: serde_json::Value =
             serde_json::from_str(&show_json).expect("config show output is not valid JSON");
 
@@ -155,11 +155,7 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
         let value = h
             .ralph_ok(["config", "get", "workflow.session_reuse_enabled"])
             .expect("config get session_reuse_enabled failed");
-        assert_eq!(
-            value.trim(),
-            "true",
-            "session_reuse_enabled should be true"
-        );
+        assert_eq!(value.trim(), "true", "session_reuse_enabled should be true");
 
         // Set roles
         h.ralph_ok([
@@ -183,17 +179,11 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
         );
 
         // Show effective config to verify all session reuse fields
-        let show_json = h
-            .ralph_ok(["config", "show"])
-            .expect("config show failed");
+        let show_json = h.ralph_ok(["config", "show"]).expect("config show failed");
         let config: serde_json::Value =
             serde_json::from_str(&show_json).expect("config show output is not valid JSON");
 
-        assert_json_field(
-            &config,
-            "workflow.session_reuse_enabled",
-            &json!(true),
-        );
+        assert_json_field(&config, "workflow.session_reuse_enabled", &json!(true));
 
         // Verify state.json has session_store field (empty initially)
         let state = h.load_state(project_id).expect("load_state failed");
@@ -220,7 +210,9 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
             .expect("ralph run with session_reuse_enabled should succeed");
 
         // Verify loop completed successfully
-        let state_after = h.load_state(project_id).expect("load_state after run failed");
+        let state_after = h
+            .load_state(project_id)
+            .expect("load_state after run failed");
         let loops = state_after["loops"]
             .as_array()
             .expect("loops should be array");
@@ -231,7 +223,12 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
 
         // Validate that invalid roles are rejected by config set
         let output = h
-            .ralph(["config", "set", "workflow.session_reuse_roles", "invalid_role"])
+            .ralph([
+                "config",
+                "set",
+                "workflow.session_reuse_roles",
+                "invalid_role",
+            ])
             .expect("ralph should execute");
         assert_exit_code(&output, 2);
         assert_stderr_contains(&output, "unknown role");
@@ -272,9 +269,7 @@ fn session_invalidation_on_rollback(h: &RalphHarness) -> TestResult {
         let session_store = &state_after["session_store"];
         if session_store.is_object() {
             let empty = Vec::new();
-            let records = session_store["records"]
-                .as_array()
-                .unwrap_or(&empty);
+            let records = session_store["records"].as_array().unwrap_or(&empty);
             assert_eq!(
                 records.len(),
                 0,
@@ -347,9 +342,7 @@ fn session_invalidation_on_prompt_change(h: &RalphHarness) -> TestResult {
         );
 
         // Show effective config (config show always outputs JSON; no --json flag needed)
-        let show_json = h
-            .ralph_ok(["config", "show"])
-            .expect("config show failed");
+        let show_json = h.ralph_ok(["config", "show"]).expect("config show failed");
         let config: serde_json::Value =
             serde_json::from_str(&show_json).expect("config show output is not valid JSON");
 
@@ -404,10 +397,7 @@ fn working_directory_stays_at_repo_root(h: &RalphHarness) -> TestResult {
 
         // Run one loop with RALPH_PWD_LOG env var
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_PWD_LOG", &pwd_log_str)],
-            )
+            .ralph_env(["run", "--loops", "1"], &[("RALPH_PWD_LOG", &pwd_log_str)])
             .expect("ralph run should execute");
         assert_exit_code(&output, 0);
 

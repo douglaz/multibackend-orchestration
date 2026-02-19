@@ -102,7 +102,9 @@ mod tests {
         let normalized = ensure_stream_json_args(args);
         assert_eq!(stream_json_pair_count(&normalized), 1);
         assert!(!normalized.iter().any(|arg| arg == "--output-format=text"));
-        assert!(!normalized.iter().any(|arg| arg == "--output-format=stream-json"));
+        assert!(!normalized
+            .iter()
+            .any(|arg| arg == "--output-format=stream-json"));
         assert!(
             normalized.contains(&"stream-json".to_owned()),
             "stream-json value missing"
@@ -168,10 +170,7 @@ mod tests {
 
     #[test]
     fn ensure_stream_json_no_duplicate_verbose() {
-        let args = vec![
-            "-p".to_owned(),
-            "--verbose".to_owned(),
-        ];
+        let args = vec!["-p".to_owned(), "--verbose".to_owned()];
         let result = ensure_stream_json_args(args);
         assert_eq!(result.iter().filter(|a| *a == "--verbose").count(), 1);
     }

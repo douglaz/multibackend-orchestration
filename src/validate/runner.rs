@@ -71,7 +71,11 @@ impl TestRunner {
                     println!("test {} ... ok ({})", test.name, format_duration(elapsed));
                 }
                 TestResult::Skip(reason) => {
-                    println!("test {} ... skipped ({})", test.name, format_duration(elapsed));
+                    println!(
+                        "test {} ... skipped ({})",
+                        test.name,
+                        format_duration(elapsed)
+                    );
                     if self.verbose {
                         for line in reason.lines() {
                             println!("  {line}");
@@ -80,7 +84,11 @@ impl TestRunner {
                     skipped.push((test.name, reason));
                 }
                 TestResult::Fail(message) => {
-                    println!("test {} ... FAILED ({})", test.name, format_duration(elapsed));
+                    println!(
+                        "test {} ... FAILED ({})",
+                        test.name,
+                        format_duration(elapsed)
+                    );
                     if self.verbose {
                         for line in message.lines() {
                             println!("  {line}");
@@ -108,16 +116,20 @@ impl TestRunner {
         let skipped_count = skipped.len();
 
         if failed == 0 {
-            let total = durations.iter().map(|(_, duration)| duration).sum::<Duration>();
+            let total = durations
+                .iter()
+                .map(|(_, duration)| duration)
+                .sum::<Duration>();
             println!("test result: ok. {passed} passed; 0 failed; {skipped_count} skipped");
             println!("test result: total {}", format_duration(total));
             return Ok(true);
         }
 
-        let total = durations.iter().map(|(_, duration)| duration).sum::<Duration>();
-        println!(
-            "test result: FAILED. {passed} passed; {failed} failed; {skipped_count} skipped"
-        );
+        let total = durations
+            .iter()
+            .map(|(_, duration)| duration)
+            .sum::<Duration>();
+        println!("test result: FAILED. {passed} passed; {failed} failed; {skipped_count} skipped");
         println!("test result: total {}", format_duration(total));
         Ok(false)
     }

@@ -1,5 +1,6 @@
 pub mod branch;
 pub mod commit;
+pub mod ralph_commit;
 
 use std::path::Path;
 use std::process::{Command, ExitStatus};

@@ -312,8 +312,7 @@ fn merge_usage_from_event(event: &Value, output: &mut NormalizedOutput) {
 
 fn merge_usage_fields(usage: &Value, output: &mut NormalizedOutput) {
     output.tokens_in = extract_u64(usage, &["tokens_in", "input_tokens"]).or(output.tokens_in);
-    output.tokens_out =
-        extract_u64(usage, &["tokens_out", "output_tokens"]).or(output.tokens_out);
+    output.tokens_out = extract_u64(usage, &["tokens_out", "output_tokens"]).or(output.tokens_out);
     output.cached_in = extract_u64(
         usage,
         &[
@@ -424,8 +423,7 @@ not-json
 
     #[test]
     fn normalize_output_routes_single_json_when_first_json_has_no_type() {
-        let raw =
-            r#"{"result":"single-json","session_id":"sess_1","usage":{"tokens_in":1,"tokens_out":2,"cached_in":3}}"#;
+        let raw = r#"{"result":"single-json","session_id":"sess_1","usage":{"tokens_in":1,"tokens_out":2,"cached_in":3}}"#;
 
         let normalized = normalize_output(raw).expect("normalize_output");
         assert_eq!(normalized.text, "single-json");
