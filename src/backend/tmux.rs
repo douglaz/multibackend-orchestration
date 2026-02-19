@@ -140,13 +140,16 @@ pub async fn wait_for_exit_with_activity(
         if exit_file_path.exists() {
             let raw_exit = fs::read_to_string(exit_file_path).await?;
             let trimmed = raw_exit.trim();
-            let exit_code = trimmed
-                .parse::<i32>()
-                .map_err(|err| RalphError::CorruptedState {
-                    path: exit_file_path.to_path_buf(),
-                    reason: format!("invalid tmux exit code '{trimmed}': {err}"),
-                })?;
-            return Ok(exit_code);
+            // File may exist but be empty due to non-atomic write; wait for content.
+            if !trimmed.is_empty() {
+                let exit_code = trimmed
+                    .parse::<i32>()
+                    .map_err(|err| RalphError::CorruptedState {
+                        path: exit_file_path.to_path_buf(),
+                        reason: format!("invalid tmux exit code '{trimmed}': {err}"),
+                    })?;
+                return Ok(exit_code);
+            }
         }
 
         // Check for activity: any capture file growing counts as activity
