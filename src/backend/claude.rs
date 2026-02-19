@@ -4,7 +4,9 @@ use crate::backend::CliBackend;
 use crate::config::GlobalConfig;
 
 pub fn ensure_stream_json_args(args: Vec<String>) -> Vec<String> {
-    let mut sanitized = Vec::with_capacity(args.len() + 2);
+    let mut sanitized = Vec::with_capacity(args.len() + 3);
+    let mut has_print = false;
+    let mut has_verbose = false;
     let mut idx = 0;
 
     while idx < args.len() {
@@ -20,12 +22,24 @@ pub fn ensure_stream_json_args(args: Vec<String>) -> Vec<String> {
             idx += 1;
             continue;
         }
+        if arg == "-p" || arg == "--print" {
+            has_print = true;
+        }
+        if arg == "--verbose" {
+            has_verbose = true;
+        }
         sanitized.push(arg.clone());
         idx += 1;
     }
 
     sanitized.push("--output-format".to_owned());
     sanitized.push("stream-json".to_owned());
+
+    // Claude CLI requires --verbose when combining --print with stream-json
+    if has_print && !has_verbose {
+        sanitized.push("--verbose".to_owned());
+    }
+
     sanitized
 }
 
@@ -89,10 +103,12 @@ mod tests {
         assert_eq!(stream_json_pair_count(&normalized), 1);
         assert!(!normalized.iter().any(|arg| arg == "--output-format=text"));
         assert!(!normalized.iter().any(|arg| arg == "--output-format=stream-json"));
-        assert_eq!(
-            normalized.last().expect("stream-json value missing"),
-            "stream-json"
+        assert!(
+            normalized.contains(&"stream-json".to_owned()),
+            "stream-json value missing"
         );
+        // -p triggers --verbose addition
+        assert!(normalized.contains(&"--verbose".to_owned()));
     }
 
     #[test]
@@ -133,5 +149,30 @@ mod tests {
         let args = effective_args_claude(&base_args, None);
         assert_eq!(stream_json_pair_count(&args), 1);
         assert!(args.contains(&"--allowedTools".to_owned()));
+    }
+
+    #[test]
+    fn ensure_stream_json_adds_verbose_when_print_flag_present() {
+        let args = vec!["-p".to_owned(), "--other".to_owned()];
+        let result = ensure_stream_json_args(args);
+        assert!(result.contains(&"--verbose".to_owned()));
+        assert_eq!(stream_json_pair_count(&result), 1);
+    }
+
+    #[test]
+    fn ensure_stream_json_no_verbose_without_print() {
+        let args = vec!["--other".to_owned()];
+        let result = ensure_stream_json_args(args);
+        assert!(!result.contains(&"--verbose".to_owned()));
+    }
+
+    #[test]
+    fn ensure_stream_json_no_duplicate_verbose() {
+        let args = vec![
+            "-p".to_owned(),
+            "--verbose".to_owned(),
+        ];
+        let result = ensure_stream_json_args(args);
+        assert_eq!(result.iter().filter(|a| *a == "--verbose").count(), 1);
     }
 }
