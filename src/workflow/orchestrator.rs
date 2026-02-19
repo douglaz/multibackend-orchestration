@@ -4076,8 +4076,13 @@ async fn execute_with_timeout_retries(
 
         match backend.execute_with_log(prompt, Some(log_writer)).await {
             Ok(output) => {
-                let normalized = normalize_output(&output)?;
-                return Ok(normalized.text);
+                // Normalization extracts text from structured JSON/NDJSON.
+                // If it fails (unexpected format), fall back to raw output
+                // so the parse-retry path can still attempt reformatting.
+                let text = normalize_output(&output)
+                    .map(|n| n.text)
+                    .unwrap_or(output);
+                return Ok(text);
             }
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
