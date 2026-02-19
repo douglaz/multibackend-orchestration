@@ -50,7 +50,7 @@ fn setup_basic(h: &RalphHarness, project_id: &str) {
 /// just config plumbing).
 fn history_capping_limits_review_entries(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "hist-review-cap";
+        let project_id = "issue-401";
         setup_basic(h, project_id);
 
         // Set max review history entries to 2
@@ -98,7 +98,7 @@ fn history_capping_limits_review_entries(h: &RalphHarness) -> TestResult {
 /// that running a loop with a capped value succeeds (runtime behavior).
 fn history_capping_limits_qa_entries(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "hist-qa-cap";
+        let project_id = "issue-402";
         setup_basic(h, project_id);
 
         // Set max QA history entries to 1
@@ -144,7 +144,7 @@ fn history_capping_limits_qa_entries(h: &RalphHarness) -> TestResult {
 /// - Validate invalid roles are rejected by config set
 fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "session-lifecycle";
+        let project_id = "issue-403";
         setup_basic(h, project_id);
 
         // Enable session reuse
@@ -239,7 +239,7 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
 /// optionally for the target loop based on config.
 fn session_invalidation_on_rollback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "session-rollback";
+        let project_id = "issue-404";
         setup_basic(h, project_id);
 
         // Enable session reuse with reset on rollback enabled
@@ -293,7 +293,7 @@ fn session_invalidation_on_rollback(h: &RalphHarness) -> TestResult {
 /// runtime execution path.
 fn session_invalidation_on_prompt_change(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "session-prompt-change";
+        let project_id = "issue-405";
         setup_basic(h, project_id);
 
         // Set session_reuse_reset_on_prompt_change to true
@@ -378,7 +378,7 @@ fn session_invalidation_on_prompt_change(h: &RalphHarness) -> TestResult {
 /// the repo root.
 fn working_directory_stays_at_repo_root(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "session-cwd";
+        let project_id = "issue-406";
         h.init_workspace().expect("init failed");
 
         // Use the pwd-recording mock script

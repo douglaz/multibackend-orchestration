@@ -509,9 +509,27 @@ if [ $# -ge 2 ] && [ "$1" = "pr" ] && [ "$2" = "create" ]; then
 fi
 
 case "${1:-}" in
+  label)
+    # label create is best-effort; always succeed
+    exit 0
+    ;;
   issue)
     case "${2:-}" in
-      list) printf '[]'; exit 0 ;;
+      list)
+        # Check whether --label ralph:ready is among the args
+        has_ready=0
+        for arg in "$@"; do
+          if [ "$arg" = "ralph:ready" ]; then
+            has_ready=1
+          fi
+        done
+        if [ "$has_ready" = "1" ] && [ -n "${RALPH_E2E_MOCK_ISSUES:-}" ]; then
+          printf '%s' "$RALPH_E2E_MOCK_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
       edit) exit 0 ;;
       view)
         want_title_body=0

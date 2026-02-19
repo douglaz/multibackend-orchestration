@@ -430,11 +430,6 @@ impl ProjectState {
         Ok(())
     }
 
-    fn migrate_legacy_acceptance_results(&mut self) {
-        for attempt in &mut self.completion_attempts {
-            attempt.artifacts.migrate_legacy_acceptance_result();
-        }
-    }
 }
 
 impl CompletionLoopArtifacts {
@@ -473,22 +468,6 @@ impl CompletionLoopArtifacts {
         })
     }
 
-    fn migrate_legacy_acceptance_result(&mut self) {
-        if self.acceptance_results.is_empty() {
-            if let (Some(artifact), Some(passed)) =
-                (self.acceptance_result.clone(), self.acceptance_passed)
-            {
-                self.acceptance_results.push(AcceptanceQaResult {
-                    backend: "unknown".to_owned(),
-                    passed,
-                    artifact,
-                });
-            }
-        }
-
-        self.acceptance_result = None;
-        self.acceptance_passed = None;
-    }
 }
 
 #[cfg(test)]

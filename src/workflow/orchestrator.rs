@@ -2004,6 +2004,16 @@ impl Orchestrator {
             }
 
             if state.status == ProjectStatus::Completed {
+                // Final checkpoint: commit any uncommitted completion artifacts.
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    state.current_loop,
+                    Phase::Completing,
+                    Phase::Completing,
+                ) {
+                    warn!("failed to checkpoint completion artifacts: {err}");
+                }
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
                         "project completed".to_owned()

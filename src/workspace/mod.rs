@@ -194,7 +194,10 @@ mod tests {
 
     use super::Workspace;
     use crate::error::RalphError;
-    use crate::project::state::{FeatureLoopBackends, LoopStatus, ProjectState, ProjectStatus};
+    use crate::project::state::{
+        CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState, CompletionVerdict,
+        FeatureLoopBackends, LoopStatus, LoopType, ProjectState, ProjectStatus,
+    };
 
     fn create_workspace() -> (tempfile::TempDir, Workspace) {
         let temp = tempdir().expect("temp dir");
@@ -254,10 +257,14 @@ mod tests {
             )
             .expect("write termination request");
             if completion.status == LoopStatus::Completed {
+                let verdict_label = match completion.verdict {
+                    Some(crate::project::state::CompletionVerdict::Complete) => "COMPLETE",
+                    _ => "CONTINUE",
+                };
                 fs::write(
                     loop_dir.join("20260101000300-completer-verdict.md"),
                     format!(
-                        "---\nartifact: completer-verdict\nloop: {}\nbackend: completer\nrole: completer\ncreated_at: 2026-01-01T00:03:00Z\n---\n\n# Verdict: CONTINUE\n",
+                        "---\nartifact: completer-verdict\nloop: {}\nbackend: completer\nrole: completer\ncreated_at: 2026-01-01T00:03:00Z\n---\n\n# Verdict: {verdict_label}\n",
                         completion.loop_number
                     ),
                 )
@@ -335,6 +342,28 @@ mod tests {
             loop_state.status = LoopStatus::Completed;
             loop_state.completed_at = Some(chrono::Utc::now());
         }
+        // Add a completion attempt with COMPLETE verdict so reconstruction
+        // derives ProjectStatus::Completed.
+        state.completion_attempts.push(CompletionLoopState {
+            loop_number: 2,
+            slug: "completion".to_owned(),
+            loop_type: LoopType::Completion,
+            status: LoopStatus::Completed,
+            backends: CompletionLoopBackends {
+                planner: "planner".to_owned(),
+                completer: "completer".to_owned(),
+            },
+            artifacts: CompletionLoopArtifacts {
+                termination_request: "loops/002-completion/termination-request.md".to_owned(),
+                verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
+                acceptance_results: vec![],
+                acceptance_result: None,
+                acceptance_passed: None,
+            },
+            verdict: Some(CompletionVerdict::Complete),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        });
         state.status = ProjectStatus::Completed;
         write_state(&workspace, "demo", state);
 
@@ -344,7 +373,7 @@ mod tests {
         assert_eq!(summary.id, "demo");
         assert_eq!(summary.name, "Demo");
         assert_eq!(summary.total_feature_loops, 1);
-        assert_eq!(summary.last_loop_number, 1);
+        assert_eq!(summary.last_loop_number, 2);
         assert!(summary.completed_at.is_some());
     }
 

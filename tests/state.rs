@@ -1,4 +1,4 @@
-//! Unit tests for project state serialization and management.
+//! Unit tests for project state in-memory model semantics and serde behavior.
 
 use chrono::Utc;
 use ralph::project::state::{
@@ -6,13 +6,12 @@ use ralph::project::state::{
     CompletionVerdict, FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus,
     LoopType, Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
-use tempfile::TempDir;
 
 #[test]
 fn test_new_project_state_defaults() {
-    let state = ProjectState::new("01-poc", "Proof of Concept", "abc123", None);
+    let state = ProjectState::new("issue-1", "Proof of Concept", "abc123", None);
 
-    assert_eq!(state.project_id, "01-poc");
+    assert_eq!(state.project_id, "issue-1");
     assert_eq!(state.project_name, "Proof of Concept");
     assert_eq!(state.prompt_file, "prompt.md");
     assert_eq!(state.prompt_hash, "abc123");
@@ -28,8 +27,8 @@ fn test_new_project_state_defaults() {
 
 #[test]
 fn test_project_state_with_parent() {
-    let state = ProjectState::new("02-alpha", "Alpha", "def456", Some("01-poc".to_owned()));
-    assert_eq!(state.parent_project.as_deref(), Some("01-poc"));
+    let state = ProjectState::new("issue-2", "Alpha", "def456", Some("issue-1".to_owned()));
+    assert_eq!(state.parent_project.as_deref(), Some("issue-1"));
 }
 
 #[test]
@@ -102,11 +101,8 @@ fn test_next_loop_number_with_completion_attempts() {
 }
 
 #[test]
-fn test_save_and_load_round_trip() {
-    let temp_dir = TempDir::new().unwrap();
-    let state_path = temp_dir.path().join("state.json");
-
-    let mut original = ProjectState::new("01-poc", "Proof of Concept", "abc123", None);
+fn test_serde_round_trip() {
+    let mut original = ProjectState::new("issue-1", "Proof of Concept", "abc123", None);
     original.status = ProjectStatus::InProgress;
     original.current_loop = 2;
     original.current_phase = Phase::Reviewing;
@@ -142,8 +138,29 @@ fn test_save_and_load_round_trip() {
         completed_at: Some(Utc::now()),
     });
 
-    original.save(&state_path).unwrap();
-    let loaded = ProjectState::load(&state_path).unwrap();
+    // Another loop for current_loop=2
+    original.loops.push(FeatureLoopState {
+        loop_number: 2,
+        slug: "api".to_owned(),
+        feature_name: "API".to_owned(),
+        loop_type: LoopType::Feature,
+        status: LoopStatus::InProgress,
+        backends,
+        artifacts: FeatureLoopArtifacts {
+            spec: "loops/002-api/spec.md".to_owned(),
+            impl_notes: None,
+            reviews: vec![],
+            approval: None,
+            qa_results: vec![],
+            pending_qa_feedback: None,
+        },
+        commit: None,
+        started_at: Utc::now(),
+        completed_at: None,
+    });
+
+    let json = serde_json::to_string(&original).unwrap();
+    let loaded: ProjectState = serde_json::from_str(&json).unwrap();
 
     assert_eq!(loaded.project_id, original.project_id);
     assert_eq!(loaded.project_name, original.project_name);
@@ -151,7 +168,7 @@ fn test_save_and_load_round_trip() {
     assert_eq!(loaded.current_loop, original.current_loop);
     assert_eq!(loaded.current_phase, original.current_phase);
     assert_eq!(loaded.phase_iteration, original.phase_iteration);
-    assert_eq!(loaded.loops.len(), 1);
+    assert_eq!(loaded.loops.len(), 2);
     assert_eq!(loaded.loops[0].feature_name, "User Authentication");
     assert_eq!(loaded.loops[0].artifacts.reviews.len(), 1);
 }
@@ -534,9 +551,7 @@ fn test_legacy_state_deserializes_with_qa_defaults() {
 }
 
 #[test]
-fn test_qa_fields_round_trip() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let state_path = temp_dir.path().join("state.json");
+fn test_qa_fields_serde_round_trip() {
     let mut state = ProjectState::new("qa", "QA", "hash", None);
     state.current_loop = 1;
     state.current_phase = Phase::QA;
@@ -598,8 +613,8 @@ fn test_qa_fields_round_trip() {
         completed_at: None,
     });
 
-    state.save(&state_path).expect("save state");
-    let loaded = ProjectState::load(&state_path).expect("load state");
+    let json = serde_json::to_string(&state).expect("serialize state");
+    let loaded: ProjectState = serde_json::from_str(&json).expect("deserialize state");
     assert_eq!(loaded.current_phase, Phase::QA);
     assert_eq!(loaded.loops[0].backends.qa, "codex(gpt-5.3-codex-high)");
     assert_eq!(loaded.loops[0].artifacts.qa_results.len(), 1);
@@ -726,9 +741,11 @@ fn test_upsert_acceptance_result_replaces_existing_and_appends_new() {
 }
 
 #[test]
-fn test_load_migrates_legacy_acceptance_fields_when_new_field_empty() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let state_path = temp_dir.path().join("state.json");
+fn test_serde_deserializes_legacy_acceptance_fields_without_migration() {
+    // Without the old load() migration path, serde alone just deserializes
+    // the legacy fields as-is (skip_serializing means they deserialize but
+    // don't round-trip on output). acceptance_results stays empty when the
+    // JSON doesn't include it, and legacy fields are silently consumed.
     let raw = r#"
 {
   "project_id": "legacy-migrate",
@@ -766,23 +783,18 @@ fn test_load_migrates_legacy_acceptance_fields_when_new_field_empty() {
   ]
 }
 "#;
-    std::fs::write(&state_path, raw).expect("write state");
 
-    let state = ProjectState::load(&state_path).expect("load state");
-    assert_eq!(
-        state.completion_attempts[0].artifacts.acceptance_results,
-        vec![AcceptanceQaResult {
-            backend: "unknown".to_owned(),
-            passed: false,
-            artifact: "loops/002-completion/acceptance-fail.md".to_owned(),
-        }]
-    );
+    let state: ProjectState =
+        serde_json::from_str(raw).expect("legacy state with acceptance fields should deserialize");
+    // Without migration, acceptance_results stays empty (legacy fields are consumed but not promoted)
+    assert!(state.completion_attempts[0]
+        .artifacts
+        .acceptance_results
+        .is_empty());
 }
 
 #[test]
-fn test_load_migration_prefers_non_empty_new_acceptance_results() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let state_path = temp_dir.path().join("state.json");
+fn test_serde_preserves_new_acceptance_results_when_present() {
     let raw = r#"
 {
   "project_id": "legacy-precedence",
@@ -827,9 +839,8 @@ fn test_load_migration_prefers_non_empty_new_acceptance_results() {
   ]
 }
 "#;
-    std::fs::write(&state_path, raw).expect("write state");
 
-    let state = ProjectState::load(&state_path).expect("load state");
+    let state: ProjectState = serde_json::from_str(raw).expect("deserialize state");
     assert_eq!(
         state.completion_attempts[0].artifacts.acceptance_results,
         vec![AcceptanceQaResult {
@@ -838,55 +849,6 @@ fn test_load_migration_prefers_non_empty_new_acceptance_results() {
             artifact: "loops/002-completion/acceptance-pass-claude.md".to_owned(),
         }]
     );
-}
-
-#[test]
-fn test_load_does_not_migrate_partial_legacy_acceptance_fields() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let state_path = temp_dir.path().join("state.json");
-    let raw = r#"
-{
-  "project_id": "legacy-partial",
-  "project_name": "Legacy Partial",
-  "prompt_file": "prompt.md",
-  "prompt_hash": "hash",
-  "prompt_hash_at_loop_start": "hash",
-  "prompt_review_completed": false,
-  "parent_project": null,
-  "current_loop": 2,
-  "current_phase": "completing",
-  "phase_iteration": 1,
-  "status": "in_progress",
-  "loops": [],
-  "completion_attempts": [
-    {
-      "loop_number": 2,
-      "slug": "completion",
-      "loop_type": "completion",
-      "status": "in_progress",
-      "backends": {
-        "planner": "claude",
-        "completer": "codex"
-      },
-      "artifacts": {
-        "termination_request": "loops/002-completion/termination-request.md",
-        "verdict": "loops/002-completion/completer-verdict.md",
-        "acceptance_result": "loops/002-completion/acceptance-fail.md"
-      },
-      "verdict": "continue",
-      "started_at": "2026-02-11T00:05:00Z",
-      "completed_at": null
-    }
-  ]
-}
-"#;
-    std::fs::write(&state_path, raw).expect("write state");
-
-    let state = ProjectState::load(&state_path).expect("load state");
-    assert!(state.completion_attempts[0]
-        .artifacts
-        .acceptance_results
-        .is_empty());
 }
 
 #[test]

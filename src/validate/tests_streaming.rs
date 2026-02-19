@@ -59,7 +59,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 /// attempt=2, etc.) with appended content across attempts.
 fn retry_append_behavior(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-retry";
+        let project_id = "issue-601";
         let counter_file = h.temp_dir.path().join("planner-counter.txt");
 
         h.init_workspace().expect("init failed");
@@ -161,7 +161,7 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
 /// (no loop subdirectory) with loop_number=None.
 fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-prompt-review";
+        let project_id = "issue-602";
         setup_with_standard_mock(h, project_id);
 
         // Enable prompt review and run
@@ -210,7 +210,7 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
 /// still in progress (chunked streaming, not post-hoc write).
 fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-mid-visibility";
+        let project_id = "issue-603";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -281,7 +281,7 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
 /// and the hanging planner child process is dead after retries.
 fn timeout_cleanup(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-timeout-cleanup";
+        let project_id = "issue-604";
         let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
 
         h.init_workspace().expect("init failed");
@@ -349,7 +349,7 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
 /// runtime exceeding timeout_seconds (~2.4s > 1s). Must succeed (no timeout).
 fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-active-no-timeout";
+        let project_id = "issue-605";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -410,7 +410,7 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
 /// retain partial output in the log.
 fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-hanging-stall-timeout";
+        let project_id = "issue-606";
         let pid_file = h.temp_dir.path().join("hanging-stall.pid");
 
         h.init_workspace().expect("init failed");
@@ -491,7 +491,7 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
 /// planner runtime exceeds nominal timeout, run succeeds, and no timeout footer.
 fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-idle-timeout-reset";
+        let project_id = "issue-607";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -556,7 +556,7 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
 /// as the planner backend.
 fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "codex-active-no-timeout";
+        let project_id = "issue-608";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -636,7 +636,7 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
 /// backend and verifies the stalled process is killed.
 fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "codex-hanging-stall-timeout";
+        let project_id = "issue-609";
         let pid_file = h.temp_dir.path().join("codex-hanging-stall.pid");
 
         h.init_workspace().expect("init failed");

@@ -70,7 +70,7 @@ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
 
 fn runs_and_rewrites_prompt(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-runs";
+        let project_id = "issue-701";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -130,7 +130,7 @@ fn runs_and_rewrites_prompt(h: &RalphHarness) -> TestResult {
 
 fn skip_flag_bypasses(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-skip";
+        let project_id = "issue-702";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--skip-prompt-review", "--loops", "1"])
@@ -178,7 +178,7 @@ fn auto_skip_flag_bypasses(h: &RalphHarness) -> TestResult {
 
 fn resume_skips_completed(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-resume";
+        let project_id = "issue-703";
         setup_with_standard_mock(h, project_id);
 
         // First run: prompt review runs.
@@ -208,7 +208,7 @@ fn resume_skips_completed(h: &RalphHarness) -> TestResult {
 
 fn disabled_via_config(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-disabled";
+        let project_id = "issue-704";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
@@ -223,19 +223,22 @@ fn disabled_via_config(h: &RalphHarness) -> TestResult {
         assert_path_not_exists(&project_dir.join("prompt-review.md"));
         assert_path_not_exists(&project_dir.join("prompt-original.md"));
 
-        // prompt_review_completed should remain false.
+        // With artifact-based reconstruction, prompt_review_completed is derived
+        // from the presence of prompt-review.md or from having loops > 0.  Since
+        // the run completes a loop, reconstruction sets it to true even when the
+        // prompt review step was disabled via config.
         let state = h.load_state(project_id).expect("load state");
         assert_eq!(
             state["prompt_review_completed"],
-            json!(false),
-            "prompt_review_completed should remain false when disabled"
+            json!(true),
+            "prompt_review_completed should be true after loop completion (derived from artifacts)"
         );
     })
 }
 
 fn dry_run_reports_status(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-dry-run";
+        let project_id = "issue-705";
         setup_with_standard_mock(h, project_id);
 
         // For a new project, dry-run should show pending.
@@ -260,7 +263,7 @@ fn dry_run_reports_status(h: &RalphHarness) -> TestResult {
 
 fn existing_project_migration(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-migration";
+        let project_id = "issue-706";
         setup_with_standard_mock(h, project_id);
 
         // Run one loop to create an existing project with loops.
@@ -306,7 +309,7 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
         h.setup_mock_backends_stable(&script)
             .expect("setup_mock_backends_stable failed");
         h.create_project(
-            "pr-stable-model",
+            "issue-708",
             "Stable Model Test",
             "Stable model test prompt",
         )
@@ -319,7 +322,7 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
             .expect("ralph run with stable mock and modeled backends should succeed");
 
         // Verify the loop completed successfully.
-        let state = h.load_state("pr-stable-model").expect("load state");
+        let state = h.load_state("issue-708").expect("load state");
         assert!(
             state["loops"].as_array().is_some_and(|l| !l.is_empty()),
             "at least one loop should have been completed"
@@ -332,7 +335,7 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
 /// pipeline (not truncated at the first nested heading).
 fn nested_refined_prompt_headings(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-nested-headings";
+        let project_id = "issue-707";
         h.init_workspace().expect("init failed");
         let script = h
             .write_mock_script(

@@ -216,6 +216,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::crash_after_local_commit_before_push_recovery",
             func: crash_after_local_commit_before_push_recovery,
         },
+        ConformanceTest {
+            name: "daemon::reconstruct_position_from_real_remote_checkpoint",
+            func: reconstruct_position_from_real_remote_checkpoint,
+        },
     ]
 }
 
@@ -3274,6 +3278,62 @@ fn crash_after_local_commit_before_push_recovery(h: &RalphHarness) -> TestResult
     // Existing remote-first branch sync conformance already covers this crash class:
     // local-only commit is discarded on next sync and recovered state does not advance.
     sync_project_branch_discards_local_commit(h)
+}
+
+/// Conformance: position reconstruction from a real remote checkpoint commit.
+/// Uses `commit_and_push_phase_transition` to push a structured checkpoint to
+/// a real bare remote, then verifies `derive_position` returns the correct
+/// loop number and phase.
+fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestResult {
+    use crate::git::commit::commit_and_push_phase_transition;
+    use crate::git::ralph_commit::derive_position;
+    use crate::project::state::Phase;
+
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+
+        // Create project branch and push it
+        git_run(&clone, &["checkout", "-b", "ralph/issue-55"]);
+        git_run(&clone, &["push", "-u", "origin", "ralph/issue-55"]);
+
+        // Push a real checkpoint commit: loop 1, planning -> implementing
+        commit_and_push_phase_transition(
+            &clone,
+            "issue-55",
+            1,
+            Phase::Planning,
+            Phase::Implementing,
+        )
+        .expect("first checkpoint should succeed");
+
+        let (loop_num, phase) =
+            derive_position(&clone, "ralph/issue-55").expect("derive_position should succeed");
+        assert_eq!(loop_num, 1, "expected loop 1 after first checkpoint");
+        assert_eq!(
+            phase,
+            Phase::Implementing,
+            "expected implementing phase after first checkpoint"
+        );
+
+        // Push a second checkpoint: loop 2, implementing -> reviewing
+        commit_and_push_phase_transition(
+            &clone,
+            "issue-55",
+            2,
+            Phase::Implementing,
+            Phase::Reviewing,
+        )
+        .expect("second checkpoint should succeed");
+
+        let (loop_num, phase) =
+            derive_position(&clone, "ralph/issue-55").expect("derive_position should succeed");
+        assert_eq!(loop_num, 2, "expected loop 2 after second checkpoint");
+        assert_eq!(
+            phase,
+            Phase::Reviewing,
+            "expected reviewing phase after second checkpoint"
+        );
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult

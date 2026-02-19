@@ -640,6 +640,18 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
     }
 
     let completion_verdict = verdict.and_then(|artifact| parse_completion_verdict(&artifact.body));
+
+    // Apply acceptance gate: if the completer said COMPLETE but any acceptance
+    // result failed, the effective verdict is CONTINUE.
+    let completion_verdict = match completion_verdict {
+        Some(CompletionVerdict::Complete)
+            if acceptance_results.iter().any(|r| !r.passed) =>
+        {
+            Some(CompletionVerdict::Continue)
+        }
+        other => other,
+    };
+
     let completed_at = verdict.map(|artifact| artifact.observed_at);
 
     CompletionLoopState {

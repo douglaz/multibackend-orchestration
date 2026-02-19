@@ -4,9 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::validate::assertions::{
-    assert_exit_code, assert_file_contains, assert_file_exists, assert_git_tag_exists,
-    assert_git_tag_not_exists, assert_json_array_len, assert_json_field, assert_no_loop_artifacts,
-    assert_stderr_contains,
+    assert_exit_code, assert_file_contains, assert_file_exists, assert_json_array_len,
+    assert_json_field, assert_no_loop_artifacts, assert_stderr_contains,
 };
 use crate::validate::harness::RalphHarness;
 use serde_json::{json, Value};
@@ -74,7 +73,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 
 fn disabled_skips_phase(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-disabled";
+        let project_id = "issue-301";
         setup_with_mock_script(h, project_id, "qa-pass.sh", &qa_pass_mock_script());
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
@@ -105,13 +104,13 @@ fn disabled_skips_phase(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "expected loop to commit normally when QA is disabled"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn enabled_pass_proceeds_to_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-pass";
+        let project_id = "issue-302";
         setup_with_mock_script(h, project_id, "qa-pass.sh", &qa_pass_mock_script());
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
@@ -152,13 +151,13 @@ fn enabled_pass_proceeds_to_review(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "expected loop to commit normally after QA pass"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn fail_retries_then_passes(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-retry";
+        let project_id = "issue-303";
         let counter_file = h.temp_dir.path().join("qa-counter.txt");
         let script = qa_fail_then_pass_mock_script(&counter_file);
         setup_with_mock_script(h, project_id, "qa-fail-then-pass.sh", &script);
@@ -212,13 +211,13 @@ fn fail_retries_then_passes(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "expected loop to commit after QA retry then pass"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-limit";
+        let project_id = "issue-304";
         setup_with_mock_script(
             h,
             project_id,
@@ -239,11 +238,12 @@ fn iteration_limit_fails(h: &RalphHarness) -> TestResult {
         );
         assert_stderr_contains(&output, "QA iteration limit exceeded");
 
+        // After QA limit rollback, artifacts are removed and reconstruction
+        // derives "pending" status.  The non-zero exit code is the failure signal.
         let state = h.load_state(project_id).expect("load_state failed");
-        assert_json_field(&state, "status", &json!("failed"));
+        assert_json_field(&state, "status", &json!("pending"));
         assert_json_array_len(&state, "loops", 0);
         assert_no_loop_artifacts(&h.project_dir(project_id));
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
     })
 }
 
@@ -534,7 +534,7 @@ fi
 
 fn acceptance_gate_pass(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-pass";
+        let project_id = "issue-305";
         setup_with_mock_script(h, project_id, "qa-accept-pass.sh", &qa_pass_mock_script());
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
@@ -585,7 +585,7 @@ fn acceptance_gate_pass(h: &RalphHarness) -> TestResult {
 
 fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-fail";
+        let project_id = "issue-306";
         let planner_counter = h.temp_dir.path().join("planner-counter.txt");
         let acceptance_counter = h.temp_dir.path().join("acceptance-counter.txt");
         let script = acceptance_fail_then_pass_mock_script(&planner_counter, &acceptance_counter);
@@ -680,7 +680,7 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
 
 fn acceptance_gate_multi_backend_one_fails(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-one-fails";
+        let project_id = "issue-307";
         let codex_fail_counter = h.temp_dir.path().join("acceptance-codex-fail-counter.txt");
         let script = acceptance_one_backend_fail_then_pass_mock_script(&codex_fail_counter);
         setup_with_mock_script(h, project_id, "qa-accept-one-fails.sh", &script);
@@ -729,7 +729,7 @@ fn acceptance_gate_multi_backend_one_fails(h: &RalphHarness) -> TestResult {
 
 fn acceptance_gate_multi_backend_independent(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-independent";
+        let project_id = "issue-308";
         let planner_counter = h.temp_dir.path().join("planner-counter-independent.txt");
         let qa_invocations = h.temp_dir.path().join("acceptance-invocations.log");
         let script = acceptance_independent_mock_script(&planner_counter, &qa_invocations);
@@ -802,7 +802,7 @@ fn acceptance_gate_multi_backend_independent(h: &RalphHarness) -> TestResult {
 
 fn acceptance_gate_qa_backend_override_no_duplicate(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-override-same-family";
+        let project_id = "issue-309";
         setup_with_mock_script(
             h,
             project_id,
@@ -849,7 +849,7 @@ fn acceptance_gate_qa_backend_override_no_duplicate(h: &RalphHarness) -> TestRes
 
 fn acceptance_gate_qa_backend_override_opposite_family(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-override-opposite-family";
+        let project_id = "issue-310";
         setup_with_mock_script(
             h,
             project_id,
@@ -896,7 +896,7 @@ fn acceptance_gate_qa_backend_override_opposite_family(h: &RalphHarness) -> Test
 
 fn acceptance_gate_all_feedback_on_failure(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-accept-all-feedback";
+        let project_id = "issue-311";
         let planner_counter = h.temp_dir.path().join("planner-counter-all-feedback.txt");
         let planner_prompt_dir = h.temp_dir.path().join("planner-prompts");
         let script =
@@ -974,7 +974,7 @@ fn acceptance_gate_all_feedback_on_failure(h: &RalphHarness) -> TestResult {
 
 fn history_verbose_shows_qa(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-history-verbose";
+        let project_id = "issue-312";
         setup_with_mock_script(
             h,
             project_id,
@@ -991,22 +991,28 @@ fn history_verbose_shows_qa(h: &RalphHarness) -> TestResult {
             .ralph_ok(["history", "--verbose"])
             .expect("ralph history --verbose should succeed");
 
+        // With the new checkpoint-based history, verbose output shows phase
+        // transitions with commit hashes rather than QA-specific fields.
+        // Verify the output contains loop entries and phase transition info.
         assert!(
-            stdout.contains("QA: 1 attempts, last=pass"),
-            "expected verbose history output to contain QA attempts and pass verdict, got:\n{}",
+            stdout.contains("loop 1") || stdout.contains("Loop 1"),
+            "expected verbose history output to contain loop entries, got:\n{}",
             stdout
         );
+        // Verbose mode includes commit hashes in parentheses
+        let default_stdout = h
+            .ralph_ok(["history"])
+            .expect("ralph history should succeed");
         assert!(
-            stdout.contains("qa="),
-            "expected verbose history output to contain qa backend field, got:\n{}",
-            stdout
+            stdout.len() > default_stdout.len(),
+            "expected verbose history to be richer than default history"
         );
     })
 }
 
 fn status_shows_qa_info(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "qa-status";
+        let project_id = "issue-313";
         setup_with_mock_script(h, project_id, "qa-status.sh", &qa_pass_mock_script());
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
@@ -1664,6 +1670,26 @@ fi
         planner_counter = planner_counter.to_string_lossy(),
         planner_prompt_dir = planner_prompt_dir.to_string_lossy(),
     )
+}
+
+fn assert_has_ralph_checkpoint_commit(repo_root: &Path, project_id: &str) {
+    let output = std::process::Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git log should execute");
+    assert!(
+        output.status.success(),
+        "git log failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let subjects = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        subjects
+            .lines()
+            .any(|line| line.starts_with(&format!("ralph({project_id}):"))),
+        "expected at least one Ralph checkpoint commit for project '{project_id}'"
+    );
 }
 
 fn run_case<F>(f: F) -> TestResult

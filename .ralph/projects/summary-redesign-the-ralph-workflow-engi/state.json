@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 5,
+  "current_loop": 6,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -135,7 +135,7 @@
       "slug": "remove-statejson-durable-persistence-single",
       "feature_name": "Remove state.json Durable Persistence, Single Daemon Lock, and Git+Label CLI Derivation",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -150,8 +150,48 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "546518bd5305575aebd1eb642abf8b94969e6527",
       "started_at": "2026-02-19T21:20:56.322875255Z",
+      "completed_at": "2026-02-19T21:43:47.609285037Z"
+    },
+    {
+      "loop_number": 6,
+      "slug": "state-free-test-suite-migration-and-legacy-state",
+      "feature_name": "State-Free Test Suite Migration and Legacy State API Cleanup",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219214851-spec.md",
+        "impl_notes": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219220029-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219220408-review-001-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219222555-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219222954-review-002-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219230829-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231138-review-003-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231410-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231704-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T21:48:51.281280979Z",
       "completed_at": null
     }
   ],
