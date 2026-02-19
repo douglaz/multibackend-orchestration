@@ -71,6 +71,7 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
 pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
     let mut output = NormalizedOutput::default();
     let mut json_event_count = 0_usize;
+    let mut result_text: Option<String> = None;
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -126,6 +127,9 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 // Response event; text is in message.content[].text
                 if let Some(content) = event.pointer("/message/content") {
                     if let Some(text) = extract_text_from_content(content) {
+                        if !output.text.is_empty() && !output.text.ends_with('\n') {
+                            output.text.push('\n');
+                        }
                         output.text.push_str(&text);
                     }
                 }
@@ -138,10 +142,11 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 merge_usage_from_event(&event, &mut output);
             }
             "result" => {
-                // Summary event; text in `result` field (use only if no text yet)
-                if output.text.is_empty() {
-                    if let Some(text) = event.get("result").and_then(Value::as_str) {
-                        output.text.push_str(text);
+                // Summary event; always capture result text — it contains the
+                // clean final response without narration from assistant events.
+                if let Some(text) = event.get("result").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        result_text = Some(text.to_owned());
                     }
                 }
                 if output.session_id.is_none() {
@@ -163,8 +168,12 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 }
             }
             "item.completed" => {
-                if let Some(text) = event.pointer("/item/text").and_then(Value::as_str) {
-                    output.text.push_str(text);
+                // Only extract text from agent_message items, not reasoning items.
+                let item_type = event.pointer("/item/type").and_then(Value::as_str);
+                if item_type == Some("agent_message") {
+                    if let Some(text) = event.pointer("/item/text").and_then(Value::as_str) {
+                        output.text.push_str(text);
+                    }
                 }
             }
             "turn.completed" => {
@@ -174,6 +183,12 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
 
             _ => {}
         }
+    }
+
+    // For Claude CLI verbose streams, prefer the clean result text over
+    // the concatenation of assistant narration events.
+    if let Some(rt) = result_text {
+        output.text = rt;
     }
 
     if json_event_count == 0 {
@@ -492,18 +507,18 @@ Done."#;
     }
 
     #[test]
-    fn normalize_output_claude_cli_verbose_uses_assistant_text_over_result() {
-        // When both assistant and result events have text, prefer the assistant
-        // event's content (extracted first), ignore result's duplicate.
+    fn normalize_output_claude_cli_verbose_prefers_result_over_assistant() {
+        // When both assistant and result events have text, prefer the result
+        // event's clean text over the assistant narration.
         let raw = concat!(
             r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
             "\n",
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"primary text"}]},"session_id":"s1"}"#,
             "\n",
-            r#"{"type":"result","result":"duplicate text","session_id":"s1"}"#,
+            r#"{"type":"result","result":"clean result","session_id":"s1"}"#,
         );
-        let normalized = normalize_output(raw).expect("prefers assistant text");
-        assert_eq!(normalized.text, "primary text");
+        let normalized = normalize_output(raw).expect("prefers result text");
+        assert_eq!(normalized.text, "clean result");
     }
 
     #[test]
@@ -540,5 +555,64 @@ Done."#;
         assert_eq!(normalized.tokens_in, Some(50));
         assert_eq!(normalized.tokens_out, Some(30));
         assert_eq!(normalized.cached_in, Some(20));
+    }
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_result_overrides_concatenated_narration() {
+        // Multiple assistant events produce concatenated narration that hides the H1.
+        // The result event has the clean final response and should win.
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
+            "\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Let me work on this...\"}]},\"session_id\":\"s1\"}",
+            "\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"# Implementation Notes\\n\\n## Decisions Made\\nDone.\"}]},\"session_id\":\"s1\"}",
+            "\n",
+            "{\"type\":\"result\",\"result\":\"# Implementation Notes\\n\\n## Decisions Made\\nDone.\",\"session_id\":\"s1\"}",
+        );
+        let normalized = normalize_output(raw).expect("result overrides narration");
+        assert_eq!(
+            normalized.text,
+            "# Implementation Notes\n\n## Decisions Made\nDone."
+        );
+        assert!(
+            normalized.text.starts_with("# "),
+            "H1 must be at the start of the text"
+        );
+    }
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_no_result_uses_assistant_text() {
+        // When the result event is missing (e.g. process killed), fall back to
+        // assistant text with newline separators between events.
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first block"}]},"session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second block"}]},"session_id":"s1"}"#,
+        );
+        let normalized = normalize_output(raw).expect("fallback to assistant");
+        assert_eq!(normalized.text, "first block\nsecond block");
+    }
+
+    #[test]
+    fn normalize_output_codex_cli_filters_reasoning_items() {
+        // Codex reasoning items should be excluded; only agent_message items count.
+        let raw = concat!(
+            r#"{"type":"thread.started","thread_id":"t-1"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"internal reasoning"}}"#,
+            "\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"# Implementation Notes\\n\\nDone.\"}}",
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":50,"output_tokens":30}}"#,
+        );
+        let normalized = normalize_output(raw).expect("codex filters reasoning");
+        assert_eq!(normalized.text, "# Implementation Notes\n\nDone.");
+        assert!(
+            !normalized.text.contains("internal reasoning"),
+            "reasoning text should be filtered out"
+        );
     }
 }
