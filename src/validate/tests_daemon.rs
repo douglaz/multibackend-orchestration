@@ -400,6 +400,27 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_dispatch_backfills_legacy_failed_task_project_id",
             func: runtime_dispatch_backfills_legacy_failed_task_project_id,
         },
+        // --- Loop 2 Remote-First Branch Sync Tests ---
+        ConformanceTest {
+            name: "daemon::sync_project_branch_resets_to_remote",
+            func: sync_project_branch_resets_to_remote,
+        },
+        ConformanceTest {
+            name: "daemon::sync_project_branch_creates_from_origin_head",
+            func: sync_project_branch_creates_from_origin_head,
+        },
+        ConformanceTest {
+            name: "daemon::sync_project_branch_missing_origin_head_error",
+            func: sync_project_branch_missing_origin_head_error,
+        },
+        ConformanceTest {
+            name: "daemon::sync_project_branch_discards_local_commit",
+            func: sync_project_branch_discards_local_commit,
+        },
+        ConformanceTest {
+            name: "daemon::worktree_uses_origin_head_not_local_refs",
+            func: worktree_uses_origin_head_not_local_refs,
+        },
     ]
 }
 
@@ -9038,6 +9059,239 @@ fn combined_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+// =============================================================================
+// Loop 2 Remote-First Branch Sync Tests
+// =============================================================================
+
+/// Helper: create a bare remote, push initial commit, clone it. Returns
+/// (temp_dir, bare_path, clone_path).
+fn setup_remote_clone() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let bare_path = tmp.path().join("remote.git");
+    let setup_path = tmp.path().join("setup");
+    let clone_path = tmp.path().join("clone");
+
+    // Create bare remote
+    fs::create_dir_all(bare_path.parent().unwrap()).unwrap();
+    let status = Command::new("git")
+        .args(["init", "--bare", &bare_path.to_string_lossy()])
+        .current_dir(tmp.path())
+        .status()
+        .expect("git init --bare");
+    assert!(status.success());
+
+    // Create a working repo, commit, push
+    fs::create_dir_all(&setup_path).unwrap();
+    let git_setup = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&setup_path)
+            .status()
+            .expect("git setup");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    git_setup(&["init"]);
+    git_setup(&["config", "user.email", "test@example.com"]);
+    git_setup(&["config", "user.name", "Test User"]);
+    fs::write(setup_path.join("README.md"), "# test\n").unwrap();
+    git_setup(&["add", "-A"]);
+    git_setup(&["commit", "-m", "initial"]);
+    git_setup(&["remote", "add", "origin", &bare_path.to_string_lossy()]);
+    git_setup(&["push", "-u", "origin", "HEAD"]);
+
+    // Clone
+    let status = Command::new("git")
+        .args(["clone", &bare_path.to_string_lossy(), &clone_path.to_string_lossy()])
+        .current_dir(tmp.path())
+        .status()
+        .expect("git clone");
+    assert!(status.success());
+
+    let git_clone = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&clone_path)
+            .status()
+            .expect("git clone setup");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    git_clone(&["config", "user.email", "test@example.com"]);
+    git_clone(&["config", "user.name", "Test User"]);
+
+    (tmp, bare_path, clone_path)
+}
+
+fn git_run(repo: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .expect("git command");
+    assert!(status.success(), "git {:?} failed in {}", args, repo.display());
+}
+
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command");
+    assert!(output.status.success(), "git {:?} failed in {}", args, repo.display());
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Conformance: sync_project_branch resets local branch to remote when
+/// origin/ralph/issue-<n> exists, discarding diverged local commits.
+fn sync_project_branch_resets_to_remote(_h: &RalphHarness) -> TestResult {
+    use crate::git::branch::sync_project_branch;
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+
+        // Push a project branch to remote
+        git_run(&clone, &["checkout", "-b", "ralph/issue-42"]);
+        fs::write(clone.join("remote-file.txt"), "from remote\n").unwrap();
+        git_run(&clone, &["add", "-A"]);
+        git_run(&clone, &["commit", "-m", "remote commit"]);
+        git_run(&clone, &["push", "origin", "ralph/issue-42"]);
+        let remote_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+
+        // Add a local-only diverged commit
+        fs::write(clone.join("local-only.txt"), "local diverge\n").unwrap();
+        git_run(&clone, &["add", "-A"]);
+        git_run(&clone, &["commit", "-m", "local only"]);
+        let local_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_ne!(remote_sha, local_sha);
+
+        // Switch away so sync can checkout
+        git_run(&clone, &["checkout", "-"]);
+
+        sync_project_branch(&clone, 42).expect("sync should succeed");
+
+        let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(after_sha, remote_sha, "should reset to remote");
+
+        let branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-42");
+    })
+}
+
+/// Conformance: sync_project_branch creates from origin/HEAD when remote
+/// project branch doesn't exist.
+fn sync_project_branch_creates_from_origin_head(_h: &RalphHarness) -> TestResult {
+    use crate::git::branch::sync_project_branch;
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+
+        let origin_head = git_out(&clone, &["rev-parse", "origin/HEAD"]);
+
+        sync_project_branch(&clone, 99).expect("sync should succeed");
+
+        let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(after_sha, origin_head, "should create from origin/HEAD");
+
+        let branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-99");
+    })
+}
+
+/// Conformance: sync_project_branch produces an actionable error when
+/// origin/HEAD is missing, including issue number, branch name, and failed
+/// git operation.
+fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResult {
+    use crate::git::branch::sync_project_branch;
+    run_case(|| {
+        let (_tmp, bare, clone) = setup_remote_clone();
+
+        // Delete origin/HEAD locally so it no longer resolves.
+        git_run(&clone, &["remote", "set-head", "origin", "-d"]);
+
+        // Point the bare remote's HEAD to a non-existent branch so that
+        // `git fetch origin` (inside sync_project_branch) won't re-create
+        // origin/HEAD.
+        git_run(
+            &bare,
+            &["symbolic-ref", "HEAD", "refs/heads/nonexistent"],
+        );
+
+        let result = sync_project_branch(&clone, 7);
+        assert!(result.is_err(), "should fail without origin/HEAD");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("origin/HEAD"), "error should mention origin/HEAD: {err}");
+        assert!(
+            err.contains("issue 7") || err.contains("issue-7"),
+            "error should mention issue: {err}"
+        );
+        assert!(err.contains("ralph/issue-7"), "error should mention branch: {err}");
+        assert!(
+            err.contains("git rev-parse --verify origin/HEAD"),
+            "error should mention the failed git operation: {err}"
+        );
+    })
+}
+
+/// Conformance (integration-style): a local-only commit on ralph/issue-<n>
+/// is removed after sync realigns to remote.
+fn sync_project_branch_discards_local_commit(_h: &RalphHarness) -> TestResult {
+    use crate::git::branch::sync_project_branch;
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+
+        // Push project branch
+        git_run(&clone, &["checkout", "-b", "ralph/issue-10"]);
+        fs::write(clone.join("base.txt"), "base\n").unwrap();
+        git_run(&clone, &["add", "-A"]);
+        git_run(&clone, &["commit", "-m", "base commit"]);
+        git_run(&clone, &["push", "origin", "ralph/issue-10"]);
+        let remote_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+
+        // Add local-only commit
+        fs::write(clone.join("local-artifact.txt"), "should vanish\n").unwrap();
+        git_run(&clone, &["add", "-A"]);
+        git_run(&clone, &["commit", "-m", "local only"]);
+
+        git_run(&clone, &["checkout", "-"]);
+
+        sync_project_branch(&clone, 10).expect("sync should succeed");
+
+        let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(after_sha, remote_sha, "local commit should be discarded");
+        assert!(
+            !clone.join("local-artifact.txt").exists(),
+            "local-only file should not exist"
+        );
+    })
+}
+
+/// Conformance: worktree creation uses origin/HEAD (not origin/master or local refs).
+fn worktree_uses_origin_head_not_local_refs(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+
+        // The clone has origin/HEAD pointing to default branch.
+        // Create workspace structure
+        let workspace_root = clone.join(".ralph");
+        fs::create_dir_all(workspace_root.join("daemon")).unwrap();
+
+        let result = worktree::create_worktree(&clone, &workspace_root, "test-task-1");
+        assert!(
+            result.is_ok(),
+            "worktree creation should succeed with origin/HEAD: {:?}",
+            result.err()
+        );
+
+        let wt_path = result.unwrap();
+        assert!(wt_path.exists(), "worktree dir should exist");
+
+        // Verify the worktree is on a branch based on origin/HEAD
+        let origin_head_sha = git_out(&clone, &["rev-parse", "origin/HEAD"]);
+        let wt_head_sha = git_out(&wt_path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            origin_head_sha, wt_head_sha,
+            "worktree HEAD should match origin/HEAD"
+        );
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult

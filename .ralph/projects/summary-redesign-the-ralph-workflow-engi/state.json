@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 1,
+  "current_loop": 2,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -17,7 +17,7 @@
       "slug": "ralph-structured-commit-parser-and-builder",
       "feature_name": "Ralph Structured Commit Parser and Builder",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "claude(opus)",
         "implementer": "codex(gpt-5.3-codex-high)",
@@ -32,8 +32,38 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "08cca0407df5d663613c6fee1aa65c4ae54e7e28",
       "started_at": "2026-02-19T16:33:25.761665483Z",
+      "completed_at": "2026-02-19T19:23:52.950108575Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "remote-first-project-branch-sync-for-daemon",
+      "feature_name": "Remote-First Project Branch Sync for Daemon Worktrees",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-remote-first-project-branch-sync-for-daemon/20260219192556-spec.md",
+        "impl_notes": "loops/002-remote-first-project-branch-sync-for-daemon/20260219193556-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-remote-first-project-branch-sync-for-daemon/20260219193802-review-001-feedback.md",
+            "response": "loops/002-remote-first-project-branch-sync-for-daemon/20260219194026-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-remote-first-project-branch-sync-for-daemon/20260219194215-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T19:25:56.283093760Z",
       "completed_at": null
     }
   ],

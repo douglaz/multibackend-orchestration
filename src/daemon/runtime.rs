@@ -618,6 +618,33 @@ async fn dispatch_task(
         }
     };
 
+    // Remote-first project branch sync: align the worktree to the remote
+    // project branch before invoking `ralph run`. This ensures local-only
+    // diverged commits are discarded and the branch matches remote truth.
+    {
+        let wt = wt_path.clone();
+        let issue_number = task.issue_number;
+        match spawn_blocking_op(move || {
+            crate::git::branch::sync_project_branch(&wt, issue_number)
+        })
+        .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "dispatch: remote-first sync completed for issue {} (task {})",
+                    task.issue_number, task.task_id
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "dispatch: remote-first sync failed for issue {} (task {}): {err}",
+                    task.issue_number, task.task_id
+                );
+                return Err(err);
+            }
+        }
+    }
+
     // When resuming a project (`ralph run --project`), the project state lives
     // on the project branch (e.g. `ralph/<project_id>`), not on the daemon task
     // branch. Checkout the project branch so `ralph run` can find state.json.
