@@ -546,6 +546,7 @@ impl CliBackend {
                 details: "child stderr pipe unavailable".to_owned(),
             })?;
 
+
         let last_activity = Arc::new(Mutex::new(Instant::now()));
         let activity_notify = Arc::new(Notify::new());
         let stderr_backend = self.name.clone();
@@ -738,9 +739,15 @@ impl CliBackend {
         }
     }
 
-    #[allow(dead_code)]
     async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
-        if let Err(err) = child.kill().await {
+        // Kill the entire process group (child used setsid(), so its PID is
+        // the group leader). This ensures descendant processes like `sleep`
+        // are also terminated, preventing them from holding pipes open.
+        if let Some(pid) = child.id() {
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        } else if let Err(err) = child.kill().await {
             if err.kind() != std::io::ErrorKind::InvalidInput {
                 warn!(
                     backend = %self.name,
