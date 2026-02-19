@@ -1,0 +1,65 @@
+{
+  "project_id": "restore-real-time-streaming-of-stdout-to",
+  "project_name": "Restore real-time streaming of stdout to `agent-output-*.log",
+  "created_at": "2026-02-19T01:36:44.791321958Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "6b5b71a3bc2eeec82888b2ca49d00dac62d4d4683e37314795d082e83740873d",
+  "prompt_hash_at_loop_start": "6b5b71a3bc2eeec82888b2ca49d00dac62d4d4683e37314795d082e83740873d",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "committing",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "activity-aware-idle-timeout-for-clibackend",
+      "feature_name": "Activity-Aware Idle Timeout for CliBackend Execution",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-activity-aware-idle-timeout-for-clibackend/20260219013752-spec.md",
+        "impl_notes": "loops/001-activity-aware-idle-timeout-for-clibackend/20260219014821-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-activity-aware-idle-timeout-for-clibackend/20260219014932-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T01:37:52.321545972Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": [],
+  "session_store": {
+    "records": [
+      {
+        "session_id": "019c738b-df16-7010-a13b-66dfdfd0d540",
+        "backend_spec": "codex(gpt-5.3-codex-high)",
+        "role": "implementer",
+        "loop_number": 1,
+        "bootstrap_hash": "c12641675713b70777a9f520311d11524fafd8f8a781c5d4c90fa72ec91e0478",
+        "call_count": 1,
+        "created_at": "2026-02-19T01:48:21.981108013Z",
+        "last_used_at": "2026-02-19T01:48:21.981108564Z"
+      },
+      {
+        "session_id": "0da6f402-7ff4-471e-afed-bd43d2f41af3",
+        "backend_spec": "claude(opus)",
+        "role": "reviewer",
+        "loop_number": 1,
+        "bootstrap_hash": "584068bde0e7473c2db1ed6045690ef60cb5dd3499f5976f3d25a7e8a92d8828",
+        "call_count": 1,
+        "created_at": "2026-02-19T01:49:32.311425404Z",
+        "last_used_at": "2026-02-19T01:49:32.311426036Z"
+      }
+    ]
+  }
+}

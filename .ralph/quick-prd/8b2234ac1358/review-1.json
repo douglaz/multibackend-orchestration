@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Scope alignment",
+      "feedback": "The spec shifts from the requested fix (real-time stdout log streaming) to a new idle-timeout redesign. In this codebase, streaming to `agent-output-*.log` is already in-loop (`src/backend/mod.rs:635` and `src/backend/mod.rs:637`), so this should be framed as either a regression test/spec update or a separate timeout feature proposal."
+    },
+    {
+      "area": "Acceptance criteria clarity",
+      "feedback": "Acceptance criteria and scope conflict: it requires `ralph tail` live progress, but the spec marks `ralph tail` out of scope. `ralph tail` currently follows `.md` artifacts/state (`src/cli/tail.rs`), not `agent-output-*.log`, so pass/fail is undefined unless criteria are revised or split into a second feature."
+    },
+    {
+      "area": "Behavioral compatibility",
+      "feedback": "Replacing global timeout with idle timeout unconditionally changes `timeout_seconds` semantics from total runtime cap to inactivity window. That can allow indefinitely running but chatty processes. The spec needs an explicit compatibility decision, migration note, or dual limits (`max_duration` + `idle_timeout`)."
+    },
+    {
+      "area": "Edge cases",
+      "feedback": "The proposed `Notify` watchdog needs explicit boundary-race handling (activity arriving as timeout expires, or process exiting naturally near deadline). Without a final liveness check before setting timeout state, false `BackendTimeout` results are possible."
+    },
+    {
+      "area": "Testing coverage",
+      "feedback": "Coverage is incomplete for the proposed timeout redesign: add a stderr-only activity test (idle timer reset without stdout) and add validate conformance tests for idle-timeout behavior, per project guidance that new features require validate coverage."
+    }
+  ]
+}
