@@ -1997,6 +1997,123 @@ fi
     .to_owned()
 }
 
+/// Mock script that keeps planner output active with periodic chunks for longer
+/// than a 1-second timeout window, validating idle-timeout reset behavior.
+pub fn idle_timeout_reset_planner_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  printf '# Feature: Idle Timeout Reset Feature\n'
+  sleep 0.45
+  printf '\n## Description\n'
+  sleep 0.45
+  printf 'Planner stays active with periodic output chunks.\n'
+  sleep 0.45
+  cat <<'EOF'
+
+## Acceptance Criteria
+- [ ] mock file exists
+
+## Files to Modify/Create
+- `mock_file.txt` - created by implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOF
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 /// Mock script that emits partial planner output then hangs; used to verify
 /// timeout cleanup and log footer behavior.
 pub fn timeout_hanging_planner_mock_script(pid_file: &Path) -> String {

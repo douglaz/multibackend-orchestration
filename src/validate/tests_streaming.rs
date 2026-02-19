@@ -9,8 +9,8 @@ use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
     active_streaming_planner_mock_script, hanging_after_partial_planner_mock_script,
-    planner_parse_fail_then_pass_mock_script, slow_streaming_planner_mock_script,
-    standard_mock_script, timeout_hanging_planner_mock_script,
+    idle_timeout_reset_planner_mock_script, planner_parse_fail_then_pass_mock_script,
+    slow_streaming_planner_mock_script, standard_mock_script, timeout_hanging_planner_mock_script,
 };
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -38,6 +38,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "streaming::hanging_stall_timeout",
             func: hanging_stall_timeout,
+        },
+        ConformanceTest {
+            name: "streaming::idle_timeout_reset",
+            func: idle_timeout_reset,
         },
     ]
 }
@@ -351,7 +355,7 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
             .expect("config set workflow.prompt_review_enabled failed");
-        // Set timeout to 1s — total planner runtime ~2.4s > 1s, but each
+        // Set timeout to 1s -- total planner runtime ~2.4s > 1s, but each
         // chunk arrives every 0.3s < 1s, so inactivity timeout must NOT fire.
         h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("set claude timeout");
@@ -471,6 +475,69 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
             os_err,
             libc::ESRCH,
             "stalled planner process should be fully reaped"
+        );
+    })
+}
+
+/// Verify idle timeout resets with periodic planner output chunks:
+/// planner runtime exceeds nominal timeout, run succeeds, and no timeout footer.
+fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "streaming-idle-timeout-reset";
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "idle-timeout-reset.sh",
+                &idle_timeout_reset_planner_mock_script(),
+            )
+            .expect("failed to write idle-timeout-reset mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Streaming Idle Timeout Reset",
+            "Streaming idle-timeout reset prompt",
+        )
+        .expect("create_project failed");
+
+        let start = Instant::now();
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        let elapsed = start.elapsed();
+        assert_exit_code(&output, 0);
+        assert!(
+            elapsed >= Duration::from_millis(1200),
+            "run should exceed nominal 1s timeout while still active; elapsed={elapsed:?}"
+        );
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        assert!(
+            content.contains("Idle Timeout Reset Feature"),
+            "planner log should contain streamed planner content, got:\n{content}"
+        );
+        assert!(
+            content.contains("periodic output chunks"),
+            "planner log should contain delayed chunk content, got:\n{content}"
+        );
+        assert!(
+            !content.contains("--- timeout ts="),
+            "planner log should not contain timeout footer, got:\n{content}"
         );
     })
 }
