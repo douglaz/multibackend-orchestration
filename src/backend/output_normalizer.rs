@@ -12,9 +12,15 @@ pub struct NormalizedOutput {
     pub cached_in: Option<u64>,
 }
 
-/// Known Claude stream-json event types used to distinguish NDJSON streams
+/// Known NDJSON stream event types used to distinguish multi-line streams
 /// from single-object JSON responses that happen to contain a `type` field.
-const CLAUDE_STREAM_EVENT_TYPES: &[&str] = &[
+///
+/// Includes:
+/// - Claude API stream events (`message_start`, `content_block_*`, etc.)
+/// - Claude CLI verbose events (`system` init is the first event)
+/// - Codex CLI events (`thread.started` is the first event)
+const STREAM_EVENT_TYPES: &[&str] = &[
+    // Claude API stream-json
     "message_start",
     "content_block_start",
     "content_block_delta",
@@ -23,6 +29,10 @@ const CLAUDE_STREAM_EVENT_TYPES: &[&str] = &[
     "message_stop",
     "ping",
     "summary",
+    // Claude CLI --verbose (first event is "system")
+    "system",
+    // Codex CLI (first event is "thread.started")
+    "thread.started",
 ];
 
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
@@ -49,7 +59,7 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
     let is_stream = first_json
         .get("type")
         .and_then(Value::as_str)
-        .is_some_and(|t| CLAUDE_STREAM_EVENT_TYPES.contains(&t));
+        .is_some_and(|t| STREAM_EVENT_TYPES.contains(&t));
 
     if is_stream {
         normalize_claude_stream_json(raw)
@@ -81,6 +91,7 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         match event_type {
+            // --- Claude API stream-json events ---
             "message_start" => {
                 if output.session_id.is_none() {
                     output.session_id = event
@@ -100,6 +111,67 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 merge_usage_from_event(&event, &mut output);
             }
             "content_block_start" | "content_block_stop" | "ping" => {}
+
+            // --- Claude CLI --verbose events ---
+            "system" => {
+                // Init event; extract session_id
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "assistant" => {
+                // Response event; text is in message.content[].text
+                if let Some(content) = event.pointer("/message/content") {
+                    if let Some(text) = extract_text_from_content(content) {
+                        output.text.push_str(&text);
+                    }
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                merge_usage_from_event(&event, &mut output);
+            }
+            "result" => {
+                // Summary event; text in `result` field (use only if no text yet)
+                if output.text.is_empty() {
+                    if let Some(text) = event.get("result").and_then(Value::as_str) {
+                        output.text.push_str(text);
+                    }
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                merge_usage_from_event(&event, &mut output);
+            }
+
+            // --- Codex CLI events ---
+            "thread.started" => {
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("thread_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "item.completed" => {
+                if let Some(text) = event.pointer("/item/text").and_then(Value::as_str) {
+                    output.text.push_str(text);
+                }
+            }
+            "turn.completed" => {
+                merge_usage_from_event(&event, &mut output);
+            }
+            "turn.started" => {}
+
             _ => {}
         }
     }
@@ -232,6 +304,7 @@ fn merge_usage_fields(usage: &Value, output: &mut NormalizedOutput) {
         &[
             "cached_in",
             "cache_read_input_tokens",
+            "cached_input_tokens",
             "cached_tokens",
             "cache_creation_input_tokens",
         ],
@@ -397,5 +470,75 @@ Done."#;
         let normalized = normalize_output(raw).expect("should route to single-json");
         assert_eq!(normalized.text, "ok");
         assert_eq!(normalized.session_id.as_deref(), Some("s1"));
+    }
+
+    // --- Claude CLI --verbose output ---
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_extracts_text_and_metadata() {
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"sess-abc","model":"claude-opus-4-6"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello from verbose"}],"usage":{"input_tokens":10,"output_tokens":5}},"session_id":"sess-abc"}"#,
+            "\n",
+            r#"{"type":"result","result":"Hello from verbose","session_id":"sess-abc","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}"#,
+        );
+        let normalized = normalize_output(raw).expect("claude cli verbose");
+        assert_eq!(normalized.text, "Hello from verbose");
+        assert_eq!(normalized.session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(normalized.tokens_in, Some(10));
+        assert_eq!(normalized.tokens_out, Some(5));
+        assert_eq!(normalized.cached_in, Some(100));
+    }
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_uses_assistant_text_over_result() {
+        // When both assistant and result events have text, prefer the assistant
+        // event's content (extracted first), ignore result's duplicate.
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"primary text"}]},"session_id":"s1"}"#,
+            "\n",
+            r#"{"type":"result","result":"duplicate text","session_id":"s1"}"#,
+        );
+        let normalized = normalize_output(raw).expect("prefers assistant text");
+        assert_eq!(normalized.text, "primary text");
+    }
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_falls_back_to_result_text() {
+        // If assistant event has no content, fall back to result event text.
+        let raw = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s2"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[]},"session_id":"s2"}"#,
+            "\n",
+            r#"{"type":"result","result":"fallback text","session_id":"s2"}"#,
+        );
+        let normalized = normalize_output(raw).expect("falls back to result text");
+        assert_eq!(normalized.text, "fallback text");
+        assert_eq!(normalized.session_id.as_deref(), Some("s2"));
+    }
+
+    // --- Codex CLI output ---
+
+    #[test]
+    fn normalize_output_codex_cli_extracts_text_and_metadata() {
+        let raw = concat!(
+            r#"{"type":"thread.started","thread_id":"thread-xyz"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Codex response"}}"#,
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":30}}"#,
+        );
+        let normalized = normalize_output(raw).expect("codex cli");
+        assert_eq!(normalized.text, "Codex response");
+        assert_eq!(normalized.session_id.as_deref(), Some("thread-xyz"));
+        assert_eq!(normalized.tokens_in, Some(50));
+        assert_eq!(normalized.tokens_out, Some(30));
+        assert_eq!(normalized.cached_in, Some(20));
     }
 }
