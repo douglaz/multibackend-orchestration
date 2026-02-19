@@ -28,7 +28,7 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
     AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
@@ -187,7 +187,7 @@ impl Orchestrator {
             debug!("all backends available");
         }
 
-        let mut state = load_project_state(&project_dir)?;
+        let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
         // Compute repo root for cwd invariant assertions (spec D6).
@@ -220,14 +220,12 @@ impl Orchestrator {
         {
             info!("migration guard: setting prompt_review_completed for existing project");
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
         }
 
         // Skip-flag handling: mark completed immediately so future resumes also skip.
         if options.skip_prompt_review && !state.prompt_review_completed {
             info!("--skip-prompt-review: marking prompt review as completed");
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
         }
 
         // Execute prompt review if all gates pass.
@@ -317,7 +315,6 @@ impl Orchestrator {
             state.prompt_hash = new_hash.clone();
             state.prompt_hash_at_loop_start = new_hash;
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
             info!("prompt review completed; prompt file updated");
         }
 
@@ -1053,7 +1050,6 @@ impl Orchestrator {
                             state = state_before_rollback;
                             return Err(err);
                         }
-                        persist_state(&project_dir, &state)?;
                         if options.until_complete {
                             logs.push(format!(
                                 "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1940,7 +1936,6 @@ impl Orchestrator {
                     state = state_before_rollback;
                     return Err(err);
                 }
-                persist_state(&project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
                         "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1997,7 +1992,6 @@ impl Orchestrator {
                 }
             }
 
-            persist_state(&project_dir, &state)?;
 
             // Handle --until-review stop
             if let Some(ln) = until_review_stop {
@@ -2041,36 +2035,8 @@ impl Orchestrator {
         )))
         }.await;
 
-        // Mark the project as failed while we still hold the lock.
-        if let Err(ref err) = result {
-            if is_terminal_orchestration_error(err) {
-                if let Ok(mut st) = load_project_state(&project_dir) {
-                    if st.status != ProjectStatus::Completed {
-                        st.status = ProjectStatus::Failed;
-                        let _ = save_project_state(&project_dir, &st);
-                    }
-                }
-            }
-        }
-
         result
     }
-}
-
-/// Returns `true` for error variants that indicate the orchestration loop hit
-/// a terminal failure (as opposed to setup/validation issues or transient IO
-/// errors).  Used to decide whether to mark the project as `Failed`.
-fn is_terminal_orchestration_error(err: &RalphError) -> bool {
-    matches!(
-        err,
-        RalphError::BackendTimeoutExhausted { .. }
-            | RalphError::ParseRetriesExhausted { .. }
-            | RalphError::ReviewIterationLimitExceeded { .. }
-            | RalphError::QaIterationLimitExceeded { .. }
-            | RalphError::BackendCommandFailed { .. }
-            | RalphError::Orchestration(_)
-            | RalphError::GitConflict { .. }
-    )
 }
 
 #[derive(Debug, Clone)]
@@ -3358,10 +3324,6 @@ fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<Stri
         ))
     })?;
     Ok(content)
-}
-
-fn persist_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
-    save_project_state(project_dir, state)
 }
 
 fn checkpoint_phase_transition(

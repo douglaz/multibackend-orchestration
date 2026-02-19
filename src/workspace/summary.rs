@@ -18,7 +18,7 @@ pub struct ProjectSummary {
     pub parent_project: Option<String>,
 }
 
-pub fn summarize_project(id: &str, state: &ProjectState, state_path: &Path) -> ProjectSummary {
+pub fn summarize_project(id: &str, state: &ProjectState, project_dir: &Path) -> ProjectSummary {
     let created_at = if state.created_at == DateTime::<Utc>::MIN_UTC {
         state
             .loops
@@ -32,7 +32,8 @@ pub fn summarize_project(id: &str, state: &ProjectState, state_path: &Path) -> P
             )
             .min()
             .or_else(|| {
-                fs::metadata(state_path)
+                fs::metadata(project_dir.join("prompt.md"))
+                    .or_else(|_| fs::metadata(project_dir))
                     .and_then(|meta| meta.modified())
                     .ok()
                     .map(DateTime::<Utc>::from)
@@ -101,8 +102,9 @@ mod tests {
     #[test]
     fn summarizes_project_from_state() {
         let temp = tempdir().expect("tempdir");
-        let state_path = temp.path().join("state.json");
-        fs::write(&state_path, "{}").expect("write placeholder state");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "prompt").expect("write placeholder prompt");
 
         let mut state = ProjectState::new(
             "state-id",
@@ -183,7 +185,7 @@ mod tests {
             completed_at: Some(parse_utc("2026-01-03T12:00:00Z")),
         });
 
-        let summary = summarize_project("dir-id", &state, &state_path);
+        let summary = summarize_project("dir-id", &state, &project_dir);
 
         assert_eq!(summary.id, "dir-id");
         assert_eq!(summary.name, "Demo Project");
@@ -202,25 +204,28 @@ mod tests {
     #[test]
     fn completed_at_is_none_for_non_completed_projects() {
         let temp = tempdir().expect("tempdir");
-        let state_path = temp.path().join("state.json");
-        fs::write(&state_path, "{}").expect("write placeholder state");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "prompt").expect("write placeholder prompt");
 
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
         state.status = ProjectStatus::InProgress;
-        let summary = summarize_project("demo", &state, &state_path);
+        let summary = summarize_project("demo", &state, &project_dir);
         assert!(summary.completed_at.is_none());
     }
 
     #[test]
-    fn legacy_state_without_created_at_falls_back_to_state_file_mtime() {
+    fn legacy_state_without_created_at_falls_back_to_prompt_file_mtime() {
         let temp = tempdir().expect("tempdir");
-        let state_path = temp.path().join("state.json");
-        fs::write(&state_path, "{}").expect("write placeholder state");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let prompt_path = project_dir.join("prompt.md");
+        fs::write(&prompt_path, "prompt").expect("write placeholder prompt");
         let expected_created_at = DateTime::<Utc>::from(
-            fs::metadata(&state_path)
-                .expect("state metadata")
+            fs::metadata(&prompt_path)
+                .expect("prompt metadata")
                 .modified()
-                .expect("state mtime"),
+                .expect("prompt mtime"),
         );
 
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
@@ -228,22 +233,22 @@ mod tests {
         state.loops.clear();
         state.completion_attempts.clear();
 
-        let summary = summarize_project("demo", &state, &state_path);
+        let summary = summarize_project("demo", &state, &project_dir);
         assert_eq!(summary.created_at, expected_created_at);
         assert_ne!(summary.created_at, DateTime::<Utc>::MIN_UTC);
     }
 
     #[test]
-    fn legacy_state_uses_now_when_state_file_metadata_is_unavailable() {
+    fn legacy_state_uses_now_when_prompt_metadata_is_unavailable() {
         let temp = tempdir().expect("tempdir");
-        let missing_state_path = temp.path().join("missing").join("state.json");
+        let missing_project_dir = temp.path().join("missing");
         let mut state = ProjectState::new("demo", "Demo", "hash", None);
         state.created_at = DateTime::<Utc>::MIN_UTC;
         state.loops.clear();
         state.completion_attempts.clear();
 
         let before = Utc::now();
-        let summary = summarize_project("demo", &state, &missing_state_path);
+        let summary = summarize_project("demo", &state, &missing_project_dir);
         let after = Utc::now();
 
         assert!(summary.created_at >= before);

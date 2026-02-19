@@ -33,7 +33,7 @@ pub fn render_template_with_fallback(
 pub fn default_planner_template() -> &'static str {
     r#"You are a software architect planning features for a project.
 
-Given `prompt.md` and `state.json`, you must:
+Given `prompt.md`, loop artifacts, and git checkpoint history, you must:
 1. Analyze what has been completed so far
 2. Identify the next logical feature to implement
 3. Write a detailed specification for that feature

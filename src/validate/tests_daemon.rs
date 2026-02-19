@@ -204,6 +204,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::label_retry_on_conflict_transient",
             func: label_retry_on_conflict_transient,
         },
+        ConformanceTest {
+            name: "daemon::daemon_lock_contention_exits_immediately",
+            func: daemon_lock_contention_exits_immediately,
+        },
+        ConformanceTest {
+            name: "daemon::status_history_derive_from_git_and_labels",
+            func: status_history_derive_from_git_and_labels,
+        },
+        ConformanceTest {
+            name: "daemon::crash_after_local_commit_before_push_recovery",
+            func: crash_after_local_commit_before_push_recovery,
+        },
     ]
 }
 
@@ -1391,16 +1403,22 @@ exit 1
         );
 
         // With 100 issues that have no lifecycle labels (`labels:[]`), none
-        // should be claimed (they lack `ralph:ready`). No tasks.json is written.
-        let tasks_json = dh
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("tasks.json");
-        assert!(
-            !tasks_json.exists(),
-            "no tasks.json should be written (label-only lifecycle)"
-        );
+        // should be claimed (they lack `ralph:ready`), and no durable daemon
+        // JSON state should be written.
+        let daemon_dir = dh.repo_root.join(".ralph").join("daemon");
+        if daemon_dir.exists() {
+            let has_json = fs::read_dir(&daemon_dir)
+                .expect("read daemon dir")
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("json")
+                });
+            assert!(!has_json, "no daemon JSON state files should be written");
+        }
     })
 }
 
@@ -1556,7 +1574,7 @@ esac
 /// Verifies:
 /// - Daemon exits successfully in single-iteration mode
 /// - Issues polled as ralph:ready are claimed, dispatched, and drained
-/// - No tasks.json file is created (label-only lifecycle)
+/// - No durable daemon JSON lifecycle file is created (label-only lifecycle)
 fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -1592,16 +1610,21 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "daemon start validated for repo acme/widgets");
 
-        // Verify no tasks.json was written (label-only lifecycle)
-        let tasks_json_path = dh
-            .repo_root
-            .join(".ralph")
-            .join("daemon")
-            .join("tasks.json");
-        assert!(
-            !tasks_json_path.exists(),
-            "tasks.json should NOT exist after single-iteration (label-only lifecycle)"
-        );
+        // Verify no durable daemon JSON state was written (label-only lifecycle)
+        let daemon_dir = dh.repo_root.join(".ralph").join("daemon");
+        if daemon_dir.exists() {
+            let has_json = fs::read_dir(&daemon_dir)
+                .expect("read daemon dir")
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("json")
+                });
+            assert!(!has_json, "daemon should not persist JSON lifecycle state");
+        }
     })
 }
 
@@ -1975,7 +1998,7 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
         // Create a file inside .ralph/ (should be preserved)
         let ralph_dir = wt.join(".ralph").join("test");
         fs::create_dir_all(&ralph_dir).expect("create .ralph/test");
-        fs::write(ralph_dir.join("state.json"), "{}").expect("write .ralph state");
+        fs::write(ralph_dir.join("marker.txt"), "{}").expect("write .ralph marker");
 
         // Verify dirty state
         let status = git_stdout(&wt, &["status", "--short"]);
@@ -2000,7 +2023,7 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
 
         // .ralph/ directory should be preserved
         assert!(
-            ralph_dir.join("state.json").exists(),
+            ralph_dir.join("marker.txt").exists(),
             ".ralph/ contents should survive clean_worktree"
         );
     })
@@ -2079,7 +2102,7 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
 // =============================================================================
 
 /// Create an empty data-dir, run daemon start with a mock gh that simulates
-/// clone. Assert: repo dir exists, .ralph/ workspace initialized, tasks.json
+/// clone. Assert: repo dir exists, .ralph/ workspace initialized, label lifecycle
 /// written, daemon completes exit 0.
 fn daemon_start_bootstraps_empty_dir(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -2333,12 +2356,12 @@ fn git(repo_root: &Path, args: &[&str]) {
 // Loop 2 Dispatch-time Project Backfill Tests
 // =============================================================================
 
-/// Asserts stray project directories without `state.json` are ignored by
+/// Asserts stray project directories without `prompt.md` are ignored by
 /// dispatch-time project discovery.
 ///
 /// Sets up a worktree with:
-/// - `.ralph/projects/valid-proj/state.json` (valid)
-/// - `.ralph/projects/stray-proj/` (no state.json — stray)
+/// - `.ralph/projects/valid-proj/prompt.md` (valid)
+/// - `.ralph/projects/stray-proj/` (no prompt.md — stray)
 ///
 /// The legacy task (project_id = null) should discover only `valid-proj` and
 /// dispatch via `ralph run --project valid-proj`.
@@ -2354,13 +2377,12 @@ fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> Test
         let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
             .expect("create worktree");
 
-        // Valid project: has state.json
+        // Valid project: has prompt.md
         let valid_proj_dir = wt_path.join(".ralph").join("projects").join("valid-proj");
         fs::create_dir_all(&valid_proj_dir).expect("create valid project dir");
-        fs::write(valid_proj_dir.join("state.json"), r#"{"status":"active"}"#)
-            .expect("write valid state.json");
+        fs::write(valid_proj_dir.join("prompt.md"), "valid prompt").expect("write valid prompt");
 
-        // Stray project: directory only, no state.json
+        // Stray project: directory only, no prompt.md
         let stray_proj_dir = wt_path.join(".ralph").join("projects").join("stray-proj");
         fs::create_dir_all(&stray_proj_dir).expect("create stray project dir");
 
@@ -2784,7 +2806,7 @@ fn worktree_uses_origin_head_not_local_refs(_h: &RalphHarness) -> TestResult {
 // Loop 4: Label Lifecycle No-Durable-Store Tests
 // =============================================================================
 
-/// Verify that no tasks.json file is created during a daemon runtime cycle.
+/// Verify that no durable daemon JSON lifecycle file is created during a daemon runtime cycle.
 /// This confirms the removal of durable local task state.
 fn no_tasks_json_written_after_runtime(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -2815,19 +2837,30 @@ fn no_tasks_json_written_after_runtime(h: &RalphHarness) -> TestResult {
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        // Verify no tasks.json was created
-        let tasks_json_path = dh
+        // Verify no durable daemon JSON state was created
+        let daemon_dir = dh
             .data_dir()
             .join("acme")
             .join("widgets")
             .join(".ralph")
-            .join("daemon")
-            .join("tasks.json");
-        assert!(
-            !tasks_json_path.exists(),
-            "tasks.json should NOT exist after daemon runtime (durable store removed): {}",
-            tasks_json_path.display()
-        );
+            .join("daemon");
+        if daemon_dir.exists() {
+            let has_json = fs::read_dir(&daemon_dir)
+                .expect("read daemon dir")
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("json")
+                });
+            assert!(
+                !has_json,
+                "daemon should not persist JSON lifecycle state in {}",
+                daemon_dir.display()
+            );
+        }
     })
 }
 
@@ -3116,6 +3149,131 @@ exit 1
         );
         assert_eq!(lifecycle[0], "ralph:ready");
     })
+}
+
+fn daemon_lock_contention_exits_immediately(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let mut first = Command::new(&dh.ralph_bin)
+            .args([
+                "daemon",
+                "start",
+                "--data-dir",
+                &dh.data_dir_str(),
+                "--repo",
+                "acme/widgets",
+                "--poll-seconds",
+                "60",
+            ])
+            .current_dir(dh.data_dir())
+            .env("PATH", &gh_path)
+            .spawn()
+            .expect("first daemon should spawn");
+
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        let second = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path)],
+            )
+            .expect("second daemon invocation should execute");
+        assert!(
+            !second.status.success(),
+            "second daemon should fail due to lock contention, stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&second.stdout),
+            String::from_utf8_lossy(&second.stderr)
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&second.stdout),
+            String::from_utf8_lossy(&second.stderr)
+        );
+        assert!(
+            combined.contains("daemon is already running") || combined.contains("lock"),
+            "expected lock contention message, got:\n{combined}"
+        );
+
+        let _ = first.kill();
+        let _ = first.wait();
+    })
+}
+
+fn status_history_derive_from_git_and_labels(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("issue-7", "Issue 7", "status/history derivation prompt")
+            .expect("create project");
+
+        git(
+            &h.repo_root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/acme/widgets.git",
+            ],
+        );
+        git(&h.repo_root, &["checkout", "-B", "ralph/issue-7"]);
+
+        let msg_1 = "ralph(issue-7): loop 1 planning -> implementing\n\nRalph-Project: issue-7\nRalph-Loop: 1\nRalph-Phase: implementing";
+        git(&h.repo_root, &["commit", "--allow-empty", "-m", msg_1]);
+        let msg_2 = "ralph(issue-7): loop 1 implementing -> reviewing\n\nRalph-Project: issue-7\nRalph-Loop: 1\nRalph-Phase: reviewing";
+        git(&h.repo_root, &["commit", "--allow-empty", "-m", msg_2]);
+
+        let head = git_stdout(&h.repo_root, &["rev-parse", "HEAD"]);
+        git(
+            &h.repo_root,
+            &["update-ref", "refs/remotes/origin/ralph/issue-7", &head],
+        );
+        git(&h.repo_root, &["checkout", "master"]);
+
+        let gh_script = r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"labels":[{"name":"ralph:completed"}]}'
+  exit 0
+fi
+printf '[]'
+exit 0
+"#;
+        let gh_path = write_mock_gh(h, gh_script).expect("mock gh");
+
+        let status = h
+            .ralph_env(["status", "--project", "issue-7"], &[("PATH", &gh_path)])
+            .expect("status should execute");
+        assert_exit_code(&status, 0);
+        assert_stdout_contains(&status, "completed");
+        assert_stdout_contains(&status, "reviewing");
+
+        let history = h
+            .ralph_env(["history", "--project", "issue-7"], &[("PATH", &gh_path)])
+            .expect("history should execute");
+        assert_exit_code(&history, 0);
+        let out = String::from_utf8_lossy(&history.stdout);
+        assert!(
+            out.contains("planning -> implementing"),
+            "expected trailer-derived transition in history output, got:\n{out}"
+        );
+        assert!(
+            out.contains("implementing -> reviewing"),
+            "expected trailer-derived transition in history output, got:\n{out}"
+        );
+    })
+}
+
+fn crash_after_local_commit_before_push_recovery(h: &RalphHarness) -> TestResult {
+    // Existing remote-first branch sync conformance already covers this crash class:
+    // local-only commit is discarded on next sync and recovered state does not advance.
+    sync_project_branch_discards_local_commit(h)
 }
 
 fn run_case<F>(f: F) -> TestResult

@@ -267,13 +267,6 @@ fn existing_project_migration(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        // Manually remove prompt_review_completed from state to simulate legacy.
-        let state_path = h.project_dir(project_id).join("state.json");
-        let state_json = fs::read_to_string(&state_path).expect("read state");
-        let mut state: serde_json::Value = serde_json::from_str(&state_json).expect("parse state");
-        state["prompt_review_completed"] = json!(false);
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).expect("write state");
-
         // Remove the prompt-review.md and prompt-original.md so we can detect if
         // prompt review re-ran.
         let project_dir = h.project_dir(project_id);
@@ -290,7 +283,7 @@ fn existing_project_migration(h: &RalphHarness) -> TestResult {
         assert_path_not_exists(&project_dir.join("prompt-review.md"));
         assert_path_not_exists(&project_dir.join("prompt-original.md"));
 
-        // The key assertion is that prompt_review_completed is now true in state.
+        // The key assertion is that prompt_review_completed remains true in derived state.
         let state_after = h.load_state(project_id).expect("load state");
         assert_eq!(
             state_after["prompt_review_completed"],

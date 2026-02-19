@@ -158,13 +158,9 @@ impl RalphHarness {
     }
 
     pub fn load_state(&self, project_id: &str) -> Result<Value> {
-        let path = self
-            .repo_root
-            .join(".ralph")
-            .join("projects")
-            .join(project_id)
-            .join("state.json");
-        load_json(&path)
+        let stdout = self.ralph_ok(["project", "show", project_id, "--json"])?;
+        let parsed: Value = serde_json::from_str(&stdout)?;
+        Ok(parsed.get("state").cloned().unwrap_or(Value::Null))
     }
 
     /// Read the worktree-local active-project file (`.git/ralph-active-project`).
@@ -417,11 +413,6 @@ fn inject_daemon_data_dir_arg(data_dir: &Path, args: &mut Vec<OsString>) {
 
     args.insert(2, data_dir.as_os_str().to_os_string());
     args.insert(2, OsString::from("--data-dir"));
-}
-
-fn load_json(path: &Path) -> Result<Value> {
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {

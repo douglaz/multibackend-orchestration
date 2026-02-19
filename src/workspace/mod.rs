@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
-use crate::project::state::ProjectState;
+use crate::project::lifecycle::reconstruct_project_state;
 use crate::Result;
 
 use self::summary::{summarize_project, ProjectSummary};
@@ -116,20 +116,16 @@ impl Workspace {
                 continue;
             }
 
-            let state_path = path.join("state.json");
-            if !state_path.is_file() {
-                eprintln!(
-                    "warning: skipping project directory '{}' because state.json is missing",
-                    path.display()
-                );
+            if !path.join("prompt.md").is_file() {
                 continue;
             }
 
-            let state = match ProjectState::load(&state_path) {
+            let project_id = entry.file_name().to_string_lossy().to_string();
+            let state = match reconstruct_project_state(self, &project_id) {
                 Ok(state) => state,
                 Err(err) => {
                     eprintln!(
-                        "warning: skipping project directory '{}' because state.json is invalid: {}",
+                        "warning: skipping project directory '{}' because state derivation failed: {}",
                         path.display(),
                         err
                     );
@@ -137,8 +133,7 @@ impl Workspace {
                 }
             };
 
-            let project_id = entry.file_name().to_string_lossy().to_string();
-            projects.push(summarize_project(&project_id, &state, &state_path));
+            projects.push(summarize_project(&project_id, &state, &path));
         }
 
         projects.sort_by(|left, right| left.id.cmp(&right.id));
@@ -146,7 +141,8 @@ impl Workspace {
     }
 
     pub fn project_exists(&self, id: &str) -> bool {
-        self.project_dir(id).join("state.json").is_file()
+        let project_dir = self.project_dir(id);
+        project_dir.is_dir() && project_dir.join("prompt.md").is_file()
     }
 
     pub fn load_project_summary(&self, id: &str) -> Result<ProjectSummary> {
@@ -154,9 +150,9 @@ impl Workspace {
             return Err(RalphError::ProjectNotFound(id.to_owned()));
         }
 
-        let state_path = self.project_dir(id).join("state.json");
-        let state = ProjectState::load(&state_path)?;
-        Ok(summarize_project(id, &state, &state_path))
+        let project_dir = self.project_dir(id);
+        let state = reconstruct_project_state(self, id)?;
+        Ok(summarize_project(id, &state, &project_dir))
     }
 
     pub fn active_project_id(&self) -> Option<String> {
@@ -211,9 +207,63 @@ mod tests {
         let project_dir = workspace.project_dir(id);
         fs::create_dir_all(project_dir.join("loops")).expect("create loops dir");
         state.project_id = id.to_owned();
-        state
-            .save(&project_dir.join("state.json"))
-            .expect("save state");
+        fs::write(project_dir.join("prompt.md"), "prompt").expect("write prompt");
+        fs::write(
+            project_dir.join("project.toml"),
+            format!("name = {:?}\n", state.project_name),
+        )
+        .expect("write metadata");
+
+        for loop_state in &state.loops {
+            let loop_dir = project_dir
+                .join("loops")
+                .join(format!("{:03}-{}", loop_state.loop_number, loop_state.slug));
+            fs::create_dir_all(&loop_dir).expect("create loop dir");
+            fs::write(
+                loop_dir.join("20260101000000-spec.md"),
+                format!(
+                    "---\nartifact: spec\nloop: {}\nbackend: planner\nrole: planner\ncreated_at: 2026-01-01T00:00:00Z\n---\n\n# Feature: {}\n",
+                    loop_state.loop_number, loop_state.feature_name
+                ),
+            )
+            .expect("write spec");
+
+            if loop_state.status == LoopStatus::Completed {
+                fs::write(
+                    loop_dir.join("20260101000100-review-approved.md"),
+                    format!(
+                        "---\nartifact: review-approved\nloop: {}\nbackend: reviewer\nrole: reviewer\ncreated_at: 2026-01-01T00:01:00Z\n---\n\n# Review: APPROVED\n",
+                        loop_state.loop_number
+                    ),
+                )
+                .expect("write approval");
+            }
+        }
+
+        for completion in &state.completion_attempts {
+            let loop_dir = project_dir
+                .join("loops")
+                .join(format!("{:03}-completion", completion.loop_number));
+            fs::create_dir_all(&loop_dir).expect("create completion loop dir");
+            fs::write(
+                loop_dir.join("20260101000200-termination-request.md"),
+                format!(
+                    "---\nartifact: termination-request\nloop: {}\nbackend: planner\nrole: planner\ncreated_at: 2026-01-01T00:02:00Z\n---\n\n# Project Completion Request\n",
+                    completion.loop_number
+                ),
+            )
+            .expect("write termination request");
+            if completion.status == LoopStatus::Completed {
+                fs::write(
+                    loop_dir.join("20260101000300-completer-verdict.md"),
+                    format!(
+                        "---\nartifact: completer-verdict\nloop: {}\nbackend: completer\nrole: completer\ncreated_at: 2026-01-01T00:03:00Z\n---\n\n# Verdict: CONTINUE\n",
+                        completion.loop_number
+                    ),
+                )
+                .expect("write completer verdict");
+            }
+        }
     }
 
     fn demo_state(name: &str) -> ProjectState {
@@ -241,19 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn list_projects_skips_non_dirs_missing_state_and_malformed_state() {
+    fn list_projects_skips_non_dirs_and_missing_prompt() {
         let (_temp, workspace) = create_workspace();
         write_state(&workspace, "valid", demo_state("Valid"));
 
         let non_dir_entry = workspace.root.join("projects").join("README.txt");
         fs::write(non_dir_entry, "ignore me").expect("write non-dir entry");
 
-        let missing_state_dir = workspace.project_dir("missing");
-        fs::create_dir_all(&missing_state_dir).expect("create missing state dir");
-
-        let malformed_state_dir = workspace.project_dir("malformed");
-        fs::create_dir_all(&malformed_state_dir).expect("create malformed dir");
-        fs::write(malformed_state_dir.join("state.json"), "{").expect("write malformed state");
+        let missing_prompt_dir = workspace.project_dir("missing");
+        fs::create_dir_all(&missing_prompt_dir).expect("create missing prompt dir");
 
         let projects = workspace.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
@@ -261,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn project_exists_checks_for_state_json() {
+    fn project_exists_checks_for_prompt_file() {
         let (_temp, workspace) = create_workspace();
         write_state(&workspace, "exists", demo_state("Exists"));
         assert!(workspace.project_exists("exists"));

@@ -139,7 +139,7 @@ fn history_capping_limits_qa_entries(h: &RalphHarness) -> TestResult {
 
 /// Verify session reuse config, state model, and runtime store/resume lifecycle:
 /// - Enable session reuse and verify config roundtrip
-/// - Verify state.json has session_store with expected structure
+/// - Verify derived state has session_store with expected structure
 /// - Run a loop and verify session_store appears in state
 /// - Validate invalid roles are rejected by config set
 fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
@@ -185,12 +185,12 @@ fn session_lifecycle_stores_and_resumes(h: &RalphHarness) -> TestResult {
 
         assert_json_field(&config, "workflow.session_reuse_enabled", &json!(true));
 
-        // Verify state.json has session_store field (empty initially)
+        // Verify derived state has session_store field (empty initially)
         let state = h.load_state(project_id).expect("load_state failed");
         let session_store = &state["session_store"];
         assert!(
             session_store.is_object(),
-            "session_store should exist in state.json: {:?}",
+            "session_store should exist in derived state: {:?}",
             state
         );
         let records = &session_store["records"];

@@ -1,12 +1,7 @@
 use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -247,22 +242,6 @@ impl ProjectState {
             completion_attempts: Vec::new(),
             session_store: SessionStore::default(),
         }
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = fs::read_to_string(path)?;
-        let mut state: Self = serde_json::from_str(&raw)?;
-        state.migrate_legacy_acceptance_results();
-        Ok(state)
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let raw = serde_json::to_string_pretty(self)?;
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-        temp.write_all(raw.as_bytes())?;
-        temp.persist(path).map_err(|err| err.error)?;
-        Ok(())
     }
 
     pub fn next_loop_number(&self) -> u32 {
@@ -515,8 +494,6 @@ impl CompletionLoopArtifacts {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
-    use tempfile::tempdir;
-
     use super::{default_created_at, ProjectState};
 
     #[test]
@@ -559,21 +536,6 @@ mod tests {
         let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
         assert_eq!(parsed.created_at, DateTime::<Utc>::MIN_UTC);
         assert_eq!(parsed.created_at, default_created_at());
-    }
-
-    #[test]
-    fn save_is_atomic_and_roundtrips() {
-        let temp = tempdir().expect("temp dir");
-        let state_path = temp.path().join("state.json");
-        let state = ProjectState::new("demo", "Demo", "abc123", None);
-
-        state.save(&state_path).expect("save state");
-        assert!(state_path.exists());
-
-        let loaded = ProjectState::load(&state_path).expect("load state");
-        assert_eq!(loaded.project_id, state.project_id);
-        assert_eq!(loaded.project_name, state.project_name);
-        assert_eq!(loaded.created_at, state.created_at);
     }
 
     #[test]

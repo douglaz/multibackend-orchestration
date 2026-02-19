@@ -436,14 +436,19 @@ fn dry_run(h: &RalphHarness) -> TestResult {
         let project_id = "run-dry-run";
         setup_with_standard_mock(h, project_id);
 
-        let state_path = h.project_dir(project_id).join("state.json");
-        let before = fs::read_to_string(&state_path).expect("failed to read state before dry-run");
+        let prompt_path = h.project_dir(project_id).join("prompt.md");
+        let before_prompt =
+            fs::read_to_string(&prompt_path).expect("failed to read prompt before dry-run");
 
         h.ralph_ok(["run", "--dry-run", "--loops", "1"])
             .expect("ralph run --dry-run should succeed");
 
-        let after = fs::read_to_string(&state_path).expect("failed to read state after dry-run");
-        assert_eq!(before, after, "state.json should not change during dry-run");
+        let after_prompt =
+            fs::read_to_string(&prompt_path).expect("failed to read prompt after dry-run");
+        assert_eq!(
+            before_prompt, after_prompt,
+            "prompt should not change during dry-run"
+        );
         assert_no_loop_artifacts(&h.project_dir(project_id));
     })
 }

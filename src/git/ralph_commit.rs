@@ -70,6 +70,11 @@ pub fn parse_ralph_commit(
 }
 
 pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<RalphCommitInfo>> {
+    let commits = list_ralph_commits(repo_root, branch)?;
+    Ok(commits.into_iter().next())
+}
+
+pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
     let remote_branch = format!("origin/{branch}");
 
@@ -78,7 +83,7 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
         &["rev-parse", "--verify", "--quiet", remote_branch.as_str()],
     )?;
     if !status.success() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let log = run_git(
@@ -86,6 +91,7 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
         &["log", remote_branch.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
     )?;
 
+    let mut commits = Vec::new();
     for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
         let mut fields = record.splitn(3, '\x1f');
         let hash = fields.next().unwrap_or("").trim();
@@ -99,10 +105,10 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
         let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
             RalphError::ParseError(format!("malformed Ralph checkpoint commit {hash}: {err}"))
         })?;
-        return Ok(Some(parsed));
+        commits.push(parsed);
     }
 
-    Ok(None)
+    Ok(commits)
 }
 
 pub fn derive_position(repo_root: &Path, branch: &str) -> Result<(u32, Phase)> {

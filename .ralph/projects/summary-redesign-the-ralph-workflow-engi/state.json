@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 4,
+  "current_loop": 5,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -95,7 +95,7 @@
       "slug": "daemon-in-memory-runtime-and-lifecycle-label",
       "feature_name": "Daemon In-Memory Runtime and Lifecycle Label Reconciliation",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -126,8 +126,32 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "779b674c0e58fb88b41ee47176433bf8e631037a",
       "started_at": "2026-02-19T20:00:20.950812252Z",
+      "completed_at": "2026-02-19T21:17:20.345357019Z"
+    },
+    {
+      "loop_number": 5,
+      "slug": "remove-statejson-durable-persistence-single",
+      "feature_name": "Remove state.json Durable Persistence, Single Daemon Lock, and Git+Label CLI Derivation",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/005-remove-statejson-durable-persistence-single/20260219212056-spec.md",
+        "impl_notes": "loops/005-remove-statejson-durable-persistence-single/20260219214212-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/005-remove-statejson-durable-persistence-single/20260219214347-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T21:20:56.322875255Z",
       "completed_at": null
     }
   ],

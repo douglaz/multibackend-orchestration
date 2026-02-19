@@ -599,7 +599,10 @@ fn load_tasks(h: &RalphHarness) -> crate::Result<Vec<Value>> {
 }
 
 fn tasks_path(h: &RalphHarness) -> PathBuf {
-    h.repo_root.join(".ralph").join("daemon").join("tasks.json")
+    h.repo_root
+        .join(".ralph")
+        .join("daemon")
+        .join("daemon-state-fixture.json")
 }
 
 fn task_json(task_id: &str, state: &str, issue_number: u32, owner: &str, repo: &str) -> Value {

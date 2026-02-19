@@ -9,6 +9,7 @@ use crate::daemon::bootstrap;
 use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
 use crate::daemon::github;
 use crate::project::load_project_config_if_exists;
+use crate::util::lock::DaemonLock;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -135,6 +136,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
     let mut deprecation_warned = false;
 
     let mut repo_configs: Vec<DaemonRuntimeConfig> = Vec::new();
+    let mut daemon_locks: Vec<DaemonLock> = Vec::new();
 
     for slug in &normalized_repos {
         let (owner, repo_name) = parse_repo_slug(slug)?;
@@ -203,6 +205,8 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             workspace_root: workspace.root.clone(),
         };
 
+        let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;
+        daemon_locks.push(daemon_lock);
         repo_configs.push(runtime_config);
     }
 
@@ -229,6 +233,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         }
     }
 
+    drop(daemon_locks);
     Ok(())
 }
 

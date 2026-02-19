@@ -2,8 +2,13 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::StatusArgs;
+use crate::daemon::github::{classify_lifecycle_labels, fetch_issue_labels};
+use crate::git::ralph_commit::{derive_position, parse_last_ralph_commit};
 use crate::project::artifacts::resolve_artifact_path_by_suffix;
-use crate::project::lifecycle::load_project_state;
+use crate::project::lifecycle::{
+    parse_github_repo_slug, parse_issue_number, project_git_context, reconstruct_project_state,
+};
+use crate::project::state::ProjectStatus;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -14,7 +19,28 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     if !workspace.project_exists(&project_id) {
         return Err(RalphError::ProjectNotFound(project_id));
     }
-    let state = load_project_state(&workspace.project_dir(&project_id))?;
+    let mut state = reconstruct_project_state(&workspace, &project_id)?;
+
+    if let Some(ctx) = project_git_context(&workspace, &project_id) {
+        if parse_last_ralph_commit(&ctx.repo_root, &ctx.branch)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            if let Ok((loop_number, phase)) = derive_position(&ctx.repo_root, &ctx.branch) {
+                state.current_loop = if state.last_loop_number() == 0 && loop_number == 1 {
+                    0
+                } else {
+                    loop_number
+                };
+                state.current_phase = phase;
+            }
+        }
+    }
+
+    if let Some(label_status) = derive_project_status_from_labels(&workspace, &project_id) {
+        state.status = label_status;
+    }
 
     println!("WORKSPACE: {}", workspace.root.display());
     println!(
@@ -140,6 +166,26 @@ fn project_status_label(status: &crate::project::state::ProjectStatus) -> &'stat
         crate::project::state::ProjectStatus::InProgress => "in_progress",
         crate::project::state::ProjectStatus::Completed => "completed",
         crate::project::state::ProjectStatus::Failed => "failed",
+    }
+}
+
+fn derive_project_status_from_labels(workspace: &Workspace, project_id: &str) -> Option<ProjectStatus> {
+    let issue_number = parse_issue_number(project_id)?;
+    let git_context = project_git_context(workspace, project_id)?;
+    let (owner, repo) = parse_github_repo_slug(&git_context.repo_root)?;
+
+    let labels = fetch_issue_labels(&owner, &repo, issue_number).ok()?;
+    let lifecycle = classify_lifecycle_labels(&labels);
+    if lifecycle.len() > 1 {
+        return Some(ProjectStatus::Failed);
+    }
+
+    match lifecycle.first().map(String::as_str) {
+        Some("ralph:ready") => Some(ProjectStatus::Pending),
+        Some("ralph:in-progress") => Some(ProjectStatus::InProgress),
+        Some("ralph:completed") => Some(ProjectStatus::Completed),
+        Some("ralph:failed") => Some(ProjectStatus::Failed),
+        _ => None,
     }
 }
 

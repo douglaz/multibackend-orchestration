@@ -361,7 +361,7 @@ async fn poll_and_claim(
     Ok(())
 }
 
-/// Scan a task worktree for valid projects under `.ralph/projects/*/state.json`.
+/// Scan a task worktree for valid projects under `.ralph/projects/*/prompt.md`.
 fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
     let projects_dir = worktree_path.join(".ralph").join("projects");
     let entries = match std::fs::read_dir(&projects_dir) {
@@ -372,16 +372,16 @@ fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
     let mut found = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let state_path = entry.path().join("state.json");
-        if state_path.is_file() {
+        let prompt_path = entry.path().join("prompt.md");
+        if prompt_path.is_file() {
             found.push(name);
         }
     }
     found
 }
 
-/// Find the most recently created project in a worktree by parsing
-/// `created_at` from each `state.json`. Returns `None` if no projects exist.
+/// Find the most recently modified project directory by prompt mtime.
+/// Returns `None` if no projects exist.
 #[cfg(test)]
 fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
     let projects_dir = worktree_path.join(".ralph").join("projects");
@@ -390,30 +390,20 @@ fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
         Err(_) => return None,
     };
 
-    let mut best: Option<(String, String)> = None; // (project_id, created_at)
+    let mut best: Option<(String, std::time::SystemTime)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let state_path = entry.path().join("state.json");
-        if let Ok(contents) = std::fs::read_to_string(&state_path) {
-            if let Some(pos) = contents.find("\"created_at\"") {
-                let mut tail = &contents[pos + "\"created_at\"".len()..];
-                if let Some(colon_pos) = tail.find(':') {
-                    tail = &tail[colon_pos + 1..];
-                    if let Some(start) = tail.find('"') {
-                        let value_start = start + 1;
-                        if let Some(end) = tail[value_start..].find('"') {
-                            let created_at = &tail[value_start..value_start + end];
-                            let dominated = match &best {
-                                Some((_, prev)) => created_at > prev.as_str(),
-                                None => true,
-                            };
-                            if dominated {
-                                best = Some((name, created_at.to_owned()));
-                            }
-                        }
-                    }
-                }
-            }
+        let prompt_path = entry.path().join("prompt.md");
+        let modified = match std::fs::metadata(prompt_path).and_then(|meta| meta.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        let dominated = match &best {
+            Some((_, prev)) => modified > *prev,
+            None => true,
+        };
+        if dominated {
+            best = Some((name, modified));
         }
     }
     best.map(|(id, _)| id)
@@ -1571,28 +1561,15 @@ mod tests {
         let project_a = projects_root.join("acme-project-a");
         let project_b = projects_root.join("acme-project-b");
         let project_c = projects_root.join("acme-project-c");
-        std::fs::create_dir_all(project_a.join("state.json").parent().expect("state dir"))
-            .expect("mkdir a");
-        std::fs::create_dir_all(project_b.join("state.json").parent().expect("state dir"))
-            .expect("mkdir b");
-        std::fs::create_dir_all(project_c.join("state.json").parent().expect("state dir"))
-            .expect("mkdir c");
+        std::fs::create_dir_all(&project_a).expect("mkdir a");
+        std::fs::create_dir_all(&project_b).expect("mkdir b");
+        std::fs::create_dir_all(&project_c).expect("mkdir c");
 
-        std::fs::write(
-            project_a.join("state.json"),
-            r#"{"created_at":"2026-01-01T00:00:00Z","other":"a"}"#,
-        )
-        .expect("write a");
-        std::fs::write(
-            project_b.join("state.json"),
-            r#"{"created_at":"2026-01-03T00:00:00Z","other":"b"}"#,
-        )
-        .expect("write b");
-        std::fs::write(
-            project_c.join("state.json"),
-            r#"{"created_at":"2026-01-02T00:00:00Z","other":"c"}"#,
-        )
-        .expect("write c");
+        std::fs::write(project_a.join("prompt.md"), "a").expect("write a");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(project_c.join("prompt.md"), "c").expect("write c");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(project_b.join("prompt.md"), "b").expect("write b");
 
         assert_eq!(
             discover_latest_project_id(&worktree),

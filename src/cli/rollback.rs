@@ -5,7 +5,7 @@ use crate::cli::RollbackArgs;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::is_git_repo;
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use crate::util::lock::ProjectLock;
@@ -19,7 +19,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     let project_dir = workspace.project_dir(&project_id);
     let _lock = ProjectLock::acquire(&project_dir, &project_id)?;
 
-    let mut state = load_project_state(&project_dir)?;
+    let mut state = reconstruct_project_state(&workspace, &project_id)?;
     let original_state = state.clone();
     let prompt_backup = fs::read_to_string(project_dir.join("prompt.md")).ok();
     let project_config_backup = fs::read_to_string(project_dir.join("config.toml")).ok();
@@ -154,8 +154,6 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     } else {
         state.status = ProjectStatus::InProgress;
     }
-
-    save_project_state(&project_dir, &state)?;
 
     if let Some(reference) = hard_ref {
         println!(

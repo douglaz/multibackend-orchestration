@@ -552,7 +552,7 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
 
 /// Codex-specific active-stream conformance: set planner backend to Codex, emit
 /// output at intervals shorter than timeout_seconds, with total runtime exceeding
-/// timeout_seconds. Must succeed (no timeout). Asserts state.json reflects Codex
+/// timeout_seconds. Must succeed (no timeout). Asserts derived state reflects Codex
 /// as the planner backend.
 fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -591,7 +591,7 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
             .expect("ralph run should execute");
         assert_exit_code(&output, 0);
 
-        // Verify state.json reflects Codex as the planner backend
+        // Verify derived state reflects Codex as the planner backend
         let state = h.load_state(project_id).expect("load_state failed");
         let planner_backend = state["loops"][0]["backends"]["planner"]
             .as_str()
@@ -632,7 +632,7 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
 
 /// Codex-specific stall conformance: set planner backend to Codex, emit partial
 /// output then stall past timeout_seconds. Must timeout with cleanup and retain
-/// partial output in the log. Asserts state.json reflects Codex as the planner
+/// partial output in the log. Asserts derived state reflects Codex as the planner
 /// backend and verifies the stalled process is killed.
 fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -665,7 +665,7 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         )
         .expect("create_project failed");
 
-        // Verify state.json reflects Codex as the planner backend (check after
+        // Verify derived state reflects Codex as the planner backend (check after
         // run, since state is written during execution)
         let start = Instant::now();
         let output = h
