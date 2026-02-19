@@ -43,6 +43,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "streaming::idle_timeout_reset",
             func: idle_timeout_reset,
         },
+        ConformanceTest {
+            name: "streaming::codex_active_stream_no_timeout",
+            func: codex_active_stream_no_timeout,
+        },
+        ConformanceTest {
+            name: "streaming::codex_hanging_stall_timeout",
+            func: codex_hanging_stall_timeout,
+        },
     ]
 }
 
@@ -538,6 +546,193 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
         assert!(
             !content.contains("--- timeout ts="),
             "planner log should not contain timeout footer, got:\n{content}"
+        );
+    })
+}
+
+/// Codex-specific active-stream conformance: set planner backend to Codex, emit
+/// output at intervals shorter than timeout_seconds, with total runtime exceeding
+/// timeout_seconds. Must succeed (no timeout). Asserts state.json reflects Codex
+/// as the planner backend.
+fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "codex-active-no-timeout";
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "codex-active-streaming.sh",
+                &active_streaming_planner_mock_script(),
+            )
+            .expect("failed to write active streaming mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        // Force planner backend to Codex
+        h.ralph_ok(["config", "set", "workspace.default_backend", "codex"])
+            .expect("set default_backend to codex");
+        // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        // Set timeout to 1s -- total planner runtime ~2.4s > 1s, but each
+        // chunk arrives every 0.3s < 1s, so inactivity timeout must NOT fire.
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Codex Active Stream No Timeout",
+            "Codex active stream inactivity test",
+        )
+        .expect("create_project failed");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify state.json reflects Codex as the planner backend
+        let state = h.load_state(project_id).expect("load_state failed");
+        let planner_backend = state["loops"][0]["backends"]["planner"]
+            .as_str()
+            .expect("planner backend should be a string");
+        assert!(
+            planner_backend.starts_with("codex"),
+            "planner backend should be codex, got: {planner_backend}"
+        );
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        // Verify the Codex backend actually executed (not Claude)
+        assert!(
+            content.contains("backend=codex"),
+            "planner log attempt separator should show backend=codex: {content}"
+        );
+        // All 8 chunks should be present
+        assert!(
+            content.contains("chunk-8"),
+            "planner log should contain all chunks: {content}"
+        );
+        // No timeout footer should appear
+        assert!(
+            !content.contains("--- timeout ts="),
+            "planner log should NOT contain timeout footer: {content}"
+        );
+    })
+}
+
+/// Codex-specific stall conformance: set planner backend to Codex, emit partial
+/// output then stall past timeout_seconds. Must timeout with cleanup and retain
+/// partial output in the log. Asserts state.json reflects Codex as the planner
+/// backend and verifies the stalled process is killed.
+fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "codex-hanging-stall-timeout";
+        let pid_file = h.temp_dir.path().join("codex-hanging-stall.pid");
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script(
+                "codex-hanging-stall.sh",
+                &hanging_after_partial_planner_mock_script(&pid_file),
+            )
+            .expect("failed to write hanging stall mock script");
+        h.setup_mock_backends(&script)
+            .expect("setup_mock_backends failed");
+        // Force planner backend to Codex
+        h.ralph_ok(["config", "set", "workspace.default_backend", "codex"])
+            .expect("set default_backend to codex");
+        // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("config set workflow.prompt_review_enabled failed");
+        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
+            .expect("set claude timeout");
+        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
+            .expect("set codex timeout");
+        h.create_project(
+            project_id,
+            "Codex Hanging Stall Timeout",
+            "Codex hanging stall inactivity timeout test",
+        )
+        .expect("create_project failed");
+
+        // Verify state.json reflects Codex as the planner backend (check after
+        // run, since state is written during execution)
+        let start = Instant::now();
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("ralph run should execute");
+        let elapsed = start.elapsed();
+        assert_exit_code(&output, 1);
+
+        // The timeout is 1s and the mock sleeps for 30s. With retries (up to 3
+        // attempts), the run should finish well under 30s if the idle timeout
+        // actually kills the process promptly.
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "codex hanging stall should be killed by idle timeout, not run for full 30s; elapsed={elapsed:?}"
+        );
+
+        // When the planner times out, register_feature_loop() is never called
+        // (the error propagates before loop registration), so state["loops"] is
+        // empty — we can't check state["loops"][0]["backends"]["planner"].
+        // Instead, verify the planner log's attempt separator contains
+        // "backend=codex", proving the Codex backend actually executed.
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert!(
+            state["loops"].as_array().map_or(true, |a| a.is_empty()),
+            "loops array should be empty when planner timed out: {:?}",
+            state["loops"]
+        );
+
+        let planner_log = h
+            .project_dir(project_id)
+            .join("loops")
+            .join("001")
+            .join("agent-output-planner.log");
+        assert!(
+            planner_log.exists(),
+            "planner log should exist at {}",
+            planner_log.display()
+        );
+        let content = fs::read_to_string(&planner_log).expect("read planner log");
+        // Verify the Codex backend actually executed (not Claude)
+        assert!(
+            content.contains("backend=codex"),
+            "planner log attempt separator should show backend=codex: {content}"
+        );
+        // Partial output should be retained
+        assert!(
+            content.contains("partial-output-before-stall"),
+            "planner log should contain partial output: {content}"
+        );
+        // Timeout footer should be present
+        assert!(
+            content.contains("--- timeout ts="),
+            "planner log should contain timeout footer: {content}"
+        );
+
+        // Verify the hanging process was killed
+        let pid_raw = fs::read_to_string(&pid_file).expect("read pid file");
+        let pid: i32 = pid_raw.trim().parse().expect("pid should be numeric");
+        let kill_rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(kill_rc, -1, "codex stalled planner process should be dead");
+        let os_err = std::io::Error::last_os_error()
+            .raw_os_error()
+            .expect("raw os error should be present");
+        assert_eq!(
+            os_err,
+            libc::ESRCH,
+            "codex stalled planner process should be fully reaped"
         );
     })
 }
