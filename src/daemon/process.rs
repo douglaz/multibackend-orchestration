@@ -148,7 +148,7 @@ fn build_ralph_run_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
-    cmd.args(["run", "--project", project_id])
+    cmd.args(["run", "--project", project_id, "--until-complete"])
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(file))
@@ -335,6 +335,7 @@ mod tests {
                 OsStr::new("run"),
                 OsStr::new("--project"),
                 OsStr::new("retry-project"),
+                OsStr::new("--until-complete"),
             ]
         );
     }
