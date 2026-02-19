@@ -85,6 +85,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "commands::exit_code_project_not_found",
             func: exit_code_project_not_found,
         },
+        ConformanceTest {
+            name: "commands::no_checkpoint_status_defaults",
+            func: no_checkpoint_status_defaults,
+        },
+        ConformanceTest {
+            name: "commands::no_checkpoint_history_defaults",
+            func: no_checkpoint_history_defaults,
+        },
     ]
 }
 
@@ -541,6 +549,67 @@ fn exit_code_project_not_found(h: &RalphHarness) -> TestResult {
             .ralph(["project", "show", "nonexistent"])
             .expect("ralph project show should execute");
         assert_exit_code(&output, 2);
+    })
+}
+
+fn no_checkpoint_status_defaults(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("nochk-status", "No Checkpoint Status", "No checkpoint status prompt")
+            .expect("create_project failed");
+
+        // No `ralph run` — no checkpoint commits exist.
+        let output = h.ralph(["status"]).expect("ralph status should execute");
+        assert_exit_code(&output, 0);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Status should reflect loop 1, phase planning (not loop 0).
+        assert!(
+            stdout.contains("Current Loop: 1"),
+            "expected 'Current Loop: 1' in status output, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("planning"),
+            "expected 'planning' phase in status output, got:\n{stdout}"
+        );
+
+        // Also verify via --json (project show --json)
+        let state = h.load_state("nochk-status").expect("load_state failed");
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
+    })
+}
+
+fn no_checkpoint_history_defaults(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("nochk-history", "No Checkpoint History", "No checkpoint history prompt")
+            .expect("create_project failed");
+
+        // No `ralph run` — no checkpoint commits exist.
+        let output = h.ralph(["history"]).expect("ralph history should execute");
+        assert_exit_code(&output, 0);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // With no checkpoint commits and no loops, history should show "(no loops yet)".
+        assert!(
+            stdout.contains("(no loops yet)"),
+            "expected '(no loops yet)' in history output for fresh project, got:\n{stdout}"
+        );
+
+        // Verify --json returns an empty array.
+        let json_stdout = h
+            .ralph_ok(["history", "--json"])
+            .expect("ralph history --json should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_stdout).expect("history --json output should be valid JSON");
+        let arr = parsed
+            .as_array()
+            .expect("expected top-level JSON array from history --json");
+        assert!(
+            arr.is_empty(),
+            "expected empty JSON array for no-checkpoint history, got: {parsed}"
+        );
     })
 }
 

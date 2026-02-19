@@ -194,6 +194,9 @@ impl Orchestrator {
         let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
         let repo_root_ref = repo_root.as_deref();
 
+        // Route agent logs to .ralph/tmp/logs (deterministic, collision-safe).
+        let log_dir = self.workspace.root.join("tmp").join("logs");
+
         if !options.dry_run && self.workspace.config.git.auto_branch {
             if let Some(repo_root) = self.workspace.root.parent() {
                 if is_git_repo(repo_root) {
@@ -260,7 +263,7 @@ impl Orchestrator {
                 .await;
 
             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
-            let mut pr_log = LogWriter::open(&project_dir, None, None, "prompt-reviewer");
+            let mut pr_log = LogWriter::open(&log_dir, &project_id, None, "prompt-reviewer");
             let _retry_result = execute_with_parse_retries(
                 pr_backend,
                 &registry,
@@ -412,7 +415,7 @@ impl Orchestrator {
                         "invoking planner..."
                     );
                     let mut planner_log =
-                        LogWriter::open(&project_dir, Some(loop_number), None, "planner");
+                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "planner");
                     let _retry_result = execute_with_parse_retries(
                         planner_backend,
                         &registry,
@@ -597,7 +600,7 @@ impl Orchestrator {
                             "invoking implementer..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -754,7 +757,7 @@ impl Orchestrator {
                             "invoking implementer for QA feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -913,7 +916,7 @@ impl Orchestrator {
                             "invoking implementer for feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -1139,7 +1142,7 @@ impl Orchestrator {
                         iteration = state.phase_iteration,
                         "invoking QA..."
                     );
-                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "qa");
+                    let mut qa_log = LogWriter::open(&log_dir, &project_id, Some(loop_number), "qa");
                     let mut qa_out_session_id: Option<String> = None;
                     let retry_result = execute_with_parse_retries(
                         qa_backend,
@@ -1387,7 +1390,7 @@ impl Orchestrator {
                             "invoking reviewer..."
                         );
                         let mut reviewer_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "reviewer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "reviewer");
                         let mut reviewer_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             reviewer_backend,
@@ -1614,7 +1617,7 @@ impl Orchestrator {
                         "invoking completer..."
                     );
                     let mut completer_log =
-                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "completer");
+                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
                     let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
                         completer_backend,
                         &registry,
@@ -1716,7 +1719,7 @@ impl Orchestrator {
                                         "invoking acceptance QA..."
                                     );
                                     let mut acceptance_log =
-                                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "qa");
+                                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "qa");
                                     let retry_result = execute_with_parse_retries(
                                         acceptance_qa_backend,
                                         &registry,
@@ -2237,8 +2240,8 @@ fn rollback_current_loop(
         }
     }
 
-    // Also remove the bare loop-number directory used by agent-output log files
-    // (e.g., loops/001/agent-output-planner.log).
+    // Remove the bare loop-number directory (legacy layout; agent-output logs
+    // are now routed to .ralph/tmp/logs).
     let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
     if log_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&log_dir) {
@@ -2246,7 +2249,7 @@ fn rollback_current_loop(
                 loop_number = loop_number,
                 path = %log_dir.display(),
                 error = %e,
-                "failed to remove agent-output log directory during rollback"
+                "failed to remove legacy loop-number directory during rollback"
             );
         }
     }
@@ -5466,7 +5469,7 @@ mod tests {
         let backend_handle = backend.clone();
         let backend: Arc<dyn Backend> = Arc::new(backend);
         let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
-        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+        let mut log = LogWriter::open(temp.path(), "issue-test", Some(1), "implementer");
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5521,7 +5524,7 @@ mod tests {
         let backend_handle = backend.clone();
         let backend: Arc<dyn Backend> = Arc::new(backend);
         let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
-        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+        let mut log = LogWriter::open(temp.path(), "issue-test", Some(1), "implementer");
 
         let capture_layer = MetricsCaptureLayer::default();
         let captured = capture_layer.events.clone();

@@ -3,7 +3,6 @@ use std::path::Path;
 
 use crate::cli::StatusArgs;
 use crate::daemon::github::{classify_lifecycle_labels, fetch_issue_labels};
-use crate::git::ralph_commit::{derive_position, parse_last_ralph_commit};
 use crate::project::artifacts::resolve_artifact_path_by_suffix;
 use crate::project::lifecycle::{
     parse_github_repo_slug, parse_issue_number, project_git_context, reconstruct_project_state,
@@ -21,22 +20,8 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     }
     let mut state = reconstruct_project_state(&workspace, &project_id)?;
 
-    if let Some(ctx) = project_git_context(&workspace, &project_id) {
-        if parse_last_ralph_commit(&ctx.repo_root, &ctx.branch)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            if let Ok((loop_number, phase)) = derive_position(&ctx.repo_root, &ctx.branch) {
-                state.current_loop = if state.last_loop_number() == 0 && loop_number == 1 {
-                    0
-                } else {
-                    loop_number
-                };
-                state.current_phase = phase;
-            }
-        }
-    }
+    // Position is already derived from checkpoint commits in
+    // reconstruct_project_state — no additional remap needed here.
 
     if let Some(label_status) = derive_project_status_from_labels(&workspace, &project_id) {
         state.status = label_status;

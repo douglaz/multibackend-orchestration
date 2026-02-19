@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::ProjectConfig;
 use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
 use crate::git::is_git_repo;
-use crate::git::ralph_commit::{derive_position, list_ralph_commits, parse_last_ralph_commit};
+use crate::git::ralph_commit::{derive_position, list_ralph_commits};
 use crate::project::artifacts::parse_artifact_filename_timestamp;
 use crate::project::state::{
     AcceptanceQaResult, CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState,
@@ -225,15 +225,14 @@ fn reconstruct_project_state_internal(
     state.prompt_hash = prompt_hash.clone();
     state.prompt_hash_at_loop_start = prompt_hash;
 
-    let (checkpoint_loop, checkpoint_phase, has_checkpoint, checkpoint_commits) =
+    let (checkpoint_loop, checkpoint_phase, checkpoint_commits) =
         match (repo_root, branch) {
             (Some(root), Some(branch_name)) if is_git_repo(root) => {
-                let has_checkpoint = parse_last_ralph_commit(root, branch_name)?.is_some();
                 let (loop_number, phase) = derive_position(root, branch_name)?;
                 let commits = list_ralph_commits(root, branch_name)?;
-                (loop_number, phase, has_checkpoint, commits)
+                (loop_number, phase, commits)
             }
-            _ => (1, Phase::Planning, false, Vec::new()),
+            _ => (1, Phase::Planning, Vec::new()),
         };
 
     let mut commit_by_loop: HashMap<u32, String> = HashMap::new();
@@ -266,18 +265,11 @@ fn reconstruct_project_state_internal(
 
     state.prompt_review_completed = state_has_prompt_review(project_dir) || state.last_loop_number() > 0;
 
-    if has_checkpoint {
-        state.current_loop = if state.last_loop_number() == 0 && checkpoint_loop == 1 {
-            0
-        } else {
-            checkpoint_loop
-        };
-        state.current_phase = checkpoint_phase;
-    } else {
-        let (loop_number, phase) = infer_position_from_artifacts(&state);
-        state.current_loop = loop_number;
-        state.current_phase = phase;
-    }
+    // Position is always derived from checkpoint commits (no artifact-based
+    // fallback).  When no checkpoint exists, derive_position defaults to
+    // loop=1, phase=planning.  The loop 1→0 remap is removed.
+    state.current_loop = checkpoint_loop;
+    state.current_phase = checkpoint_phase;
 
     state.phase_iteration = infer_phase_iteration(&state);
 
@@ -684,56 +676,6 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
         started_at,
         completed_at,
     }
-}
-
-fn infer_position_from_artifacts(state: &ProjectState) -> (u32, Phase) {
-    let last_loop = state.last_loop_number();
-    if last_loop == 0 {
-        return (0, Phase::Planning);
-    }
-
-    if let Some(completion) = state
-        .completion_attempts
-        .iter()
-        .find(|attempt| attempt.loop_number == last_loop)
-    {
-        if completion.status == LoopStatus::InProgress {
-            return (last_loop, Phase::Completing);
-        }
-    }
-
-    if let Some(feature_loop) = state.loops.iter().find(|loop_state| loop_state.loop_number == last_loop)
-    {
-        if feature_loop.status == LoopStatus::Completed {
-            return (last_loop, Phase::Planning);
-        }
-
-        if feature_loop.artifacts.approval.is_some() {
-            return (last_loop, Phase::Committing);
-        }
-
-        if feature_loop.artifacts.pending_qa_feedback.is_some() {
-            return (last_loop, Phase::Implementing);
-        }
-
-        if let Some(last_qa) = feature_loop.artifacts.qa_results.last() {
-            if last_qa.passed {
-                return (last_loop, Phase::Reviewing);
-            }
-            if last_qa.implementer_response.is_some() {
-                return (last_loop, Phase::QA);
-            }
-            return (last_loop, Phase::Implementing);
-        }
-
-        if feature_loop.artifacts.impl_notes.is_some() {
-            return (last_loop, Phase::Reviewing);
-        }
-
-        return (last_loop, Phase::Implementing);
-    }
-
-    (last_loop, Phase::Planning)
 }
 
 fn infer_phase_iteration(state: &ProjectState) -> u32 {

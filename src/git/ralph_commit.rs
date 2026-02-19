@@ -69,11 +69,55 @@ pub fn parse_ralph_commit(
     })
 }
 
+/// Returns the newest Ralph checkpoint commit on the remote branch.
+///
+/// Only the newest matching commit is validated.  If it is malformed, an
+/// actionable error (including commit hash context) is returned.  Older
+/// malformed Ralph commits are irrelevant when a newer valid checkpoint exists.
 pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<RalphCommitInfo>> {
-    let commits = list_ralph_commits(repo_root, branch)?;
-    Ok(commits.into_iter().next())
+    ensure_git_repo(repo_root)?;
+    let remote_branch = format!("origin/{branch}");
+
+    let status = run_git_status(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", remote_branch.as_str()],
+    )?;
+    if !status.success() {
+        return Ok(None);
+    }
+
+    let log = run_git(
+        repo_root,
+        &["log", remote_branch.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
+    )?;
+
+    for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
+        let mut fields = record.splitn(3, '\x1f');
+        let hash = fields.next().unwrap_or("").trim();
+        let subject = fields.next().unwrap_or("").trim();
+        let body = fields.next().unwrap_or("");
+
+        if !subject.starts_with(RALPH_SUBJECT_PREFIX) {
+            continue;
+        }
+
+        // This is the newest Ralph checkpoint commit — validate strictly.
+        let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
+            RalphError::ParseError(format!(
+                "malformed newest Ralph checkpoint commit {hash}: {err}"
+            ))
+        })?;
+        return Ok(Some(parsed));
+    }
+
+    Ok(None)
 }
 
+/// Returns all valid Ralph checkpoint commits from the remote branch (newest first).
+///
+/// Only the newest Ralph checkpoint must be well-formed.  Older malformed
+/// commits are silently skipped so that historical format changes do not
+/// break derivation when a newer valid checkpoint exists.
 pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
     let remote_branch = format!("origin/{branch}");
@@ -92,6 +136,7 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
     )?;
 
     let mut commits = Vec::new();
+    let mut is_newest = true;
     for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
         let mut fields = record.splitn(3, '\x1f');
         let hash = fields.next().unwrap_or("").trim();
@@ -102,10 +147,21 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
             continue;
         }
 
-        let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
-            RalphError::ParseError(format!("malformed Ralph checkpoint commit {hash}: {err}"))
-        })?;
-        commits.push(parsed);
+        if is_newest {
+            // Newest Ralph checkpoint must be valid — fail loudly if not.
+            let parsed = parse_ralph_commit(subject, body, Some(hash)).map_err(|err| {
+                RalphError::ParseError(format!(
+                    "malformed newest Ralph checkpoint commit {hash}: {err}"
+                ))
+            })?;
+            commits.push(parsed);
+            is_newest = false;
+        } else {
+            // Older commits: skip silently if malformed.
+            if let Ok(parsed) = parse_ralph_commit(subject, body, Some(hash)) {
+                commits.push(parsed);
+            }
+        }
     }
 
     Ok(commits)
@@ -432,5 +488,64 @@ mod tests {
 
         let result = parse_last_ralph_commit(&repo, "ralph/issue-42");
         assert!(result.is_err(), "malformed newest checkpoint should error");
+
+        // Error should include commit context for actionable debugging.
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("malformed newest Ralph checkpoint commit"),
+            "error should include commit context, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn newest_valid_with_older_malformed_succeeds() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push an older malformed Ralph commit (subject/trailer project mismatch).
+        let malformed = "ralph(issue-42): loop 1 planning -> implementing\n\nRalph-Project: issue-999\nRalph-Loop: 1\nRalph-Phase: implementing";
+        commit_empty_with_message(&repo, malformed);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Push a newer valid Ralph commit on top.
+        let valid =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&repo, &valid);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // parse_last_ralph_commit should succeed (newest is valid).
+        let parsed = parse_last_ralph_commit(&repo, "ralph/issue-42")
+            .expect("parse should succeed when newest is valid")
+            .expect("ralph commit should exist");
+        assert_eq!(parsed.loop_number, 2);
+        assert_eq!(parsed.phase, Phase::Reviewing);
+
+        // list_ralph_commits should also succeed, skipping the older malformed one.
+        let commits = super::list_ralph_commits(&repo, "ralph/issue-42")
+            .expect("list should succeed with older malformed commit");
+        assert_eq!(
+            commits.len(),
+            1,
+            "only the valid commit should be in the list"
+        );
+        assert_eq!(commits[0].loop_number, 2);
+    }
+
+    #[test]
+    fn no_checkpoint_defaults_to_loop_1_planning() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // No Ralph checkpoint commits exist at all.
+        let result = parse_last_ralph_commit(&repo, "ralph/issue-42")
+            .expect("parse should succeed with no checkpoints");
+        assert!(result.is_none(), "no checkpoint should return None");
+
+        let (loop_number, phase) = super::derive_position(&repo, "ralph/issue-42")
+            .expect("derive_position should succeed");
+        assert_eq!(loop_number, 1, "no-checkpoint default loop should be 1");
+        assert_eq!(
+            phase,
+            Phase::Planning,
+            "no-checkpoint default phase should be planning"
+        );
     }
 }

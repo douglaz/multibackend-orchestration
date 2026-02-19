@@ -88,7 +88,7 @@ fn new_creates_state(h: &RalphHarness) -> TestResult {
 
         let state = h.load_state("test-proj").expect("load_state failed");
 
-        assert_json_field(&state, "current_loop", &json!(0));
+        assert_json_field(&state, "current_loop", &json!(1));
         assert_json_field(&state, "current_phase", &json!("planning"));
         assert_json_field(&state, "status", &json!("pending"));
     })) {
@@ -365,7 +365,7 @@ fn show_json(h: &RalphHarness) -> TestResult {
 
         // Should contain project and state sections with correct fields
         assert_json_field(&parsed, "project.id", &json!("json-test"));
-        assert_json_field(&parsed, "state.current_loop", &json!(0));
+        assert_json_field(&parsed, "state.current_loop", &json!(1));
         assert_json_field(&parsed, "state.current_phase", &json!("planning"));
         assert_json_field(&parsed, "state.status", &json!("pending"));
     })) {

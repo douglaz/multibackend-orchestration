@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 6,
+  "current_loop": 8,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -159,7 +159,7 @@
       "slug": "state-free-test-suite-migration-and-legacy-state",
       "feature_name": "State-Free Test Suite Migration and Legacy State API Cleanup",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -190,12 +190,61 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "6a43ed6e89f96ad753344193d3f78843c35b1a1f",
       "started_at": "2026-02-19T21:48:51.281280979Z",
+      "completed_at": "2026-02-19T23:17:04.401983507Z"
+    },
+    {
+      "loop_number": 8,
+      "slug": "final-contract-alignment-for-checkpoint-defaults",
+      "feature_name": "Final Contract Alignment for Checkpoint Defaults and Temporary Log Routing",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219233015-spec.md",
+        "impl_notes": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234312-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234644-review-001-feedback.md",
+            "response": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234823-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219235008-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T23:30:15.955583445Z",
       "completed_at": null
     }
   ],
-  "completion_attempts": [],
+  "completion_attempts": [
+    {
+      "loop_number": 7,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/007-completion/20260219231953-termination-request.md",
+        "verdict": "loops/007-completion/20260219232611-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-19T23:19:53.080249212Z",
+      "completed_at": "2026-02-19T23:26:11.281805702Z"
+    }
+  ],
   "session_store": {
     "records": []
   }

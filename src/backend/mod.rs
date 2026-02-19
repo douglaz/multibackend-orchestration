@@ -1248,7 +1248,7 @@ printf 'progress 20%%\rpartial-line'
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(1), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(1), "planner");
         let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
             .await
             .expect("backend should succeed");
@@ -1285,7 +1285,7 @@ sleep 30
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(2), "implementer");
         let start = Instant::now();
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         let elapsed = start.elapsed();
@@ -1738,7 +1738,7 @@ sleep 30
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(3), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(3), "planner");
         let start = Instant::now();
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         let elapsed = start.elapsed();
@@ -1797,7 +1797,7 @@ done
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(3), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(3), "planner");
         let start = Instant::now();
         let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
             .await

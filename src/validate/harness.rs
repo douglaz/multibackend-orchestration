@@ -318,6 +318,10 @@ impl RalphHarness {
             .join(project_id)
     }
 
+    pub fn tmp_log_dir(&self) -> PathBuf {
+        self.repo_root.join(".ralph").join("tmp").join("logs")
+    }
+
     pub fn loop_dir(&self, project_id: &str, loop_number: u32) -> Result<Option<PathBuf>> {
         let loops_dir = self.project_dir(project_id).join("loops");
         let entries = match fs::read_dir(&loops_dir) {

@@ -81,12 +81,10 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        // Planner log path: .ralph/projects/<id>/loops/001/agent-output-planner.log
+        // Planner log path: .ralph/tmp/logs/{project_id}-001-planner.log
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
 
         assert!(
             planner_log.exists(),
@@ -137,12 +135,9 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         );
 
         // Implementer log should also exist (after planner succeeded on retry)
-        // The implementer log is in the slug-prefixed loop directory (e.g., 001-feature/)
-        let loop_dir = h
-            .loop_dir(project_id, 1)
-            .expect("loop_dir should succeed")
-            .expect("loop directory should exist");
-        let impl_log = loop_dir.join("agent-output-implementer.log");
+        let impl_log = h
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-implementer.log"));
         assert!(
             impl_log.exists(),
             "implementer log file should exist at {}",
@@ -171,14 +166,14 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        // Prompt reviewer log should be at project root, not in a loop dir
+        // Prompt reviewer log should be at .ralph/tmp/logs/{project_id}-prompt-reviewer.log
         let pr_log = h
-            .project_dir(project_id)
-            .join("agent-output-prompt-reviewer.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-prompt-reviewer.log"));
 
         assert!(
             pr_log.exists(),
-            "prompt-reviewer log should exist at project root: {}",
+            "prompt-reviewer log should exist at tmp/logs: {}",
             pr_log.display()
         );
 
@@ -188,21 +183,15 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
             "prompt-reviewer log should contain attempt separator, got:\n{content}"
         );
 
-        // It should NOT be inside any loop directory
-        let loops_dir = h.project_dir(project_id).join("loops");
-        if loops_dir.exists() {
-            for entry in fs::read_dir(&loops_dir).expect("read loops dir") {
-                let entry = entry.expect("dir entry");
-                if entry.file_type().expect("file type").is_dir() {
-                    let bad_path = entry.path().join("agent-output-prompt-reviewer.log");
-                    assert!(
-                        !bad_path.exists(),
-                        "prompt-reviewer log should NOT exist inside loop dir: {}",
-                        bad_path.display()
-                    );
-                }
-            }
-        }
+        // It should NOT be inside any project directory or loop directory
+        let project_root_log = h
+            .project_dir(project_id)
+            .join("agent-output-prompt-reviewer.log");
+        assert!(
+            !project_root_log.exists(),
+            "prompt-reviewer log should NOT exist at project root: {}",
+            project_root_log.display()
+        );
     })
 }
 
@@ -226,10 +215,8 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
         .expect("create_project failed");
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
 
         let mut child = Command::new(&h.ralph_bin)
             .args(["run", "--loops", "1"])
@@ -310,10 +297,8 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 1);
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -382,10 +367,8 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -452,10 +435,8 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -525,10 +506,8 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -602,10 +581,8 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -695,10 +672,8 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",

@@ -84,14 +84,14 @@ fn no_loop_artifacts_defaults_to_loop_1_planning() {
     let state = reconstruct_project_state_from_project_dir(&project_dir)
         .expect("reconstruction should succeed");
 
-    // With no artifacts and no checkpoint commits, default to loop=1, phase=planning
-    // (current_loop=0 means no loop is active, next loop is 1)
+    // With no artifacts and no checkpoint commits, default to loop=1, phase=planning.
+    assert_eq!(state.current_loop, 1);
     assert_eq!(state.current_phase, Phase::Planning);
     assert!(state.loops.is_empty());
 }
 
 #[test]
-fn reconstruction_with_spec_only_infers_implementing_phase() {
+fn reconstruction_with_spec_only_defaults_to_checkpoint_position() {
     let (_temp, workspace_root, project_id) = setup_project();
     let project_dir = workspace_root.join("projects").join(&project_id);
 
@@ -108,11 +108,14 @@ fn reconstruction_with_spec_only_infers_implementing_phase() {
         .expect("reconstruction with spec should succeed");
 
     assert_eq!(state.loops.len(), 1);
-    assert_eq!(state.current_phase, Phase::Implementing);
+    // Position is derived from checkpoint commits (not artifacts).
+    // No checkpoint → default loop=1, planning.
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
 }
 
 #[test]
-fn reconstruction_with_spec_and_impl_notes_infers_qa_or_reviewing_phase() {
+fn reconstruction_with_spec_and_impl_notes_defaults_to_checkpoint_position() {
     let (_temp, workspace_root, project_id) = setup_project();
     let project_dir = workspace_root.join("projects").join(&project_id);
 
@@ -133,12 +136,10 @@ fn reconstruction_with_spec_and_impl_notes_infers_qa_or_reviewing_phase() {
         .expect("reconstruction with spec+impl should succeed");
 
     assert_eq!(state.loops.len(), 1);
-    // With spec + impl-notes but no QA results and no review, should be at QA or Reviewing
-    assert!(
-        state.current_phase == Phase::QA || state.current_phase == Phase::Reviewing,
-        "expected QA or Reviewing, got {:?}",
-        state.current_phase
-    );
+    // Position is derived from checkpoint commits (not artifacts).
+    // No checkpoint → default loop=1, planning.
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
 }
 
 #[test]

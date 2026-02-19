@@ -211,38 +211,53 @@ fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
+        // Agent output logs are routed to .ralph/tmp/logs (not loop directories)
+        let tmp_log_dir = h.tmp_log_dir();
+        let log_files: Vec<String> = fs::read_dir(&tmp_log_dir)
+            .expect("read tmp log dir")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(project_id) && name.ends_with(".log") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !log_files.is_empty(),
+            "expected at least one agent-output log in tmp/logs; found: {log_files:?}"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("-implementer")),
+            "expected implementer log in tmp/logs; found: {log_files:?}"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("-reviewer")),
+            "expected reviewer log in tmp/logs; found: {log_files:?}"
+        );
+
+        // Verify no agent-output logs exist in loop directories
         let artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts should succeed");
-        let names = artifacts
+        let loop_logs: Vec<_> = artifacts
             .iter()
-            .map(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .expect("artifact filename should be valid UTF-8")
-                    .to_owned()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
             })
-            .collect::<Vec<_>>();
-        let agent_output = names
-            .iter()
-            .filter(|name| name.contains("agent-output-") && name.ends_with(".log"))
-            .collect::<Vec<_>>();
-
+            .collect();
         assert!(
-            !agent_output.is_empty(),
-            "expected at least one agent-output log artifact in loop directory; found: {names:?}"
-        );
-        assert!(
-            agent_output
-                .iter()
-                .any(|name| name.contains("agent-output-implementer")),
-            "expected implementer agent-output artifact; found: {agent_output:?}"
-        );
-        assert!(
-            agent_output
-                .iter()
-                .any(|name| name.contains("agent-output-reviewer")),
-            "expected reviewer agent-output artifact; found: {agent_output:?}"
+            loop_logs.is_empty(),
+            "agent-output logs should NOT exist in loop directory; found: {loop_logs:?}"
         );
     })
 }
@@ -255,6 +270,8 @@ fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
+        // With tmp-log routing, planner logs go to .ralph/tmp/logs but should
+        // NOT produce timestamped artifacts in loop directories.
         let artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts should succeed");
@@ -272,7 +289,7 @@ fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
             !names
                 .iter()
                 .any(|name| name.contains("-agent-output-planner-")),
-            "planner should not write agent-output artifacts"
+            "planner should not write agent-output artifacts in loop dir"
         );
     })
 }
