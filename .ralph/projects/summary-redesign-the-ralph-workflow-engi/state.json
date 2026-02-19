@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 2,
+  "current_loop": 3,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -41,7 +41,7 @@
       "slug": "remote-first-project-branch-sync-for-daemon",
       "feature_name": "Remote-First Project Branch Sync for Daemon Worktrees",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -62,8 +62,32 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "6220bf9bfa00e92f86b9c82f821261638df499e3",
       "started_at": "2026-02-19T19:25:56.283093760Z",
+      "completed_at": "2026-02-19T19:42:15.886611384Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "phase-transition-commit-and-push-checkpointing",
+      "feature_name": "Phase Transition Commit-and-Push Checkpointing",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-phase-transition-commit-and-push-checkpointing/20260219194523-spec.md",
+        "impl_notes": "loops/003-phase-transition-commit-and-push-checkpointing/20260219195525-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-phase-transition-commit-and-push-checkpointing/20260219195656-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-19T19:45:23.403833359Z",
       "completed_at": null
     }
   ],

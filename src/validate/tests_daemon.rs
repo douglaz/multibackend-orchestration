@@ -9103,7 +9103,11 @@ fn setup_remote_clone() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
     // Clone
     let status = Command::new("git")
-        .args(["clone", &bare_path.to_string_lossy(), &clone_path.to_string_lossy()])
+        .args([
+            "clone",
+            &bare_path.to_string_lossy(),
+            &clone_path.to_string_lossy(),
+        ])
         .current_dir(tmp.path())
         .status()
         .expect("git clone");
@@ -9129,7 +9133,12 @@ fn git_run(repo: &Path, args: &[&str]) {
         .current_dir(repo)
         .status()
         .expect("git command");
-    assert!(status.success(), "git {:?} failed in {}", args, repo.display());
+    assert!(
+        status.success(),
+        "git {:?} failed in {}",
+        args,
+        repo.display()
+    );
 }
 
 fn git_out(repo: &Path, args: &[&str]) -> String {
@@ -9138,7 +9147,12 @@ fn git_out(repo: &Path, args: &[&str]) -> String {
         .current_dir(repo)
         .output()
         .expect("git command");
-    assert!(output.status.success(), "git {:?} failed in {}", args, repo.display());
+    assert!(
+        output.status.success(),
+        "git {:?} failed in {}",
+        args,
+        repo.display()
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -9210,20 +9224,23 @@ fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResul
         // Point the bare remote's HEAD to a non-existent branch so that
         // `git fetch origin` (inside sync_project_branch) won't re-create
         // origin/HEAD.
-        git_run(
-            &bare,
-            &["symbolic-ref", "HEAD", "refs/heads/nonexistent"],
-        );
+        git_run(&bare, &["symbolic-ref", "HEAD", "refs/heads/nonexistent"]);
 
         let result = sync_project_branch(&clone, 7);
         assert!(result.is_err(), "should fail without origin/HEAD");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("origin/HEAD"), "error should mention origin/HEAD: {err}");
+        assert!(
+            err.contains("origin/HEAD"),
+            "error should mention origin/HEAD: {err}"
+        );
         assert!(
             err.contains("issue 7") || err.contains("issue-7"),
             "error should mention issue: {err}"
         );
-        assert!(err.contains("ralph/issue-7"), "error should mention branch: {err}");
+        assert!(
+            err.contains("ralph/issue-7"),
+            "error should mention branch: {err}"
+        );
         assert!(
             err.contains("git rev-parse --verify origin/HEAD"),
             "error should mention the failed git operation: {err}"

@@ -11,15 +11,15 @@ use tracing::{debug, info, warn};
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
-    resolve_effective_config, CommitMessageStyle, EffectiveConfig, PlannerStateInPrompt,
-    PreviousSpecsInPrompt, PromptChangeAction, RunWorkflowOverrides,
+    resolve_effective_config, EffectiveConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    PromptChangeAction, RunWorkflowOverrides,
 };
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_feature_loop, reset_and_clean_working_tree,
-    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
-    ORCHESTRATION_STATE_PATH_PREFIX,
+    changed_paths_excluding_prefixes, commit_and_push_phase_transition,
+    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
+    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
 use crate::output_log::LogWriter;
@@ -360,6 +360,9 @@ impl Orchestrator {
 
             let mut until_review_stop: Option<u32> = None;
             let mut review_limit_hit: Option<(u32, u32)> = None;
+            let phase_at_step_start = state.current_phase.clone();
+            let phase_iteration_at_step_start = state.phase_iteration;
+            let mut completed_feature_loop_for_checkpoint: Option<u32> = None;
 
             match state.current_phase {
                 Phase::Planning => {
@@ -1038,7 +1041,18 @@ impl Orchestrator {
                             max_iterations = max_iter,
                             "QA iteration limit exceeded, rolling back loop"
                         );
+                        let state_before_rollback = state.clone();
                         rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
+                        if let Err(err) = checkpoint_phase_transition(
+                            &self.workspace.root,
+                            &state.project_id,
+                            ln,
+                            Phase::QA,
+                            Phase::Planning,
+                        ) {
+                            state = state_before_rollback;
+                            return Err(err);
+                        }
                         persist_state(&project_dir, &state)?;
                         if options.until_complete {
                             logs.push(format!(
@@ -1493,7 +1507,7 @@ impl Orchestrator {
                 }
                 Phase::Committing => {
                     info!(loop = state.current_loop, "starting commit phase");
-                    let (loop_number, loop_slug, feature_name, approval_rel) = {
+                    let loop_number = {
                         let loop_state = state.current_feature_loop().ok_or_else(|| {
                             RalphError::Orchestration(
                                 "current phase is committing but no current feature loop exists"
@@ -1501,64 +1515,20 @@ impl Orchestrator {
                             )
                         })?;
 
-                        (
-                            loop_state.loop_number,
-                            loop_state.slug.clone(),
-                            loop_state.feature_name.clone(),
-                            loop_state.artifacts.approval.clone().ok_or_else(|| {
-                                RalphError::Orchestration(
-                                    "cannot commit without review-approved artifact".to_owned(),
-                                )
-                            })?,
-                        )
-                    };
-
-                    let approval_content = read_project_relative_file(&project_dir, &approval_rel)?;
-                    let reviewer_commit_message =
-                        extract_reviewer_commit_message(&approval_content);
-                    let commit_message = reviewer_commit_message.unwrap_or_else(|| {
-                        generate_commit_message(
-                            &effective.workflow.commit_message_style,
-                            &feature_name,
-                            loop_number,
-                            &state,
-                        )
-                    });
-
-                    let mut commit_hash: Option<String> = None;
-                    if effective.workflow.auto_commit && !options.skip_commit {
-                        let repo_root = self.workspace.root.parent().ok_or_else(|| {
+                        let _ = loop_state.artifacts.approval.clone().ok_or_else(|| {
                             RalphError::Orchestration(
-                                "workspace root has no parent path".to_owned(),
+                                "cannot commit without review-approved artifact".to_owned(),
                             )
                         })?;
 
-                        if !is_git_repo(repo_root) {
-                            return Err(RalphError::Orchestration(
-                                "cannot commit: repository is not a git workspace".to_owned(),
-                            ));
-                        }
+                        loop_state.loop_number
+                    };
 
-                        let tag_name = effective
-                            .workflow
-                            .commit_tag_format
-                            .replace("{project_id}", &state.project_id)
-                            .replace("{loop_number}", &loop_number.to_string());
-
-                        let hash = commit_feature_loop(
-                            repo_root,
-                            &commit_message,
-                            Some(&tag_name),
-                            effective.global.git.sign_commits,
-                        )?;
-                        commit_hash = Some(hash.clone());
+                    if !effective.workflow.auto_commit || options.skip_commit {
                         logs.push(format!(
-                            "loop {loop_number}: committed and tagged ({tag_name})"
-                        ));
-                    } else {
-                        logs.push(format!(
-                            "loop {loop_number}: commit skipped (auto_commit={} skip_commit={})",
-                            effective.workflow.auto_commit, options.skip_commit
+                            "loop {loop_number}: using structured phase checkpoint commit (auto_commit={} skip_commit={})",
+                            effective.workflow.auto_commit,
+                            options.skip_commit
                         ));
                     }
 
@@ -1568,12 +1538,12 @@ impl Orchestrator {
                                 "failed to reload current loop for completion update".to_owned(),
                             )
                         })?;
-                        loop_state.commit = commit_hash;
+                        loop_state.commit = None;
                         loop_state.status = LoopStatus::Completed;
                         loop_state.completed_at = Some(Utc::now());
-                        let _ = loop_slug;
                     }
 
+                    completed_feature_loop_for_checkpoint = Some(loop_number);
                     state.current_phase = Phase::Planning;
                     state.phase_iteration = 1;
                     state.current_loop = state.last_loop_number();
@@ -1958,7 +1928,18 @@ impl Orchestrator {
                     max_iterations = max_iter,
                     "review iteration limit exceeded, rolling back loop"
                 );
+                let state_before_rollback = state.clone();
                 rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    ln,
+                    Phase::Reviewing,
+                    Phase::Planning,
+                ) {
+                    state = state_before_rollback;
+                    return Err(err);
+                }
                 persist_state(&project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
@@ -1970,6 +1951,50 @@ impl Orchestrator {
                     loop_number: ln,
                     max_iterations: max_iter,
                 });
+            }
+
+            let transitioned_phase = state.current_phase.clone();
+            if transitioned_phase != phase_at_step_start {
+                let transitioned_iteration = state.phase_iteration;
+                let checkpoint_loop_number = state.current_loop;
+                if checkpoint_loop_number == 0 {
+                    return Err(RalphError::Orchestration(
+                        "cannot checkpoint phase transition without a current loop".to_owned(),
+                    ));
+                }
+
+                state.current_phase = phase_at_step_start.clone();
+                state.phase_iteration = phase_iteration_at_step_start;
+
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    checkpoint_loop_number,
+                    phase_at_step_start,
+                    transitioned_phase.clone(),
+                ) {
+                    state.current_phase = transitioned_phase;
+                    state.phase_iteration = transitioned_iteration;
+                    return Err(err);
+                }
+
+                state.current_phase = transitioned_phase;
+                state.phase_iteration = transitioned_iteration;
+
+                if let Some(loop_number) = completed_feature_loop_for_checkpoint {
+                    let repo_root = self.workspace.root.parent().ok_or_else(|| {
+                        RalphError::Orchestration("workspace root has no parent path".to_owned())
+                    })?;
+                    let commit_hash = rev_parse(repo_root, "HEAD")?;
+                    if let Some(loop_state) = state
+                        .loops
+                        .iter_mut()
+                        .find(|loop_state| loop_state.loop_number == loop_number)
+                    {
+                        loop_state.commit = Some(commit_hash);
+                    }
+                    logs.push(format!("loop {loop_number}: committed structured checkpoint"));
+                }
             }
 
             persist_state(&project_dir, &state)?;
@@ -1985,22 +2010,6 @@ impl Orchestrator {
             }
 
             if state.status == ProjectStatus::Completed {
-                // Commit completion artifacts (acceptance QA results, state, etc.)
-                if effective.workflow.auto_commit && !options.skip_commit {
-                    if let Some(repo_root) = self.workspace.root.parent() {
-                        if is_git_repo(repo_root) {
-                            let msg =
-                                format!("chore({}): add completion artifacts", state.project_id);
-                            let _ = commit_feature_loop(
-                                repo_root,
-                                &msg,
-                                None,
-                                effective.global.git.sign_commits,
-                            );
-                        }
-                    }
-                }
-
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
                         "project completed".to_owned()
@@ -3355,6 +3364,25 @@ fn persist_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
     save_project_state(project_dir, state)
 }
 
+fn checkpoint_phase_transition(
+    workspace_root: &Path,
+    project_id: &str,
+    loop_number: u32,
+    from_phase: Phase,
+    to_phase: Phase,
+) -> Result<()> {
+    let repo_root = workspace_root
+        .parent()
+        .ok_or_else(|| RalphError::Orchestration("workspace root has no parent path".to_owned()))?;
+    if !is_git_repo(repo_root) {
+        return Err(RalphError::Orchestration(
+            "cannot checkpoint phase transition: repository is not a git workspace".to_owned(),
+        ));
+    }
+
+    commit_and_push_phase_transition(repo_root, project_id, loop_number, from_phase, to_phase)
+}
+
 fn phase_label(phase: &Phase) -> &'static str {
     match phase {
         Phase::Planning => "planning",
@@ -3439,61 +3467,6 @@ fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {
         return Ok(());
     }
     stage_implementation_changes(repo_root)
-}
-
-fn generate_commit_message(
-    style: &CommitMessageStyle,
-    feature_name: &str,
-    loop_number: u32,
-    state: &ProjectState,
-) -> String {
-    match style {
-        CommitMessageStyle::Conventional => {
-            format!("feat(ralph): {feature_name} [loop-{loop_number}]")
-        }
-        CommitMessageStyle::Descriptive => {
-            if let Some(loop_state) = state.current_feature_loop() {
-                format!(
-                    "{feature_name}\n\nImplemented via ralph loop {loop_number}.\nBackends: planner={}, implementer={}, reviewer={}",
-                    loop_state.backends.planner,
-                    loop_state.backends.implementer,
-                    loop_state.backends.reviewer,
-                )
-            } else {
-                format!("{feature_name}\n\nImplemented via ralph loop {loop_number}.")
-            }
-        }
-        CommitMessageStyle::Minimal => feature_name.to_owned(),
-    }
-}
-
-fn extract_reviewer_commit_message(body: &str) -> Option<String> {
-    let mut in_commit_section = false;
-    let mut lines = Vec::new();
-
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed == "## Commit Message" {
-            in_commit_section = true;
-            continue;
-        }
-
-        if in_commit_section {
-            if trimmed.starts_with("## ") {
-                break;
-            }
-            if trimmed.is_empty() {
-                continue;
-            }
-            lines.push(trimmed.to_owned());
-        }
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join(" "))
-    }
 }
 
 fn expected_format_template_for(role: &str, iteration: Option<u32>) -> String {

@@ -624,10 +624,8 @@ async fn dispatch_task(
     {
         let wt = wt_path.clone();
         let issue_number = task.issue_number;
-        match spawn_blocking_op(move || {
-            crate::git::branch::sync_project_branch(&wt, issue_number)
-        })
-        .await
+        match spawn_blocking_op(move || crate::git::branch::sync_project_branch(&wt, issue_number))
+            .await
         {
             Ok(()) => {
                 eprintln!(

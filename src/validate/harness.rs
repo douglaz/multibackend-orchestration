@@ -368,12 +368,27 @@ fn initialize_git_repo(repo_root: &Path, with_initial_commit: bool) -> Result<()
     run_git(repo_root, &["init"])?;
     run_git(repo_root, &["config", "user.email", "validate@example.com"])?;
     run_git(repo_root, &["config", "user.name", "Validate Harness"])?;
+    let origin_bare = repo_root.parent().unwrap_or(repo_root).join("origin.git");
+    run_git(
+        repo_root,
+        &["init", "--bare", origin_bare.to_string_lossy().as_ref()],
+    )?;
+    run_git(
+        repo_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin_bare.to_string_lossy().as_ref(),
+        ],
+    )?;
 
     if with_initial_commit {
         fs::write(repo_root.join(".gitkeep"), "")?;
         run_git(repo_root, &["add", ".gitkeep"])?;
         run_git(repo_root, &["commit", "-m", "chore: initial commit"])?;
         run_git(repo_root, &["branch", "-M", "master"])?;
+        run_git(repo_root, &["push", "-u", "origin", "master"])?;
     }
 
     Ok(())

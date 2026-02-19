@@ -46,16 +46,12 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         Ok(has_origin) => {
             if has_origin {
                 if let Err(err) = fetch_origin(repo_root, task_id) {
-                    eprintln!(
-                        "warning: failed to fetch origin for task {task_id}: {err}"
-                    );
+                    eprintln!("warning: failed to fetch origin for task {task_id}: {err}");
                 }
             }
         }
         Err(err) => {
-            eprintln!(
-                "warning: failed to detect origin remote for task {task_id}: {err}"
-            );
+            eprintln!("warning: failed to detect origin remote for task {task_id}: {err}");
         }
     }
 
@@ -126,9 +122,7 @@ fn fetch_origin(repo_root: &Path, task_id: &str) -> Result<()> {
         .current_dir(repo_root)
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to fetch origin for {task_id}: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to fetch origin for {task_id}: {err}"))
         })?;
 
     if output.status.success() {

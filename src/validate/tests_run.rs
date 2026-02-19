@@ -5,9 +5,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::validate::assertions::{
-    assert_artifact_timestamp_naming, assert_exit_code, assert_file_exists, assert_git_tag_exists,
-    assert_git_tag_not_exists, assert_json_array_len, assert_json_field, assert_no_loop_artifacts,
-    assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
+    assert_artifact_timestamp_naming, assert_exit_code, assert_file_exists, assert_json_array_len,
+    assert_json_field, assert_no_loop_artifacts, assert_no_uncommitted_ralph_files,
+    parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
@@ -128,7 +128,7 @@ fn single_feature_loop(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "expected loop to have a commit hash"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
@@ -300,7 +300,20 @@ fn git_tag_format(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        let subject = git_log_subject(&h.repo_root, "HEAD");
+        assert!(
+            subject.starts_with(&format!("ralph({project_id}): loop 1 ")),
+            "expected structured Ralph checkpoint commit subject, got '{subject}'"
+        );
+        let body = git_log_body(&h.repo_root, "HEAD");
+        assert!(
+            body.contains(&format!("Ralph-Project: {project_id}")),
+            "expected Ralph-Project trailer in checkpoint commit body"
+        );
+        assert!(
+            body.contains("Ralph-Loop: 1"),
+            "expected Ralph-Loop trailer in checkpoint commit body"
+        );
     })
 }
 
@@ -415,7 +428,6 @@ fn review_limit_fails(h: &RalphHarness) -> TestResult {
         assert_json_field(&state, "status", &json!("failed"));
         assert_json_array_len(&state, "loops", 0);
         assert_no_loop_artifacts(&h.project_dir(project_id));
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
     })
 }
 
@@ -477,7 +489,7 @@ fn until_review(h: &RalphHarness) -> TestResult {
         assert_file_exists(&project_dir.join(spec_rel));
         assert_file_exists(&project_dir.join(impl_notes_rel));
         assert_file_exists(&project_dir.join(approval_rel));
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
@@ -501,7 +513,7 @@ fn resume_after_interrupt(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "commit hash should be populated after resume"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
@@ -536,10 +548,10 @@ fn skip_commit(h: &RalphHarness) -> TestResult {
         let loop_state = &loops[0];
         assert_eq!(loop_state["status"], json!("completed"));
         assert!(
-            loop_state["commit"].is_null(),
-            "loop commit should be null when --skip-commit is used"
+            loop_state["commit"].as_str().is_some(),
+            "loop commit should still be set via structured phase checkpointing"
         );
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
@@ -762,6 +774,54 @@ fn git_head(repo_root: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_log_subject(repo_root: &Path, rev: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%s", rev])
+        .current_dir(repo_root)
+        .output()
+        .expect("git show should execute");
+    assert!(
+        output.status.success(),
+        "git show subject failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_log_body(repo_root: &Path, rev: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%b", rev])
+        .current_dir(repo_root)
+        .output()
+        .expect("git show should execute");
+    assert!(
+        output.status.success(),
+        "git show body failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn assert_has_ralph_checkpoint_commit(repo_root: &Path, project_id: &str) {
+    let output = Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git log should execute");
+    assert!(
+        output.status.success(),
+        "git log failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let subjects = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        subjects
+            .lines()
+            .any(|line| line.starts_with(&format!("ralph({project_id}):"))),
+        "expected at least one Ralph checkpoint commit for project '{project_id}'"
+    );
 }
 
 fn run_case<F>(f: F) -> TestResult

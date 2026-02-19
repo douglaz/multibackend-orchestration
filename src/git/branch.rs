@@ -88,11 +88,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
     if remote_ref_exists(repo_root, &remote_branch)? {
         // Remote branch exists — force-reset local branch to match remote.
         // This discards any local-only diverged commits.
-        run_git(
-            repo_root,
-            &["checkout", "-B", &branch, &remote_branch],
-        )
-        .map_err(|err| {
+        run_git(repo_root, &["checkout", "-B", &branch, &remote_branch]).map_err(|err| {
             RalphError::Orchestration(format!(
                 "sync_project_branch: git checkout -B {branch} {remote_branch} failed \
                  for issue {issue_number}: {err}"
@@ -111,11 +107,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
         )));
     }
 
-    run_git(
-        repo_root,
-        &["checkout", "-b", &branch, "origin/HEAD"],
-    )
-    .map_err(|err| {
+    run_git(repo_root, &["checkout", "-b", &branch, "origin/HEAD"]).map_err(|err| {
         RalphError::Orchestration(format!(
             "sync_project_branch: git checkout -b {branch} origin/HEAD failed \
              for issue {issue_number}: {err}"
@@ -247,19 +239,18 @@ mod tests {
         git_ok(&setup_dir, &["commit", "-m", "initial"]);
         git_ok(
             &setup_dir,
-            &[
-                "remote",
-                "add",
-                "origin",
-                &bare_dir.to_string_lossy(),
-            ],
+            &["remote", "add", "origin", &bare_dir.to_string_lossy()],
         );
         git_ok(&setup_dir, &["push", "-u", "origin", "HEAD"]);
 
         // Clone from bare into clone_dir
         git_ok_abs(
             &clone_dir,
-            &["clone", &bare_dir.to_string_lossy(), &clone_dir.to_string_lossy()],
+            &[
+                "clone",
+                &bare_dir.to_string_lossy(),
+                &clone_dir.to_string_lossy(),
+            ],
         );
         git_ok(&clone_dir, &["config", "user.email", "test@example.com"]);
         git_ok(&clone_dir, &["config", "user.name", "Test User"]);
@@ -289,8 +280,7 @@ mod tests {
 
         // Push a project branch to the remote
         git_ok(&clone_dir, &["checkout", "-b", "ralph/issue-42"]);
-        fs::write(clone_dir.join("remote-file.txt"), "from remote\n")
-            .expect("write remote file");
+        fs::write(clone_dir.join("remote-file.txt"), "from remote\n").expect("write remote file");
         git_ok(&clone_dir, &["add", "-A"]);
         git_ok(&clone_dir, &["commit", "-m", "remote commit"]);
         git_ok(&clone_dir, &["push", "origin", "ralph/issue-42"]);
@@ -299,8 +289,7 @@ mod tests {
         // Go back to default branch, add a local-only diverged commit on
         // ralph/issue-42
         git_ok(&clone_dir, &["checkout", "ralph/issue-42"]);
-        fs::write(clone_dir.join("local-only.txt"), "local diverge\n")
-            .expect("write local file");
+        fs::write(clone_dir.join("local-only.txt"), "local diverge\n").expect("write local file");
         git_ok(&clone_dir, &["add", "-A"]);
         git_ok(&clone_dir, &["commit", "-m", "local only commit"]);
         let local_head = git_output(&clone_dir, &["rev-parse", "HEAD"]);
@@ -328,10 +317,7 @@ mod tests {
         let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
 
         // origin/HEAD should exist pointing to default branch
-        let origin_head = git_output(
-            &clone_dir,
-            &["rev-parse", "origin/HEAD"],
-        );
+        let origin_head = git_output(&clone_dir, &["rev-parse", "origin/HEAD"]);
 
         // No remote ralph/issue-99 exists
         sync_project_branch(&clone_dir, 99).expect("sync should succeed");
@@ -389,16 +375,18 @@ mod tests {
 
         // Push a project branch to the remote
         git_ok(&clone_dir, &["checkout", "-b", "ralph/issue-10"]);
-        fs::write(clone_dir.join("base.txt"), "base content\n")
-            .expect("write base file");
+        fs::write(clone_dir.join("base.txt"), "base content\n").expect("write base file");
         git_ok(&clone_dir, &["add", "-A"]);
         git_ok(&clone_dir, &["commit", "-m", "base commit"]);
         git_ok(&clone_dir, &["push", "origin", "ralph/issue-10"]);
         let remote_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
 
         // Add a local-only commit (not pushed)
-        fs::write(clone_dir.join("local-artifact.txt"), "should be discarded\n")
-            .expect("write local artifact");
+        fs::write(
+            clone_dir.join("local-artifact.txt"),
+            "should be discarded\n",
+        )
+        .expect("write local artifact");
         git_ok(&clone_dir, &["add", "-A"]);
         git_ok(&clone_dir, &["commit", "-m", "local only: should vanish"]);
         let local_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);

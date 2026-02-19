@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use crate::error::RalphError;
+use crate::git::ralph_commit::build_ralph_commit_message;
 use crate::git::{
     conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
     run_git_status,
 };
+use crate::project::state::Phase;
 use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
@@ -99,7 +101,7 @@ pub fn changed_paths_excluding_prefixes(
 pub fn commit_feature_loop(
     workdir: &Path,
     message: &str,
-    tag_name: Option<&str>,
+    _tag_name: Option<&str>,
     sign_commits: bool,
 ) -> Result<String> {
     ensure_git_repo(workdir)?;
@@ -126,11 +128,42 @@ pub fn commit_feature_loop(
 
     let commit_hash = rev_parse(workdir, "HEAD")?;
 
-    if let Some(tag) = tag_name {
-        run_git(workdir, &["tag", tag, "HEAD"])?;
+    Ok(commit_hash)
+}
+
+pub fn commit_and_push_phase_transition(
+    repo_root: &Path,
+    project_id: &str,
+    loop_number: u32,
+    from_phase: Phase,
+    to_phase: Phase,
+) -> Result<()> {
+    ensure_git_repo(repo_root)?;
+
+    // Keep the failure behavior aligned with commit_feature_loop.
+    if has_conflicts(repo_root)? {
+        let files = conflicting_files(repo_root)?;
+        return Err(RalphError::GitConflict {
+            details: format!(
+                "Merge conflicts detected in {} file(s): {}",
+                files.len(),
+                files.join(", ")
+            ),
+        });
     }
 
-    Ok(commit_hash)
+    run_git(repo_root, &["add", "-A"])?;
+
+    let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
+    run_git(repo_root, &["commit", "--allow-empty", "-m", &message])?;
+
+    let project_branch = format!("ralph/{project_id}");
+    run_git(
+        repo_root,
+        &["push", "origin", &format!("HEAD:{project_branch}")],
+    )?;
+
+    Ok(())
 }
 
 /// Stage all non-orchestration changes so reviewer diff (`git diff HEAD`)
@@ -255,4 +288,230 @@ fn parse_porcelain_status_path(line: &str) -> Option<String> {
 fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     let normalized = prefix.trim().trim_end_matches('/');
     !normalized.is_empty() && (path == normalized || path.starts_with(&format!("{normalized}/")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::commit_and_push_phase_transition;
+    use crate::git::branch::sync_project_branch;
+    use crate::git::ralph_commit::{build_ralph_commit_message, derive_position};
+    use crate::project::state::Phase;
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git command should execute");
+        assert!(
+            status.success(),
+            "git command failed: git {}",
+            args.join(" ")
+        );
+    }
+
+    fn git_output(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git command failed: git {}",
+            args.join(" ")
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn git_output_in_dir(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git command failed: git {}",
+            args.join(" ")
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn commit_empty_with_message(repo: &Path, message: &str) {
+        let msg_file = repo.join(".git").join("RALPH_MSG");
+        let msg_file_str = msg_file.to_string_lossy().into_owned();
+        fs::write(&msg_file, message).expect("message file should be written");
+        git_ok(
+            repo,
+            &["commit", "--allow-empty", "--file", msg_file_str.as_str()],
+        );
+        let _ = fs::remove_file(msg_file);
+    }
+
+    fn init_repo_with_remote() -> (TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().expect("temp dir should be created");
+        let root = temp.path();
+        let remote = root.join("remote.git");
+        let work = root.join("work");
+        let remote_str = remote.to_string_lossy().into_owned();
+
+        git_ok(root, &["init", "--bare", remote_str.as_str()]);
+        git_ok(root, &["clone", remote_str.as_str(), "work"]);
+        git_ok(&work, &["config", "user.email", "test@example.com"]);
+        git_ok(&work, &["config", "user.name", "Test User"]);
+
+        fs::write(work.join("README.md"), "# test\n").expect("README should be written");
+        git_ok(&work, &["add", "-A"]);
+        git_ok(&work, &["commit", "-m", "initial"]);
+        git_ok(&work, &["push", "-u", "origin", "HEAD:master"]);
+
+        git_ok(&work, &["checkout", "-b", "ralph/issue-42"]);
+        git_ok(&work, &["push", "-u", "origin", "ralph/issue-42"]);
+
+        (temp, remote, work)
+    }
+
+    #[test]
+    fn commit_and_push_phase_transition_pushes_structured_checkpoint() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+        let before = git_output(&work, &["rev-parse", "origin/ralph/issue-42"]);
+
+        fs::write(work.join(".ralph-checkpoint"), "checkpoint\n")
+            .expect("checkpoint file should be written");
+        commit_and_push_phase_transition(
+            &work,
+            "issue-42",
+            3,
+            Phase::Planning,
+            Phase::Implementing,
+        )
+        .expect("checkpoint push should succeed");
+
+        let after = git_output(&work, &["rev-parse", "origin/ralph/issue-42"]);
+        let count = git_output(
+            &work,
+            &["rev-list", "--count", &format!("{before}..{after}")],
+        );
+        assert_eq!(count, "1", "expected exactly one remote checkpoint commit");
+
+        let subject = git_output(&work, &["show", "-s", "--format=%s", &after]);
+        assert_eq!(
+            subject, "ralph(issue-42): loop 3 planning -> implementing",
+            "unexpected commit subject"
+        );
+
+        let body = git_output(&work, &["show", "-s", "--format=%b", &after]);
+        assert!(
+            body.contains("Ralph-Project: issue-42"),
+            "missing Ralph-Project trailer"
+        );
+        assert!(body.contains("Ralph-Loop: 3"), "missing Ralph-Loop trailer");
+        assert!(
+            body.contains("Ralph-Phase: implementing"),
+            "missing Ralph-Phase trailer"
+        );
+    }
+
+    #[test]
+    fn commit_and_push_phase_transition_push_failure_keeps_local_commit_without_remote_advance() {
+        let (_temp, remote, work) = init_repo_with_remote();
+        let remote_str = remote.to_string_lossy().into_owned();
+        let remote_before = git_output_in_dir(
+            remote.parent().expect("remote parent should exist"),
+            &[
+                "--git-dir",
+                remote_str.as_str(),
+                "rev-parse",
+                "refs/heads/ralph/issue-42",
+            ],
+        );
+        let local_before = git_output(&work, &["rev-parse", "HEAD"]);
+
+        git_ok(
+            &work,
+            &["remote", "set-url", "origin", "/definitely/missing/repo"],
+        );
+        fs::write(work.join("local-only.txt"), "local only\n").expect("write local file");
+
+        let err = commit_and_push_phase_transition(
+            &work,
+            "issue-42",
+            4,
+            Phase::Implementing,
+            Phase::Reviewing,
+        )
+        .expect_err("push should fail");
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("push"),
+            "push failure should mention push command: {err_str}"
+        );
+
+        let local_after = git_output(&work, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            local_before, local_after,
+            "local commit should exist even when push fails"
+        );
+
+        let remote_after = git_output_in_dir(
+            remote.parent().expect("remote parent should exist"),
+            &[
+                "--git-dir",
+                remote_str.as_str(),
+                "rev-parse",
+                "refs/heads/ralph/issue-42",
+            ],
+        );
+        assert_eq!(
+            remote_before, remote_after,
+            "remote branch should not advance when push fails"
+        );
+    }
+
+    #[test]
+    fn sync_project_branch_discards_local_only_checkpoint_and_position_reverts() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+
+        let remote_checkpoint =
+            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&work, &remote_checkpoint);
+        git_ok(&work, &["push", "origin", "HEAD:ralph/issue-42"]);
+        let remote_head = git_output(&work, &["rev-parse", "origin/ralph/issue-42"]);
+
+        let local_only =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&work, &local_only);
+        let local_head = git_output(&work, &["rev-parse", "HEAD"]);
+        assert_ne!(local_head, remote_head, "local should diverge from remote");
+
+        let before_sync_position =
+            derive_position(&work, "ralph/issue-42").expect("derive_position before sync");
+        assert_eq!(
+            before_sync_position,
+            (1, Phase::Implementing),
+            "remote-derived position should stay on pushed checkpoint"
+        );
+
+        sync_project_branch(&work, 42).expect("sync should discard local-only checkpoint");
+        let head_after_sync = git_output(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_after_sync, remote_head,
+            "sync should reset local branch to remote checkpoint"
+        );
+
+        let after_sync_position =
+            derive_position(&work, "ralph/issue-42").expect("derive_position after sync");
+        assert_eq!(
+            after_sync_position,
+            (1, Phase::Implementing),
+            "position should revert to last pushed checkpoint after sync"
+        );
+    }
 }
