@@ -386,6 +386,87 @@ fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
     found
 }
 
+/// Scan remote `ralph/*` branches (excluding `daemon/` and `issue-` branches)
+/// for project data.  If found, check out that branch in the worktree and
+/// return the discovered project ID.
+///
+/// This handles retriggers of tasks originally dispatched via `ralph auto
+/// --idea`, where project commits land on `ralph/{project_id}` instead of
+/// `ralph/issue-<n>`.
+fn discover_project_from_remote_branches(
+    worktree_path: &Path,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin/ralph/",
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "discover_project_from_remote_branches: git for-each-ref failed: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for remote_branch in stdout.lines() {
+        let remote_branch = remote_branch.trim();
+        if remote_branch.is_empty() {
+            continue;
+        }
+        // Skip daemon worktree branches and issue branches (already checked
+        // by sync_project_branch).
+        let short = remote_branch.strip_prefix("origin/ralph/").unwrap_or("");
+        if short.starts_with("daemon/") || short.starts_with("issue-") {
+            continue;
+        }
+
+        // Check if this branch has .ralph/projects/ content
+        let ls = std::process::Command::new("git")
+            .args(["ls-tree", "--name-only", remote_branch, ".ralph/projects/"])
+            .current_dir(worktree_path)
+            .output();
+        let has_projects = ls
+            .as_ref()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+
+        if !has_projects {
+            continue;
+        }
+
+        // Checkout this branch and try discovery
+        let local_branch = match remote_branch.strip_prefix("origin/") {
+            Some(b) => b,
+            None => continue,
+        };
+        let checkout = crate::git::run_git(
+            worktree_path,
+            &["checkout", "-B", local_branch, remote_branch],
+        );
+        if checkout.is_err() {
+            continue;
+        }
+
+        let project_ids = discover_project_ids(worktree_path);
+        if let Some(project_id) = project_ids.into_iter().next() {
+            eprintln!(
+                "dispatch: event=project_branch_fallback task_id={task_id} branch={local_branch} project_id={project_id}"
+            );
+            return Ok(Some(project_id));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Find the most recently modified project directory by prompt mtime.
 /// Returns `None` if no projects exist.
 #[cfg(test)]
@@ -445,7 +526,24 @@ async fn dispatch_task(
     // Dispatch-time project discovery
     let effective_project_id = {
         let wt = wt_path.clone();
-        let discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
+        let mut discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
+
+        // If no projects found on the issue branch, scan remote ralph/*
+        // branches for project data.  This handles retriggers of tasks that
+        // were originally dispatched via `ralph auto --idea` (where project
+        // commits land on `ralph/{project_id}`, not `ralph/issue-<n>`).
+        if discovered.is_empty() {
+            let wt = wt_path.clone();
+            let tid = task_id.clone();
+            if let Ok(Some(project_id)) = spawn_blocking_op(move || {
+                discover_project_from_remote_branches(&wt, &tid)
+            })
+            .await
+            {
+                discovered.push(project_id);
+            }
+        }
+
         match discovered.len() {
             0 => None,
             1 => {

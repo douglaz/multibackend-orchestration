@@ -96,6 +96,8 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             }
         }
 
+        // Always reset the local branch so that checkpoint-derived state
+        // reconstruction sees the rolled-back position.
         reset_hard(repo_root, reference)?;
         restore_workspace_files(
             &workspace,
@@ -104,15 +106,16 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             project_config_backup.as_deref(),
         )?;
 
-        // Force-push the reset branch to the remote so that checkpoint-derived
-        // state reconstruction (which reads `origin/<branch>`) sees the
-        // rolled-back position instead of the pre-rollback checkpoints.
-        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if branch_exists(repo_root, &branch)? {
-            run_git(
-                repo_root,
-                &["push", "--force", "origin", &format!("{branch}:{branch}")],
-            )?;
+        // Only force-push to remote with --hard; without it, the destructive
+        // remote action is skipped so the user can inspect before pushing.
+        if args.hard {
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            if branch_exists(repo_root, &branch)? {
+                run_git(
+                    repo_root,
+                    &["push", "--force", "origin", &format!("{branch}:{branch}")],
+                )?;
+            }
         }
     }
 
