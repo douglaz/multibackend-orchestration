@@ -69,26 +69,64 @@ pub fn parse_ralph_commit(
     })
 }
 
+/// Resolve the best checkpoint ref for `branch`: prefer the local branch when
+/// it is strictly ahead of `origin/{branch}` (e.g. a checkpoint commit was
+/// created locally but the subsequent push failed).  Falls back to the remote
+/// tracking ref, or returns `None` when neither ref exists.
+fn resolve_checkpoint_ref(repo_root: &Path, branch: &str) -> Result<Option<String>> {
+    let remote_ref = format!("origin/{branch}");
+    let remote_exists = run_git_status(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", &remote_ref],
+    )?
+    .success();
+
+    let local_exists = run_git_status(
+        repo_root,
+        &["rev-parse", "--verify", "--quiet", branch],
+    )?
+    .success();
+
+    match (remote_exists, local_exists) {
+        (false, false) => Ok(None),
+        (true, false) => Ok(Some(remote_ref)),
+        (false, true) => Ok(Some(branch.to_owned())),
+        (true, true) => {
+            // If local is strictly ahead of remote, prefer local
+            // (covers push-failure scenario where local commit exists
+            // but origin was never updated).
+            let ahead = run_git(
+                repo_root,
+                &["rev-list", "--count", &format!("{remote_ref}..{branch}")],
+            )?;
+            if ahead.trim().parse::<u64>().unwrap_or(0) > 0 {
+                Ok(Some(branch.to_owned()))
+            } else {
+                Ok(Some(remote_ref))
+            }
+        }
+    }
+}
+
 /// Returns the newest Ralph checkpoint commit on the remote branch.
 ///
 /// Only the newest matching commit is validated.  If it is malformed, an
 /// actionable error (including commit hash context) is returned.  Older
 /// malformed Ralph commits are irrelevant when a newer valid checkpoint exists.
+///
+/// Falls back to the local branch when it is ahead of the remote (e.g. after a
+/// push failure).
 pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
-    let remote_branch = format!("origin/{branch}");
 
-    let status = run_git_status(
-        repo_root,
-        &["rev-parse", "--verify", "--quiet", remote_branch.as_str()],
-    )?;
-    if !status.success() {
-        return Ok(None);
-    }
+    let checkpoint_ref = match resolve_checkpoint_ref(repo_root, branch)? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
     let log = run_git(
         repo_root,
-        &["log", remote_branch.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
+        &["log", checkpoint_ref.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
     )?;
 
     for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
@@ -113,26 +151,23 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
     Ok(None)
 }
 
-/// Returns all valid Ralph checkpoint commits from the remote branch (newest first).
+/// Returns all valid Ralph checkpoint commits from the best available ref
+/// (remote, or local when ahead of remote).
 ///
 /// Only the newest Ralph checkpoint must be well-formed.  Older malformed
 /// commits are silently skipped so that historical format changes do not
 /// break derivation when a newer valid checkpoint exists.
 pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCommitInfo>> {
     ensure_git_repo(repo_root)?;
-    let remote_branch = format!("origin/{branch}");
 
-    let status = run_git_status(
-        repo_root,
-        &["rev-parse", "--verify", "--quiet", remote_branch.as_str()],
-    )?;
-    if !status.success() {
-        return Ok(Vec::new());
-    }
+    let checkpoint_ref = match resolve_checkpoint_ref(repo_root, branch)? {
+        Some(r) => r,
+        None => return Ok(Vec::new()),
+    };
 
     let log = run_git(
         repo_root,
-        &["log", remote_branch.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
+        &["log", checkpoint_ref.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
     )?;
 
     let mut commits = Vec::new();

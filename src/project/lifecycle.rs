@@ -156,7 +156,16 @@ pub fn reconstruct_project_state_from_project_dir(project_dir: &Path) -> Result<
         })?;
 
     let repo_root = find_repo_root(project_dir);
-    let branch = format!("ralph/{project_id}");
+
+    // Try loading workspace config for branch_format.  The project dir lives
+    // at `.ralph/projects/<id>/`, so the workspace root is two levels up.
+    let branch = project_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|ws_root| Workspace::load(ws_root.to_path_buf()).ok())
+        .map(|ws| resolve_branch_name(&ws.config.git.branch_format, project_id))
+        .unwrap_or_else(|| format!("ralph/{project_id}"));
+
     reconstruct_project_state_internal(
         project_dir,
         project_id,

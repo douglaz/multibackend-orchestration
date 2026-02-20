@@ -504,8 +504,8 @@ mod tests {
             derive_position(&work, "ralph/issue-42").expect("derive_position before sync");
         assert_eq!(
             before_sync_position,
-            (1, Phase::Implementing),
-            "remote-derived position should stay on pushed checkpoint"
+            (2, Phase::Reviewing),
+            "local-ahead position should reflect unpushed checkpoint"
         );
 
         sync_project_branch(&work, 42).expect("sync should discard local-only checkpoint");
