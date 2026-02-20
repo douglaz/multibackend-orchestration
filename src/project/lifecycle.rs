@@ -1,15 +1,19 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::ProjectConfig;
 use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
 use crate::git::is_git_repo;
-use crate::project::state::ProjectState;
+use crate::project::state::{ProjectState, SessionStore};
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
+use tracing::warn;
+
+pub const SESSION_STORE_FILE: &str = "session-store.json";
 
 pub enum PromptSource {
     File(PathBuf),
@@ -139,11 +143,20 @@ pub(crate) fn validate_project_id(id: &str) -> Result<()> {
 pub fn load_project_state(project_dir: &Path) -> Result<ProjectState> {
     let state_path = project_dir.join("state.json");
     let raw = fs::read_to_string(&state_path)?;
+    reconstruct_project_state_internal(project_dir, &state_path, &raw)
+}
 
-    match parse_and_validate_state(&raw) {
-        Ok(state) => Ok(state),
-        Err(reason) => recover_state_from_git(project_dir, &state_path, &reason),
-    }
+fn reconstruct_project_state_internal(
+    project_dir: &Path,
+    state_path: &Path,
+    raw: &str,
+) -> Result<ProjectState> {
+    let mut state = match parse_and_validate_state(raw) {
+        Ok(state) => state,
+        Err(reason) => recover_state_from_git(project_dir, state_path, &reason)?,
+    };
+    state.session_store = load_persisted_session_store(project_dir);
+    Ok(state)
 }
 
 pub fn save_project_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
@@ -162,6 +175,41 @@ fn parse_and_validate_state(raw: &str) -> std::result::Result<ProjectState, Stri
         .validate_invariants()
         .map_err(|reason| format!("invalid invariants: {reason}"))?;
     Ok(state)
+}
+
+pub fn persist_session_store(project_dir: &Path, store: &SessionStore) -> Result<()> {
+    let path = project_dir.join(SESSION_STORE_FILE);
+    let raw = serde_json::to_string_pretty(store)?;
+    fs::write(path, raw)?;
+    Ok(())
+}
+
+fn load_persisted_session_store(project_dir: &Path) -> SessionStore {
+    let path = project_dir.join(SESSION_STORE_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return SessionStore::default(),
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to read session store, defaulting to empty"
+            );
+            return SessionStore::default();
+        }
+    };
+
+    match serde_json::from_str::<SessionStore>(&raw) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to parse session store, defaulting to empty"
+            );
+            SessionStore::default()
+        }
+    }
 }
 
 fn recover_state_from_git(
@@ -239,5 +287,77 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(root))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use super::{load_project_state, persist_session_store};
+    use crate::project::state::{ProjectState, SessionRecord, SessionStore};
+
+    fn sample_store(loop_number: u32) -> SessionStore {
+        let now = Utc::now();
+        let mut store = SessionStore::default();
+        store.upsert(SessionRecord {
+            session_id: format!("sid-{loop_number}"),
+            backend_spec: "claude(opus)".to_owned(),
+            role: "implementer".to_owned(),
+            loop_number,
+            bootstrap_hash: "bootstrap".to_owned(),
+            call_count: 1,
+            created_at: now,
+            last_used_at: now,
+        });
+        store
+    }
+
+    #[test]
+    fn persist_and_load_session_store_roundtrip() {
+        let temp = tempdir().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+        state.save(&state_path).expect("save state");
+
+        let store = sample_store(1);
+        persist_session_store(temp.path(), &store).expect("persist session store");
+
+        let loaded = load_project_state(temp.path()).expect("load project state");
+        let loaded_json =
+            serde_json::to_value(&loaded.session_store).expect("serialize loaded session store");
+        let expected_json = serde_json::to_value(&store).expect("serialize expected store");
+        assert_eq!(loaded_json, expected_json);
+    }
+
+    #[test]
+    fn missing_session_store_file_yields_empty_store() {
+        let temp = tempdir().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.session_store = sample_store(1);
+        state.save(&state_path).expect("save state");
+
+        let loaded = load_project_state(temp.path()).expect("load project state");
+        assert!(loaded.session_store.records.is_empty());
+    }
+
+    #[test]
+    fn corrupt_session_store_file_yields_empty_store() {
+        let temp = tempdir().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let mut state = ProjectState::new("demo", "Demo", "hash", None);
+        state.session_store = sample_store(1);
+        state.save(&state_path).expect("save state");
+
+        std::fs::write(
+            temp.path().join(super::SESSION_STORE_FILE),
+            "{not valid json",
+        )
+        .expect("write corrupt session store");
+
+        let loaded = load_project_state(temp.path()).expect("load project state");
+        assert!(loaded.session_store.records.is_empty());
     }
 }

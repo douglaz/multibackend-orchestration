@@ -28,7 +28,7 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::{load_project_state, persist_session_store, save_project_state};
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
     AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
@@ -628,6 +628,7 @@ impl Orchestrator {
                             effective_sid.as_deref(),
                             session_id.is_some(),
                         );
+                        persist_session_store(&project_dir, &state.session_store)?;
                         let retry_result = retry_result?;
                         let decision = retry_result.parsed;
                         debug!(loop = loop_number, "implementer responded");
@@ -784,6 +785,7 @@ impl Orchestrator {
                             effective_sid.as_deref(),
                             session_id.is_some(),
                         );
+                        persist_session_store(&project_dir, &state.session_store)?;
                         let retry_result = retry_result?;
                         let decision = retry_result.parsed;
 
@@ -943,6 +945,7 @@ impl Orchestrator {
                             effective_sid.as_deref(),
                             session_id.is_some(),
                         );
+                        persist_session_store(&project_dir, &state.session_store)?;
                         let retry_result = retry_result?;
                         let decision = retry_result.parsed;
 
@@ -1039,6 +1042,7 @@ impl Orchestrator {
                             "QA iteration limit exceeded, rolling back loop"
                         );
                         rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
+                        persist_session_store(&project_dir, &state.session_store)?;
                         persist_state(&project_dir, &state)?;
                         if options.until_complete {
                             logs.push(format!(
@@ -1160,6 +1164,7 @@ impl Orchestrator {
                         effective_sid.as_deref(),
                         qa_session_id.is_some(),
                     );
+                    persist_session_store(&project_dir, &state.session_store)?;
                     let retry_result = retry_result?;
                     let qa_decision = retry_result.parsed;
                     debug!(loop = loop_number, "QA responded");
@@ -1408,6 +1413,7 @@ impl Orchestrator {
                             effective_sid.as_deref(),
                             reviewer_session_id.is_some(),
                         );
+                        persist_session_store(&project_dir, &state.session_store)?;
                         let retry_result = retry_result?;
                         let reviewer_decision = retry_result.parsed;
                         debug!(loop = loop_number, "reviewer responded");
@@ -1959,6 +1965,7 @@ impl Orchestrator {
                     "review iteration limit exceeded, rolling back loop"
                 );
                 rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
+                persist_session_store(&project_dir, &state.session_store)?;
                 persist_state(&project_dir, &state)?;
                 if options.until_complete {
                     logs.push(format!(
@@ -2327,6 +2334,7 @@ fn handle_prompt_change(
             for record in saved_sessions {
                 state.session_store.upsert(record);
             }
+            persist_session_store(project_dir, &state.session_store)?;
             state.prompt_hash = new_prompt_hash.to_owned();
             state.prompt_hash_at_loop_start = new_prompt_hash.to_owned();
             Ok(())
@@ -3651,7 +3659,11 @@ fn log_parse_retry_token_metrics(
     session_reused: bool,
     normalized: &crate::backend::output_normalizer::NormalizedOutput,
 ) {
-    match (normalized.tokens_in, normalized.tokens_out, normalized.cached_in) {
+    match (
+        normalized.tokens_in,
+        normalized.tokens_out,
+        normalized.cached_in,
+    ) {
         (Some(tokens_in), Some(tokens_out), Some(cached_in)) => info!(
             role = role,
             phase = phase,
@@ -3792,7 +3804,9 @@ where
     );
     let mut last_session_id: Option<String> = None;
 
-    registry.override_session_id(active_session_id.clone()).await;
+    registry
+        .override_session_id(active_session_id.clone())
+        .await;
 
     let first_raw = execute_with_timeout_retries(
         backend.clone(),
@@ -3874,7 +3888,9 @@ where
             &loop_dir_hint,
             role,
         );
-        registry.override_session_id(resume_session_id.clone()).await;
+        registry
+            .override_session_id(resume_session_id.clone())
+            .await;
         if let Some(parse_error) = &parse_error_first {
             warn!(
                 role = role,
@@ -4030,7 +4046,11 @@ where
         });
     }
 
-    warn!(role = role, attempts = attempts_executed, "all parse retries exhausted");
+    warn!(
+        role = role,
+        attempts = attempts_executed,
+        "all parse retries exhausted"
+    );
     // Write last discovered session_id even on failure (D6 lifecycle rule).
     if let Some(out) = out_session_id {
         *out = last_session_id;
@@ -4059,14 +4079,14 @@ async fn execute_with_timeout_retries(
     if let (Ok(cwd), Some(root)) = (std::env::current_dir(), repo_root) {
         if cwd.starts_with(root) || root.starts_with(&cwd) {
             debug_assert_eq!(
-                cwd, root,
+                cwd,
+                root,
                 "backend invocation cwd ({}) must equal repo root ({})",
                 cwd.display(),
                 root.display()
             );
         }
     }
-
 
     let retry_started = Instant::now();
 
@@ -4228,9 +4248,7 @@ fn upsert_session_after_execution(
     match new_session_id {
         Some(sid) => {
             // New session id: store or update
-            let existing = state
-                .session_store
-                .lookup(loop_number, role, backend_spec);
+            let existing = state.session_store.lookup(loop_number, role, backend_spec);
             let (call_count, created_at) = match existing {
                 Some(r) => (r.call_count + 1, r.created_at),
                 None => (1, Utc::now()),
@@ -4249,10 +4267,7 @@ fn upsert_session_after_execution(
         None if had_prior_session => {
             // Resume response omitted session_id: keep prior stored id,
             // just bump call_count and last_used_at.
-            if let Some(existing) = state
-                .session_store
-                .lookup(loop_number, role, backend_spec)
-            {
+            if let Some(existing) = state.session_store.lookup(loop_number, role, backend_spec) {
                 let mut updated = existing.clone();
                 updated.call_count += 1;
                 updated.last_used_at = Utc::now();
@@ -4277,9 +4292,9 @@ fn ensure_prompt_hash_at_loop_start(state: &mut ProjectState) {
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use tempfile::tempdir;
@@ -5484,7 +5499,8 @@ mod tests {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut visitor = MetricsVisitor::default();
             event.record(&mut visitor);
-            if let (Some(attempt), Some(session_reused)) = (visitor.attempt, visitor.session_reused) {
+            if let (Some(attempt), Some(session_reused)) = (visitor.attempt, visitor.session_reused)
+            {
                 self.events
                     .lock()
                     .expect("capture lock")
@@ -5539,7 +5555,10 @@ mod tests {
 
         match result {
             Err(RalphError::ParseRetriesExhausted { attempts, .. }) => {
-                assert_eq!(attempts, 3, "without a session, exactly 3 attempts should run")
+                assert_eq!(
+                    attempts, 3,
+                    "without a session, exactly 3 attempts should run"
+                )
             }
             _ => panic!("expected ParseRetriesExhausted"),
         }
@@ -5619,10 +5638,7 @@ mod tests {
             "attempt numbers should be 1-based within the executed retry sequence"
         );
         assert_eq!(
-            events
-                .iter()
-                .map(|e| e.session_reused)
-                .collect::<Vec<_>>(),
+            events.iter().map(|e| e.session_reused).collect::<Vec<_>>(),
             vec![false, true, false, false],
             "attempt 2 should reuse the session id discovered on attempt 1"
         );
@@ -5657,7 +5673,10 @@ mod tests {
             "spec body",
             "template content",
         );
-        assert_eq!(hash1, hash2, "identical inputs must produce identical hashes");
+        assert_eq!(
+            hash1, hash2,
+            "identical inputs must produce identical hashes"
+        );
     }
 
     #[test]
@@ -5669,14 +5688,12 @@ mod tests {
             "spec",
             "template",
         );
-        let changed = super::compute_bootstrap_hash(
-            "reviewer",
-            "claude(opus)",
-            "phash",
-            "spec",
-            "template",
+        let changed =
+            super::compute_bootstrap_hash("reviewer", "claude(opus)", "phash", "spec", "template");
+        assert_ne!(
+            base, changed,
+            "different roles must produce different hashes"
         );
-        assert_ne!(base, changed, "different roles must produce different hashes");
     }
 
     #[test]
@@ -5695,7 +5712,10 @@ mod tests {
             "spec",
             "template",
         );
-        assert_ne!(base, changed, "different backends must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different backends must produce different hashes"
+        );
     }
 
     #[test]
@@ -5714,7 +5734,10 @@ mod tests {
             "spec",
             "template",
         );
-        assert_ne!(base, changed, "different prompt hashes must produce different bootstrap hashes");
+        assert_ne!(
+            base, changed,
+            "different prompt hashes must produce different bootstrap hashes"
+        );
     }
 
     #[test]
@@ -5733,7 +5756,10 @@ mod tests {
             "spec v2",
             "template",
         );
-        assert_ne!(base, changed, "different spec content must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different spec content must produce different hashes"
+        );
     }
 
     #[test]
@@ -5752,7 +5778,10 @@ mod tests {
             "spec",
             "template v2",
         );
-        assert_ne!(base, changed, "different template content must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different template content must produce different hashes"
+        );
     }
 
     #[test]

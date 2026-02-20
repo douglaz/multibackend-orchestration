@@ -5,7 +5,7 @@ use crate::cli::RollbackArgs;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::is_git_repo;
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::{load_project_state, persist_session_store, save_project_state};
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use crate::util::lock::ProjectLock;
@@ -140,6 +140,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             state.session_store.remove_for_loop(args.loop_number);
         }
     }
+    persist_session_store(&project_dir, &state.session_store)?;
 
     state.current_loop = args.loop_number;
     state.current_phase = Phase::Planning;

@@ -8,12 +8,12 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -265,7 +265,6 @@ impl CliBackend {
         }
     }
 
-
     pub fn resolved_command_path(&self) -> PathBuf {
         which::which(&self.command).unwrap_or_else(|_| PathBuf::from(&self.command))
     }
@@ -293,17 +292,11 @@ impl CliBackend {
     pub fn effective_args(&self, ctx: &BackendInvocationContext) -> Result<Vec<String>> {
         match &ctx.session_id {
             Some(id) => match self.name.as_str() {
-                n if n.starts_with("claude") || n == "claude" => {
-                    self.effective_args_claude(id)
-                }
-                n if n.starts_with("codex") || n == "codex" => {
-                    self.effective_args_codex(id)
-                }
+                n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
+                n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 _ => Ok(self.args.clone()),
             },
-            None if ctx.json_output_required => {
-                self.ensure_json_output_args()
-            }
+            None if ctx.json_output_required => self.ensure_json_output_args(),
             None => Ok(self.args.clone()),
         }
     }
@@ -316,7 +309,10 @@ impl CliBackend {
             n if n.starts_with("claude") || n == "claude" => {
                 let mut args = self.args.clone();
                 // Only add if not already present
-                if !args.iter().any(|a| a == "--output-format" || a.starts_with("--output-format=")) {
+                if !args
+                    .iter()
+                    .any(|a| a == "--output-format" || a.starts_with("--output-format="))
+                {
                     args.push("--output-format".to_owned());
                     args.push("json".to_owned());
                 }
@@ -424,7 +420,11 @@ impl CliBackend {
                     i += 1;
                     if i < args.len() && args[i] == "resume" {
                         i += 1; // skip "resume"
-                        if i < args.len() && args[i] != "-" && args[i] != "--json" && !args[i].starts_with("--") {
+                        if i < args.len()
+                            && args[i] != "-"
+                            && args[i] != "--json"
+                            && !args[i].starts_with("--")
+                        {
                             i += 1; // skip old session id
                         }
                     }
@@ -474,19 +474,17 @@ impl CliBackend {
         let effective_args = {
             let ctx_opt = self.invocation_ctx.get().await;
             match ctx_opt {
-                Some(ref ctx) => {
-                    match self.effective_args(ctx) {
-                        Ok(args) => args,
-                        Err(e) => {
-                            debug!(
-                                backend = self.name,
-                                error = %e,
-                                "effective_args rewrite failed in CliBackend, using base args"
-                            );
-                            self.args.clone()
-                        }
+                Some(ref ctx) => match self.effective_args(ctx) {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!(
+                            backend = self.name,
+                            error = %e,
+                            "effective_args rewrite failed in CliBackend, using base args"
+                        );
+                        self.args.clone()
                     }
-                }
+                },
                 None => self.args.clone(),
             }
         };
@@ -545,7 +543,6 @@ impl CliBackend {
                 backend: self.name.clone(),
                 details: "child stderr pipe unavailable".to_owned(),
             })?;
-
 
         let last_activity = Arc::new(Mutex::new(Instant::now()));
         let activity_notify = Arc::new(Notify::new());
@@ -902,11 +899,8 @@ impl BackendRegistry {
 
         let mut cli_backend = self.create_cli_backend_for_spec(&parsed, role)?;
         cli_backend.invocation_ctx = self.invocation_context.clone();
-        let backend = backend_with_optional_tmux(
-            cli_backend,
-            &self.tmux,
-            self.tmux_context.clone(),
-        );
+        let backend =
+            backend_with_optional_tmux(cli_backend, &self.tmux, self.tmux_context.clone());
         self.backends.insert(cache_key, backend.clone());
         Ok(backend)
     }
@@ -1523,7 +1517,10 @@ sleep 30
         let result = backend.effective_args(&ctx);
         assert!(result.is_err(), "codex without 'exec' should fail");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("exec"), "error should mention 'exec': {err_msg}");
+        assert!(
+            err_msg.contains("exec"),
+            "error should mention 'exec': {err_msg}"
+        );
     }
 
     // --- Strengthened arg-rewrite tests with full token sequence assertions ---
@@ -1634,8 +1631,14 @@ sleep 30
         );
         let ctx = make_invocation_ctx(Some("new-session"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(!args.contains(&"old-session".to_owned()), "old session id must be replaced");
-        assert!(!args.contains(&"text".to_owned()), "old output-format value must be replaced");
+        assert!(
+            !args.contains(&"old-session".to_owned()),
+            "old session id must be replaced"
+        );
+        assert!(
+            !args.contains(&"text".to_owned()),
+            "old output-format value must be replaced"
+        );
         assert_eq!(
             args.iter().filter(|a| *a == "--resume").count(),
             1,
@@ -1663,7 +1666,10 @@ sleep 30
         );
         let ctx = make_invocation_ctx(Some("new-thread"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(!args.contains(&"old-thread".to_owned()), "old session must be replaced");
+        assert!(
+            !args.contains(&"old-thread".to_owned()),
+            "old session must be replaced"
+        );
         assert_eq!(args[2], "new-thread", "new session id in correct position");
         assert_eq!(
             args.iter().filter(|a| *a == "--json").count(),

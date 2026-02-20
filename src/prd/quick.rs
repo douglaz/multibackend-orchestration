@@ -345,9 +345,7 @@ impl QuickPrdPipeline {
             fs::write(cache_dir.join(format!("revision-{n}.md")), &cleaned)?;
 
             if missing.len() >= REQUIRED_SECTIONS.len() {
-                eprintln!(
-                    "warning: revision {n} has no valid sections, keeping previous spec"
-                );
+                eprintln!("warning: revision {n} has no valid sections, keeping previous spec");
             } else {
                 current_spec = cleaned;
             }

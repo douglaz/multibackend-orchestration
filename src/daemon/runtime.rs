@@ -2035,8 +2035,8 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pr_body, build_pr_title, extract_issue_body, extract_original_title,
-        discover_latest_project_id, extract_project_ref, write_body_file,
+        build_pr_body, build_pr_title, discover_latest_project_id, extract_issue_body,
+        extract_original_title, extract_project_ref, write_body_file,
     };
 
     #[test]
