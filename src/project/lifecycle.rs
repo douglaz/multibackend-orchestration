@@ -560,7 +560,7 @@ fn reconstruct_feature_loop(
         .unwrap_or_else(|| "unknown".to_owned());
 
     let completed_at = approval.map(|artifact| artifact.observed_at);
-    let status = if completed_at.is_some() || commit_hash.is_some() {
+    let status = if completed_at.is_some() {
         LoopStatus::Completed
     } else {
         LoopStatus::InProgress

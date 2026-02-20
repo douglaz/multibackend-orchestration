@@ -193,7 +193,7 @@ fn parse_subject(raw_subject: &str) -> Result<(String, u32, Phase, Phase)> {
     let project_id = project_id.trim();
     if !is_valid_project_id(project_id) {
         return Err(RalphError::ParseError(format!(
-            "invalid Ralph commit subject project id '{project_id}': expected issue-<number>"
+            "invalid Ralph commit subject project id '{project_id}': expected non-empty [a-zA-Z0-9_-]+"
         )));
     }
 
@@ -230,7 +230,7 @@ fn parse_trailers(raw_body: &str) -> Result<(String, u32, Phase)> {
             let project_id = value.trim();
             if !is_valid_project_id(project_id) {
                 return Err(RalphError::ParseError(format!(
-                    "invalid Ralph-Project trailer '{project_id}': expected issue-<number>"
+                    "invalid Ralph-Project trailer '{project_id}': expected non-empty [a-zA-Z0-9_-]+"
                 )));
             }
             trailer_project_id = Some(project_id.to_owned());
@@ -301,10 +301,10 @@ fn phase_label(phase: &Phase) -> &'static str {
 }
 
 fn is_valid_project_id(project_id: &str) -> bool {
-    let Some(number) = project_id.strip_prefix("issue-") else {
-        return false;
-    };
-    !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+    !project_id.is_empty()
+        && project_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 #[cfg(test)]

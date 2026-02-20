@@ -137,6 +137,7 @@ pub fn commit_and_push_phase_transition(
     loop_number: u32,
     from_phase: Phase,
     to_phase: Phase,
+    branch: &str,
 ) -> Result<()> {
     ensure_git_repo(repo_root)?;
 
@@ -157,10 +158,9 @@ pub fn commit_and_push_phase_transition(
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     run_git(repo_root, &["commit", "--allow-empty", "-m", &message])?;
 
-    let project_branch = format!("ralph/{project_id}");
     run_git(
         repo_root,
-        &["push", "origin", &format!("HEAD:{project_branch}")],
+        &["push", "origin", &format!("HEAD:{branch}")],
     )?;
 
     Ok(())
@@ -391,6 +391,7 @@ mod tests {
             3,
             Phase::Planning,
             Phase::Implementing,
+            "ralph/issue-42",
         )
         .expect("checkpoint push should succeed");
 
@@ -446,6 +447,7 @@ mod tests {
             4,
             Phase::Implementing,
             Phase::Reviewing,
+            "ralph/issue-42",
         )
         .expect_err("push should fail");
         let err_str = err.to_string();

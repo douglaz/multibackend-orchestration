@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::cli::RollbackArgs;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
-use crate::git::is_git_repo;
+use crate::git::{is_git_repo, run_git};
 use crate::git::ralph_commit::list_ralph_commits;
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
@@ -47,25 +47,25 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .filter(|num| *num > args.loop_number)
         .collect();
 
-    let hard_ref = if args.hard {
+    // Always compute a reset ref so checkpoint-derived state reconstruction
+    // sees the correct position after rollback.  Without a git reset the
+    // checkpoint commits would remain on the branch and the next
+    // `reconstruct_project_state()` call would undo the rollback.
+    let hard_ref = {
         let repo_root = workspace.root.parent().ok_or_else(|| {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
-        if !is_git_repo(repo_root) {
-            return Err(RalphError::Orchestration(
-                "--hard rollback requires a git repository".to_owned(),
-            ));
+        if is_git_repo(repo_root) {
+            Some(resolve_hard_reset_ref(
+                &workspace,
+                &original_state,
+                &project_id,
+                args.loop_number,
+                repo_root,
+            )?)
+        } else {
+            None
         }
-
-        Some(resolve_hard_reset_ref(
-            &workspace,
-            &original_state,
-            &project_id,
-            args.loop_number,
-            repo_root,
-        )?)
-    } else {
-        None
     };
 
     if args.dry_run {
@@ -103,6 +103,19 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             prompt_backup.as_deref(),
             project_config_backup.as_deref(),
         )?;
+
+        // Force-push the reset branch to the remote so that checkpoint-derived
+        // state reconstruction (which reads `origin/<branch>`) sees the
+        // rolled-back position instead of the pre-rollback checkpoints.
+        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+        if branch_exists(repo_root, &branch)? {
+            // Best-effort: if no remote is configured the push will fail, which
+            // is acceptable — the local reset is still effective.
+            let _ = run_git(
+                repo_root,
+                &["push", "--force", "origin", &format!("{branch}:{branch}")],
+            );
+        }
     }
 
     for &loop_number in &to_remove {

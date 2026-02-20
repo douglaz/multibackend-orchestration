@@ -107,7 +107,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
         )));
     }
 
-    run_git(repo_root, &["checkout", "-b", &branch, "origin/HEAD"]).map_err(|err| {
+    run_git(repo_root, &["checkout", "-B", &branch, "origin/HEAD"]).map_err(|err| {
         RalphError::Orchestration(format!(
             "sync_project_branch: git checkout -b {branch} origin/HEAD failed \
              for issue {issue_number}: {err}"

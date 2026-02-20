@@ -1049,6 +1049,7 @@ impl Orchestrator {
                             ln,
                             Phase::QA,
                             Phase::Planning,
+                            &self.workspace.config.git.branch_format,
                         ) {
                             state = state_before_rollback;
                             return Err(err);
@@ -1935,6 +1936,7 @@ impl Orchestrator {
                     ln,
                     Phase::Reviewing,
                     Phase::Planning,
+                    &self.workspace.config.git.branch_format,
                 ) {
                     state = state_before_rollback;
                     return Err(err);
@@ -1970,6 +1972,7 @@ impl Orchestrator {
                     checkpoint_loop_number,
                     phase_at_step_start,
                     transitioned_phase.clone(),
+                    &self.workspace.config.git.branch_format,
                 ) {
                     state.current_phase = transitioned_phase;
                     state.phase_iteration = transitioned_iteration;
@@ -2014,6 +2017,7 @@ impl Orchestrator {
                     state.current_loop,
                     Phase::Completing,
                     Phase::Completing,
+                    &self.workspace.config.git.branch_format,
                 ) {
                     warn!("failed to checkpoint completion artifacts: {err}");
                 }
@@ -3345,6 +3349,7 @@ fn checkpoint_phase_transition(
     loop_number: u32,
     from_phase: Phase,
     to_phase: Phase,
+    branch_format: &str,
 ) -> Result<()> {
     let repo_root = workspace_root
         .parent()
@@ -3355,7 +3360,8 @@ fn checkpoint_phase_transition(
         ));
     }
 
-    commit_and_push_phase_transition(repo_root, project_id, loop_number, from_phase, to_phase)
+    let branch = crate::git::branch::resolve_branch_name(branch_format, project_id);
+    commit_and_push_phase_transition(repo_root, project_id, loop_number, from_phase, to_phase, &branch)
 }
 
 fn phase_label(phase: &Phase) -> &'static str {
