@@ -2610,6 +2610,19 @@ fn build_planner_prompt(
         completion_feedback.clone().unwrap_or_default(),
     );
 
+    // Populate final_review_amendments so custom templates can reference it.
+    let amendments_path = project_dir.join("final-review-amendments-applied.md");
+    let amendments_content = amendments_path
+        .exists()
+        .then(|| std::fs::read_to_string(&amendments_path).ok())
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default();
+    vars.insert(
+        "final_review_amendments".to_owned(),
+        amendments_content.clone(),
+    );
+
     let rendered = render_template_with_fallback(
         &effective.templates.planner,
         &vars,
@@ -2653,19 +2666,14 @@ fn build_planner_prompt(
     }
 
     // Inject final-review amendments context when present
-    let amendments_path = project_dir.join("final-review-amendments-applied.md");
-    if amendments_path.exists() {
-        if let Ok(amendments_content) = std::fs::read_to_string(&amendments_path) {
-            if !amendments_content.trim().is_empty() {
-                append_section_if_missing(
-                    &mut prompt,
-                    &template_source,
-                    &["final_review_amendments"],
-                    "## Final Review Amendments",
-                    &amendments_content,
-                );
-            }
-        }
+    if !amendments_content.is_empty() {
+        append_section_if_missing(
+            &mut prompt,
+            &template_source,
+            &["final_review_amendments"],
+            "## Final Review Amendments",
+            &amendments_content,
+        );
     }
 
     Ok(prompt)
@@ -3165,7 +3173,7 @@ async fn run_final_review_phase(
         reviewer_decisions.push((reviewer_backend.clone(), decision));
     }
 
-    let amendments = merge_final_review_amendments(&reviewer_decisions)?;
+    let amendments = merge_final_review_amendments(&reviewer_decisions);
     if amendments.is_empty() {
         write_final_review_exit_artifact(
             project_dir,
@@ -3608,27 +3616,29 @@ fn is_final_review_loop_file(file_name: &str) -> bool {
 
 fn merge_final_review_amendments(
     decisions: &[(String, FinalReviewerDecision)],
-) -> Result<Vec<FinalReviewAmendment>> {
+) -> Vec<FinalReviewAmendment> {
     let mut merged = Vec::new();
     let mut seen = HashSet::new();
     for (backend, decision) in decisions {
         if let FinalReviewerDecision::Amendments { amendments, .. } = decision {
             for amendment in amendments {
-                if !seen.insert(amendment.id.clone()) {
-                    return Err(RalphError::ParseError(format!(
-                        "duplicate final-review amendment ID across reviewers: {}",
-                        amendment.id
-                    )));
-                }
+                // Namespace IDs by backend to avoid collisions when independent
+                // reviewers emit identical generic IDs like "A1" or "FR-001".
+                let namespaced_id = if seen.contains(&amendment.id) {
+                    format!("{}/{}", backend, amendment.id)
+                } else {
+                    amendment.id.clone()
+                };
+                seen.insert(amendment.id.clone());
                 merged.push(FinalReviewAmendment {
-                    id: amendment.id.clone(),
+                    id: namespaced_id,
                     body: amendment.body.clone(),
                     reviewer_backend: backend.clone(),
                 });
             }
         }
     }
-    Ok(merged)
+    merged
 }
 
 fn format_amendments_for_prompt(amendments: &[FinalReviewAmendment]) -> String {
