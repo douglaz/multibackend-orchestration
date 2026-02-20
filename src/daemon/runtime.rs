@@ -720,6 +720,7 @@ async fn dispatch_task(
             branch: branch_name,
             log_file: log_path,
             last_rebase_at: None,
+            last_rebase_failure_sha: None,
         },
     );
 
@@ -1009,8 +1010,8 @@ async fn auto_rebase_phase(
     let mut rebase_count = 0u32;
 
     for issue_number in &issue_numbers {
-        let (branch, last_rebase_at) = match children.get(issue_number) {
-            Some(h) => (h.branch.clone(), h.last_rebase_at),
+        let (branch, last_rebase_at, last_failure_sha) = match children.get(issue_number) {
+            Some(h) => (h.branch.clone(), h.last_rebase_at, h.last_rebase_failure_sha.clone()),
             None => continue,
         };
 
@@ -1178,18 +1179,27 @@ async fn auto_rebase_phase(
 
                 eprintln!("auto-rebase: failure for {task_id}: {err_msg}");
 
-                // Post failure comment on PR
-                let marker =
-                    format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
-                let body = format!(
-                    "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {err_msg}"
-                );
-                let owner = config.owner.clone();
-                let repo = config.repo.clone();
-                let _ = spawn_blocking_op(move || {
-                    github::post_pr_comment(&owner, &repo, pr_number, &body)
-                })
-                .await;
+                // Skip duplicate failure comment for the same head SHA.
+                if last_failure_sha.as_deref() == Some(head_sha.as_str()) {
+                    eprintln!(
+                        "auto-rebase: skipping duplicate failure comment for {task_id} (head={head_sha})"
+                    );
+                } else {
+                    let marker =
+                        format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
+                    let body = format!(
+                        "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {err_msg}"
+                    );
+                    let owner = config.owner.clone();
+                    let repo = config.repo.clone();
+                    let _ = spawn_blocking_op(move || {
+                        github::post_pr_comment(&owner, &repo, pr_number, &body)
+                    })
+                    .await;
+                    if let Some(h) = children.get_mut(issue_number) {
+                        h.last_rebase_failure_sha = Some(head_sha.clone());
+                    }
+                }
             }
         }
     }

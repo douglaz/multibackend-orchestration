@@ -88,12 +88,11 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
 
-        // Ensure we reset on the project's branch when branch management is enabled.
-        if workspace.config.git.auto_branch {
-            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-            if branch_exists(repo_root, &branch)? {
-                checkout_branch(repo_root, &branch)?;
-            }
+        // Ensure we reset on the project's branch (not an unrelated branch
+        // that happens to be checked out).
+        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+        if branch_exists(repo_root, &branch)? {
+            checkout_branch(repo_root, &branch)?;
         }
 
         // Always reset the local branch so that checkpoint-derived state
@@ -106,16 +105,16 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             project_config_backup.as_deref(),
         )?;
 
-        // Only force-push to remote with --hard; without it, the destructive
-        // remote action is skipped so the user can inspect before pushing.
-        if args.hard {
-            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-            if branch_exists(repo_root, &branch)? {
-                run_git(
-                    repo_root,
-                    &["push", "--force", "origin", &format!("{branch}:{branch}")],
-                )?;
-            }
+        // Force-push the reset branch so that checkpoint-derived state
+        // reconstruction (which may read `origin/<branch>`) sees the
+        // rolled-back position.  Without this the remote would retain
+        // stale checkpoint commits and reconstruction would undo the rollback.
+        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+        if branch_exists(repo_root, &branch)? {
+            run_git(
+                repo_root,
+                &["push", "--force", "origin", &format!("{branch}:{branch}")],
+            )?;
         }
     }
 

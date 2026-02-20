@@ -24,6 +24,9 @@ pub struct ChildHandle {
     pub branch: String,
     pub log_file: PathBuf,
     pub last_rebase_at: Option<Instant>,
+    /// Head SHA of the last rebase failure comment posted for this task,
+    /// used to avoid spamming duplicate comments on persistent failures.
+    pub last_rebase_failure_sha: Option<String>,
 }
 
 pub fn format_task_id(owner: &str, repo: &str, issue_number: u32) -> String {

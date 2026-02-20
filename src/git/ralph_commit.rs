@@ -92,11 +92,25 @@ fn resolve_checkpoint_ref(repo_root: &Path, branch: &str) -> Result<Option<Strin
         (true, false) => Ok(Some(remote_ref)),
         (false, true) => Ok(Some(branch.to_owned())),
         (true, true) => {
-            // Always prefer the local branch — it is the authoritative state.
-            // Local may be ahead (unpushed checkpoint), behind (after
-            // rollback without --hard), or diverged; in all cases the local
-            // branch reflects the user's intended position.
-            Ok(Some(branch.to_owned()))
+            // Prefer local when ahead (unpushed checkpoint) or diverged
+            // (e.g. rollback without --hard).  Only fall back to remote
+            // when local is strictly behind (stale after fetch without
+            // fast-forward).
+            let ahead = run_git(
+                repo_root,
+                &["rev-list", "--count", &format!("{remote_ref}..{branch}")],
+            )?;
+            let behind = run_git(
+                repo_root,
+                &["rev-list", "--count", &format!("{branch}..{remote_ref}")],
+            )?;
+            let ahead_n = ahead.trim().parse::<u64>().unwrap_or(0);
+            let behind_n = behind.trim().parse::<u64>().unwrap_or(0);
+            if ahead_n == 0 && behind_n > 0 {
+                Ok(Some(remote_ref))
+            } else {
+                Ok(Some(branch.to_owned()))
+            }
         }
     }
 }
