@@ -1,0 +1,33 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Soft rollback semantics",
+      "feedback": "Marker handling is incomplete: clamping only when `marker_loop < checkpoint_loop` misses rollback-to-same-loop cases. If checkpoint is loop N in a non-planning phase and user rolls back to N, reconstruction can still resume non-planning. Marker should also force planning when `checkpoint_loop == marker_loop`."
+    },
+    {
+      "area": "Marker robustness",
+      "feedback": "The spec does not define behavior for invalid/corrupt `.rollback-target` contents (non-integer, negative, empty). Reconstruction should treat malformed markers as non-fatal (ignore + warn), otherwise commands like `status`/`project show` can fail unexpectedly."
+    },
+    {
+      "area": "Hard rollback recovery safety",
+      "feedback": "`original_head` capture order is ambiguous. If captured before checking out the project branch, push-failure recovery can reset the project branch to the wrong commit. The spec should require capturing rollback anchor after switching to the target project branch (or capturing both branch+HEAD explicitly)."
+    },
+    {
+      "area": "Push-failure contract",
+      "feedback": "Fallback behavior is underspecified at the CLI contract level: after reverting local HEAD and applying soft rollback, should command exit success or non-zero? Acceptance criteria should explicitly require exit code and user-facing message so callers can rely on deterministic behavior."
+    },
+    {
+      "area": "Marker clearing timing",
+      "feedback": "Clearing marker in `checkpoint_phase_transition` is directionally correct, but timing is unspecified. If marker is deleted before commit/push succeeds, a failed checkpoint can lose rollback intent and re-expose stale checkpoints. Marker must be removed only after successful checkpoint commit+push."
+    },
+    {
+      "area": "Branch existence edge case",
+      "feedback": "Current rollback logic only checks out project branch if it exists locally; otherwise reset runs on current branch. The spec does not address this hazard. Hard rollback should fail fast (or create/sync and checkout project branch) before any destructive reset."
+    },
+    {
+      "area": "Test strategy completeness",
+      "feedback": "Test plan is mostly unit/integration-oriented, but this repo requires validate conformance coverage for CLI behavior. The spec should include concrete `src/validate/` tests for soft rollback (no git mutation), hard rollback, push-failure recovery path, dry-run messaging, and marker lifecycle/cleanup."
+    }
+  ]
+}

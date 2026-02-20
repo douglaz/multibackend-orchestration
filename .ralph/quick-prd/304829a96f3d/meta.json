@@ -1,0 +1,17 @@
+{
+  "idea": "# Task: Fix rollback command to honor --hard flag and handle partial rollback states\n\nThe `ralph rollback <loop>` command currently always performs destructive `git reset --hard` + `git push --force` regardless of the `--hard` flag, and can leave the repository in a partial state if the force-push fails.\n\n## Requirements\n\n1. **Make --hard flag functional**: Without `--hard`, rollback should be non-destructive (no git reset/force-push). With `--hard`, perform the full destructive reset.\n\n2. **Support soft rollback**: Implement a mechanism (e.g., rollback marker) that `reconstruct_project_state` respects, allowing non-destructive rollback without git operations.\n\n3. **Prevent partial rollback states**: Ensure that push failures don't leave the repo with local branch reset but artifacts/remote untouched.\n\n## Constraints\n\n- Checkpoint-derived state reconstruction (`reconstruct_project_state`) reads git history, creating tension:\n  - Without git reset: checkpoint commits remain, next reconstruction undoes rollback\n  - Without force-push: `resolve_checkpoint_ref` falls back to stale remote state\n- Current execution order creates vulnerability: reset (destructive) → restore workspace → push (can fail) → cleanup → invalidation\n- The `args.hard` flag is currently dead code at `src/cli/rollback.rs:54-119`\n\n## Acceptance Criteria\n\n- [ ] `ralph rollback <loop>` without `--hard` performs soft rollback (no git reset/force-push)\n- [ ] `ralph rollback <loop> --hard` performs full destructive rollback with git reset + force-push\n- [ ] Soft rollback mechanism prevents `reconstruct_project_state` from undoing the rollback\n- [ ] Push failures do not leave repository in partial state (either validate early or reorder cleanup)\n- [ ] Artifact cleanup and session invalidation complete even if push fails (when appropriate)\n- [ ] Existing rollback tests pass with both flag states\n\n## Suggested Implementation Approaches\n\n1. **Persist rollback intent**: Write a rollback marker that `reconstruct_project_state` checks before deriving state from checkpoint commits\n2. **Validate push viability first**: Check remote reachability/permissions before performing destructive local operations\n3. **Reorder cleanup operations**: Move force-push after artifact cleanup, or make cleanup non-fatal\n\n## Relevant Code Locations\n\n- `src/cli/rollback.rs:54-119` — rollback execution path\n- `src/git/ralph_commit.rs:76-115` — `resolve_checkpoint_ref` (local vs remote preference)\n- `src/project/lifecycle.rs` — `reconstruct_project_state` (checkpoint-derived state)",
+  "idea_hash": "304829a96f3d",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-20T18:46:56Z",
+  "completed_at": "2026-02-20T19:03:58Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 433.824740816,
+  "review_times_secs": [
+    247.599690102
+  ],
+  "revision_times_secs": [
+    340.429831495
+  ]
+}
