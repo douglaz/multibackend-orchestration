@@ -222,8 +222,18 @@ fn reconstruct_project_state_internal(
     if let Some(created_at) = metadata.created_at.and_then(|raw| parse_rfc3339_utc(&raw)) {
         state.created_at = created_at;
     }
-    state.prompt_hash = prompt_hash.clone();
-    state.prompt_hash_at_loop_start = prompt_hash;
+    // Use the persisted prompt hash (from the last orchestrator run) as the
+    // baseline so that prompt edits between runs are detectable by
+    // `handle_prompt_change`.  Fall back to the current file hash for fresh
+    // projects or when the sentinel file is absent.
+    let persisted = project_dir.join(".last-prompt-hash");
+    let baseline_prompt_hash = fs::read_to_string(&persisted)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| prompt_hash.clone());
+    state.prompt_hash = baseline_prompt_hash.clone();
+    state.prompt_hash_at_loop_start = baseline_prompt_hash;
 
     let (checkpoint_loop, checkpoint_phase, checkpoint_commits) =
         match (repo_root, branch) {

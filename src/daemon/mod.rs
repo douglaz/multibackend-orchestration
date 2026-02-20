@@ -6,7 +6,7 @@ pub mod runtime;
 pub mod worktree;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::error::RalphError;
 use crate::Result;
@@ -23,6 +23,7 @@ pub struct ChildHandle {
     pub child: tokio::process::Child,
     pub branch: String,
     pub log_file: PathBuf,
+    pub last_rebase_at: Option<Instant>,
 }
 
 pub fn format_task_id(owner: &str, repo: &str, issue_number: u32) -> String {

@@ -353,6 +353,14 @@ impl Orchestrator {
             )?;
             state.prompt_hash = prompt_hash.clone();
 
+            // Persist the prompt hash so the next `reconstruct_project_state`
+            // can detect inter-run prompt changes.  The file is committed by
+            // the next checkpoint's `git add -A`.
+            let _ = std::fs::write(
+                project_dir.join(".last-prompt-hash"),
+                &state.prompt_hash,
+            );
+
             if !state.has_in_progress_loop() {
                 state.current_phase = Phase::Planning;
                 state.phase_iteration = 1;

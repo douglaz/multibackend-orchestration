@@ -155,8 +155,12 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // Collect finished children
         collect_children(config, &mut children).await;
 
+        // Kill children whose issues were externally aborted (label changed
+        // from ralph:in-progress to ralph:failed via CLI `daemon abort`).
+        kill_aborted_children(config, &mut children).await;
+
         // Auto-rebase phase: rebase eligible PR-backed child branches
-        auto_rebase_phase(config, &children).await;
+        auto_rebase_phase(config, &mut children).await;
 
         // Poll for new issues
         let active_count = children.len() as u32;
@@ -615,6 +619,7 @@ async fn dispatch_task(
             child: spawned.child,
             branch: branch_name,
             log_file: log_path,
+            last_rebase_at: None,
         },
     );
 
@@ -697,6 +702,52 @@ async fn collect_children(
         }
         children.remove(&issue_number);
         complete_task(config, issue_number, &task_id, terminal_label).await;
+    }
+}
+
+/// Kill running children whose issues have been externally aborted (e.g. via
+/// `ralph daemon abort`).  The CLI abort swaps the issue label to
+/// `ralph:failed` but cannot kill the process (no PID access).  This function
+/// queries labels for each running child and terminates any that are no longer
+/// `ralph:in-progress`.
+async fn kill_aborted_children(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, ChildHandle>,
+) {
+    let issue_numbers: Vec<u32> = children.keys().cloned().collect();
+    let mut to_kill = Vec::new();
+
+    for issue_number in issue_numbers {
+        let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        match spawn_blocking_op(move || github::fetch_issue_labels(&owner, &repo, issue_number))
+            .await
+        {
+            Ok(labels) => {
+                if !labels.iter().any(|l| l == "ralph:in-progress") {
+                    eprintln!(
+                        "abort-check: task {task_id} no longer in-progress (labels: {}), killing",
+                        labels.join(", ")
+                    );
+                    to_kill.push(issue_number);
+                }
+            }
+            Err(err) => {
+                eprintln!("abort-check: failed to query labels for {task_id}: {err}");
+            }
+        }
+    }
+
+    for issue_number in to_kill {
+        if let Some(handle) = children.remove(&issue_number) {
+            let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+            crate::daemon::process::terminate_process_group_blocking(
+                handle.pgid,
+                Duration::from_secs(10),
+            );
+            eprintln!("abort-check: killed {task_id} (pid={} pgid={})", handle.pid, handle.pgid);
+        }
     }
 }
 
@@ -844,7 +895,7 @@ async fn cleanup_worktree(config: &DaemonRuntimeConfig, task_id: &str) {
 /// `rebase_timeout_seconds`.
 async fn auto_rebase_phase(
     config: &DaemonRuntimeConfig,
-    children: &HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, ChildHandle>,
 ) {
     if !config.auto_rebase_enabled {
         eprintln!("auto-rebase: skipped (disabled by config)");
@@ -858,8 +909,8 @@ async fn auto_rebase_phase(
     let mut rebase_count = 0u32;
 
     for issue_number in &issue_numbers {
-        let handle = match children.get(issue_number) {
-            Some(h) => h,
+        let (branch, last_rebase_at) = match children.get(issue_number) {
+            Some(h) => (h.branch.clone(), h.last_rebase_at),
             None => continue,
         };
 
@@ -872,7 +923,21 @@ async fn auto_rebase_phase(
         }
 
         let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
-        let branch = &handle.branch;
+
+        // Honor per-task rebase cooldown
+        let cooldown = Duration::from_secs(config.rebase_interval_seconds);
+        if let Some(last) = last_rebase_at {
+            if last.elapsed() < cooldown {
+                eprintln!(
+                    "auto-rebase: skip {task_id} — cooldown ({} of {}s remaining)",
+                    cooldown.as_secs().saturating_sub(last.elapsed().as_secs()),
+                    cooldown.as_secs(),
+                );
+                continue;
+            }
+        }
+
+        let branch = &branch;
 
         // Check if there's an existing PR for this branch
         let pr_url = {
@@ -996,6 +1061,9 @@ async fn auto_rebase_phase(
         match rebase_result {
             Ok(()) => {
                 eprintln!("auto-rebase: success for {task_id}");
+                if let Some(h) = children.get_mut(issue_number) {
+                    h.last_rebase_at = Some(std::time::Instant::now());
+                }
             }
             Err(err) => {
                 let err_msg = err.to_string();
