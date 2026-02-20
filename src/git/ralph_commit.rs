@@ -572,6 +572,121 @@ mod tests {
         assert_eq!(commits[0].loop_number, 2);
     }
 
+    /// When local branch is strictly ahead of remote (e.g. push failed after
+    /// checkpoint commit), derive_position should read the local checkpoint.
+    #[test]
+    fn resolve_checkpoint_ref_prefers_local_when_ahead() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push loop-1 checkpoint to remote.
+        let remote_msg =
+            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&repo, &remote_msg);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Create loop-2 checkpoint locally but don't push.
+        let local_msg =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&repo, &local_msg);
+
+        let (loop_number, phase) =
+            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        assert_eq!(loop_number, 2, "should read local-ahead checkpoint");
+        assert_eq!(phase, Phase::Reviewing);
+    }
+
+    /// When local branch is strictly behind remote (e.g. stale after fetch
+    /// without fast-forward), derive_position should fall back to remote.
+    #[test]
+    fn resolve_checkpoint_ref_prefers_remote_when_local_behind() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push loop-1 and loop-2 checkpoints to remote.
+        let msg1 =
+            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&repo, &msg1);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        let msg2 =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&repo, &msg2);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Reset local branch back to loop-1 (simulates stale local).
+        git_ok(&repo, &["reset", "--hard", "HEAD~1"]);
+
+        let (loop_number, phase) =
+            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        assert_eq!(loop_number, 2, "should read remote checkpoint when local is behind");
+        assert_eq!(phase, Phase::Reviewing);
+    }
+
+    /// When local and remote have diverged (e.g. rollback without --hard),
+    /// derive_position should prefer the local branch.
+    #[test]
+    fn resolve_checkpoint_ref_prefers_local_when_diverged() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push loop-1 checkpoint to remote.
+        let remote_msg =
+            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&repo, &remote_msg);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Push loop-2 checkpoint to remote.
+        let remote_msg2 =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_message(&repo, &remote_msg2);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Reset local to loop-1, then add a different local-only loop-2.
+        // This creates divergence: local has a different loop-2 commit.
+        git_ok(&repo, &["reset", "--hard", "HEAD~1"]);
+        let diverged_msg =
+            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::QA);
+        commit_empty_with_message(&repo, &diverged_msg);
+
+        let (loop_number, phase) =
+            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        assert_eq!(loop_number, 2, "should read local checkpoint when diverged");
+        assert_eq!(phase, Phase::QA, "should prefer local diverged checkpoint over remote");
+    }
+
+    /// When neither local nor remote branch exists, derive_position should
+    /// return the default (1, Planning).
+    #[test]
+    fn resolve_checkpoint_ref_returns_none_when_neither_exists() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // The branch ralph/issue-42 exists, so test with a non-existent branch.
+        let (loop_number, phase) =
+            derive_position(&repo, "ralph/issue-999").expect("derive_position should succeed");
+        assert_eq!(loop_number, 1, "no-ref default loop should be 1");
+        assert_eq!(phase, Phase::Planning, "no-ref default phase should be planning");
+    }
+
+    /// When only remote branch exists (local not checked out),
+    /// derive_position should read from remote.
+    #[test]
+    fn resolve_checkpoint_ref_uses_remote_when_only_remote_exists() {
+        let (_temp, repo) = init_repo_with_remote();
+
+        // Push a checkpoint on ralph/issue-42.
+        let msg =
+            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_message(&repo, &msg);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
+
+        // Delete local branch (switch to master first).
+        git_ok(&repo, &["checkout", "master"]);
+        git_ok(&repo, &["branch", "-D", "ralph/issue-42"]);
+
+        let (loop_number, phase) =
+            derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
+        assert_eq!(loop_number, 1, "should read remote-only checkpoint");
+        assert_eq!(phase, Phase::Implementing);
+    }
+
     #[test]
     fn no_checkpoint_defaults_to_loop_1_planning() {
         let (_temp, repo) = init_repo_with_remote();
