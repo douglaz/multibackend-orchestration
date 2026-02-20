@@ -300,6 +300,365 @@ pub fn parse_prompt_reviewer_output(raw: &str) -> Result<PromptReviewerDecision>
     })
 }
 
+// ---------------------------------------------------------------------------
+// FinalReview parser types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Amendment {
+    pub id: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalReviewerDecision {
+    NoAmendments { body: String },
+    Amendments { body: String, amendments: Vec<Amendment> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentPosition {
+    pub id: String,
+    pub position: String, // "ACCEPT" or "REJECT"
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerPositionsDecision {
+    pub body: String,
+    pub positions: Vec<AmendmentPosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentVote {
+    pub id: String,
+    pub vote: String, // "ACCEPT" or "REJECT"
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoteDecision {
+    pub body: String,
+    pub votes: Vec<AmendmentVote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentRuling {
+    pub id: String,
+    pub ruling: String, // "ACCEPT" or "REJECT"
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArbiterDecision {
+    pub body: String,
+    pub rulings: Vec<AmendmentRuling>,
+}
+
+// ---------------------------------------------------------------------------
+// FinalReview parsers (fail-closed)
+// ---------------------------------------------------------------------------
+
+pub fn parse_final_reviewer_output(raw: &str) -> Result<FinalReviewerDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "final reviewer output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    match first_h1.trim() {
+        "# Final Review: NO AMENDMENTS" => {
+            validate_required_section(&body, "## Summary", "final review (no amendments)")?;
+            Ok(FinalReviewerDecision::NoAmendments { body })
+        }
+        "# Final Review: AMENDMENTS" => {
+            let amendments = extract_amendment_blocks(&body)?;
+            if amendments.is_empty() {
+                return Err(RalphError::ParseError(
+                    "final review declares AMENDMENTS but contains no ## Amendment: blocks"
+                        .to_owned(),
+                ));
+            }
+            validate_no_duplicate_ids(&amendments.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), "final reviewer")?;
+            Ok(FinalReviewerDecision::Amendments { body, amendments })
+        }
+        other => Err(RalphError::ParseError(format!(
+            "unsupported final reviewer H1: {other}"
+        ))),
+    }
+}
+
+pub fn parse_planner_position_output(
+    raw: &str,
+    required_ids: &[&str],
+) -> Result<PlannerPositionsDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "planner position output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    if first_h1.trim() != "# Planner Positions" {
+        return Err(RalphError::ParseError(format!(
+            "unsupported planner position H1: {}",
+            first_h1.trim()
+        )));
+    }
+
+    let positions = extract_amendment_value_blocks(&body, "Position", "planner position")?;
+    validate_no_duplicate_ids(&positions.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), "planner position")?;
+    validate_exact_id_coverage(
+        &positions.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+        required_ids,
+        "planner position",
+    )?;
+
+    let positions = positions
+        .into_iter()
+        .map(|(id, value, block_body)| {
+            validate_accept_reject(&value, &id, "planner position")?;
+            Ok(AmendmentPosition {
+                id,
+                position: value,
+                body: block_body,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(PlannerPositionsDecision { body, positions })
+}
+
+pub fn parse_vote_output(raw: &str, required_ids: &[&str]) -> Result<VoteDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "vote output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    if first_h1.trim() != "# Vote Results" {
+        return Err(RalphError::ParseError(format!(
+            "unsupported vote H1: {}",
+            first_h1.trim()
+        )));
+    }
+
+    let votes = extract_amendment_value_blocks(&body, "Vote", "vote")?;
+    validate_no_duplicate_ids(&votes.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(), "vote")?;
+    validate_exact_id_coverage(
+        &votes.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(),
+        required_ids,
+        "vote",
+    )?;
+
+    let votes = votes
+        .into_iter()
+        .map(|(id, value, block_body)| {
+            validate_accept_reject(&value, &id, "vote")?;
+            Ok(AmendmentVote {
+                id,
+                vote: value,
+                body: block_body,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(VoteDecision { body, votes })
+}
+
+pub fn parse_arbiter_output(raw: &str, required_ids: &[&str]) -> Result<ArbiterDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "arbiter output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    if first_h1.trim() != "# Arbiter Ruling" {
+        return Err(RalphError::ParseError(format!(
+            "unsupported arbiter H1: {}",
+            first_h1.trim()
+        )));
+    }
+
+    let rulings = extract_amendment_value_blocks(&body, "Ruling", "arbiter")?;
+    validate_no_duplicate_ids(&rulings.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), "arbiter")?;
+    validate_exact_id_coverage(
+        &rulings.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        required_ids,
+        "arbiter",
+    )?;
+
+    let rulings = rulings
+        .into_iter()
+        .map(|(id, value, block_body)| {
+            validate_accept_reject(&value, &id, "arbiter")?;
+            Ok(AmendmentRuling {
+                id,
+                ruling: value,
+                body: block_body,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ArbiterDecision { body, rulings })
+}
+
+// ---------------------------------------------------------------------------
+// FinalReview parser helpers
+// ---------------------------------------------------------------------------
+
+fn extract_amendment_blocks(body: &str) -> Result<Vec<Amendment>> {
+    let mut amendments = Vec::new();
+    let mut current_id: Option<String> = None;
+    let mut current_lines = Vec::new();
+
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("## Amendment: ") {
+            if let Some(id) = current_id.take() {
+                amendments.push(Amendment {
+                    id,
+                    body: current_lines.join("\n").trim().to_owned(),
+                });
+                current_lines.clear();
+            }
+            let id = rest.trim().to_owned();
+            if id.is_empty() {
+                return Err(RalphError::ParseError(
+                    "amendment block has empty ID".to_owned(),
+                ));
+            }
+            current_id = Some(id);
+        } else if current_id.is_some() {
+            current_lines.push(line);
+        }
+    }
+
+    if let Some(id) = current_id {
+        amendments.push(Amendment {
+            id,
+            body: current_lines.join("\n").trim().to_owned(),
+        });
+    }
+
+    Ok(amendments)
+}
+
+/// Extract `## Amendment: <ID>` blocks and find the `### <value_section>` value inside each.
+/// Returns `(id, value, block_body)` tuples.
+fn extract_amendment_value_blocks(
+    body: &str,
+    value_section: &str,
+    scope: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut results = Vec::new();
+    let mut current_id: Option<String> = None;
+    let mut current_lines = Vec::new();
+
+    let flush = |id: String, lines: &[&str], value_section: &str, scope: &str| -> Result<(String, String, String)> {
+        let block = lines.join("\n");
+        let value_heading = format!("### {value_section}");
+        let mut in_value = false;
+        let mut value_lines = Vec::new();
+        for l in lines {
+            let trimmed = l.trim();
+            if trimmed == value_heading {
+                in_value = true;
+                continue;
+            }
+            if in_value {
+                if trimmed.starts_with("### ") {
+                    break;
+                }
+                if !trimmed.is_empty() {
+                    value_lines.push(trimmed);
+                }
+            }
+        }
+        if value_lines.is_empty() {
+            return Err(RalphError::ParseError(format!(
+                "missing '### {value_section}' value in {scope} for amendment '{id}'"
+            )));
+        }
+        let value = value_lines[0].to_owned();
+        Ok((id, value, block.trim().to_owned()))
+    };
+
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("## Amendment: ") {
+            if let Some(id) = current_id.take() {
+                results.push(flush(id, &current_lines, value_section, scope)?);
+                current_lines.clear();
+            }
+            let id = rest.trim().to_owned();
+            if id.is_empty() {
+                return Err(RalphError::ParseError(
+                    "amendment block has empty ID".to_owned(),
+                ));
+            }
+            current_id = Some(id);
+        } else if current_id.is_some() {
+            current_lines.push(line);
+        }
+    }
+
+    if let Some(id) = current_id {
+        results.push(flush(id, &current_lines, value_section, scope)?);
+    }
+
+    Ok(results)
+}
+
+fn validate_no_duplicate_ids(ids: &[&str], scope: &str) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Err(RalphError::ParseError(format!(
+                "duplicate amendment ID '{id}' in {scope}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_id_coverage(found_ids: &[&str], required_ids: &[&str], scope: &str) -> Result<()> {
+    let found_set: std::collections::HashSet<&str> = found_ids.iter().copied().collect();
+    let required_set: std::collections::HashSet<&str> = required_ids.iter().copied().collect();
+
+    let missing: Vec<&&str> = required_set.difference(&found_set).collect();
+    if !missing.is_empty() {
+        let mut missing_sorted: Vec<&str> = missing.into_iter().copied().collect();
+        missing_sorted.sort();
+        return Err(RalphError::ParseError(format!(
+            "missing amendment IDs in {scope}: {}",
+            missing_sorted.join(", ")
+        )));
+    }
+
+    let extra: Vec<&&str> = found_set.difference(&required_set).collect();
+    if !extra.is_empty() {
+        let mut extra_sorted: Vec<&str> = extra.into_iter().copied().collect();
+        extra_sorted.sort();
+        return Err(RalphError::ParseError(format!(
+            "unexpected amendment IDs in {scope}: {}",
+            extra_sorted.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_accept_reject(value: &str, id: &str, scope: &str) -> Result<()> {
+    if value != "ACCEPT" && value != "REJECT" {
+        return Err(RalphError::ParseError(format!(
+            "invalid value '{value}' for amendment '{id}' in {scope}; expected ACCEPT or REJECT"
+        )));
+    }
+    Ok(())
+}
+
 pub fn extract_commit_message(body: &str) -> Option<String> {
     let mut in_section = false;
     let mut lines = Vec::new();
@@ -691,5 +1050,200 @@ mod tests {
             .expect_err("expected error")
             .to_string()
             .contains("must appear before"));
+    }
+
+    // -----------------------------------------------------------------------
+    // FinalReview parser tests
+    // -----------------------------------------------------------------------
+
+    use super::{
+        parse_arbiter_output, parse_final_reviewer_output, parse_planner_position_output,
+        parse_vote_output, FinalReviewerDecision,
+    };
+
+    #[test]
+    fn final_reviewer_no_amendments() {
+        let text = "# Final Review: NO AMENDMENTS\n\n## Summary\nAll good.";
+        let parsed = parse_final_reviewer_output(text).expect("should parse");
+        assert!(matches!(parsed, FinalReviewerDecision::NoAmendments { .. }));
+    }
+
+    #[test]
+    fn final_reviewer_with_amendments() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: FIX-001\n\n### Problem\nbug\n\n### Proposed Change\nfix it\n\n### Affected Files\n- `src/lib.rs`\n\n## Amendment: FIX-002\n\n### Problem\ntypo\n\n### Proposed Change\ncorrect\n\n### Affected Files\n- `README.md`";
+        let parsed = parse_final_reviewer_output(text).expect("should parse");
+        match parsed {
+            FinalReviewerDecision::Amendments { amendments, .. } => {
+                assert_eq!(amendments.len(), 2);
+                assert_eq!(amendments[0].id, "FIX-001");
+                assert_eq!(amendments[1].id, "FIX-002");
+            }
+            _ => panic!("expected amendments"),
+        }
+    }
+
+    #[test]
+    fn final_reviewer_rejects_missing_h1() {
+        let text = "no heading here";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn final_reviewer_rejects_wrong_h1() {
+        let text = "# Something Else\n\n## Summary\nstuff";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unsupported final reviewer H1"));
+    }
+
+    #[test]
+    fn final_reviewer_amendments_h1_but_no_blocks_fails() {
+        let text = "# Final Review: AMENDMENTS\n\nno amendment blocks here";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no ## Amendment: blocks"));
+    }
+
+    #[test]
+    fn final_reviewer_rejects_duplicate_amendment_ids() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: DUP-1\n\n### Problem\nx\n\n## Amendment: DUP-1\n\n### Problem\ny";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+    }
+
+    #[test]
+    fn planner_position_success() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\ngood idea\n\n## Amendment: FIX-002\n\n### Position\nREJECT\n\n### Rationale\nnot needed";
+        let parsed =
+            parse_planner_position_output(text, &["FIX-001", "FIX-002"]).expect("should parse");
+        assert_eq!(parsed.positions.len(), 2);
+        assert_eq!(parsed.positions[0].id, "FIX-001");
+        assert_eq!(parsed.positions[0].position, "ACCEPT");
+        assert_eq!(parsed.positions[1].id, "FIX-002");
+        assert_eq!(parsed.positions[1].position, "REJECT");
+    }
+
+    #[test]
+    fn planner_position_rejects_missing_id() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok";
+        let result = parse_planner_position_output(text, &["FIX-001", "FIX-002"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+    }
+
+    #[test]
+    fn planner_position_rejects_extra_id() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok\n\n## Amendment: FIX-EXTRA\n\n### Position\nREJECT\n\n### Rationale\nnah";
+        let result = parse_planner_position_output(text, &["FIX-001"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unexpected amendment IDs"));
+    }
+
+    #[test]
+    fn planner_position_rejects_invalid_value() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nMAYBE\n\n### Rationale\nhmm";
+        let result = parse_planner_position_output(text, &["FIX-001"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected ACCEPT or REJECT"));
+    }
+
+    #[test]
+    fn planner_position_rejects_duplicate_ids() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok\n\n## Amendment: FIX-001\n\n### Position\nREJECT\n\n### Rationale\nnah";
+        let result = parse_planner_position_output(text, &["FIX-001"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+    }
+
+    #[test]
+    fn vote_output_success() {
+        let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT\n\n### Rationale\nyes\n\n## Amendment: A2\n\n### Vote\nREJECT\n\n### Rationale\nno";
+        let parsed = parse_vote_output(text, &["A1", "A2"]).expect("should parse");
+        assert_eq!(parsed.votes.len(), 2);
+        assert_eq!(parsed.votes[0].vote, "ACCEPT");
+        assert_eq!(parsed.votes[1].vote, "REJECT");
+    }
+
+    #[test]
+    fn vote_output_rejects_missing_ids() {
+        let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT\n\n### Rationale\nyes";
+        let result = parse_vote_output(text, &["A1", "A2"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+    }
+
+    #[test]
+    fn vote_output_rejects_duplicate_ids() {
+        let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT\n\n### Rationale\nyes\n\n## Amendment: A1\n\n### Vote\nREJECT\n\n### Rationale\nno";
+        let result = parse_vote_output(text, &["A1"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+    }
+
+    #[test]
+    fn arbiter_output_success() {
+        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\ngood\n\n## Amendment: D2\n\n### Ruling\nREJECT\n\n### Rationale\nbad";
+        let parsed = parse_arbiter_output(text, &["D1", "D2"]).expect("should parse");
+        assert_eq!(parsed.rulings.len(), 2);
+        assert_eq!(parsed.rulings[0].ruling, "ACCEPT");
+        assert_eq!(parsed.rulings[1].ruling, "REJECT");
+    }
+
+    #[test]
+    fn arbiter_output_rejects_missing_ids() {
+        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\ngood";
+        let result = parse_arbiter_output(text, &["D1", "D2"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+    }
+
+    #[test]
+    fn arbiter_output_rejects_invalid_ruling() {
+        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nDEFER\n\n### Rationale\nhmm";
+        let result = parse_arbiter_output(text, &["D1"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected ACCEPT or REJECT"));
+    }
+
+    #[test]
+    fn arbiter_output_rejects_wrong_h1() {
+        let text = "# Wrong Heading\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\nok";
+        let result = parse_arbiter_output(text, &["D1"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unsupported arbiter H1"));
+    }
+
+    #[test]
+    fn final_reviewer_strips_frontmatter() {
+        let text = "---\nartifact: final-review\n---\n# Final Review: NO AMENDMENTS\n\n## Summary\nAll good.";
+        let parsed = parse_final_reviewer_output(text).expect("should strip frontmatter and parse");
+        assert!(matches!(parsed, FinalReviewerDecision::NoAmendments { .. }));
+    }
+
+    #[test]
+    fn vote_output_rejects_missing_h1() {
+        let text = "no heading at all";
+        let result = parse_vote_output(text, &["A1"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn planner_position_rejects_missing_h1() {
+        let text = "no heading at all";
+        let result = parse_planner_position_output(text, &["A1"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn final_reviewer_no_amendments_requires_summary() {
+        let text = "# Final Review: NO AMENDMENTS\n\nno summary section";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("## Summary"));
     }
 }

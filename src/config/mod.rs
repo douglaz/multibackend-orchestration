@@ -68,6 +68,10 @@ pub struct EffectiveTemplateConfig {
     pub prompt_reviewer: PathBuf,
     pub completer: PathBuf,
     pub qa: PathBuf,
+    pub final_reviewer: PathBuf,
+    pub planner_position: PathBuf,
+    pub vote: PathBuf,
+    pub arbiter: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +292,30 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.qa.as_deref()),
             &global.templates.qa,
+        ),
+        final_reviewer: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.final_reviewer.as_deref()),
+            &global.templates.final_reviewer,
+        ),
+        planner_position: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.planner_position.as_deref()),
+            &global.templates.planner_position,
+        ),
+        vote: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.vote.as_deref()),
+            &global.templates.vote,
+        ),
+        arbiter: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.arbiter.as_deref()),
+            &global.templates.arbiter,
         ),
     };
 

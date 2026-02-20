@@ -346,6 +346,14 @@ pub struct TemplateConfig {
     pub completer: String,
     #[serde(default = "default_qa_template_path")]
     pub qa: String,
+    #[serde(default = "default_final_reviewer_template_path")]
+    pub final_reviewer: String,
+    #[serde(default = "default_planner_position_template_path")]
+    pub planner_position: String,
+    #[serde(default = "default_vote_template_path")]
+    pub vote: String,
+    #[serde(default = "default_arbiter_template_path")]
+    pub arbiter: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -509,6 +517,10 @@ impl Default for TemplateConfig {
             prompt_reviewer: default_prompt_reviewer_template_path(),
             completer: default_completer_template_path(),
             qa: default_qa_template_path(),
+            final_reviewer: default_final_reviewer_template_path(),
+            planner_position: default_planner_position_template_path(),
+            vote: default_vote_template_path(),
+            arbiter: default_arbiter_template_path(),
         }
     }
 }
@@ -772,6 +784,22 @@ fn default_qa_template_path() -> String {
     "templates/qa.md".to_owned()
 }
 
+fn default_final_reviewer_template_path() -> String {
+    "templates/final_reviewer.md".to_owned()
+}
+
+fn default_planner_position_template_path() -> String {
+    "templates/planner_position.md".to_owned()
+}
+
+fn default_vote_template_path() -> String {
+    "templates/vote.md".to_owned()
+}
+
+fn default_arbiter_template_path() -> String {
+    "templates/arbiter.md".to_owned()
+}
+
 impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
@@ -952,6 +980,10 @@ command = "claude-custom"
             config.templates.prompt_reviewer,
             "templates/prompt_reviewer.md"
         );
+        assert_eq!(config.templates.final_reviewer, "templates/final_reviewer.md");
+        assert_eq!(config.templates.planner_position, "templates/planner_position.md");
+        assert_eq!(config.templates.vote, "templates/vote.md");
+        assert_eq!(config.templates.arbiter, "templates/arbiter.md");
     }
 
     #[test]

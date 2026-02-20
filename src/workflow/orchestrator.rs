@@ -2575,6 +2575,22 @@ fn build_planner_prompt(
         );
     }
 
+    // Inject final-review amendments context when present
+    let amendments_path = project_dir.join("final-review-amendments-applied.md");
+    if amendments_path.exists() {
+        if let Ok(amendments_content) = std::fs::read_to_string(&amendments_path) {
+            if !amendments_content.trim().is_empty() {
+                append_section_if_missing(
+                    &mut prompt,
+                    &template_source,
+                    &["final_review_amendments"],
+                    "## Final Review Amendments",
+                    &amendments_content,
+                );
+            }
+        }
+    }
+
     Ok(prompt)
 }
 
@@ -5284,6 +5300,83 @@ mod tests {
         assert_eq!(
             fence_count, 1,
             "FullJson mode should produce exactly one ```json fence, got {fence_count}"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_includes_final_review_amendments_when_file_exists() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let amendments_content = "## Amendment: FIX-001\nFix the widget\n";
+        fs::write(
+            project_dir.join("final-review-amendments-applied.md"),
+            amendments_content,
+        )
+        .expect("write amendments file");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            prompt.contains("## Final Review Amendments"),
+            "prompt should contain Final Review Amendments heading"
+        );
+        assert!(
+            prompt.contains("FIX-001"),
+            "prompt should contain amendment content"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_omits_final_review_amendments_when_file_absent() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            !prompt.contains("## Final Review Amendments"),
+            "prompt should not contain Final Review Amendments when file is absent"
         );
     }
 

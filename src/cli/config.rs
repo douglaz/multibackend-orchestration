@@ -132,6 +132,12 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "reviewer_backend": effective.workflow.reviewer_backend,
                     "qa_backend": effective.workflow.qa_backend,
                     "completer_backend": effective.workflow.completer_backend,
+                    "final_review_enabled": effective.workflow.final_review_enabled,
+                    "final_review_backends": effective.workflow.final_review_backends,
+                    "final_review_arbiter_backend": effective.workflow.final_review_arbiter_backend,
+                    "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
+                    "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
+                    "max_final_review_restarts": effective.workflow.max_final_review_restarts,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -169,6 +175,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "prompt_reviewer": effective.templates.prompt_reviewer,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
+                    "final_reviewer": effective.templates.final_reviewer,
+                    "planner_position": effective.templates.planner_position,
+                    "vote": effective.templates.vote,
+                    "arbiter": effective.templates.arbiter,
                 },
                 "git": effective.global.git,
                 "project_overrides": project_config,
@@ -215,6 +225,12 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "reviewer_backend": effective.workflow.reviewer_backend,
                     "qa_backend": effective.workflow.qa_backend,
                     "completer_backend": effective.workflow.completer_backend,
+                    "final_review_enabled": effective.workflow.final_review_enabled,
+                    "final_review_backends": effective.workflow.final_review_backends,
+                    "final_review_arbiter_backend": effective.workflow.final_review_arbiter_backend,
+                    "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
+                    "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
+                    "max_final_review_restarts": effective.workflow.max_final_review_restarts,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -252,6 +268,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "prompt_reviewer": effective.templates.prompt_reviewer,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
+                    "final_reviewer": effective.templates.final_reviewer,
+                    "planner_position": effective.templates.planner_position,
+                    "vote": effective.templates.vote,
+                    "arbiter": effective.templates.arbiter,
                 },
                 "git": effective.global.git,
             })
@@ -428,6 +448,28 @@ fn set_global_value(
         "workflow.completer_backend" => {
             config.workflow.completer_backend = parse_optional_backend(raw_value)?;
         }
+        "workflow.final_review_enabled" => {
+            config.workflow.final_review_enabled = parse_bool(raw_value, key)?;
+        }
+        "workflow.final_review_backends" => {
+            config.workflow.final_review_backends = parse_string_list(raw_value)?;
+        }
+        "workflow.final_review_arbiter_backend" => {
+            ensure_backend(raw_value)?;
+            config.workflow.final_review_arbiter_backend = raw_value.to_owned();
+        }
+        "workflow.final_review_min_reviewers" => {
+            config.workflow.final_review_min_reviewers = parse_u32(raw_value, key)?;
+        }
+        "workflow.final_review_consensus_threshold" => {
+            let v: f64 = raw_value.parse().map_err(|_| {
+                RalphError::Validation(format!("key '{key}' expects float value"))
+            })?;
+            config.workflow.final_review_consensus_threshold = v;
+        }
+        "workflow.max_final_review_restarts" => {
+            config.workflow.max_final_review_restarts = parse_u32(raw_value, key)?;
+        }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_bool(raw_value, key)?;
         }
@@ -472,6 +514,10 @@ fn set_global_value(
         "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
         "templates.completer" => config.templates.completer = raw_value.to_owned(),
         "templates.qa" => config.templates.qa = raw_value.to_owned(),
+        "templates.final_reviewer" => config.templates.final_reviewer = raw_value.to_owned(),
+        "templates.planner_position" => config.templates.planner_position = raw_value.to_owned(),
+        "templates.vote" => config.templates.vote = raw_value.to_owned(),
+        "templates.arbiter" => config.templates.arbiter = raw_value.to_owned(),
         "git.auto_branch" => config.git.auto_branch = parse_bool(raw_value, key)?,
         "git.branch_format" => config.git.branch_format = raw_value.to_owned(),
         "git.sign_commits" => config.git.sign_commits = parse_bool(raw_value, key)?,
@@ -566,6 +612,31 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "workflow.completer_backend" => {
             config.workflow.completer_backend = parse_optional_backend(raw_value)?;
         }
+        "workflow.final_review_enabled" => {
+            config.workflow.final_review_enabled = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.final_review_backends" => {
+            config.workflow.final_review_backends = parse_optional_string_list(raw_value)?;
+        }
+        "workflow.final_review_arbiter_backend" => {
+            config.workflow.final_review_arbiter_backend = parse_optional_backend(raw_value)?;
+        }
+        "workflow.final_review_min_reviewers" => {
+            config.workflow.final_review_min_reviewers = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.final_review_consensus_threshold" => {
+            if raw_value == "null" {
+                config.workflow.final_review_consensus_threshold = None;
+            } else {
+                let v: f64 = raw_value.parse().map_err(|_| {
+                    RalphError::Validation(format!("key '{key}' expects float value"))
+                })?;
+                config.workflow.final_review_consensus_threshold = Some(v);
+            }
+        }
+        "workflow.max_final_review_restarts" => {
+            config.workflow.max_final_review_restarts = parse_optional_u32(raw_value, key)?;
+        }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_optional_bool(raw_value, key)?;
         }
@@ -617,6 +688,14 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
         "templates.qa" => config.templates.qa = parse_optional_string(raw_value),
+        "templates.final_reviewer" => {
+            config.templates.final_reviewer = parse_optional_string(raw_value)
+        }
+        "templates.planner_position" => {
+            config.templates.planner_position = parse_optional_string(raw_value)
+        }
+        "templates.vote" => config.templates.vote = parse_optional_string(raw_value),
+        "templates.arbiter" => config.templates.arbiter = parse_optional_string(raw_value),
         "daemon.poll_seconds" => {
             config.daemon.poll_seconds = parse_optional_u64(raw_value, key)?;
         }
@@ -859,8 +938,11 @@ fn set_backend_model(
         "planner" => models.planner = value,
         "implementer" => models.implementer = value,
         "reviewer" => models.reviewer = value,
+        "final_reviewer" => models.final_reviewer = value,
+        "arbiter" => models.arbiter = value,
         "qa" => models.qa = value,
         "completer" => models.completer = value,
+        "acceptance_qa" => models.acceptance_qa = value,
         "reformatter" => models.reformatter = value,
         _ => {
             return Err(RalphError::Validation(format!(
@@ -882,6 +964,8 @@ fn set_role_timeout(
         "planner" => role_timeouts.planner = value,
         "implementer" => role_timeouts.implementer = value,
         "reviewer" => role_timeouts.reviewer = value,
+        "final_reviewer" => role_timeouts.final_reviewer = value,
+        "arbiter" => role_timeouts.arbiter = value,
         "qa" => role_timeouts.qa = value,
         "completer" => role_timeouts.completer = value,
         "acceptance_qa" => role_timeouts.acceptance_qa = value,

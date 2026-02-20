@@ -369,6 +369,198 @@ If any checks fail:
 "#
 }
 
+pub fn default_final_reviewer_template() -> &'static str {
+    r#"You are a final reviewer evaluating a completed project for quality and correctness.
+
+Given:
+- `prompt.md` (the master prompt)
+- The full project state
+- All implemented features and their specs
+
+Your job is to:
+1. Review the entire project against the master prompt requirements
+2. Identify any issues, gaps, or improvements needed
+3. Propose specific amendments if changes are required
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections
+- No preamble or commentary before the H1
+
+If no changes are needed:
+
+# Final Review: NO AMENDMENTS
+
+## Summary
+<why the project is complete and correct>
+
+---
+
+If changes are needed:
+
+# Final Review: AMENDMENTS
+
+## Amendment: <ID>
+
+### Problem
+<what is wrong or missing>
+
+### Proposed Change
+<what should be changed>
+
+### Affected Files
+- `path/to/file` - <what changes>
+
+(repeat ## Amendment: <ID> for each amendment)
+
+---
+
+## Context Provided
+
+## System Guardrails
+{{system_guardrails}}
+
+## Master Prompt
+{{master_prompt}}
+
+## Project State
+```json
+{{state_json}}
+```
+"#
+}
+
+pub fn default_planner_position_template() -> &'static str {
+    r#"You are the project planner evaluating proposed amendments from final reviewers.
+
+Given:
+- `prompt.md` (the master prompt)
+- The proposed amendments from final review
+
+Your job is to:
+1. Evaluate each proposed amendment
+2. Accept or reject each one with rationale
+3. Provide your position on every amendment ID
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections — one for every amendment ID
+- No preamble or commentary before the H1
+
+# Planner Positions
+
+## Amendment: <ID>
+
+### Position
+ACCEPT or REJECT
+
+### Rationale
+<why you accept or reject this amendment>
+
+(repeat for every amendment ID)
+
+---
+
+## Context Provided
+
+## Master Prompt
+{{master_prompt}}
+
+## Proposed Amendments
+{{proposed_amendments}}
+"#
+}
+
+pub fn default_vote_template() -> &'static str {
+    r#"You are a reviewer voting on proposed amendments after considering the planner's positions.
+
+Given:
+- The proposed amendments
+- The planner's positions on each amendment
+
+Your job is to:
+1. Consider each amendment and the planner's position
+2. Vote ACCEPT or REJECT for each amendment
+3. Provide rationale for your vote
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections — one for every amendment ID
+- No preamble or commentary before the H1
+
+# Vote Results
+
+## Amendment: <ID>
+
+### Vote
+ACCEPT or REJECT
+
+### Rationale
+<why you vote this way>
+
+(repeat for every amendment ID)
+
+---
+
+## Context Provided
+
+## Proposed Amendments
+{{proposed_amendments}}
+
+## Planner Positions
+{{planner_positions}}
+"#
+}
+
+pub fn default_arbiter_template() -> &'static str {
+    r#"You are the arbiter resolving disputed amendments where reviewers and planner disagree.
+
+Given:
+- The disputed amendments
+- The planner's positions
+- The reviewer votes
+
+Your job is to:
+1. Consider each disputed amendment carefully
+2. Make a final ruling: ACCEPT or REJECT
+3. Provide clear rationale for each ruling
+
+CRITICAL FORMAT REQUIREMENTS:
+- Return markdown body only (no YAML frontmatter)
+- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
+- Include ALL required H2 sections — one for every disputed amendment ID
+- No preamble or commentary before the H1
+
+# Arbiter Ruling
+
+## Amendment: <ID>
+
+### Ruling
+ACCEPT or REJECT
+
+### Rationale
+<why you rule this way>
+
+(repeat for every disputed amendment ID)
+
+---
+
+## Context Provided
+
+## Disputed Amendments
+{{disputed_amendments}}
+
+## Planner Positions
+{{planner_positions}}
+
+## Reviewer Votes
+{{reviewer_votes}}
+"#
+}
+
 pub fn default_completer_template() -> &'static str {
     r#"You are a project completion validator.
 

@@ -72,6 +72,10 @@ pub struct ProjectTemplateOverrides {
     pub prompt_reviewer: Option<String>,
     pub completer: Option<String>,
     pub qa: Option<String>,
+    pub final_reviewer: Option<String>,
+    pub planner_position: Option<String>,
+    pub vote: Option<String>,
+    pub arbiter: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
