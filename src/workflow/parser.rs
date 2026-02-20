@@ -381,6 +381,14 @@ pub fn parse_final_reviewer_output(raw: &str) -> Result<FinalReviewerDecision> {
                 ));
             }
             validate_no_duplicate_ids(&amendments.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), "final reviewer")?;
+            for amendment in &amendments {
+                validate_amendment_subsections(
+                    &amendment.body,
+                    &["Problem", "Proposed Change", "Affected Files"],
+                    &amendment.id,
+                    "final reviewer",
+                )?;
+            }
             Ok(FinalReviewerDecision::Amendments { body, amendments })
         }
         other => Err(RalphError::ParseError(format!(
@@ -419,6 +427,7 @@ pub fn parse_planner_position_output(
         .into_iter()
         .map(|(id, value, block_body)| {
             validate_accept_reject(&value, &id, "planner position")?;
+            validate_amendment_subsections(&block_body, &["Rationale"], &id, "planner position")?;
             Ok(AmendmentPosition {
                 id,
                 position: value,
@@ -457,6 +466,7 @@ pub fn parse_vote_output(raw: &str, required_ids: &[&str]) -> Result<VoteDecisio
         .into_iter()
         .map(|(id, value, block_body)| {
             validate_accept_reject(&value, &id, "vote")?;
+            validate_amendment_subsections(&block_body, &["Rationale"], &id, "vote")?;
             Ok(AmendmentVote {
                 id,
                 vote: value,
@@ -495,6 +505,7 @@ pub fn parse_arbiter_output(raw: &str, required_ids: &[&str]) -> Result<ArbiterD
         .into_iter()
         .map(|(id, value, block_body)| {
             validate_accept_reject(&value, &id, "arbiter")?;
+            validate_amendment_subsections(&block_body, &["Rationale"], &id, "arbiter")?;
             Ok(AmendmentRuling {
                 id,
                 ruling: value,
@@ -647,6 +658,26 @@ fn validate_exact_id_coverage(found_ids: &[&str], required_ids: &[&str], scope: 
         )));
     }
 
+    Ok(())
+}
+
+/// Shared helper that validates required subsection headings within an amendment block body.
+/// For each required heading (e.g. `### Problem`), it checks that the heading appears on its
+/// own line within `block_body`. Returns `ParseError` for the first missing heading.
+fn validate_amendment_subsections(
+    block_body: &str,
+    required_subsections: &[&str],
+    amendment_id: &str,
+    scope: &str,
+) -> Result<()> {
+    for subsection in required_subsections {
+        let heading = format!("### {subsection}");
+        if !block_body.lines().any(|line| line.trim() == heading) {
+            return Err(RalphError::ParseError(format!(
+                "missing required subsection '### {subsection}' in {scope} for amendment '{amendment_id}'"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1108,7 +1139,7 @@ mod tests {
 
     #[test]
     fn final_reviewer_rejects_duplicate_amendment_ids() {
-        let text = "# Final Review: AMENDMENTS\n\n## Amendment: DUP-1\n\n### Problem\nx\n\n## Amendment: DUP-1\n\n### Problem\ny";
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: DUP-1\n\n### Problem\nx\n\n### Proposed Change\nfix\n\n### Affected Files\n- `a.rs`\n\n## Amendment: DUP-1\n\n### Problem\ny\n\n### Proposed Change\nfix2\n\n### Affected Files\n- `b.rs`";
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
@@ -1245,5 +1276,89 @@ mod tests {
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("## Summary"));
+    }
+
+    // -----------------------------------------------------------------------
+    // FinalReview fail-closed subsection enforcement tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn final_reviewer_rejects_amendment_missing_problem() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: FIX-001\n\n### Proposed Change\nfix it\n\n### Affected Files\n- `src/lib.rs`";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Problem"), "expected missing Problem error, got: {err}");
+        assert!(err.contains("FIX-001"), "expected amendment ID in error, got: {err}");
+    }
+
+    #[test]
+    fn final_reviewer_rejects_amendment_missing_proposed_change() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: FIX-001\n\n### Problem\nbug\n\n### Affected Files\n- `src/lib.rs`";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Proposed Change"), "expected missing Proposed Change error, got: {err}");
+    }
+
+    #[test]
+    fn final_reviewer_rejects_amendment_missing_affected_files() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: FIX-001\n\n### Problem\nbug\n\n### Proposed Change\nfix it";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Affected Files"), "expected missing Affected Files error, got: {err}");
+    }
+
+    #[test]
+    fn final_reviewer_rejects_second_amendment_missing_subsection() {
+        // First amendment is valid, second is missing ### Proposed Change
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: OK-1\n\n### Problem\nbug\n\n### Proposed Change\nfix\n\n### Affected Files\n- `a.rs`\n\n## Amendment: BAD-2\n\n### Problem\ntypo\n\n### Affected Files\n- `b.rs`";
+        let result = parse_final_reviewer_output(text);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Proposed Change"), "got: {err}");
+        assert!(err.contains("BAD-2"), "error should reference the failing amendment ID, got: {err}");
+    }
+
+    #[test]
+    fn planner_position_rejects_missing_rationale() {
+        let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT";
+        let result = parse_planner_position_output(text, &["FIX-001"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
+        assert!(err.contains("FIX-001"), "expected amendment ID in error, got: {err}");
+    }
+
+    #[test]
+    fn vote_output_rejects_missing_rationale() {
+        let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT";
+        let result = parse_vote_output(text, &["A1"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
+        assert!(err.contains("A1"), "expected amendment ID in error, got: {err}");
+    }
+
+    #[test]
+    fn arbiter_output_rejects_missing_rationale() {
+        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nACCEPT";
+        let result = parse_arbiter_output(text, &["D1"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
+        assert!(err.contains("D1"), "expected amendment ID in error, got: {err}");
+    }
+
+    #[test]
+    fn planner_position_rejects_partial_rationale_coverage() {
+        // First amendment has Rationale, second doesn't
+        let text = "# Planner Positions\n\n## Amendment: A1\n\n### Position\nACCEPT\n\n### Rationale\ngood\n\n## Amendment: A2\n\n### Position\nREJECT";
+        let result = parse_planner_position_output(text, &["A1", "A2"]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("### Rationale"), "got: {err}");
+        assert!(err.contains("A2"), "error should reference the failing amendment, got: {err}");
     }
 }
