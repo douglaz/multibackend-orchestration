@@ -1,13 +1,21 @@
 use std::fs;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::cli::StatusArgs;
+use crate::config::{resolve_effective_config, RunWorkflowOverrides};
 use crate::daemon::github::{classify_lifecycle_labels, fetch_issue_labels};
+use crate::git::commit::count_phase_transition_checkpoints;
+use crate::git::is_git_repo;
+use crate::project::load_project_config_if_exists;
 use crate::project::artifacts::resolve_artifact_path_by_suffix;
 use crate::project::lifecycle::{
     parse_github_repo_slug, parse_issue_number, project_git_context, reconstruct_project_state,
 };
 use crate::project::state::ProjectStatus;
+use crate::workflow::parser::{
+    parse_final_reviewer_output, parse_planner_position_output, parse_vote_output,
+};
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
@@ -27,6 +35,16 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         state.status = label_status;
     }
 
+    let project_dir = workspace.project_dir(&project_id);
+    let project_cfg = load_project_config_if_exists(&project_dir)?;
+    let effective = resolve_effective_config(
+        &workspace.root,
+        &project_dir,
+        workspace.config.clone(),
+        project_cfg,
+        RunWorkflowOverrides::default(),
+    )?;
+
     println!("WORKSPACE: {}", workspace.root.display());
     println!(
         "ACTIVE PROJECT: {} ({})",
@@ -40,8 +58,20 @@ pub fn execute(args: StatusArgs) -> Result<()> {
         phase_label(&state.current_phase),
         state.phase_iteration
     );
+    if state.current_phase == crate::project::state::Phase::FinalReview {
+        let progress = final_review_progress(&workspace.root, &project_dir, &state, &effective)?;
+        println!("Final Review: round {}", progress.round);
+        println!(
+            "Reviewers: {}/{} complete",
+            progress.reviewer_complete, progress.reviewer_total
+        );
+        println!("Disputed amendments: {}", progress.disputed_count);
+        println!(
+            "Restart count: {} / {}",
+            progress.restart_count, progress.max_restarts
+        );
+    }
     println!();
-    let project_dir = workspace.project_dir(&project_id);
     if let Some(loop_state) = state.current_feature_loop() {
         println!(
             "Loop {}: {} ({})",
@@ -182,6 +212,7 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",
+        crate::project::state::Phase::FinalReview => "final_review",
     }
 }
 
@@ -307,6 +338,168 @@ fn extract_section_lines(body: &str, section_header: &str) -> Vec<String> {
     }
 
     lines
+}
+
+#[derive(Debug, Clone, Default)]
+struct FinalReviewProgress {
+    round: u32,
+    reviewer_complete: usize,
+    reviewer_total: usize,
+    disputed_count: usize,
+    restart_count: u32,
+    max_restarts: u32,
+}
+
+fn final_review_progress(
+    workspace_root: &Path,
+    project_dir: &Path,
+    state: &crate::project::state::ProjectState,
+    effective: &crate::config::EffectiveConfig,
+) -> Result<FinalReviewProgress> {
+    let (loop_number, loop_slug) = state.current_completion_loop_identity().ok_or_else(|| {
+        RalphError::Orchestration(
+            "current phase is final_review but no completion loop is available".to_owned(),
+        )
+    })?;
+
+    let restart_count = final_review_restart_count(workspace_root, &state.project_id)?;
+    let reviewers = normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let reviewer_total = reviewers.len();
+    let mut reviewer_complete = 0_usize;
+    let mut amendment_ids: BTreeSet<String> = BTreeSet::new();
+
+    for reviewer in &reviewers {
+        let proposal_file = format!("final-review-proposals-{reviewer}.md");
+        let proposal_rel =
+            resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &proposal_file)?;
+        if let Some(rel) = proposal_rel {
+            let raw = fs::read_to_string(project_dir.join(rel));
+            if let Ok(raw) = raw {
+                if let Ok(decision) = parse_final_reviewer_output(&raw) {
+                    reviewer_complete += 1;
+                    if let crate::workflow::parser::FinalReviewerDecision::Amendments {
+                        amendments,
+                        ..
+                    } = decision
+                    {
+                        for amendment in amendments {
+                            amendment_ids.insert(amendment.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let disputed_count = compute_status_disputed_count(
+        project_dir,
+        loop_number,
+        loop_slug,
+        &reviewers,
+        &amendment_ids.iter().cloned().collect::<Vec<_>>(),
+        effective.workflow.final_review_consensus_threshold,
+    )?;
+
+    Ok(FinalReviewProgress {
+        round: restart_count.saturating_add(1),
+        reviewer_complete,
+        reviewer_total,
+        disputed_count,
+        restart_count,
+        max_restarts: effective.workflow.max_final_review_restarts,
+    })
+}
+
+fn final_review_restart_count(workspace_root: &Path, project_id: &str) -> Result<u32> {
+    let Some(repo_root) = workspace_root.parent() else {
+        return Ok(0);
+    };
+    if !is_git_repo(repo_root) {
+        return Ok(0);
+    }
+    count_phase_transition_checkpoints(repo_root, project_id, "final_review", "planning")
+}
+
+fn normalize_final_review_backends(backends: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for backend in backends {
+        let parsed = crate::backend::parse_backend_spec(backend)?;
+        let canonical = match parsed.model {
+            Some(model) => format!("{}({model})", parsed.name),
+            None => parsed.name,
+        };
+        if seen.insert(canonical.clone()) {
+            normalized.push(canonical);
+        }
+    }
+    Ok(normalized)
+}
+
+fn compute_status_disputed_count(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    reviewers: &[String],
+    amendment_ids: &[String],
+    threshold: f64,
+) -> Result<usize> {
+    if amendment_ids.is_empty() {
+        return Ok(0);
+    }
+    let required_ids = amendment_ids.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let planner_positions_rel = resolve_artifact_path_by_suffix(
+        project_dir,
+        loop_number,
+        loop_slug,
+        "final-review-planner-positions.md",
+    )?;
+    let Some(planner_positions_rel) = planner_positions_rel else {
+        return Ok(0);
+    };
+    let planner_positions_raw = fs::read_to_string(project_dir.join(planner_positions_rel))?;
+    if parse_planner_position_output(&planner_positions_raw, &required_ids).is_err() {
+        return Ok(0);
+    }
+
+    let mut votes = Vec::new();
+    for reviewer in reviewers {
+        let vote_file = format!("final-review-votes-{reviewer}.md");
+        let vote_rel =
+            resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &vote_file)?;
+        let Some(vote_rel) = vote_rel else {
+            return Ok(0);
+        };
+        let vote_raw = fs::read_to_string(project_dir.join(vote_rel))?;
+        let Ok(vote_decision) = parse_vote_output(&vote_raw, &required_ids) else {
+            return Ok(0);
+        };
+        votes.push(vote_decision.votes);
+    }
+
+    let total_voters = votes.len();
+    if total_voters == 0 {
+        return Ok(0);
+    }
+
+    let mut disputed = 0_usize;
+    for amendment_id in amendment_ids {
+        let accepts = votes
+            .iter()
+            .filter(|vote_set| {
+                vote_set
+                    .iter()
+                    .find(|vote| vote.id == *amendment_id)
+                    .is_some_and(|vote| vote.vote == "ACCEPT")
+            })
+            .count();
+        let ratio = accepts as f64 / total_voters as f64;
+        if accepts > 0 && ratio < threshold {
+            disputed += 1;
+        }
+    }
+    Ok(disputed)
 }
 
 fn strip_frontmatter(raw: &str) -> String {

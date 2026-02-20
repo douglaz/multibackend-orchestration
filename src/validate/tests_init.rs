@@ -79,6 +79,10 @@ fn creates_template_files(h: &RalphHarness) -> TestResult {
             "prompt_reviewer.md",
             "completion.md",
             "qa.md",
+            "final_reviewer.md",
+            "planner_position.md",
+            "vote.md",
+            "arbiter.md",
         ] {
             assert_file_not_empty(&templates.join(name));
         }
@@ -186,6 +190,10 @@ dry-run: write-template .ralph/templates/review.md
 dry-run: write-template .ralph/templates/prompt_reviewer.md
 dry-run: write-template .ralph/templates/completion.md
 dry-run: write-template .ralph/templates/qa.md
+dry-run: write-template .ralph/templates/final_reviewer.md
+dry-run: write-template .ralph/templates/planner_position.md
+dry-run: write-template .ralph/templates/vote.md
+dry-run: write-template .ralph/templates/arbiter.md
 dry-run: create-legacy-link .ralph/templates/planner.md -> spec.md
 dry-run: create-legacy-link .ralph/templates/implementer.md -> implementation.md
 dry-run: create-legacy-link .ralph/templates/reviewer.md -> review.md

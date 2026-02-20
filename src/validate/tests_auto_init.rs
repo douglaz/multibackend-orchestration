@@ -3,7 +3,7 @@ use std::fs;
 use super::*;
 
 use crate::validate::assertions::{
-    assert_dir_exists, assert_exit_code, assert_file_exists, assert_stderr_contains,
+    assert_dir_exists, assert_exit_code, assert_file_exists,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::auto_mock_script;
@@ -55,6 +55,10 @@ fn auto_initializes_workspace_when_missing(h: &RalphHarness) -> TestResult {
         assert_file_exists(&workspace_root.join("templates/prompt_reviewer.md"));
         assert_file_exists(&workspace_root.join("templates/completion.md"));
         assert_file_exists(&workspace_root.join("templates/qa.md"));
+        assert_file_exists(&workspace_root.join("templates/final_reviewer.md"));
+        assert_file_exists(&workspace_root.join("templates/planner_position.md"));
+        assert_file_exists(&workspace_root.join("templates/vote.md"));
+        assert_file_exists(&workspace_root.join("templates/arbiter.md"));
     })
 }
 

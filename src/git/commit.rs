@@ -171,6 +171,31 @@ pub fn commit_and_push_phase_transition(
     Ok(())
 }
 
+pub fn count_phase_transition_checkpoints(
+    workdir: &Path,
+    project_id: &str,
+    from_phase: &str,
+    to_phase: &str,
+) -> Result<u32> {
+    ensure_git_repo(workdir)?;
+    let needle = format!("chore({project_id}): checkpoint {from_phase} -> {to_phase}");
+    let log = run_git(
+        workdir,
+        &[
+            "log",
+            "--format=%s",
+            "--fixed-strings",
+            "--grep",
+            &needle,
+        ],
+    )?;
+
+    if log.trim().is_empty() {
+        return Ok(0);
+    }
+    Ok(log.lines().filter(|line| line.trim() == needle).count() as u32)
+}
+
 /// Stage all non-orchestration changes so reviewer diff (`git diff HEAD`)
 /// includes newly created files.
 ///
@@ -301,9 +326,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use tempfile::TempDir;
+    use tempfile::{tempdir, TempDir};
 
-    use super::commit_and_push_phase_transition;
+    use super::{commit_and_push_phase_transition, commit_feature_loop, count_phase_transition_checkpoints};
     use crate::git::branch::sync_project_branch;
     use crate::git::ralph_commit::{build_ralph_commit_message, derive_position};
     use crate::project::state::Phase;
@@ -522,5 +547,56 @@ mod tests {
             (1, Phase::Implementing),
             "position should revert to last pushed checkpoint after sync"
         );
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let temp = tempdir().expect("temp dir");
+        let repo = temp.path();
+        git_ok(repo, &["init"]);
+        git_ok(repo, &["config", "user.email", "test@example.com"]);
+        git_ok(repo, &["config", "user.name", "Test User"]);
+        fs::write(repo.join("README.md"), "# demo\n").expect("write readme");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "initial"]);
+        temp
+    }
+
+    #[test]
+    fn counts_only_matching_project_and_transition_messages() {
+        let temp = init_repo();
+        let repo = temp.path();
+
+        commit_feature_loop(
+            repo,
+            "chore(proj-a): checkpoint final_review -> planning",
+            None,
+            false,
+        )
+        .expect("commit checkpoint 1");
+        commit_feature_loop(
+            repo,
+            "chore(proj-a): checkpoint final_review -> planning",
+            None,
+            false,
+        )
+        .expect("commit checkpoint 2");
+        commit_feature_loop(
+            repo,
+            "chore(proj-a): checkpoint final_review -> completing",
+            None,
+            false,
+        )
+        .expect("commit other transition");
+        commit_feature_loop(
+            repo,
+            "chore(proj-b): checkpoint final_review -> planning",
+            None,
+            false,
+        )
+        .expect("commit other project");
+
+        let count = count_phase_transition_checkpoints(repo, "proj-a", "final_review", "planning")
+            .expect("count checkpoints");
+        assert_eq!(count, 2);
     }
 }

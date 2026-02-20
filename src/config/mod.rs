@@ -1,11 +1,13 @@
 pub mod global;
 pub mod project;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::backend::parse_backend_spec;
 use crate::error::RalphError;
 use crate::Result;
+use tracing::warn;
 
 pub use global::{
     CommitMessageStyle, GlobalConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
@@ -23,6 +25,12 @@ pub struct EffectiveWorkflowConfig {
     pub reviewer_backend: Option<String>,
     pub qa_backend: Option<String>,
     pub completer_backend: Option<String>,
+    pub final_review_enabled: bool,
+    pub final_review_backends: Vec<String>,
+    pub final_review_arbiter_backend: String,
+    pub final_review_min_reviewers: u32,
+    pub final_review_consensus_threshold: f64,
+    pub max_final_review_restarts: u32,
     pub qa_enabled: bool,
     pub max_qa_iterations: u32,
     pub max_review_iterations: u32,
@@ -60,6 +68,10 @@ pub struct EffectiveTemplateConfig {
     pub prompt_reviewer: PathBuf,
     pub completer: PathBuf,
     pub qa: PathBuf,
+    pub final_reviewer: PathBuf,
+    pub planner_position: PathBuf,
+    pub vote: PathBuf,
+    pub arbiter: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +177,24 @@ pub fn resolve_effective_config(
         reviewer_backend,
         qa_backend,
         completer_backend,
+        final_review_enabled: project_ref
+            .and_then(|p| p.workflow.final_review_enabled)
+            .unwrap_or(global.workflow.final_review_enabled),
+        final_review_backends: project_ref
+            .and_then(|p| p.workflow.final_review_backends.clone())
+            .unwrap_or_else(|| global.workflow.final_review_backends.clone()),
+        final_review_arbiter_backend: project_ref
+            .and_then(|p| p.workflow.final_review_arbiter_backend.clone())
+            .unwrap_or_else(|| global.workflow.final_review_arbiter_backend.clone()),
+        final_review_min_reviewers: project_ref
+            .and_then(|p| p.workflow.final_review_min_reviewers)
+            .unwrap_or(global.workflow.final_review_min_reviewers),
+        final_review_consensus_threshold: project_ref
+            .and_then(|p| p.workflow.final_review_consensus_threshold)
+            .unwrap_or(global.workflow.final_review_consensus_threshold),
+        max_final_review_restarts: project_ref
+            .and_then(|p| p.workflow.max_final_review_restarts)
+            .unwrap_or(global.workflow.max_final_review_restarts),
         qa_enabled: project_ref
             .and_then(|p| p.workflow.qa_enabled)
             .unwrap_or(global.workflow.qa_enabled),
@@ -215,6 +245,16 @@ pub fn resolve_effective_config(
             .and_then(|p| p.workflow.session_reuse_reset_on_rollback)
             .unwrap_or(global.workflow.session_reuse_reset_on_rollback),
     };
+    let final_review_validation = validate_final_review_config(&global, &workflow)?;
+    if workflow.final_review_enabled && final_review_validation.arbiter_overlaps_reviewer_family {
+        warn!(
+            arbiter_backend = %workflow.final_review_arbiter_backend,
+            arbiter_family = %final_review_validation.arbiter_family,
+            reviewers = ?final_review_validation.normalized_reviewers,
+            reviewer_families = ?final_review_validation.reviewer_families,
+            "final review arbiter backend family overlaps configured reviewer families"
+        );
+    }
 
     let templates = EffectiveTemplateConfig {
         planner: resolve_template_path(
@@ -252,6 +292,30 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.qa.as_deref()),
             &global.templates.qa,
+        ),
+        final_reviewer: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.final_reviewer.as_deref()),
+            &global.templates.final_reviewer,
+        ),
+        planner_position: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.planner_position.as_deref()),
+            &global.templates.planner_position,
+        ),
+        vote: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.vote.as_deref()),
+            &global.templates.vote,
+        ),
+        arbiter: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.arbiter.as_deref()),
+            &global.templates.arbiter,
         ),
     };
 
@@ -335,6 +399,94 @@ fn validate_backend_spec(global: &GlobalConfig, backend_spec: &str, label: &str)
         )));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FinalReviewValidation {
+    normalized_reviewers: Vec<String>,
+    reviewer_families: Vec<String>,
+    arbiter_family: String,
+    arbiter_overlaps_reviewer_family: bool,
+}
+
+fn validate_final_review_config(
+    global: &GlobalConfig,
+    workflow: &EffectiveWorkflowConfig,
+) -> Result<FinalReviewValidation> {
+    if !workflow.final_review_consensus_threshold.is_finite()
+        || workflow.final_review_consensus_threshold <= 0.0
+        || workflow.final_review_consensus_threshold > 1.0
+    {
+        return Err(RalphError::Validation(format!(
+            "final_review_consensus_threshold must be > 0.0 and <= 1.0, got {}",
+            workflow.final_review_consensus_threshold
+        )));
+    }
+
+    let normalized_reviewers = normalize_backend_specs(global, &workflow.final_review_backends)?;
+    if workflow.final_review_enabled && normalized_reviewers.is_empty() {
+        return Err(RalphError::Validation(
+            "final_review_enabled=true requires at least one backend in final_review_backends"
+                .to_owned(),
+        ));
+    }
+    if workflow.final_review_enabled
+        && normalized_reviewers.len() < workflow.final_review_min_reviewers as usize
+    {
+        return Err(RalphError::Validation(format!(
+            "final_review_backends has {} unique backend specs after deduplication, but final_review_min_reviewers is {}",
+            normalized_reviewers.len(),
+            workflow.final_review_min_reviewers
+        )));
+    }
+
+    let reviewer_families = unique_backend_families(&normalized_reviewers)?;
+
+    let arbiter_backend = canonicalize_backend_spec(&workflow.final_review_arbiter_backend)?;
+    validate_backend_spec(global, &arbiter_backend, "final review arbiter backend")?;
+    let arbiter_family = parse_backend_spec(&arbiter_backend)?.name;
+
+    Ok(FinalReviewValidation {
+        normalized_reviewers,
+        arbiter_overlaps_reviewer_family: reviewer_families.contains(&arbiter_family),
+        reviewer_families,
+        arbiter_family,
+    })
+}
+
+fn normalize_backend_specs(global: &GlobalConfig, specs: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+
+    for spec in specs {
+        let canonical = canonicalize_backend_spec(spec)?;
+        validate_backend_spec(global, &canonical, "final review backend")?;
+        if seen.insert(canonical.clone()) {
+            normalized.push(canonical);
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn unique_backend_families(specs: &[String]) -> Result<Vec<String>> {
+    let mut families = Vec::new();
+    let mut seen = HashSet::new();
+    for spec in specs {
+        let family = parse_backend_spec(spec)?.name;
+        if seen.insert(family.clone()) {
+            families.push(family);
+        }
+    }
+    Ok(families)
+}
+
+fn canonicalize_backend_spec(spec: &str) -> Result<String> {
+    let parsed = parse_backend_spec(spec)?;
+    Ok(match parsed.model {
+        Some(model) => format!("{}({model})", parsed.name),
+        None => parsed.name,
+    })
 }
 
 #[cfg(test)]
@@ -771,5 +923,194 @@ mod tests {
                 .workflow
                 .include_history_when_session_reuse_enabled
         );
+    }
+
+    #[test]
+    fn resolve_effective_config_final_review_fields_follow_precedence() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = false;
+        global.workflow.final_review_backends = vec!["claude".to_owned()];
+        global.workflow.final_review_arbiter_backend = "codex".to_owned();
+        global.workflow.final_review_min_reviewers = 1;
+        global.workflow.final_review_consensus_threshold = 0.75;
+        global.workflow.max_final_review_restarts = 4;
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                final_review_enabled: Some(true),
+                final_review_backends: Some(vec![
+                    "codex".to_owned(),
+                    "claude(opus)".to_owned(),
+                    "codex".to_owned(),
+                ]),
+                final_review_arbiter_backend: Some("claude".to_owned()),
+                final_review_min_reviewers: Some(2),
+                final_review_consensus_threshold: Some(1.0),
+                max_final_review_restarts: Some(3),
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("final review config should resolve");
+
+        assert!(effective.workflow.final_review_enabled);
+        assert_eq!(
+            effective.workflow.final_review_backends,
+            vec![
+                "codex".to_owned(),
+                "claude(opus)".to_owned(),
+                "codex".to_owned()
+            ]
+        );
+        assert_eq!(effective.workflow.final_review_arbiter_backend, "claude");
+        assert_eq!(effective.workflow.final_review_min_reviewers, 2);
+        assert_eq!(effective.workflow.final_review_consensus_threshold, 1.0);
+        assert_eq!(effective.workflow.max_final_review_restarts, 3);
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_invalid_final_review_threshold_bounds() {
+        for invalid in [0.0, -0.1, 1.1] {
+            let mut global = GlobalConfig::default();
+            global.workflow.final_review_consensus_threshold = invalid;
+
+            let err = resolve_effective_config(
+                Path::new("/workspace"),
+                Path::new("/workspace/project"),
+                global,
+                None,
+                RunWorkflowOverrides::default(),
+            )
+            .expect_err("invalid threshold should fail");
+            assert!(
+                err.to_string()
+                    .contains("final_review_consensus_threshold must be > 0.0 and <= 1.0"),
+                "unexpected error for {invalid}: {err}"
+            );
+        }
+
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_consensus_threshold = 1.0;
+        resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("1.0 threshold should be allowed");
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_empty_final_review_backends_when_enabled() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
+        global.workflow.final_review_backends = Vec::new();
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("empty reviewer list should fail");
+        assert!(err
+            .to_string()
+            .contains("final_review_enabled=true requires at least one backend"));
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_when_unique_reviewer_count_below_minimum() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
+        global.workflow.final_review_backends = vec![
+            "claude".to_owned(),
+            "claude".to_owned(),
+            "claude".to_owned(),
+        ];
+        global.workflow.final_review_min_reviewers = 2;
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("deduplicated reviewer set should fail minimum");
+        assert!(err
+            .to_string()
+            .contains("unique backend specs after deduplication"));
+    }
+
+    #[test]
+    fn resolve_effective_config_deduplicates_final_review_backends_before_minimum_check() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
+        global.workflow.final_review_backends = vec![
+            "claude".to_owned(),
+            "claude".to_owned(),
+            "codex".to_owned(),
+            "codex".to_owned(),
+        ];
+        global.workflow.final_review_min_reviewers = 2;
+
+        resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("deduplicated unique reviewer set should pass minimum");
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_unknown_final_review_arbiter_family() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_arbiter_backend = "unknown(model)".to_owned();
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("unknown arbiter backend should fail");
+        assert!(err
+            .to_string()
+            .contains("unknown backend configured as final review arbiter backend"));
+    }
+
+    #[test]
+    fn final_review_overlap_warning_detection_triggers_for_matching_backend_family() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_backends =
+            vec!["claude(opus)".to_owned(), "codex(gpt-5)".to_owned()];
+        global.workflow.final_review_arbiter_backend = "claude(sonnet)".to_owned();
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("overlap should only warn, not fail");
+
+        let validation =
+            super::validate_final_review_config(&effective.global, &effective.workflow)
+                .expect("validation should succeed");
+        assert!(validation.arbiter_overlaps_reviewer_family);
     }
 }

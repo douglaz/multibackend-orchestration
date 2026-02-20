@@ -1,0 +1,17 @@
+{
+  "idea": "Add a final review gate after acceptance QA that requires multi-backend consensus before project completion. When enabled, reviewers propose structured amendments to the project specification, a planner evaluates them, reviewers vote on the planner's positions, and an arbiter resolves disputes. Accepted amendments restart the planning phase with requirements augmented; rejected amendments allow completion.\n\n## Requirements\n\n1. **Phase model**: Add `FinalReview` phase (no `Completed` phase added)\n2. **Configuration**: Add 6 new workflow config fields with validation\n3. **Git-first durability**: Derive state from artifacts + checkpoint commits only\n4. **8-step orchestrator flow**: proposals → amendments → planner position → votes → consensus → arbiter (if needed) → exit decision\n5. **Amendment injection**: Accepted amendments must appear in next planner prompt\n6. **4 new prompt templates**: final_reviewer, planner_position, vote, arbiter\n7. **4 new parsers**: Extract structured data keyed by amendment ID\n8. **Resume safety**: Probe artifacts to skip completed steps on resume\n9. **Config mismatch handling**: Invalidate in-progress round if config changed\n\n## Acceptance Criteria\n\n- [ ] `Phase::FinalReview` added to state model\n- [ ] 6 new config fields added with Option<T> project overrides\n- [ ] Config validation: arbiter backend family check + overlap warning\n- [ ] `parse_phase` and `phase_label` support `final_review` label\n- [ ] All `phase_label` match blocks updated (5 files)\n- [ ] 8-step flow in orchestrator with artifact-based resume probing\n- [ ] `final-review-config.json` persisted at round start, mismatch detection implemented\n- [ ] Checkpoint commits: `completing -> final_review`, `final_review -> planning`, `final_review -> completing`\n- [ ] Amendment integration: `build_planner_prompt` injects `final-review-amendments-applied.md`\n- [ ] 4 new template files created matching exact format requirements\n- [ ] 4 new parser functions with fail-closed ID validation\n- [ ] Restart count derivation from checkpoint commit messages\n- [ ] Force-complete after `max_final_review_restarts` with artifact\n- [ ] CLI visibility: status shows reviewer progress, disputes, restart count\n- [ ] Unit tests: parsers, consensus logic, config validation, resume probing\n- [ ] Integration tests: approve path, restart path, arbiter path, resume, config mismatch\n- [ ] Validate tests: full completion flow with final review enabled\n\n## Constraints\n\n- No new durable state store (Git-first only)\n- Deterministic and resume-safe under partial artifact state\n- Backward compatible: `final_review_enabled` defaults true (opt-out)\n- Old binaries will hard-fail on `final_review` checkpoint (standard phase incompatibility)",
+  "idea_hash": "01a3d4a76033",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-20T18:45:25Z",
+  "completed_at": "2026-02-20T19:10:56Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 770.226784312,
+  "review_times_secs": [
+    411.192453871
+  ],
+  "revision_times_secs": [
+    349.656988128
+  ]
+}

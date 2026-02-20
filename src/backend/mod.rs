@@ -941,8 +941,11 @@ impl BackendRegistry {
             "planner",
             "implementer",
             "reviewer",
+            "final_reviewer",
+            "arbiter",
             "qa",
             "completer",
+            "acceptance_qa",
             "reformatter",
         ];
 

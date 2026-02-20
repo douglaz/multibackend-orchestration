@@ -756,6 +756,7 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
             .last()
             .map(|review| review.iteration + 1)
             .unwrap_or(1),
+        Phase::FinalReview => 1,
     }
 }
 

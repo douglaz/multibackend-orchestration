@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
@@ -17,8 +18,9 @@ use crate::config::{
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_and_push_phase_transition,
-    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
+    changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
+    reset_and_clean_working_tree, rev_parse,
+    stage_implementation_changes,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
@@ -36,17 +38,20 @@ use crate::project::state::{
 };
 use crate::prompts::template_introspection::{load_template_source, template_uses_var};
 use crate::prompts::templates::{
-    default_completer_template, default_implementer_template, default_planner_template,
+    default_arbiter_template, default_completer_template, default_final_reviewer_template,
+    default_implementer_template, default_planner_position_template, default_planner_template,
     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
-    render_template_with_fallback,
+    default_vote_template, render_template_with_fallback,
 };
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::util::slug::slugify_feature_name;
 use crate::workflow::parser::{
-    parse_completer_output, parse_implementer_output, parse_planner_output,
-    parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output, CompleterDecision,
-    ImplementerDecision, PlannerDecision, QaDecision, ReviewerDecision,
+    parse_arbiter_output, parse_completer_output, parse_final_reviewer_output,
+    parse_implementer_output, parse_planner_output, parse_planner_position_output,
+    parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output, parse_vote_output,
+    ArbiterDecision, CompleterDecision, FinalReviewerDecision, ImplementerDecision,
+    PlannerDecision, PlannerPositionsDecision, QaDecision, ReviewerDecision, VoteDecision,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -72,6 +77,33 @@ const REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtim
 - Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop.
 - If criteria are already satisfied and no code change is required, return `# Review: APPROVED` with evidence.
 - Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues."#;
+
+const FINAL_REVIEWER_GUARDRAILS: &str = r#"- Evaluate project-wide outcomes against the master prompt.
+- Propose only concrete, high-signal amendments with clear affected files.
+- Use globally unique amendment IDs within your response."#;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct FinalReviewConfigSnapshot {
+    reviewers: Vec<String>,
+    arbiter_backend: String,
+    min_reviewers: u32,
+    consensus_threshold: f64,
+    max_restarts: u32,
+}
+
+#[derive(Debug, Clone)]
+struct FinalReviewAmendment {
+    id: String,
+    body: String,
+    reviewer_backend: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FinalReviewConsensus {
+    accepted: Vec<String>,
+    rejected: Vec<String>,
+    disputed: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -361,7 +393,7 @@ impl Orchestrator {
                 &state.prompt_hash,
             );
 
-            if !state.has_in_progress_loop() {
+            if !state.has_in_progress_loop() && state.current_phase != Phase::FinalReview {
                 state.current_phase = Phase::Planning;
                 state.phase_iteration = 1;
             }
@@ -371,6 +403,7 @@ impl Orchestrator {
             let phase_at_step_start = state.current_phase.clone();
             let phase_iteration_at_step_start = state.phase_iteration;
             let mut completed_feature_loop_for_checkpoint: Option<u32> = None;
+            let mut pending_phase_checkpoint: Option<(Phase, Phase)> = None;
 
             match state.current_phase {
                 Phase::Planning => {
@@ -1887,13 +1920,25 @@ impl Orchestrator {
                                         passed_backends = ?passed_backends,
                                         "acceptance QA aggregate: PASS"
                                     );
-                                    state.status = ProjectStatus::Completed;
-                                    state.current_phase = Phase::Completing;
-                                    state.phase_iteration = 1;
-                                    logs.push(format!(
-                                        "loop {loop_number}: acceptance QA passed on [{}]; project finished",
-                                        passed_backends.join(", ")
-                                    ));
+                                    if effective.workflow.final_review_enabled {
+                                        state.status = ProjectStatus::InProgress;
+                                        state.current_phase = Phase::FinalReview;
+                                        state.phase_iteration = 1;
+                                        pending_phase_checkpoint =
+                                            Some((Phase::Completing, Phase::FinalReview));
+                                        logs.push(format!(
+                                            "loop {loop_number}: acceptance QA passed on [{}]; entering final review",
+                                            passed_backends.join(", ")
+                                        ));
+                                    } else {
+                                        state.status = ProjectStatus::Completed;
+                                        state.current_phase = Phase::Completing;
+                                        state.phase_iteration = 1;
+                                        logs.push(format!(
+                                            "loop {loop_number}: acceptance QA passed on [{}]; project finished",
+                                            passed_backends.join(", ")
+                                        ));
+                                    }
                                 } else {
                                     info!(
                                         loop = loop_number,
@@ -1910,12 +1955,23 @@ impl Orchestrator {
                                     ));
                                 }
                             } else {
-                                state.status = ProjectStatus::Completed;
-                                state.current_phase = Phase::Completing;
-                                state.phase_iteration = 1;
-                                logs.push(format!(
-                                    "loop {loop_number}: completer returned COMPLETE; project finished"
-                                ));
+                                if effective.workflow.final_review_enabled {
+                                    state.status = ProjectStatus::InProgress;
+                                    state.current_phase = Phase::FinalReview;
+                                    state.phase_iteration = 1;
+                                    pending_phase_checkpoint =
+                                        Some((Phase::Completing, Phase::FinalReview));
+                                    logs.push(format!(
+                                        "loop {loop_number}: completer returned COMPLETE; entering final review"
+                                    ));
+                                } else {
+                                    state.status = ProjectStatus::Completed;
+                                    state.current_phase = Phase::Completing;
+                                    state.phase_iteration = 1;
+                                    logs.push(format!(
+                                        "loop {loop_number}: completer returned COMPLETE; project finished"
+                                    ));
+                                }
                             }
                         }
                         CompletionVerdict::Continue => {
@@ -1927,6 +1983,20 @@ impl Orchestrator {
                             ));
                         }
                     }
+                }
+                Phase::FinalReview => {
+                    let checkpoint = run_final_review_phase(
+                        &project_dir,
+                        &self.workspace.root,
+                        &effective,
+                        &mut registry,
+                        &mut state,
+                        &prompt_content,
+                        &mut logs,
+                        repo_root_ref,
+                    )
+                    .await?;
+                    pending_phase_checkpoint = checkpoint;
                 }
             }
 
@@ -2009,6 +2079,18 @@ impl Orchestrator {
                 }
             }
 
+
+            if let Some((from_phase, to_phase)) = pending_phase_checkpoint.take() {
+                commit_phase_checkpoint_if_enabled(
+                    &self.workspace.root,
+                    &state.project_id,
+                    &from_phase,
+                    &to_phase,
+                    effective.workflow.auto_commit,
+                    options.skip_commit,
+                    effective.global.git.sign_commits,
+                )?;
+            }
 
             // Handle --until-review stop
             if let Some(ln) = until_review_stop {
@@ -2528,6 +2610,19 @@ fn build_planner_prompt(
         completion_feedback.clone().unwrap_or_default(),
     );
 
+    // Populate final_review_amendments so custom templates can reference it.
+    let amendments_path = project_dir.join("final-review-amendments-applied.md");
+    let amendments_content = amendments_path
+        .exists()
+        .then(|| std::fs::read_to_string(&amendments_path).ok())
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default();
+    vars.insert(
+        "final_review_amendments".to_owned(),
+        amendments_content.clone(),
+    );
+
     let rendered = render_template_with_fallback(
         &effective.templates.planner,
         &vars,
@@ -2567,6 +2662,17 @@ fn build_planner_prompt(
             &["completion_feedback"],
             "## Completion Feedback",
             &completion_feedback,
+        );
+    }
+
+    // Inject final-review amendments context when present
+    if !amendments_content.is_empty() {
+        append_section_if_missing(
+            &mut prompt,
+            &template_source,
+            &["final_review_amendments"],
+            "## Final Review Amendments",
+            &amendments_content,
         );
     }
 
@@ -2946,6 +3052,914 @@ OR
 - Planner Backend: {opposite_backend}
 "
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_final_review_phase(
+    project_dir: &Path,
+    workspace_root: &Path,
+    effective: &EffectiveConfig,
+    registry: &mut BackendRegistry,
+    state: &mut ProjectState,
+    prompt_content: &str,
+    logs: &mut Vec<String>,
+    repo_root_ref: Option<&Path>,
+) -> Result<Option<(Phase, Phase)>> {
+    info!(
+        loop = state.current_loop,
+        "starting final review orchestration phase"
+    );
+    let log_dir = workspace_root.join("tmp").join("logs");
+    let project_id = &state.project_id;
+    let completion = state.current_completion_attempt().ok_or_else(|| {
+        RalphError::Orchestration(
+            "current phase is final_review but no completion attempt exists".to_owned(),
+        )
+    })?;
+    let loop_number = completion.loop_number;
+    let loop_slug = completion.slug.clone();
+    let planner_backend_name = completion.backends.planner.clone();
+
+    let reviewers = normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let arbiter_backend = canonicalize_backend_spec(&effective.workflow.final_review_arbiter_backend)?;
+    let snapshot = FinalReviewConfigSnapshot {
+        reviewers: reviewers.clone(),
+        arbiter_backend: arbiter_backend.clone(),
+        min_reviewers: effective.workflow.final_review_min_reviewers,
+        consensus_threshold: effective.workflow.final_review_consensus_threshold,
+        max_restarts: effective.workflow.max_final_review_restarts,
+    };
+    let loop_dir = project_dir
+        .join("loops")
+        .join(format!("{loop_number:03}-{loop_slug}"));
+    ensure_final_review_config_snapshot(&loop_dir, &snapshot)?;
+
+    let restart_count = final_review_restart_count_from_artifacts(project_dir);
+    let round = restart_count.saturating_add(1);
+
+    let mut reviewer_decisions: Vec<(String, FinalReviewerDecision)> = Vec::new();
+    for reviewer_backend in &reviewers {
+        let artifact_kind = ArtifactKind::FinalReviewProposals {
+            backend: reviewer_backend.clone(),
+        };
+        let maybe_rel =
+            resolve_final_review_artifact(project_dir, loop_number, &loop_slug, &artifact_kind)?;
+        let decision = if let Some(rel) = maybe_rel {
+            let raw = read_project_relative_file(project_dir, &rel)?;
+            parse_final_reviewer_output(&raw)?
+        } else {
+            let reviewer_backend_impl =
+                registry.get_or_create_for_role(reviewer_backend, "final_reviewer")?;
+            let prompt = build_final_reviewer_prompt(
+                effective,
+                state,
+                prompt_content,
+                reviewer_backend_impl.name(),
+                &planner_backend_name,
+            )?;
+            registry
+                .set_tmux_context(TmuxExecutionContext {
+                    loop_number: Some(loop_number),
+                    role: Some("final_reviewer".to_owned()),
+                    loop_dir: Some(loop_dir.clone()),
+                    session_id: None,
+                })
+                .await;
+            info!(
+                loop = loop_number,
+                round = round,
+                backend = reviewer_backend_impl.name(),
+                "invoking final reviewer..."
+            );
+            let mut reviewer_log =
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
+            let retry_result: ParseRetryResult<FinalReviewerDecision> = execute_with_parse_retries(
+                reviewer_backend_impl,
+                registry,
+                "final_reviewer",
+                "final_review",
+                loop_number,
+                &prompt,
+                None,
+                parse_final_reviewer_output,
+                &expected_format_template_for("final_reviewer", None),
+                registry
+                    .timeout_for_role(reviewer_backend, "final_reviewer")
+                    .as_secs(),
+                &mut reviewer_log,
+                None,
+                repo_root_ref,
+            )
+            .await?;
+            let decision = retry_result.parsed;
+            let body = match &decision {
+                FinalReviewerDecision::NoAmendments { body }
+                | FinalReviewerDecision::Amendments { body, .. } => body.as_str(),
+            };
+            let _ = write_artifact(
+                project_dir,
+                ArtifactWriteInput {
+                    project_id: &state.project_id,
+                    loop_number,
+                    loop_slug: &loop_slug,
+                    backend: reviewer_backend,
+                    role: "final_reviewer",
+                    kind: artifact_kind,
+                    body,
+                },
+            )?;
+            decision
+        };
+        reviewer_decisions.push((reviewer_backend.clone(), decision));
+    }
+
+    let amendments = merge_final_review_amendments(&reviewer_decisions);
+    if amendments.is_empty() {
+        write_final_review_exit_artifact(
+            project_dir,
+            &state.project_id,
+            loop_number,
+            &loop_slug,
+            "approved",
+            &format!(
+                "# Final Review Exit: APPROVED\n\n## Summary\nNo amendments proposed in round {round}; project is complete."
+            ),
+        )?;
+        state.status = ProjectStatus::Completed;
+        state.current_phase = Phase::Completing;
+        state.phase_iteration = 1;
+        logs.push(format!(
+            "loop {loop_number}: final review round {round} found no amendments; project finished"
+        ));
+        return Ok(Some((Phase::FinalReview, Phase::Completing)));
+    }
+
+    let proposed_amendments = format_amendments_for_prompt(&amendments);
+    let amendment_ids = amendments
+        .iter()
+        .map(|amendment| amendment.id.clone())
+        .collect::<Vec<_>>();
+    let required_ids = amendment_ids.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let planner_positions_kind = ArtifactKind::FinalReviewPlannerPositions;
+    let planner_positions_rel = resolve_final_review_artifact(
+        project_dir,
+        loop_number,
+        &loop_slug,
+        &planner_positions_kind,
+    )?;
+    let planner_positions = if let Some(rel) = planner_positions_rel {
+        let raw = read_project_relative_file(project_dir, &rel)?;
+        parse_planner_position_output(&raw, &required_ids)?
+    } else {
+        let planner_backend = registry.get_or_create_for_role(&planner_backend_name, "planner")?;
+        let prompt = build_planner_position_prompt(
+            effective,
+            state,
+            prompt_content,
+            planner_backend.name(),
+            &arbiter_backend,
+            &proposed_amendments,
+        )?;
+        registry
+            .set_tmux_context(TmuxExecutionContext {
+                loop_number: Some(loop_number),
+                role: Some("planner".to_owned()),
+                loop_dir: Some(loop_dir.clone()),
+                session_id: None,
+            })
+            .await;
+        info!(
+            loop = loop_number,
+            round = round,
+            backend = planner_backend.name(),
+            "invoking planner for final-review positions..."
+        );
+        let mut planner_position_log =
+            LogWriter::open(&log_dir, project_id, Some(loop_number), "planner");
+        let retry_result: ParseRetryResult<PlannerPositionsDecision> = execute_with_parse_retries(
+            planner_backend,
+            registry,
+            "planner",
+            "final_review",
+            loop_number,
+            &prompt,
+            None,
+            |raw| parse_planner_position_output(raw, &required_ids),
+            &expected_format_template_for("planner_position", None),
+            registry
+                .timeout_for_role(&planner_backend_name, "planner")
+                .as_secs(),
+            &mut planner_position_log,
+            None,
+            repo_root_ref,
+        )
+        .await?;
+        let decision = retry_result.parsed;
+        let _ = write_artifact(
+            project_dir,
+            ArtifactWriteInput {
+                project_id: &state.project_id,
+                loop_number,
+                loop_slug: &loop_slug,
+                backend: &planner_backend_name,
+                role: "planner",
+                kind: planner_positions_kind,
+                body: &decision.body,
+            },
+        )?;
+        decision
+    };
+
+    let vote_prompt = build_vote_prompt(
+        effective,
+        state,
+        &proposed_amendments,
+        &planner_positions.body,
+    )?;
+    let mut vote_decisions: Vec<(String, VoteDecision)> = Vec::new();
+    for reviewer_backend in &reviewers {
+        let vote_kind = ArtifactKind::FinalReviewVotes {
+            backend: reviewer_backend.clone(),
+        };
+        let maybe_rel =
+            resolve_final_review_artifact(project_dir, loop_number, &loop_slug, &vote_kind)?;
+        let decision = if let Some(rel) = maybe_rel {
+            let raw = read_project_relative_file(project_dir, &rel)?;
+            parse_vote_output(&raw, &required_ids)?
+        } else {
+            let reviewer_backend_impl =
+                registry.get_or_create_for_role(reviewer_backend, "final_reviewer")?;
+            registry
+                .set_tmux_context(TmuxExecutionContext {
+                    loop_number: Some(loop_number),
+                    role: Some("final_reviewer".to_owned()),
+                    loop_dir: Some(loop_dir.clone()),
+                    session_id: None,
+                })
+                .await;
+            info!(
+                loop = loop_number,
+                round = round,
+                backend = reviewer_backend_impl.name(),
+                "invoking final reviewer vote..."
+            );
+            let mut vote_log =
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
+            let retry_result: ParseRetryResult<VoteDecision> = execute_with_parse_retries(
+                reviewer_backend_impl,
+                registry,
+                "final_reviewer",
+                "final_review",
+                loop_number,
+                &vote_prompt,
+                None,
+                |raw| parse_vote_output(raw, &required_ids),
+                &expected_format_template_for("vote", None),
+                registry
+                    .timeout_for_role(reviewer_backend, "final_reviewer")
+                    .as_secs(),
+                &mut vote_log,
+                None,
+                repo_root_ref,
+            )
+            .await?;
+            let decision = retry_result.parsed;
+            let _ = write_artifact(
+                project_dir,
+                ArtifactWriteInput {
+                    project_id: &state.project_id,
+                    loop_number,
+                    loop_slug: &loop_slug,
+                    backend: reviewer_backend,
+                    role: "final_reviewer",
+                    kind: vote_kind,
+                    body: &decision.body,
+                },
+            )?;
+            decision
+        };
+        vote_decisions.push((reviewer_backend.clone(), decision));
+    }
+
+    let vote_only = vote_decisions
+        .iter()
+        .map(|(_, decision)| decision.clone())
+        .collect::<Vec<_>>();
+    let consensus = compute_final_review_consensus(
+        &amendment_ids,
+        &vote_only,
+        effective.workflow.final_review_consensus_threshold,
+    )?;
+
+    let mut arbiter_accepted = BTreeSet::new();
+    if !consensus.disputed.is_empty() {
+        let disputed_set = consensus
+            .disputed
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let disputed_ids = disputed_set.iter().map(String::as_str).collect::<Vec<_>>();
+        let disputed_prompt = build_arbiter_prompt(
+            effective,
+            state,
+            &format_amendments_for_subset(&amendments, &disputed_set),
+            &planner_positions.body,
+            &format_votes_for_prompt(&vote_decisions),
+        )?;
+        let arbiter_kind = ArtifactKind::FinalReviewArbiterRuling;
+        let arbiter_rel =
+            resolve_final_review_artifact(project_dir, loop_number, &loop_slug, &arbiter_kind)?;
+        let arbiter_decision: ArbiterDecision = if let Some(rel) = arbiter_rel {
+            let raw = read_project_relative_file(project_dir, &rel)?;
+            parse_arbiter_output(&raw, &disputed_ids)?
+        } else {
+            let arbiter_backend_impl = registry.get_or_create_for_role(&arbiter_backend, "arbiter")?;
+            registry
+                .set_tmux_context(TmuxExecutionContext {
+                    loop_number: Some(loop_number),
+                    role: Some("arbiter".to_owned()),
+                    loop_dir: Some(loop_dir.clone()),
+                    session_id: None,
+                })
+                .await;
+            info!(
+                loop = loop_number,
+                round = round,
+                backend = arbiter_backend_impl.name(),
+                "invoking final-review arbiter..."
+            );
+            let mut arbiter_log =
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "arbiter");
+            let retry_result: ParseRetryResult<ArbiterDecision> = execute_with_parse_retries(
+                arbiter_backend_impl,
+                registry,
+                "arbiter",
+                "final_review",
+                loop_number,
+                &disputed_prompt,
+                None,
+                |raw| parse_arbiter_output(raw, &disputed_ids),
+                &expected_format_template_for("arbiter", None),
+                registry.timeout_for_role(&arbiter_backend, "arbiter").as_secs(),
+                &mut arbiter_log,
+                None,
+                repo_root_ref,
+            )
+            .await?;
+            let decision = retry_result.parsed;
+            let _ = write_artifact(
+                project_dir,
+                ArtifactWriteInput {
+                    project_id: &state.project_id,
+                    loop_number,
+                    loop_slug: &loop_slug,
+                    backend: &arbiter_backend,
+                    role: "arbiter",
+                    kind: arbiter_kind,
+                    body: &decision.body,
+                },
+            )?;
+            decision
+        };
+        for ruling in &arbiter_decision.rulings {
+            if ruling.ruling == "ACCEPT" {
+                arbiter_accepted.insert(ruling.id.clone());
+            }
+        }
+    }
+
+    let mut final_accepted = BTreeSet::new();
+    for id in &consensus.accepted {
+        final_accepted.insert(id.clone());
+    }
+    for id in arbiter_accepted {
+        final_accepted.insert(id);
+    }
+
+    if final_accepted.is_empty() {
+        write_final_review_exit_artifact(
+            project_dir,
+            &state.project_id,
+            loop_number,
+            &loop_slug,
+            "approved",
+            &format!(
+                "# Final Review Exit: APPROVED\n\n## Summary\nRound {round} produced no accepted amendments."
+            ),
+        )?;
+        state.status = ProjectStatus::Completed;
+        state.current_phase = Phase::Completing;
+        state.phase_iteration = 1;
+        logs.push(format!(
+            "loop {loop_number}: final review round {round} accepted no amendments; project finished"
+        ));
+        return Ok(Some((Phase::FinalReview, Phase::Completing)));
+    }
+
+    if restart_count >= effective.workflow.max_final_review_restarts {
+        write_force_complete_artifact(
+            project_dir,
+            round,
+            restart_count,
+            effective.workflow.max_final_review_restarts,
+            &final_accepted,
+        )?;
+        state.status = ProjectStatus::Completed;
+        state.current_phase = Phase::Completing;
+        state.phase_iteration = 1;
+        logs.push(format!(
+            "loop {loop_number}: final review reached restart cap ({restart_count}/{}); force-completing project",
+            effective.workflow.max_final_review_restarts
+        ));
+        return Ok(Some((Phase::FinalReview, Phase::Completing)));
+    }
+
+    append_final_review_amendments_file(project_dir, round, &amendments, &final_accepted)?;
+    write_final_review_exit_artifact(
+        project_dir,
+        &state.project_id,
+        loop_number,
+        &loop_slug,
+        "restart",
+        &format!(
+            "# Final Review Exit: RESTART\n\n## Summary\nRound {round} accepted {} amendment(s); restarting planning.",
+            final_accepted.len()
+        ),
+    )?;
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Planning;
+    state.phase_iteration = 1;
+    logs.push(format!(
+        "loop {loop_number}: final review round {round} accepted {} amendment(s); returning to planning",
+        final_accepted.len()
+    ));
+    Ok(Some((Phase::FinalReview, Phase::Planning)))
+}
+
+fn normalize_final_review_backends(backends: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    let mut seen = HashSet::new();
+    for backend in backends {
+        let canonical = canonicalize_backend_spec(backend)?;
+        if seen.insert(canonical.clone()) {
+            normalized.push(canonical);
+        }
+    }
+    Ok(normalized)
+}
+
+fn canonicalize_backend_spec(spec: &str) -> Result<String> {
+    let parsed = crate::backend::parse_backend_spec(spec)?;
+    Ok(match parsed.model {
+        Some(model) => format!("{}({model})", parsed.name),
+        None => parsed.name,
+    })
+}
+
+fn final_review_restart_count_from_artifacts(project_dir: &Path) -> u32 {
+    let loops_dir = project_dir.join("loops");
+    let Ok(loop_entries) = fs::read_dir(&loops_dir) else {
+        return 0;
+    };
+    let mut count = 0u32;
+    for loop_entry in loop_entries.flatten() {
+        if !loop_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(loop_entry.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if file
+                .file_name()
+                .to_string_lossy()
+                .ends_with("-final-review-exit-restart.md")
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn resolve_final_review_artifact(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    kind: &ArtifactKind,
+) -> Result<Option<String>> {
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &kind.file_name())
+}
+
+fn ensure_final_review_config_snapshot(
+    loop_dir: &Path,
+    snapshot: &FinalReviewConfigSnapshot,
+) -> Result<()> {
+    fs::create_dir_all(loop_dir)?;
+    let config_path = loop_dir.join("final-review-config.json");
+    let mut mismatch = false;
+    if config_path.exists() {
+        let raw = fs::read_to_string(&config_path)?;
+        match serde_json::from_str::<FinalReviewConfigSnapshot>(&raw) {
+            Ok(saved) => {
+                if saved != *snapshot {
+                    mismatch = true;
+                }
+            }
+            Err(_) => mismatch = true,
+        }
+    }
+
+    if mismatch {
+        warn!(
+            path = %config_path.display(),
+            "final review config mismatch detected on resume; invalidating current-loop final-review artifacts"
+        );
+        invalidate_final_review_artifacts(loop_dir)?;
+    }
+
+    if mismatch || !config_path.exists() {
+        let normalized_json = serde_json::to_string_pretty(snapshot)?;
+        fs::write(config_path, normalized_json)?;
+    }
+    Ok(())
+}
+
+fn invalidate_final_review_artifacts(loop_dir: &Path) -> Result<()> {
+    let entries = match fs::read_dir(loop_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if is_final_review_loop_file(file_name) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn is_final_review_loop_file(file_name: &str) -> bool {
+    file_name == "final-review-config.json"
+        || file_name.starts_with("final-review-")
+        || file_name.contains("-final-review-")
+}
+
+fn merge_final_review_amendments(
+    decisions: &[(String, FinalReviewerDecision)],
+) -> Vec<FinalReviewAmendment> {
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+    for (backend, decision) in decisions {
+        if let FinalReviewerDecision::Amendments { amendments, .. } = decision {
+            for amendment in amendments {
+                // Namespace IDs by backend to avoid collisions when independent
+                // reviewers emit identical generic IDs like "A1" or "FR-001".
+                let namespaced_id = if seen.contains(&amendment.id) {
+                    format!("{}/{}", backend, amendment.id)
+                } else {
+                    amendment.id.clone()
+                };
+                seen.insert(amendment.id.clone());
+                merged.push(FinalReviewAmendment {
+                    id: namespaced_id,
+                    body: amendment.body.clone(),
+                    reviewer_backend: backend.clone(),
+                });
+            }
+        }
+    }
+    merged
+}
+
+fn format_amendments_for_prompt(amendments: &[FinalReviewAmendment]) -> String {
+    amendments
+        .iter()
+        .map(|amendment| {
+            format!(
+                "## Amendment: {}\n\n{}\n\n### Reviewer\n{}",
+                amendment.id, amendment.body, amendment.reviewer_backend
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_amendments_for_subset(
+    amendments: &[FinalReviewAmendment],
+    ids: &BTreeSet<String>,
+) -> String {
+    amendments
+        .iter()
+        .filter(|amendment| ids.contains(&amendment.id))
+        .map(|amendment| {
+            format!(
+                "## Amendment: {}\n\n{}\n\n### Reviewer\n{}",
+                amendment.id, amendment.body, amendment.reviewer_backend
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_votes_for_prompt(votes: &[(String, VoteDecision)]) -> String {
+    votes
+        .iter()
+        .map(|(backend, decision)| format!("## Reviewer: {backend}\n\n{}", decision.body))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn compute_final_review_consensus(
+    amendment_ids: &[String],
+    vote_decisions: &[VoteDecision],
+    threshold: f64,
+) -> Result<FinalReviewConsensus> {
+    let total_voters = vote_decisions.len();
+    if total_voters == 0 {
+        return Err(RalphError::Orchestration(
+            "cannot compute final-review consensus with zero voters".to_owned(),
+        ));
+    }
+
+    let mut consensus = FinalReviewConsensus::default();
+    for amendment_id in amendment_ids {
+        let mut accepts = 0_u32;
+        for decision in vote_decisions {
+            let vote = decision
+                .votes
+                .iter()
+                .find(|vote| vote.id == *amendment_id)
+                .ok_or_else(|| {
+                    RalphError::ParseError(format!(
+                        "vote output missing amendment ID '{}' during consensus computation",
+                        amendment_id
+                    ))
+                })?;
+            if vote.vote == "ACCEPT" {
+                accepts += 1;
+            }
+        }
+        let ratio = accepts as f64 / total_voters as f64;
+        if ratio >= threshold {
+            consensus.accepted.push(amendment_id.clone());
+        } else if accepts == 0 {
+            consensus.rejected.push(amendment_id.clone());
+        } else {
+            consensus.disputed.push(amendment_id.clone());
+        }
+    }
+    Ok(consensus)
+}
+
+fn append_final_review_amendments_file(
+    project_dir: &Path,
+    round: u32,
+    amendments: &[FinalReviewAmendment],
+    accepted: &BTreeSet<String>,
+) -> Result<()> {
+    let file_path = project_dir.join("final-review-amendments-applied.md");
+    let mut by_id: HashMap<&str, &FinalReviewAmendment> = HashMap::new();
+    for amendment in amendments {
+        by_id.insert(amendment.id.as_str(), amendment);
+    }
+
+    let mut section = String::new();
+    section.push_str(&format!("## Round {round}\n\n"));
+    for id in accepted {
+        if let Some(amendment) = by_id.get(id.as_str()) {
+            section.push_str(&format!(
+                "### Amendment: {}\n\n{}\n\n### Reviewer\n{}\n\n",
+                amendment.id, amendment.body, amendment.reviewer_backend
+            ));
+        }
+    }
+
+    if file_path.exists() {
+        let mut existing = fs::read_to_string(&file_path)?;
+        if !existing.ends_with('\n') {
+            existing.push('\n');
+        }
+        existing.push('\n');
+        existing.push_str(&section);
+        fs::write(file_path, existing)?;
+    } else {
+        let mut content = String::new();
+        content.push_str("# Final Review Amendments Applied\n\n");
+        content.push_str(&section);
+        fs::write(file_path, content)?;
+    }
+    Ok(())
+}
+
+fn write_force_complete_artifact(
+    project_dir: &Path,
+    round: u32,
+    restart_count: u32,
+    max_restarts: u32,
+    accepted: &BTreeSet<String>,
+) -> Result<()> {
+    let mut content = String::new();
+    content.push_str("# Final Review Force Complete\n\n");
+    content.push_str(&format!(
+        "Restart cap reached in round {round} ({restart_count}/{max_restarts}). Project force-completed with pending accepted amendments.\n\n"
+    ));
+    content.push_str("## Accepted Amendments\n\n");
+    for id in accepted {
+        content.push_str(&format!("- {id}\n"));
+    }
+    fs::write(project_dir.join("final-review-force-complete.md"), content)?;
+    Ok(())
+}
+
+fn write_final_review_exit_artifact(
+    project_dir: &Path,
+    project_id: &str,
+    loop_number: u32,
+    loop_slug: &str,
+    outcome: &str,
+    body: &str,
+) -> Result<()> {
+    let _ = write_artifact(
+        project_dir,
+        ArtifactWriteInput {
+            project_id,
+            loop_number,
+            loop_slug,
+            backend: "ralph",
+            role: "final_review",
+            kind: ArtifactKind::FinalReviewExit {
+                outcome: outcome.to_owned(),
+            },
+            body,
+        },
+    )?;
+    Ok(())
+}
+
+fn commit_phase_checkpoint_if_enabled(
+    workspace_root: &Path,
+    project_id: &str,
+    from_phase: &Phase,
+    to_phase: &Phase,
+    auto_commit: bool,
+    skip_commit: bool,
+    sign_commits: bool,
+) -> Result<()> {
+    if !auto_commit || skip_commit {
+        return Ok(());
+    }
+    let Some(repo_root) = workspace_root.parent() else {
+        return Ok(());
+    };
+    if !is_git_repo(repo_root) {
+        return Ok(());
+    }
+    let message = format!(
+        "chore({project_id}): checkpoint {} -> {}",
+        phase_label(from_phase),
+        phase_label(to_phase)
+    );
+    let _ = commit_feature_loop(repo_root, &message, None, sign_commits)?;
+    Ok(())
+}
+
+fn build_final_reviewer_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    prompt_content: &str,
+    backend: &str,
+    opposite_backend: &str,
+) -> Result<String> {
+    let template_source = load_template_source(
+        &effective.templates.final_reviewer,
+        default_final_reviewer_template(),
+    );
+    let mut vars = base_vars(
+        state,
+        state.current_loop,
+        "final_review",
+        1,
+        backend,
+        opposite_backend,
+    );
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
+    vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
+    vars.insert(
+        "state_json".to_owned(),
+        serde_json::to_string_pretty(state).unwrap_or_default(),
+    );
+    vars.insert(
+        "system_guardrails".to_owned(),
+        FINAL_REVIEWER_GUARDRAILS.to_owned(),
+    );
+
+    let rendered = render_template_with_fallback(
+        &effective.templates.final_reviewer,
+        &vars,
+        default_final_reviewer_template(),
+    )?;
+    let mut prompt = rendered;
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["system_guardrails"],
+        "## System Guardrails",
+        FINAL_REVIEWER_GUARDRAILS,
+    );
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["master_prompt", "prompt_content"],
+        "## Master Prompt",
+        prompt_content,
+    );
+    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
+    append_section_if_missing(
+        &mut prompt,
+        &template_source,
+        &["state_json"],
+        "## Project State",
+        &format!("```json\n{state_json}\n```"),
+    );
+    Ok(prompt)
+}
+
+fn build_planner_position_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    prompt_content: &str,
+    backend: &str,
+    opposite_backend: &str,
+    proposed_amendments: &str,
+) -> Result<String> {
+    let mut vars = base_vars(
+        state,
+        state.current_loop,
+        "final_review",
+        1,
+        backend,
+        opposite_backend,
+    );
+    vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
+    vars.insert("proposed_amendments".to_owned(), proposed_amendments.to_owned());
+    render_template_with_fallback(
+        &effective.templates.planner_position,
+        &vars,
+        default_planner_position_template(),
+    )
+}
+
+fn build_vote_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    proposed_amendments: &str,
+    planner_positions: &str,
+) -> Result<String> {
+    let mut vars = base_vars(
+        state,
+        state.current_loop,
+        "final_review",
+        1,
+        "final_reviewer",
+        "planner",
+    );
+    vars.insert("proposed_amendments".to_owned(), proposed_amendments.to_owned());
+    vars.insert("planner_positions".to_owned(), planner_positions.to_owned());
+    render_template_with_fallback(&effective.templates.vote, &vars, default_vote_template())
+}
+
+fn build_arbiter_prompt(
+    effective: &EffectiveConfig,
+    state: &ProjectState,
+    disputed_amendments: &str,
+    planner_positions: &str,
+    reviewer_votes: &str,
+) -> Result<String> {
+    let mut vars = base_vars(
+        state,
+        state.current_loop,
+        "final_review",
+        1,
+        "arbiter",
+        "final_reviewer",
+    );
+    vars.insert(
+        "disputed_amendments".to_owned(),
+        disputed_amendments.to_owned(),
+    );
+    vars.insert("planner_positions".to_owned(), planner_positions.to_owned());
+    vars.insert("reviewer_votes".to_owned(), reviewer_votes.to_owned());
+    render_template_with_fallback(&effective.templates.arbiter, &vars, default_arbiter_template())
 }
 
 fn write_acceptance_backend_artifact(artifact_path: &Path, backend: &str) -> Result<PathBuf> {
@@ -3385,6 +4399,7 @@ fn phase_label(phase: &Phase) -> &'static str {
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
+        Phase::FinalReview => "final_review",
     }
 }
 
@@ -3532,6 +4547,39 @@ OR\n\
 # Prompt Review\n\
 ## Issues Found\n\
 ## Refined Prompt"
+            .to_owned(),
+        "final_reviewer" => "\
+# Final Review: NO AMENDMENTS\n\
+## Summary\n\
+\n\
+OR\n\
+\n\
+# Final Review: AMENDMENTS\n\
+## Amendment: <ID>\n\
+### Problem\n\
+### Proposed Change\n\
+### Affected Files"
+            .to_owned(),
+        "planner_position" => "\
+# Planner Positions\n\
+## Amendment: <ID>\n\
+### Position\n\
+ACCEPT or REJECT\n\
+### Rationale"
+            .to_owned(),
+        "vote" => "\
+# Vote Results\n\
+## Amendment: <ID>\n\
+### Vote\n\
+ACCEPT or REJECT\n\
+### Rationale"
+            .to_owned(),
+        "arbiter" => "\
+# Arbiter Ruling\n\
+## Amendment: <ID>\n\
+### Ruling\n\
+ACCEPT or REJECT\n\
+### Rationale"
             .to_owned(),
         _ => "valid markdown with required H1".to_owned(),
     }
@@ -4323,6 +5371,8 @@ mod tests {
             planner: Some("claude-planner".to_owned()),
             implementer: Some("claude-implementer".to_owned()),
             reviewer: Some("claude-reviewer".to_owned()),
+            final_reviewer: Some("claude-final-reviewer".to_owned()),
+            arbiter: Some("claude-arbiter".to_owned()),
             qa: Some("claude-qa".to_owned()),
             completer: Some("claude-completer".to_owned()),
             acceptance_qa: Some("claude-acceptance-qa".to_owned()),
@@ -4332,6 +5382,8 @@ mod tests {
             planner: Some("codex-planner".to_owned()),
             implementer: Some("codex-implementer".to_owned()),
             reviewer: Some("codex-reviewer".to_owned()),
+            final_reviewer: Some("codex-final-reviewer".to_owned()),
+            arbiter: Some("codex-arbiter".to_owned()),
             qa: Some("codex-qa".to_owned()),
             completer: Some("codex-completer".to_owned()),
             acceptance_qa: Some("codex-acceptance-qa".to_owned()),
@@ -4346,14 +5398,20 @@ mod tests {
             "claude(claude-planner)",
             "claude(claude-implementer)",
             "claude(claude-reviewer)",
+            "claude(claude-final-reviewer)",
+            "claude(claude-arbiter)",
             "claude(claude-qa)",
             "claude(claude-completer)",
+            "claude(claude-acceptance-qa)",
             "claude(claude-reformatter)",
             "codex(codex-planner)",
             "codex(codex-implementer)",
             "codex(codex-reviewer)",
+            "codex(codex-final-reviewer)",
+            "codex(codex-arbiter)",
             "codex(codex-qa)",
             "codex(codex-completer)",
+            "codex(codex-acceptance-qa)",
             "codex(codex-reformatter)",
         ] {
             assert!(
@@ -5268,6 +6326,83 @@ mod tests {
         assert_eq!(
             fence_count, 1,
             "FullJson mode should produce exactly one ```json fence, got {fence_count}"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_includes_final_review_amendments_when_file_exists() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let amendments_content = "## Amendment: FIX-001\nFix the widget\n";
+        fs::write(
+            project_dir.join("final-review-amendments-applied.md"),
+            amendments_content,
+        )
+        .expect("write amendments file");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            prompt.contains("## Final Review Amendments"),
+            "prompt should contain Final Review Amendments heading"
+        );
+        assert!(
+            prompt.contains("FIX-001"),
+            "prompt should contain amendment content"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_omits_final_review_amendments_when_file_absent() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            !prompt.contains("## Final Review Amendments"),
+            "prompt should not contain Final Review Amendments when file is absent"
         );
     }
 

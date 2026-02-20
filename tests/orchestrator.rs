@@ -138,6 +138,7 @@ fn setup_workspace_with_project(
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.final_review_enabled = false;
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -969,6 +970,7 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.final_review_enabled = false;
     workspace.save_config().expect("save config");
 
     // Create project
@@ -1304,9 +1306,11 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     workspace.config.backends.codex.env = env;
 
     workspace.config.workflow.max_review_iterations = 1;
+    workspace.config.workflow.final_review_enabled = false;
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.final_review_enabled = false;
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -2155,6 +2159,7 @@ fn setup_workspace_with_qa(
 
     workspace.config.workflow.qa_enabled = qa_enabled;
     workspace.config.workflow.max_qa_iterations = max_qa_iterations;
+    workspace.config.workflow.final_review_enabled = false;
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -2719,5 +2724,624 @@ async fn planner_receives_acceptance_failure_context() {
         planner_prompt_after_fail
             .contains("Global acceptance check failed: missing end-to-end acceptance evidence."),
         "planner prompt should include acceptance-fail artifact content"
+    );
+}
+
+fn write_final_review_backend_script(path: &Path) {
+    let script = r###"#!/usr/bin/env bash
+set -euo pipefail
+
+prompt="$(cat)"
+scenario="${FINAL_REVIEW_SCENARIO:-no-amendments}"
+backend_id="${FINAL_REVIEW_BACKEND:-unknown}"
+
+inc_counter() {
+  local name="$1"
+  local file="${COUNTER_DIR}/${name}"
+  local value=0
+  if [ -f "$file" ]; then
+    value=$(cat "$file")
+  fi
+  value=$((value + 1))
+  echo "$value" > "$file"
+  echo "$value"
+}
+
+if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
+  cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+This test project is ready for completion validation.
+
+## Summary of Work
+- Existing test implementation satisfies requirements.
+
+## Remaining Items
+- None
+EOF
+elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Requirement alpha: complete
+EOF
+elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptance."* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- acceptance check passed
+
+## Automated Tests
+- acceptance check passed
+
+## Acceptance Criteria Verification
+Project-level acceptance requirements are satisfied.
+EOF
+elif [[ "$prompt" == *"You are a final reviewer evaluating a completed project for quality and correctness."* ]]; then
+  total=$(inc_counter "final_reviewer_total")
+  inc_counter "final_reviewer_${backend_id}" >/dev/null
+  round=$(( (total - 1) / 2 + 1 ))
+  upper_backend=$(printf "%s" "$backend_id" | tr '[:lower:]' '[:upper:]')
+
+  if [[ "$scenario" == "no-amendments" ]]; then
+    cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No amendments are required.
+EOF
+  elif [[ "$scenario" == "accepted-restart" ]]; then
+    if [ "$round" -eq 1 ]; then
+      cat <<EOF
+# Final Review: AMENDMENTS
+
+## Amendment: ${upper_backend}-R1
+
+### Problem
+Gap identified by ${backend_id} reviewer.
+
+### Proposed Change
+Apply ${backend_id} round-1 amendment.
+
+### Affected Files
+- \`README.md\` - update details
+EOF
+    else
+      cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+Round-two verification found no additional amendments.
+EOF
+    fi
+  elif [[ "$scenario" == "fail-after-proposals-once" || "$scenario" == "config-mismatch" ]]; then
+    cat <<EOF
+# Final Review: AMENDMENTS
+
+## Amendment: ${upper_backend}-R1
+
+### Problem
+Gap identified by ${backend_id} reviewer.
+
+### Proposed Change
+Apply ${backend_id} round-1 amendment.
+
+### Affected Files
+- \`README.md\` - update details
+EOF
+  elif [[ "$scenario" == "disputed-restart" ]]; then
+    if [ "$round" -eq 1 ]; then
+      cat <<EOF
+# Final Review: AMENDMENTS
+
+## Amendment: ${upper_backend}-R1
+
+### Problem
+Disputed round-one amendment from ${backend_id}.
+
+### Proposed Change
+Apply ${backend_id} disputed amendment.
+
+### Affected Files
+- \`README.md\` - update details
+EOF
+    else
+      cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No further amendments are required in round two.
+EOF
+    fi
+  else
+    cat <<EOF
+# Final Review: AMENDMENTS
+
+## Amendment: ${upper_backend}-R${round}
+
+### Problem
+Recurring amendment in round ${round}.
+
+### Proposed Change
+Apply recurring ${backend_id} amendment for round ${round}.
+
+### Affected Files
+- \`README.md\` - update details
+EOF
+  fi
+elif [[ "$prompt" == *"You are the project planner evaluating proposed amendments from final reviewers."* ]]; then
+  call=$(inc_counter "planner_position_calls")
+  if [[ "$scenario" == "fail-after-proposals-once" || "$scenario" == "config-mismatch" ]]; then
+    marker="${COUNTER_DIR}/planner_position_failed_once"
+    if [ ! -f "$marker" ]; then
+      echo "$call" > "$marker"
+      cat <<'EOF'
+# Invalid Planner Output
+EOF
+      exit 0
+    fi
+  fi
+
+  cat <<'EOF'
+# Planner Positions
+EOF
+  round="$call"
+  if [[ "$scenario" == "accepted-restart" || "$scenario" == "disputed-restart" ]]; then
+    if [ "$round" -eq 1 ]; then
+      ids=("CLAUDE-R1" "CODEX-R1")
+    else
+      ids=()
+    fi
+  elif [[ "$scenario" == "fail-after-proposals-once" || "$scenario" == "config-mismatch" ]]; then
+    ids=("CLAUDE-R1" "CODEX-R1")
+  elif [[ "$scenario" == "always-amend" ]]; then
+    ids=("CLAUDE-R${round}" "CODEX-R${round}")
+  else
+    ids=()
+  fi
+  for id in "${ids[@]}"; do
+    cat <<EOF
+
+## Amendment: $id
+
+### Position
+ACCEPT
+
+### Rationale
+Accepted by planner.
+EOF
+  done
+elif [[ "$prompt" == *"You are a reviewer voting on proposed amendments after considering the planner's positions."* ]]; then
+  total=$(inc_counter "vote_total")
+  inc_counter "vote_${backend_id}" >/dev/null
+  round=$(( (total - 1) / 2 + 1 ))
+  cat <<'EOF'
+# Vote Results
+EOF
+  if [[ "$scenario" == "accepted-restart" || "$scenario" == "disputed-restart" ]]; then
+    ids=("CLAUDE-R1" "CODEX-R1")
+  elif [[ "$scenario" == "fail-after-proposals-once" || "$scenario" == "config-mismatch" ]]; then
+    ids=("CLAUDE-R1" "CODEX-R1")
+  elif [[ "$scenario" == "always-amend" ]]; then
+    ids=("CLAUDE-R${round}" "CODEX-R${round}")
+  else
+    ids=()
+  fi
+  for id in "${ids[@]}"; do
+    vote="ACCEPT"
+    if [[ "$scenario" == "disputed-restart" && "$round" -eq 1 && "$id" == "CODEX-R1" && "$backend_id" == "codex" ]]; then
+      vote="REJECT"
+    fi
+    cat <<EOF
+
+## Amendment: $id
+
+### Vote
+$vote
+
+### Rationale
+${backend_id} vote is $vote.
+EOF
+  done
+elif [[ "$prompt" == *"You are the arbiter resolving disputed amendments where reviewers and planner disagree."* ]]; then
+  inc_counter "arbiter_calls" >/dev/null
+  printf "%s" "$prompt" > "${COUNTER_DIR}/arbiter_prompt.md"
+  cat <<'EOF'
+# Arbiter Ruling
+EOF
+  if [[ "$scenario" == "disputed-restart" ]]; then
+    ids=("CODEX-R1")
+  else
+    ids=()
+  fi
+  for id in "${ids[@]}"; do
+    ruling="ACCEPT"
+    if [[ "$scenario" == "disputed-restart" ]]; then
+      ruling="REJECT"
+    fi
+    cat <<EOF
+
+## Amendment: $id
+
+### Ruling
+$ruling
+
+### Rationale
+Arbiter ruling is $ruling.
+EOF
+  done
+elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- None
+
+## Refined Prompt
+No refinement needed.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###;
+
+    fs::write(path, script).expect("write final-review backend script");
+    let status = Command::new("chmod")
+        .args(["+x", path.to_str().expect("script utf8 path")])
+        .status()
+        .expect("chmod should execute");
+    assert!(status.success(), "chmod +x failed");
+}
+
+fn setup_workspace_for_final_review(
+    scenario: &str,
+    max_restarts: u32,
+) -> (TempDir, PathBuf, String, PathBuf) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+    fs::write(repo_root.join("README.md"), "# demo\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+
+    let script_path = repo_root.join("mock_final_review.sh");
+    write_final_review_backend_script(&script_path);
+    git_ok(repo_root, &["add", "mock_final_review.sh"]);
+    git_ok(repo_root, &["commit", "-m", "test: add final review mock"]);
+
+    add_local_bare_remote(repo_root);
+
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+
+    let counter_dir = workspace_root.join("counters");
+    fs::create_dir_all(&counter_dir).expect("create counter dir");
+    let counter_dir_str = counter_dir.to_string_lossy().to_string();
+
+    workspace.config.backends.claude.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.claude.args = Vec::new();
+    workspace.config.backends.claude.timeout_seconds = 30;
+    workspace.config.backends.claude.env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir_str.clone(),
+    );
+    workspace.config.backends.claude.env.insert(
+        "FINAL_REVIEW_SCENARIO".to_owned(),
+        scenario.to_owned(),
+    );
+    workspace.config.backends.claude.env.insert(
+        "FINAL_REVIEW_BACKEND".to_owned(),
+        "claude".to_owned(),
+    );
+
+    workspace.config.backends.codex.command = script_path.to_string_lossy().to_string();
+    workspace.config.backends.codex.args = Vec::new();
+    workspace.config.backends.codex.timeout_seconds = 30;
+    workspace.config.backends.codex.env.insert(
+        "COUNTER_DIR".to_owned(),
+        counter_dir_str,
+    );
+    workspace.config.backends.codex.env.insert(
+        "FINAL_REVIEW_SCENARIO".to_owned(),
+        scenario.to_owned(),
+    );
+    workspace.config.backends.codex.env.insert(
+        "FINAL_REVIEW_BACKEND".to_owned(),
+        "codex".to_owned(),
+    );
+
+    workspace.config.workflow.prompt_review_enabled = false;
+    workspace.config.workflow.final_review_enabled = true;
+    workspace.config.workflow.max_final_review_restarts = max_restarts;
+    workspace.config.workflow.final_review_backends =
+        vec!["claude".to_owned(), "codex".to_owned()];
+    workspace.config.workflow.final_review_arbiter_backend = "claude".to_owned();
+    workspace.config.workflow.final_review_consensus_threshold = 1.0;
+    workspace.config.git.base_branch =
+        git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save config");
+
+    let prompt_path = repo_root.join("PROMPT.md");
+    fs::write(&prompt_path, "# Final review test prompt\n").expect("write prompt");
+    git_ok(repo_root, &["add", "PROMPT.md"]);
+    git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
+
+    let project_id = "01-poc".to_owned();
+    create_project(
+        &workspace,
+        CreateProjectOptions {
+            id: project_id.clone(),
+            name: "Proof of Concept".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: Some("claude".to_owned()),
+        },
+    )
+    .expect("create project");
+
+    (temp, workspace_root, project_id, counter_dir)
+}
+
+fn run_until_complete_options(project_id: &str) -> RunOptions {
+    let mut options = run_options(project_id);
+    options.loops = None;
+    options.until_complete = true;
+    options
+}
+
+fn read_counter(counter_dir: &Path, name: &str) -> u32 {
+    fs::read_to_string(counter_dir.join(name))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn loop_has_artifact_suffix(project_dir: &Path, loop_number: u32, suffix: &str) -> bool {
+    let Some(repo_rel_loop_dir) = fs::read_dir(project_dir.join("loops"))
+        .ok()
+        .and_then(|entries| {
+            entries
+                .flatten()
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{loop_number:03}-"))
+                })
+                .map(|entry| entry.path())
+        })
+    else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(repo_rel_loop_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(suffix)
+    })
+}
+
+#[tokio::test]
+async fn final_review_no_amendments_completes_project() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_final_review("no-amendments", 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("run should succeed");
+
+    let project_dir = workspace_root.join("projects").join(&project_id);
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
+    assert_eq!(state.status, ProjectStatus::Completed);
+    assert_eq!(state.current_phase, Phase::Completing);
+    assert_eq!(state.completion_attempts.len(), 1);
+    assert!(
+        loop_has_artifact_suffix(
+            &project_dir,
+            state.completion_attempts[0].loop_number,
+            "-final-review-exit-approved.md"
+        ),
+        "expected final-review approved exit artifact"
+    );
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_claude"), 1);
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_codex"), 1);
+}
+
+#[tokio::test]
+async fn final_review_accepted_amendments_restart_to_planning_then_complete() {
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_for_final_review("accepted-restart", 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("run should succeed");
+
+    let project_dir = workspace_root.join("projects").join(&project_id);
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
+    assert_eq!(state.status, ProjectStatus::Completed);
+    assert_eq!(
+        state.completion_attempts.len(),
+        2,
+        "accepted amendments should trigger a planning restart and second completion attempt"
+    );
+    let amendments_file = fs::read_to_string(project_dir.join("final-review-amendments-applied.md"))
+        .expect("amendments file should exist");
+    assert!(amendments_file.contains("## Round 1"));
+    assert!(amendments_file.contains("CLAUDE-R1") || amendments_file.contains("CODEX-R1"));
+
+    let repo_root = workspace_root.parent().expect("repo root");
+    let log_output = git_output(
+        repo_root,
+        &[
+            "log",
+            "--format=%s",
+            "--fixed-strings",
+            "--grep",
+            "chore(01-poc): checkpoint final_review -> planning",
+        ],
+    );
+    assert!(
+        !log_output.trim().is_empty(),
+        "expected at least one final_review -> planning checkpoint commit"
+    );
+}
+
+#[tokio::test]
+async fn final_review_disputed_amendments_invokes_arbiter_only_for_disputed_ids() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_final_review("disputed-restart", 3);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(read_counter(&counter_dir, "arbiter_calls"), 1);
+    let arbiter_prompt =
+        fs::read_to_string(counter_dir.join("arbiter_prompt.md")).expect("arbiter prompt");
+    assert!(
+        arbiter_prompt.contains("## Amendment: CODEX-R1"),
+        "arbiter should receive disputed amendment ID"
+    );
+    let project_dir = workspace_root.join("projects").join(&project_id);
+    let first_completion_loop = 1_u32;
+    let Some(loop_dir) = fs::read_dir(project_dir.join("loops"))
+        .ok()
+        .and_then(|entries| {
+            entries.flatten().find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{first_completion_loop:03}-completion"))
+            })
+        })
+        .map(|entry| entry.path())
+    else {
+        panic!("completion loop directory should exist");
+    };
+    let arbiter_artifact = fs::read_dir(loop_dir)
+        .expect("read loop dir")
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with("-final-review-arbiter-ruling.md")
+        })
+        .map(|entry| entry.path())
+        .expect("arbiter ruling artifact should exist");
+    let arbiter_ruling = fs::read_to_string(arbiter_artifact).expect("read arbiter artifact");
+    assert!(
+        !arbiter_ruling.contains("## Amendment: CLAUDE-R1"),
+        "arbiter ruling should include only disputed amendment IDs"
+    );
+}
+
+#[tokio::test]
+async fn final_review_resume_skips_completed_proposal_step() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_final_review("fail-after-proposals-once", 0);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let first = orchestrator.run(run_until_complete_options(&project_id)).await;
+    assert!(first.is_err(), "first run should fail after proposals");
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_claude"), 1);
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_codex"), 1);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("resume should succeed");
+    assert_eq!(
+        read_counter(&counter_dir, "final_reviewer_claude"),
+        1,
+        "resume should reuse round artifacts instead of re-invoking proposal step"
+    );
+    assert_eq!(
+        read_counter(&counter_dir, "final_reviewer_codex"),
+        1,
+        "resume should reuse round artifacts instead of re-invoking proposal step"
+    );
+}
+
+#[tokio::test]
+async fn final_review_config_mismatch_invalidates_and_restarts_round() {
+    let (_temp, workspace_root, project_id, counter_dir) =
+        setup_workspace_for_final_review("config-mismatch", 0);
+    let project_dir = workspace_root.join("projects").join(&project_id);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    let first = orchestrator.run(run_until_complete_options(&project_id)).await;
+    assert!(first.is_err(), "first run should fail after proposals");
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_claude"), 1);
+    assert_eq!(read_counter(&counter_dir, "final_reviewer_codex"), 1);
+
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
+    workspace.config.workflow.final_review_consensus_threshold = 0.6;
+    workspace.save_config().expect("save updated config");
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("second run should succeed");
+
+    assert_eq!(
+        read_counter(&counter_dir, "final_reviewer_claude"),
+        2,
+        "config mismatch should invalidate old proposal artifacts and re-run reviewers"
+    );
+    assert_eq!(
+        read_counter(&counter_dir, "final_reviewer_codex"),
+        2,
+        "config mismatch should invalidate old proposal artifacts and re-run reviewers"
+    );
+    assert!(
+        project_dir.join("final-review-force-complete.md").exists(),
+        "force-complete artifact should exist when max restart cap is 0"
+    );
+}
+
+#[tokio::test]
+async fn final_review_restart_cap_triggers_force_complete() {
+    let (_temp, workspace_root, project_id, _counter_dir) =
+        setup_workspace_for_final_review("always-amend", 1);
+
+    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    let mut orchestrator = Orchestrator::new(workspace);
+    orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await
+        .expect("run should succeed");
+
+    let project_dir = workspace_root.join("projects").join(&project_id);
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
+    assert_eq!(state.status, ProjectStatus::Completed);
+    assert_eq!(state.completion_attempts.len(), 2);
+    assert!(
+        project_dir.join("final-review-force-complete.md").exists(),
+        "expected force-complete artifact at restart cap"
     );
 }

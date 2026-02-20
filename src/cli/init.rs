@@ -7,8 +7,10 @@ use crate::cli::InitArgs;
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
 use crate::prompts::templates::{
-    default_completer_template, default_implementer_template, default_planner_template,
+    default_arbiter_template, default_completer_template, default_final_reviewer_template,
+    default_implementer_template, default_planner_position_template, default_planner_template,
     default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+    default_vote_template,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -22,6 +24,10 @@ pub(crate) const TEMPLATE_FILES: &[(&str, TemplateContentFn)] = &[
     ("prompt_reviewer.md", default_prompt_reviewer_template),
     ("completion.md", default_completer_template),
     ("qa.md", default_qa_template),
+    ("final_reviewer.md", default_final_reviewer_template),
+    ("planner_position.md", default_planner_position_template),
+    ("vote.md", default_vote_template),
+    ("arbiter.md", default_arbiter_template),
 ];
 
 pub(crate) const LEGACY_LINKS: &[(&str, &str)] = &[
@@ -237,8 +243,10 @@ mod tests {
     };
     use crate::error::RalphError;
     use crate::prompts::templates::{
-        default_completer_template, default_implementer_template, default_planner_template,
+        default_arbiter_template, default_completer_template, default_final_reviewer_template,
+        default_implementer_template, default_planner_position_template, default_planner_template,
         default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
+        default_vote_template,
     };
 
     #[test]
@@ -276,6 +284,25 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(templates_dir.join("qa.md")).expect("read qa template"),
             default_qa_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("final_reviewer.md"))
+                .expect("read final reviewer template"),
+            default_final_reviewer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("planner_position.md"))
+                .expect("read planner position template"),
+            default_planner_position_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("vote.md")).expect("read vote template"),
+            default_vote_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("arbiter.md"))
+                .expect("read arbiter template"),
+            default_arbiter_template()
         );
 
         for legacy in &[
