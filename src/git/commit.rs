@@ -138,6 +138,7 @@ pub fn commit_and_push_phase_transition(
     from_phase: Phase,
     to_phase: Phase,
     branch: &str,
+    sign_commits: bool,
 ) -> Result<()> {
     ensure_git_repo(repo_root)?;
 
@@ -156,7 +157,11 @@ pub fn commit_and_push_phase_transition(
     run_git(repo_root, &["add", "-A"])?;
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
-    run_git(repo_root, &["commit", "--allow-empty", "-m", &message])?;
+    let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
+    if sign_commits {
+        commit_args.insert(1, "-S");
+    }
+    run_git(repo_root, &commit_args)?;
 
     run_git(
         repo_root,
@@ -392,6 +397,7 @@ mod tests {
             Phase::Planning,
             Phase::Implementing,
             "ralph/issue-42",
+            false,
         )
         .expect("checkpoint push should succeed");
 
@@ -448,6 +454,7 @@ mod tests {
             Phase::Implementing,
             Phase::Reviewing,
             "ralph/issue-42",
+            false,
         )
         .expect_err("push should fail");
         let err_str = err.to_string();

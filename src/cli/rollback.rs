@@ -109,12 +109,10 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         // rolled-back position instead of the pre-rollback checkpoints.
         let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
         if branch_exists(repo_root, &branch)? {
-            // Best-effort: if no remote is configured the push will fail, which
-            // is acceptable — the local reset is still effective.
-            let _ = run_git(
+            run_git(
                 repo_root,
                 &["push", "--force", "origin", &format!("{branch}:{branch}")],
-            );
+            )?;
         }
     }
 

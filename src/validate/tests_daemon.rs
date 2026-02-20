@@ -3304,6 +3304,7 @@ fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestRe
             Phase::Planning,
             Phase::Implementing,
             "ralph/issue-55",
+            false,
         )
         .expect("first checkpoint should succeed");
 
@@ -3324,6 +3325,7 @@ fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestRe
             Phase::Implementing,
             Phase::Reviewing,
             "ralph/issue-55",
+            false,
         )
         .expect("second checkpoint should succeed");
 
