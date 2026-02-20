@@ -1,15 +1,19 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::warn;
 
 use crate::config::ProjectConfig;
 use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
 use crate::git::is_git_repo;
-use crate::project::state::ProjectState;
+use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectState, ProjectStatus};
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
+
+pub const ROLLBACK_TARGET_MARKER_FILE: &str = ".rollback-target";
 
 pub enum PromptSource {
     File(PathBuf),
@@ -140,7 +144,7 @@ pub fn load_project_state(project_dir: &Path) -> Result<ProjectState> {
     let state_path = project_dir.join("state.json");
     let raw = fs::read_to_string(&state_path)?;
 
-    match parse_and_validate_state(&raw) {
+    match parse_and_validate_state(&raw, project_dir) {
         Ok(state) => Ok(state),
         Err(reason) => recover_state_from_git(project_dir, &state_path, &reason),
     }
@@ -155,9 +159,10 @@ pub fn save_project_state(project_dir: &Path, state: &ProjectState) -> Result<()
     state.save(&project_dir.join("state.json"))
 }
 
-fn parse_and_validate_state(raw: &str) -> std::result::Result<ProjectState, String> {
-    let state: ProjectState =
+fn parse_and_validate_state(raw: &str, project_dir: &Path) -> std::result::Result<ProjectState, String> {
+    let mut state: ProjectState =
         serde_json::from_str(raw).map_err(|err| format!("invalid JSON: {err}"))?;
+    apply_rollback_target_boundary(project_dir, &mut state);
     state
         .validate_invariants()
         .map_err(|reason| format!("invalid invariants: {reason}"))?;
@@ -207,7 +212,8 @@ fn recover_state_from_git(
     }
 
     let recovered_raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let recovered_state = parse_and_validate_state(&recovered_raw).map_err(|recovery_reason| {
+    let recovered_state =
+        parse_and_validate_state(&recovered_raw, project_dir).map_err(|recovery_reason| {
         RalphError::CorruptedState {
             path: state_path.to_path_buf(),
             reason: format!(
@@ -216,7 +222,7 @@ fn recover_state_from_git(
         }
     })?;
 
-    fs::write(state_path, recovered_raw)?;
+    recovered_state.save(state_path)?;
     eprintln!(
         "warning: recovered corrupted state from git HEAD at {}",
         state_path.display()
@@ -239,5 +245,104 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(root))
+    }
+}
+
+pub fn rollback_target_marker_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(ROLLBACK_TARGET_MARKER_FILE)
+}
+
+pub fn write_rollback_target_marker(project_dir: &Path, target_loop: u32) -> Result<()> {
+    fs::write(
+        rollback_target_marker_path(project_dir),
+        format!("{target_loop}\n"),
+    )?;
+    Ok(())
+}
+
+pub fn remove_rollback_target_marker(project_dir: &Path) -> Result<()> {
+    let marker_path = rollback_target_marker_path(project_dir);
+    match fs::remove_file(&marker_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn apply_rollback_target_boundary(project_dir: &Path, state: &mut ProjectState) {
+    let Some(marker_loop) = read_rollback_target_marker(project_dir) else {
+        return;
+    };
+
+    let checkpoint_loop = state.last_loop_number();
+    if marker_loop >= checkpoint_loop {
+        return;
+    }
+
+    state.loops.retain(|l| l.loop_number <= marker_loop);
+    state
+        .completion_attempts
+        .retain(|l| l.loop_number <= marker_loop);
+    state
+        .session_store
+        .records
+        .retain(|record| record.loop_number <= marker_loop);
+
+    // Marker applies a reconstruction boundary: resume planning from the
+    // rollback target and ignore later checkpointed loops.
+    state.current_loop = marker_loop;
+    state.current_phase = Phase::Planning;
+    state.phase_iteration = 1;
+    state.status = compute_project_status(state);
+}
+
+fn read_rollback_target_marker(project_dir: &Path) -> Option<u32> {
+    let marker_path = rollback_target_marker_path(project_dir);
+    let raw = match fs::read_to_string(&marker_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return None,
+        Err(err) => {
+            warn!(
+                path = %marker_path.display(),
+                error = %err,
+                "ignoring rollback marker because it could not be read"
+            );
+            return None;
+        }
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        warn!(
+            path = %marker_path.display(),
+            "ignoring rollback marker because it is empty"
+        );
+        return None;
+    }
+
+    match trimmed.parse::<u32>() {
+        Ok(loop_number) => Some(loop_number),
+        Err(err) => {
+            warn!(
+                path = %marker_path.display(),
+                value = %trimmed,
+                error = %err,
+                "ignoring malformed rollback marker"
+            );
+            None
+        }
+    }
+}
+
+fn compute_project_status(state: &ProjectState) -> ProjectStatus {
+    if state.loops.is_empty() && state.completion_attempts.is_empty() {
+        ProjectStatus::Pending
+    } else if state.completion_attempts.iter().any(|attempt| {
+        attempt.status == LoopStatus::Completed
+            && attempt.verdict == Some(CompletionVerdict::Complete)
+    }) {
+        ProjectStatus::Completed
+    } else {
+        ProjectStatus::InProgress
     }
 }

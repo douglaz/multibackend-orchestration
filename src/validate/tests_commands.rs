@@ -1,8 +1,10 @@
 use super::*;
+use std::fs;
+use std::process::Command;
 
 use crate::validate::assertions::{
     assert_exit_code, assert_git_tag_exists, assert_json_field, assert_stdout_contains,
-    assert_stdout_eq, git_head_commit, git_tag_commit,
+    assert_path_not_exists, assert_stdout_eq, git_head_commit, git_tag_commit,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::standard_mock_script;
@@ -41,6 +43,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "commands::rollback_hard",
             func: rollback_hard,
+        },
+        ConformanceTest {
+            name: "commands::rollback_reconstruction_marker_boundary",
+            func: rollback_reconstruction_marker_boundary,
         },
         ConformanceTest {
             name: "commands::config_get",
@@ -210,6 +216,7 @@ fn rollback_removes_loops(h: &RalphHarness) -> TestResult {
 
         h.ralph_ok(["run", "--loops", "2"])
             .expect("ralph run --loops 2 should succeed");
+        let head_before = git_head_commit(&h.repo_root);
 
         // Verify two loops exist
         let state = h.load_state(project_id).expect("load_state failed");
@@ -226,6 +233,8 @@ fn rollback_removes_loops(h: &RalphHarness) -> TestResult {
         // Rollback to loop 1
         h.ralph_ok(["rollback", "1"])
             .expect("ralph rollback 1 should succeed");
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(head_after, head_before, "soft rollback should not change HEAD");
 
         // After rollback: loop-1 should remain, loop-2 should be gone
         let state = h
@@ -247,6 +256,10 @@ fn rollback_removes_loops(h: &RalphHarness) -> TestResult {
             loop2_dir.is_none(),
             "expected loop-2 directory to be removed after rollback"
         );
+
+        let marker_path = h.project_dir(project_id).join(".rollback-target");
+        let marker = fs::read_to_string(&marker_path).expect("marker should exist");
+        assert_eq!(marker.trim(), "1", "soft rollback should write marker");
     })
 }
 
@@ -294,11 +307,14 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
 
         h.ralph_ok(["run", "--loops", "2"])
             .expect("ralph run --loops 2 should succeed");
+        setup_remote_tracking(h, project_id);
 
         // Get the git reference for loop-1 tag
         let tag_name = format!("ralph/{project_id}/loop-1");
         assert_git_tag_exists(&h.repo_root, &tag_name);
         let loop1_commit = git_tag_commit(&h.repo_root, &tag_name);
+        let marker_path = h.project_dir(project_id).join(".rollback-target");
+        fs::write(&marker_path, "1\n").expect("write marker");
 
         // Rollback --hard to loop 1
         h.ralph_ok(["rollback", "--hard", "1"])
@@ -318,6 +334,7 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
             head, loop1_commit,
             "expected HEAD to be at loop-1 tag after --hard rollback"
         );
+        assert_path_not_exists(&marker_path);
 
         // Verify artifact rollback: loop-2 artifacts removed, loop-1 artifacts remain
         let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
@@ -331,6 +348,48 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
             loop2_dir.is_none(),
             "expected loop-2 artifacts to be removed after --hard rollback"
         );
+
+        let remote_branch = format!("refs/heads/ralph/{project_id}");
+        let remote_line = git_stdout(
+            &h.repo_root,
+            &["ls-remote", "--heads", "origin", &remote_branch],
+        );
+        let remote_commit = remote_line
+            .split_whitespace()
+            .next()
+            .expect("remote branch should exist");
+        assert_eq!(
+            remote_commit, loop1_commit,
+            "expected hard rollback to force-push remote branch"
+        );
+    })
+}
+
+fn rollback_reconstruction_marker_boundary(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "rollback-reconstruct";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+        h.ralph_ok(["rollback", "1"])
+            .expect("soft rollback should succeed");
+
+        let state_path = h.project_dir(project_id).join("state.json");
+        fs::write(&state_path, "{ not valid json").expect("corrupt state");
+
+        let output = h.ralph(["status"]).expect("status should execute");
+        assert_exit_code(&output, 0);
+
+        let recovered = h.load_state(project_id).expect("load recovered state");
+        let loops = recovered["loops"].as_array().expect("loops should be array");
+        assert_eq!(
+            loops.len(),
+            1,
+            "marker boundary should clamp recovered state to loop 1"
+        );
+        assert_json_field(&recovered, "current_loop", &json!(1));
+        assert_json_field(&recovered, "current_phase", &json!("planning"));
     })
 }
 
@@ -560,6 +619,57 @@ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
         "Commands suite test prompt",
     )
     .expect("create_project failed");
+}
+
+fn setup_remote_tracking(h: &RalphHarness, project_id: &str) {
+    let origin = h.temp_dir.path().join("origin.git");
+    git_ok(
+        &h.repo_root,
+        &["init", "--bare", origin.to_string_lossy().as_ref()],
+    );
+    git_ok(
+        &h.repo_root,
+        &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
+    );
+    git_ok(&h.repo_root, &["push", "-u", "origin", "master"]);
+
+    let project_branch = format!("ralph/{project_id}");
+    git_ok(&h.repo_root, &["checkout", &project_branch]);
+    git_ok(
+        &h.repo_root,
+        &["push", "-u", "origin", project_branch.as_str()],
+    );
+}
+
+fn git_ok(repo_root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .expect("git command should execute");
+    assert!(
+        output.status.success(),
+        "git command failed: git {}\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout(repo_root: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .expect("git command should execute");
+    assert!(
+        output.status.success(),
+        "git command failed: git {}\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn run_case<F>(f: F) -> TestResult

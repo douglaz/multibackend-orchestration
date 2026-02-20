@@ -28,7 +28,9 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::{
+    load_project_state, remove_rollback_target_marker, save_project_state,
+};
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
     AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
@@ -1551,6 +1553,7 @@ impl Orchestrator {
                             Some(&tag_name),
                             effective.global.git.sign_commits,
                         )?;
+                        remove_rollback_target_marker(&project_dir)?;
                         commit_hash = Some(hash.clone());
                         logs.push(format!(
                             "loop {loop_number}: committed and tagged ({tag_name})"

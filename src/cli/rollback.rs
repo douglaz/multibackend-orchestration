@@ -3,14 +3,23 @@ use std::path::Path;
 
 use crate::cli::RollbackArgs;
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
-use crate::git::commit::{merge_base, ref_exists, reset_hard};
-use crate::git::is_git_repo;
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::git::commit::{merge_base, ref_exists, reset_hard, rev_parse};
+use crate::git::{is_git_repo, run_git, run_git_status};
+use crate::project::lifecycle::{
+    load_project_state, remove_rollback_target_marker, save_project_state,
+    write_rollback_target_marker, ROLLBACK_TARGET_MARKER_FILE,
+};
 use crate::project::load_project_config_if_exists;
-use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
+use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectState, ProjectStatus};
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
+
+#[derive(Debug, Clone, Copy)]
+enum HardPushOutcome {
+    Pushed,
+    SkippedNoUpstream,
+}
 
 pub fn execute(args: RollbackArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
@@ -46,7 +55,22 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .filter(|num| *num > args.loop_number)
         .collect();
 
-    let hard_ref = if args.hard {
+    if args.dry_run {
+        if args.hard {
+            println!(
+                "dry-run: hard rollback to loop {} would remove loops {:?}, reset git (--hard), and force-push upstream; no files/state/marker would be mutated",
+                args.loop_number, to_remove
+            );
+        } else {
+            println!(
+                "dry-run: soft rollback to loop {} would remove loops {:?}, invalidate sessions, update state, and write {}; no git reset/push",
+                args.loop_number, to_remove, ROLLBACK_TARGET_MARKER_FILE
+            );
+        }
+        return Ok(());
+    }
+
+    if args.hard {
         let repo_root = workspace.root.parent().ok_or_else(|| {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
@@ -56,36 +80,13 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             ));
         }
 
-        Some(resolve_hard_reset_ref(
+        let reference = resolve_hard_reset_ref(
             &workspace,
             &original_state,
             &project_id,
             args.loop_number,
             repo_root,
-        )?)
-    } else {
-        None
-    };
-
-    if args.dry_run {
-        if let Some(reference) = hard_ref {
-            println!(
-                "dry-run: would remove loops {:?}, set current loop to {}, and git reset --hard {}",
-                to_remove, args.loop_number, reference
-            );
-        } else {
-            println!(
-                "dry-run: would remove loops {:?} and set current loop to {}",
-                to_remove, args.loop_number
-            );
-        }
-        return Ok(());
-    }
-
-    if let Some(reference) = hard_ref.as_deref() {
-        let repo_root = workspace.root.parent().ok_or_else(|| {
-            RalphError::Orchestration("workspace root has no parent path".to_owned())
-        })?;
+        )?;
 
         // Ensure we reset on the project's branch when branch management is enabled.
         if workspace.config.git.auto_branch {
@@ -95,16 +96,108 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             }
         }
 
-        reset_hard(repo_root, reference)?;
+        let original_head = rev_parse(repo_root, "HEAD")?;
+
+        reset_hard(repo_root, &reference)?;
         restore_workspace_files(
             &workspace,
             &project_id,
             prompt_backup.as_deref(),
             project_config_backup.as_deref(),
         )?;
+
+        let push_outcome = match force_push_current_upstream(repo_root) {
+            Ok(outcome) => outcome,
+            Err(push_err) => {
+                let revert_result = reset_hard(repo_root, &original_head).and_then(|_| {
+                    restore_workspace_files(
+                        &workspace,
+                        &project_id,
+                        prompt_backup.as_deref(),
+                        project_config_backup.as_deref(),
+                    )
+                });
+
+                let cleanup_err = apply_soft_rollback_state(
+                    args.loop_number,
+                    &workspace,
+                    &project_dir,
+                    &mut state,
+                    &to_remove,
+                )
+                .err();
+
+                return match revert_result {
+                    Ok(()) => {
+                        let marker_err =
+                            write_rollback_target_marker(&project_dir, args.loop_number).err();
+                        Err(RalphError::Orchestration(format!(
+                            "hard rollback failed to force-push and reverted local HEAD to original commit; applied soft fallback rollback to loop {} (push error: {}; cleanup error: {}; marker error: {})",
+                            args.loop_number,
+                            push_err,
+                            format_optional_error(cleanup_err.as_ref()),
+                            format_optional_error(marker_err.as_ref())
+                        )))
+                    }
+                    Err(revert_err) => Err(RalphError::Orchestration(format!(
+                        "hard rollback failed to force-push and could not restore local HEAD; repository may be inconsistent (push error: {}; revert error: {}; cleanup error: {})",
+                        push_err,
+                        revert_err,
+                        format_optional_error(cleanup_err.as_ref())
+                    ))),
+                };
+            }
+        };
+
+        apply_soft_rollback_state(
+            args.loop_number,
+            &workspace,
+            &project_dir,
+            &mut state,
+            &to_remove,
+        )?;
+        remove_rollback_target_marker(&project_dir)?;
+
+        match push_outcome {
+            HardPushOutcome::Pushed => {
+                println!(
+                    "rolled back project {} to loop {} with hard reset {} and force-pushed upstream",
+                    project_id, args.loop_number, reference
+                );
+            }
+            HardPushOutcome::SkippedNoUpstream => {
+                println!(
+                    "rolled back project {} to loop {} with hard reset {} (no upstream configured; skipped force-push)",
+                    project_id, args.loop_number, reference
+                );
+            }
+        }
+        return Ok(());
     }
 
-    for &loop_number in &to_remove {
+    apply_soft_rollback_state(
+        args.loop_number,
+        &workspace,
+        &project_dir,
+        &mut state,
+        &to_remove,
+    )?;
+    write_rollback_target_marker(&project_dir, args.loop_number)?;
+    println!(
+        "rolled back project {} to loop {} (soft rollback; wrote {})",
+        project_id, args.loop_number, ROLLBACK_TARGET_MARKER_FILE
+    );
+    Ok(())
+}
+
+fn apply_soft_rollback_state(
+    target_loop: u32,
+    workspace: &Workspace,
+    project_dir: &Path,
+    state: &mut ProjectState,
+    to_remove: &[u32],
+) -> Result<()> {
+    for &loop_number in to_remove {
         let pattern = format!("{loop_number:03}-");
         let loops_dir = project_dir.join("loops");
         if loops_dir.is_dir() {
@@ -118,57 +211,68 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         }
     }
 
-    state.loops.retain(|l| l.loop_number <= args.loop_number);
+    state.loops.retain(|l| l.loop_number <= target_loop);
     state
         .completion_attempts
-        .retain(|l| l.loop_number <= args.loop_number);
+        .retain(|l| l.loop_number <= target_loop);
 
     // Session invalidation: unconditionally remove sessions for loops > target.
-    for loop_number in &to_remove {
+    for loop_number in to_remove {
         state.session_store.remove_for_loop(*loop_number);
     }
 
     // For the target loop: clear sessions when session_reuse_reset_on_rollback is true.
     // Read config values directly to avoid resolve_effective_config which validates
     // backend specs — rollback must not fail on unrelated backend-config errors.
-    if args.loop_number > 0 {
-        let project_config = load_project_config_if_exists(&project_dir)?;
+    if target_loop > 0 {
+        let project_config = load_project_config_if_exists(project_dir)?;
         let reset_on_rollback = project_config
             .and_then(|p| p.workflow.session_reuse_reset_on_rollback)
             .unwrap_or(workspace.config.workflow.session_reuse_reset_on_rollback);
         if reset_on_rollback {
-            state.session_store.remove_for_loop(args.loop_number);
+            state.session_store.remove_for_loop(target_loop);
         }
     }
 
-    state.current_loop = args.loop_number;
+    state.current_loop = target_loop;
     state.current_phase = Phase::Planning;
     state.phase_iteration = 1;
+    state.status = compute_project_status(state);
 
-    if state.loops.is_empty() && state.completion_attempts.is_empty() {
-        state.status = ProjectStatus::Pending;
-    } else if state.completion_attempts.iter().any(|a| {
-        a.status == LoopStatus::Completed && a.verdict == Some(CompletionVerdict::Complete)
-    }) {
-        state.status = ProjectStatus::Completed;
-    } else {
-        state.status = ProjectStatus::InProgress;
-    }
-
-    save_project_state(&project_dir, &state)?;
-
-    if let Some(reference) = hard_ref {
-        println!(
-            "rolled back project {} to loop {} and reset git to {}",
-            project_id, args.loop_number, reference
-        );
-    } else {
-        println!(
-            "rolled back project {} to loop {}",
-            project_id, args.loop_number
-        );
-    }
+    save_project_state(project_dir, state)?;
     Ok(())
+}
+
+fn compute_project_status(state: &ProjectState) -> ProjectStatus {
+    if state.loops.is_empty() && state.completion_attempts.is_empty() {
+        ProjectStatus::Pending
+    } else if state.completion_attempts.iter().any(|attempt| {
+        attempt.status == LoopStatus::Completed
+            && attempt.verdict == Some(CompletionVerdict::Complete)
+    }) {
+        ProjectStatus::Completed
+    } else {
+        ProjectStatus::InProgress
+    }
+}
+
+fn force_push_current_upstream(repo_root: &Path) -> Result<HardPushOutcome> {
+    let has_upstream = run_git_status(
+        repo_root,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    )?
+    .success();
+    if !has_upstream {
+        return Ok(HardPushOutcome::SkippedNoUpstream);
+    }
+
+    run_git(repo_root, &["push", "--force"])?;
+    Ok(HardPushOutcome::Pushed)
+}
+
+fn format_optional_error(err: Option<&RalphError>) -> String {
+    err.map(|e| e.to_string())
+        .unwrap_or_else(|| "none".to_owned())
 }
 
 fn restore_workspace_files(
