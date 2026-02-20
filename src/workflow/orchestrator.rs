@@ -1928,6 +1928,11 @@ impl Orchestrator {
                         }
                     }
                 }
+                Phase::FinalReview => {
+                    return Err(RalphError::Orchestration(
+                        "final review orchestration is not implemented yet".to_owned(),
+                    ));
+                }
             }
 
             // Handle ReviewIterationLimitExceeded: rollback the current loop
@@ -3385,6 +3390,7 @@ fn phase_label(phase: &Phase) -> &'static str {
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
+        Phase::FinalReview => "final_review",
     }
 }
 
@@ -4323,6 +4329,8 @@ mod tests {
             planner: Some("claude-planner".to_owned()),
             implementer: Some("claude-implementer".to_owned()),
             reviewer: Some("claude-reviewer".to_owned()),
+            final_reviewer: Some("claude-final-reviewer".to_owned()),
+            arbiter: Some("claude-arbiter".to_owned()),
             qa: Some("claude-qa".to_owned()),
             completer: Some("claude-completer".to_owned()),
             acceptance_qa: Some("claude-acceptance-qa".to_owned()),
@@ -4332,6 +4340,8 @@ mod tests {
             planner: Some("codex-planner".to_owned()),
             implementer: Some("codex-implementer".to_owned()),
             reviewer: Some("codex-reviewer".to_owned()),
+            final_reviewer: Some("codex-final-reviewer".to_owned()),
+            arbiter: Some("codex-arbiter".to_owned()),
             qa: Some("codex-qa".to_owned()),
             completer: Some("codex-completer".to_owned()),
             acceptance_qa: Some("codex-acceptance-qa".to_owned()),
@@ -4346,14 +4356,20 @@ mod tests {
             "claude(claude-planner)",
             "claude(claude-implementer)",
             "claude(claude-reviewer)",
+            "claude(claude-final-reviewer)",
+            "claude(claude-arbiter)",
             "claude(claude-qa)",
             "claude(claude-completer)",
+            "claude(claude-acceptance-qa)",
             "claude(claude-reformatter)",
             "codex(codex-planner)",
             "codex(codex-implementer)",
             "codex(codex-reviewer)",
+            "codex(codex-final-reviewer)",
+            "codex(codex-arbiter)",
             "codex(codex-qa)",
             "codex(codex-completer)",
+            "codex(codex-acceptance-qa)",
             "codex(codex-reformatter)",
         ] {
             assert!(

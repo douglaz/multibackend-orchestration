@@ -720,6 +720,7 @@ fn phase_label(phase: &Phase) -> &'static str {
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
+        Phase::FinalReview => "final_review",
     }
 }
 
@@ -1081,6 +1082,7 @@ created_at: 2026-02-06T20:00:00Z
     #[test]
     fn labels_use_expected_wire_format() {
         assert_eq!(phase_label(&Phase::Reviewing), "reviewing");
+        assert_eq!(phase_label(&Phase::FinalReview), "final_review");
         assert_eq!(
             completion_verdict_label(&CompletionVerdict::Complete),
             "COMPLETE"

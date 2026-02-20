@@ -96,6 +96,8 @@ pub struct BackendRoleModels {
     pub planner: Option<String>,
     pub implementer: Option<String>,
     pub reviewer: Option<String>,
+    pub final_reviewer: Option<String>,
+    pub arbiter: Option<String>,
     pub qa: Option<String>,
     pub completer: Option<String>,
     pub acceptance_qa: Option<String>,
@@ -108,6 +110,8 @@ pub struct RoleTimeouts {
     pub planner: Option<u64>,
     pub implementer: Option<u64>,
     pub reviewer: Option<u64>,
+    pub final_reviewer: Option<u64>,
+    pub arbiter: Option<u64>,
     pub qa: Option<u64>,
     pub completer: Option<u64>,
     pub acceptance_qa: Option<u64>,
@@ -121,6 +125,8 @@ impl BackendRoleModels {
             "planner" => self.planner.as_deref(),
             "implementer" => self.implementer.as_deref(),
             "reviewer" => self.reviewer.as_deref(),
+            "final_reviewer" => self.final_reviewer.as_deref(),
+            "arbiter" => self.arbiter.as_deref(),
             "qa" => self.qa.as_deref(),
             "completer" => self.completer.as_deref(),
             "acceptance_qa" => self.acceptance_qa.as_deref(),
@@ -139,6 +145,12 @@ impl BackendRoleModels {
         }
         if self.reviewer.is_none() {
             self.reviewer.clone_from(&defaults.reviewer);
+        }
+        if self.final_reviewer.is_none() {
+            self.final_reviewer.clone_from(&defaults.final_reviewer);
+        }
+        if self.arbiter.is_none() {
+            self.arbiter.clone_from(&defaults.arbiter);
         }
         if self.qa.is_none() {
             self.qa.clone_from(&defaults.qa);
@@ -161,6 +173,8 @@ impl RoleTimeouts {
             "planner" => self.planner,
             "implementer" => self.implementer,
             "reviewer" => self.reviewer,
+            "final_reviewer" => self.final_reviewer,
+            "arbiter" => self.arbiter,
             "qa" => self.qa,
             "completer" => self.completer,
             "acceptance_qa" => self.acceptance_qa,
@@ -180,6 +194,12 @@ impl RoleTimeouts {
         }
         if self.reviewer.is_none() {
             self.reviewer = defaults.reviewer;
+        }
+        if self.final_reviewer.is_none() {
+            self.final_reviewer = defaults.final_reviewer;
+        }
+        if self.arbiter.is_none() {
+            self.arbiter = defaults.arbiter;
         }
         if self.qa.is_none() {
             self.qa = defaults.qa;
@@ -208,7 +228,7 @@ impl BackendConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct WorkflowConfig {
     #[serde(default = "default_max_review_iterations")]
@@ -235,6 +255,18 @@ pub struct WorkflowConfig {
     pub qa_backend: Option<String>,
     #[serde(default)]
     pub completer_backend: Option<String>,
+    #[serde(default = "default_final_review_enabled")]
+    pub final_review_enabled: bool,
+    #[serde(default = "default_final_review_backends")]
+    pub final_review_backends: Vec<String>,
+    #[serde(default = "default_final_review_arbiter_backend")]
+    pub final_review_arbiter_backend: String,
+    #[serde(default = "default_final_review_min_reviewers")]
+    pub final_review_min_reviewers: u32,
+    #[serde(default = "default_final_review_consensus_threshold")]
+    pub final_review_consensus_threshold: f64,
+    #[serde(default = "default_max_final_review_restarts")]
+    pub max_final_review_restarts: u32,
     #[serde(default = "default_qa_enabled")]
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
@@ -260,6 +292,8 @@ pub struct WorkflowConfig {
     #[serde(default = "default_session_reuse_reset_on_rollback")]
     pub session_reuse_reset_on_rollback: bool,
 }
+
+impl Eq for WorkflowConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -443,6 +477,12 @@ impl Default for WorkflowConfig {
             reviewer_backend: None,
             qa_backend: None,
             completer_backend: None,
+            final_review_enabled: default_final_review_enabled(),
+            final_review_backends: default_final_review_backends(),
+            final_review_arbiter_backend: default_final_review_arbiter_backend(),
+            final_review_min_reviewers: default_final_review_min_reviewers(),
+            final_review_consensus_threshold: default_final_review_consensus_threshold(),
+            max_final_review_restarts: default_max_final_review_restarts(),
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
             planner_state_in_prompt: PlannerStateInPrompt::default(),
@@ -520,6 +560,8 @@ fn default_claude_backend_config() -> BackendConfig {
             planner: Some("opus".to_owned()),
             implementer: Some("opus".to_owned()),
             reviewer: Some("opus".to_owned()),
+            final_reviewer: Some("opus".to_owned()),
+            arbiter: Some("opus".to_owned()),
             qa: Some("opus".to_owned()),
             completer: Some("opus".to_owned()),
             acceptance_qa: Some("opus".to_owned()),
@@ -543,6 +585,8 @@ fn default_codex_backend_config() -> BackendConfig {
             planner: Some("gpt-5.3-codex-xhigh".to_owned()),
             implementer: Some("gpt-5.3-codex-high".to_owned()),
             reviewer: Some("gpt-5.3-codex-high".to_owned()),
+            final_reviewer: Some("gpt-5.3-codex-high".to_owned()),
+            arbiter: Some("gpt-5.3-codex-xhigh".to_owned()),
             qa: Some("gpt-5.3-codex-high".to_owned()),
             completer: Some("gpt-5.3-codex-xhigh".to_owned()),
             acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
@@ -682,6 +726,30 @@ fn default_session_reuse_reset_on_rollback() -> bool {
 
 fn default_qa_enabled() -> bool {
     true
+}
+
+fn default_final_review_enabled() -> bool {
+    true
+}
+
+fn default_final_review_backends() -> Vec<String> {
+    vec!["claude".to_owned(), "codex".to_owned()]
+}
+
+fn default_final_review_arbiter_backend() -> String {
+    "claude".to_owned()
+}
+
+fn default_final_review_min_reviewers() -> u32 {
+    2
+}
+
+fn default_final_review_consensus_threshold() -> f64 {
+    1.0
+}
+
+fn default_max_final_review_restarts() -> u32 {
+    3
 }
 
 fn default_prompt_review_enabled() -> bool {
@@ -892,6 +960,8 @@ command = "claude-custom"
         assert!(models.planner.is_none());
         assert!(models.implementer.is_none());
         assert!(models.reviewer.is_none());
+        assert!(models.final_reviewer.is_none());
+        assert!(models.arbiter.is_none());
         assert!(models.qa.is_none());
         assert!(models.completer.is_none());
         assert!(models.reformatter.is_none());
@@ -957,6 +1027,15 @@ base_branch = "master"
         assert_eq!(config.backends.codex.models, defaults.backends.codex.models);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
+        assert!(config.workflow.final_review_enabled);
+        assert_eq!(
+            config.workflow.final_review_backends,
+            vec!["claude".to_owned(), "codex".to_owned()]
+        );
+        assert_eq!(config.workflow.final_review_arbiter_backend, "claude");
+        assert_eq!(config.workflow.final_review_min_reviewers, 2);
+        assert_eq!(config.workflow.final_review_consensus_threshold, 1.0);
+        assert_eq!(config.workflow.max_final_review_restarts, 3);
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
         assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
         assert!(!config.workflow.include_history_when_session_reuse_enabled);
@@ -1108,6 +1187,8 @@ timeout_seconds = 7200
 planner = "opus"
 implementer = "opus"
 reviewer = "opus"
+final_reviewer = "opus"
+arbiter = "opus"
 qa = "opus"
 completer = "opus"
 acceptance_qa = "opus"
@@ -1121,6 +1202,8 @@ timeout_seconds = 7200
 planner = "gpt-5.3-codex-xhigh"
 implementer = "gpt-5.3-codex-high"
 reviewer = "gpt-5.3-codex-high"
+final_reviewer = "gpt-5.3-codex-high"
+arbiter = "gpt-5.3-codex-xhigh"
 qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 acceptance_qa = "gpt-5.3-codex-xhigh"
@@ -1159,6 +1242,14 @@ base_branch = "master"
             config.backends.claude.models.reviewer.as_deref(),
             Some("opus")
         );
+        assert_eq!(
+            config.backends.claude.models.final_reviewer.as_deref(),
+            Some("opus")
+        );
+        assert_eq!(
+            config.backends.claude.models.arbiter.as_deref(),
+            Some("opus")
+        );
         assert_eq!(config.backends.claude.models.qa.as_deref(), Some("opus"));
         assert_eq!(
             config.backends.claude.models.completer.as_deref(),
@@ -1185,6 +1276,14 @@ base_branch = "master"
             Some("gpt-5.3-codex-high")
         );
         assert_eq!(
+            config.backends.codex.models.final_reviewer.as_deref(),
+            Some("gpt-5.3-codex-high")
+        );
+        assert_eq!(
+            config.backends.codex.models.arbiter.as_deref(),
+            Some("gpt-5.3-codex-xhigh")
+        );
+        assert_eq!(
             config.backends.codex.models.qa.as_deref(),
             Some("gpt-5.3-codex-high")
         );
@@ -1208,6 +1307,8 @@ base_branch = "master"
             planner: Some("planner-model".to_owned()),
             implementer: Some("implementer-model".to_owned()),
             reviewer: Some("reviewer-model".to_owned()),
+            final_reviewer: Some("final-reviewer-model".to_owned()),
+            arbiter: Some("arbiter-model".to_owned()),
             qa: Some("qa-model".to_owned()),
             completer: Some("completer-model".to_owned()),
             acceptance_qa: Some("acceptance-qa-model".to_owned()),
@@ -1217,6 +1318,11 @@ base_branch = "master"
         assert_eq!(models.for_role("planner"), Some("planner-model"));
         assert_eq!(models.for_role("implementer"), Some("implementer-model"));
         assert_eq!(models.for_role("reviewer"), Some("reviewer-model"));
+        assert_eq!(
+            models.for_role("final_reviewer"),
+            Some("final-reviewer-model")
+        );
+        assert_eq!(models.for_role("arbiter"), Some("arbiter-model"));
         assert_eq!(models.for_role("qa"), Some("qa-model"));
         assert_eq!(models.for_role("completer"), Some("completer-model"));
         assert_eq!(
@@ -1233,6 +1339,8 @@ base_branch = "master"
             planner: Some("custom-planner".to_owned()),
             implementer: None,
             reviewer: None,
+            final_reviewer: Some("custom-final-reviewer".to_owned()),
+            arbiter: None,
             qa: None,
             completer: Some("custom-completer".to_owned()),
             acceptance_qa: None,
@@ -1242,6 +1350,8 @@ base_branch = "master"
             planner: Some("default-planner".to_owned()),
             implementer: Some("default-implementer".to_owned()),
             reviewer: Some("default-reviewer".to_owned()),
+            final_reviewer: Some("default-final-reviewer".to_owned()),
+            arbiter: Some("default-arbiter".to_owned()),
             qa: Some("default-qa".to_owned()),
             completer: Some("default-completer".to_owned()),
             acceptance_qa: Some("default-acceptance-qa".to_owned()),
@@ -1251,6 +1361,11 @@ base_branch = "master"
         assert_eq!(models.planner.as_deref(), Some("custom-planner"));
         assert_eq!(models.implementer.as_deref(), Some("default-implementer"));
         assert_eq!(models.reviewer.as_deref(), Some("default-reviewer"));
+        assert_eq!(
+            models.final_reviewer.as_deref(),
+            Some("custom-final-reviewer")
+        );
+        assert_eq!(models.arbiter.as_deref(), Some("default-arbiter"));
         assert_eq!(models.qa.as_deref(), Some("default-qa"));
         assert_eq!(models.completer.as_deref(), Some("custom-completer"));
         assert_eq!(
@@ -1266,6 +1381,8 @@ base_branch = "master"
             planner: Some(10),
             implementer: Some(20),
             reviewer: Some(30),
+            final_reviewer: Some(35),
+            arbiter: Some(37),
             qa: Some(40),
             completer: Some(50),
             acceptance_qa: Some(60),
@@ -1276,6 +1393,8 @@ base_branch = "master"
         assert_eq!(role_timeouts.for_role("planner"), Some(10));
         assert_eq!(role_timeouts.for_role("implementer"), Some(20));
         assert_eq!(role_timeouts.for_role("reviewer"), Some(30));
+        assert_eq!(role_timeouts.for_role("final_reviewer"), Some(35));
+        assert_eq!(role_timeouts.for_role("arbiter"), Some(37));
         assert_eq!(role_timeouts.for_role("qa"), Some(40));
         assert_eq!(role_timeouts.for_role("completer"), Some(50));
         assert_eq!(role_timeouts.for_role("acceptance_qa"), Some(60));
@@ -1290,6 +1409,8 @@ base_branch = "master"
             planner: Some(12),
             implementer: None,
             reviewer: None,
+            final_reviewer: Some(38),
+            arbiter: None,
             qa: None,
             completer: Some(56),
             acceptance_qa: None,
@@ -1300,6 +1421,8 @@ base_branch = "master"
             planner: Some(1),
             implementer: Some(2),
             reviewer: Some(3),
+            final_reviewer: Some(4),
+            arbiter: Some(5),
             qa: Some(4),
             completer: Some(5),
             acceptance_qa: Some(6),
@@ -1311,6 +1434,8 @@ base_branch = "master"
         assert_eq!(role_timeouts.planner, Some(12));
         assert_eq!(role_timeouts.implementer, Some(2));
         assert_eq!(role_timeouts.reviewer, Some(3));
+        assert_eq!(role_timeouts.final_reviewer, Some(38));
+        assert_eq!(role_timeouts.arbiter, Some(5));
         assert_eq!(role_timeouts.qa, Some(4));
         assert_eq!(role_timeouts.completer, Some(56));
         assert_eq!(role_timeouts.acceptance_qa, Some(6));
@@ -1394,11 +1519,13 @@ prompt_reviewer = 34
                 planner: Some(99),
                 implementer: Some(20),
                 reviewer: Some(21),
+                final_reviewer: Some(22),
+                arbiter: Some(23),
                 qa: Some(22),
-                completer: Some(23),
-                acceptance_qa: Some(24),
-                reformatter: Some(25),
-                prompt_reviewer: Some(26),
+                completer: Some(24),
+                acceptance_qa: Some(25),
+                reformatter: Some(26),
+                prompt_reviewer: Some(27),
             },
             ..BackendConfig::default()
         };
@@ -1407,11 +1534,13 @@ prompt_reviewer = 34
         assert_eq!(merged.role_timeouts.planner, Some(10));
         assert_eq!(merged.role_timeouts.implementer, Some(20));
         assert_eq!(merged.role_timeouts.reviewer, Some(21));
+        assert_eq!(merged.role_timeouts.final_reviewer, Some(22));
+        assert_eq!(merged.role_timeouts.arbiter, Some(23));
         assert_eq!(merged.role_timeouts.qa, Some(30));
-        assert_eq!(merged.role_timeouts.completer, Some(23));
-        assert_eq!(merged.role_timeouts.acceptance_qa, Some(24));
-        assert_eq!(merged.role_timeouts.reformatter, Some(25));
-        assert_eq!(merged.role_timeouts.prompt_reviewer, Some(26));
+        assert_eq!(merged.role_timeouts.completer, Some(24));
+        assert_eq!(merged.role_timeouts.acceptance_qa, Some(25));
+        assert_eq!(merged.role_timeouts.reformatter, Some(26));
+        assert_eq!(merged.role_timeouts.prompt_reviewer, Some(27));
     }
 
     #[test]
@@ -1468,6 +1597,14 @@ base_branch = "master"
         assert_eq!(
             config.backends.codex.models.implementer.as_deref(),
             defaults.backends.codex.models.implementer.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.final_reviewer.as_deref(),
+            defaults.backends.codex.models.final_reviewer.as_deref(),
+        );
+        assert_eq!(
+            config.backends.codex.models.arbiter.as_deref(),
+            defaults.backends.codex.models.arbiter.as_deref(),
         );
         assert_eq!(
             config.backends.codex.models.qa.as_deref(),

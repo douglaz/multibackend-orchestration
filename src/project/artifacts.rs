@@ -21,6 +21,11 @@ pub enum ArtifactKind {
     AcceptanceFail,
     TerminationRequest,
     CompleterVerdict,
+    FinalReviewProposals { backend: String },
+    FinalReviewPlannerPositions,
+    FinalReviewVotes { backend: String },
+    FinalReviewArbiterRuling,
+    FinalReviewExit { outcome: String },
 }
 
 impl ArtifactKind {
@@ -38,6 +43,11 @@ impl ArtifactKind {
             Self::AcceptanceFail => "acceptance-fail",
             Self::TerminationRequest => "termination-request",
             Self::CompleterVerdict => "completer-verdict",
+            Self::FinalReviewProposals { .. } => "final-review-proposals",
+            Self::FinalReviewPlannerPositions => "final-review-planner-positions",
+            Self::FinalReviewVotes { .. } => "final-review-votes",
+            Self::FinalReviewArbiterRuling => "final-review-arbiter-ruling",
+            Self::FinalReviewExit { .. } => "final-review-exit",
         }
     }
 
@@ -61,6 +71,13 @@ impl ArtifactKind {
             Self::AcceptanceFail => "acceptance-fail.md".to_owned(),
             Self::TerminationRequest => "termination-request.md".to_owned(),
             Self::CompleterVerdict => "completer-verdict.md".to_owned(),
+            Self::FinalReviewProposals { backend } => {
+                format!("final-review-proposals-{backend}.md")
+            }
+            Self::FinalReviewPlannerPositions => "final-review-planner-positions.md".to_owned(),
+            Self::FinalReviewVotes { backend } => format!("final-review-votes-{backend}.md"),
+            Self::FinalReviewArbiterRuling => "final-review-arbiter-ruling.md".to_owned(),
+            Self::FinalReviewExit { outcome } => format!("final-review-exit-{outcome}.md"),
         }
     }
 
@@ -381,6 +398,69 @@ mod tests {
         );
         assert_eq!(ArtifactKind::AcceptancePass.base_type(), "acceptance-pass");
         assert_eq!(ArtifactKind::AcceptanceFail.base_type(), "acceptance-fail");
+    }
+
+    #[test]
+    fn final_review_artifact_kinds_render_expected_names_and_types() {
+        assert_eq!(
+            ArtifactKind::FinalReviewProposals {
+                backend: "claude".to_owned()
+            }
+            .file_name(),
+            "final-review-proposals-claude.md"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewPlannerPositions.file_name(),
+            "final-review-planner-positions.md"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewVotes {
+                backend: "codex(gpt-5)".to_owned()
+            }
+            .file_name(),
+            "final-review-votes-codex(gpt-5).md"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewArbiterRuling.file_name(),
+            "final-review-arbiter-ruling.md"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewExit {
+                outcome: "approved".to_owned()
+            }
+            .file_name(),
+            "final-review-exit-approved.md"
+        );
+
+        assert_eq!(
+            ArtifactKind::FinalReviewProposals {
+                backend: "claude".to_owned()
+            }
+            .base_type(),
+            "final-review-proposals"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewPlannerPositions.base_type(),
+            "final-review-planner-positions"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewVotes {
+                backend: "codex".to_owned()
+            }
+            .base_type(),
+            "final-review-votes"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewArbiterRuling.base_type(),
+            "final-review-arbiter-ruling"
+        );
+        assert_eq!(
+            ArtifactKind::FinalReviewExit {
+                outcome: "restart".to_owned()
+            }
+            .base_type(),
+            "final-review-exit"
+        );
     }
 
     #[test]

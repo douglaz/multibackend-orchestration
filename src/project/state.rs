@@ -89,6 +89,7 @@ pub enum Phase {
     Reviewing,
     Committing,
     Completing,
+    FinalReview,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

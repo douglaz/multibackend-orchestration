@@ -159,6 +159,14 @@ fn resolve_backend_for_role_injects_model_when_configured() {
         "codex(gpt-5.3-codex-high)"
     );
     assert_eq!(
+        registry.resolve_backend_for_role("claude", "final_reviewer"),
+        "claude(opus)"
+    );
+    assert_eq!(
+        registry.resolve_backend_for_role("codex", "arbiter"),
+        "codex(gpt-5.3-codex-xhigh)"
+    );
+    assert_eq!(
         registry.resolve_backend_for_role("claude", "completer"),
         "claude(opus)"
     );

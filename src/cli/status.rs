@@ -182,6 +182,7 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
         crate::project::state::Phase::Reviewing => "reviewing",
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",
+        crate::project::state::Phase::FinalReview => "final_review",
     }
 }
 

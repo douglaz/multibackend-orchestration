@@ -37,6 +37,12 @@ pub struct ProjectWorkflowOverrides {
     pub qa_backend: Option<String>,
     pub qa_enabled: Option<bool>,
     pub completer_backend: Option<String>,
+    pub final_review_enabled: Option<bool>,
+    pub final_review_backends: Option<Vec<String>>,
+    pub final_review_arbiter_backend: Option<String>,
+    pub final_review_min_reviewers: Option<u32>,
+    pub final_review_consensus_threshold: Option<f64>,
+    pub max_final_review_restarts: Option<u32>,
     pub planner_state_in_prompt: Option<PlannerStateInPrompt>,
     pub planner_previous_specs_in_prompt: Option<PreviousSpecsInPrompt>,
     /// `None` = inherit from global; `Some(None)` = override to unlimited; `Some(Some(n))` = cap at n.

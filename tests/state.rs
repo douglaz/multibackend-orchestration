@@ -183,12 +183,23 @@ fn test_phase_serialization() {
         (Phase::Reviewing, "reviewing"),
         (Phase::Committing, "committing"),
         (Phase::Completing, "completing"),
+        (Phase::FinalReview, "final_review"),
     ];
 
     for (phase, expected) in phases {
         let json = serde_json::to_string(&phase).unwrap();
         assert_eq!(json, format!("\"{}\"", expected));
     }
+}
+
+#[test]
+fn test_final_review_phase_serde_round_trip() {
+    let phase = Phase::FinalReview;
+    let json = serde_json::to_string(&phase).expect("serialize phase");
+    assert_eq!(json, "\"final_review\"");
+
+    let parsed: Phase = serde_json::from_str(&json).expect("deserialize phase");
+    assert_eq!(parsed, Phase::FinalReview);
 }
 
 #[test]
