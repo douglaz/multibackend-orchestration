@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Durability / Crash Safety",
+      "feedback": "Marking atomic writes as out-of-scope conflicts with the stated requirement that sessions survive crashes. A crash during `fs::write` can leave a truncated JSON file and lose all previously persisted sessions. Use write-to-temp + `fsync` + atomic rename (and ideally fsync parent dir) to preserve last-known-good data."
+    },
+    {
+      "area": "Mutation Coverage",
+      "feedback": "The write-point plan misses internal rollback persistence in `rollback_current_loop`. There are real paths where rollback happens and the process returns immediately (e.g., QA/review iteration limit when `--until-complete` is false), so stale on-disk sessions can survive and violate invalidation rules."
+    },
+    {
+      "area": "Acceptance Criteria Feasibility",
+      "feedback": "The criterion/test of running `ralph run --loops 1` twice and expecting session reuse is not valid with current semantics: records are keyed by `loop_number`, so second invocation runs loop 2 and should not reuse loop 1 sessions. Cross-invocation reuse must be tested on the same in-progress loop (interrupted/resumed flow)."
+    },
+    {
+      "area": "Prompt-Change Test Design",
+      "feedback": "The proposed prompt-change invalidation test is incomplete: editing prompt after a fully completed loop will not trigger `RestartLoop` because `handle_prompt_change` short-circuits when no loop is in progress. Test must force an in-progress loop (e.g., `--until-review`) and set `prompt_change_action=restart-loop`."
+    },
+    {
+      "area": "Requirements / Spec Consistency",
+      "feedback": "There is a naming/location mismatch: requirements mention `session_store.json` in loop artifacts, while the spec uses `session-store.json` in project root. Pick one canonical path/name and align all acceptance criteria/tests to it."
+    }
+  ]
+}

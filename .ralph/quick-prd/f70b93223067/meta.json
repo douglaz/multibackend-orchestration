@@ -1,0 +1,17 @@
+{
+  "idea": "Implement durable persistence for the session store so that backend sessions (e.g., Claude Code `--resume` with session IDs) can survive process restarts, crashes, and separate `ralph run` invocations.\n\n## Requirements\n\n- Session store must be saved to disk during workflow execution\n- Session store must be restored during project state reconstruction\n- Session invalidation rules (`session_reuse_reset_on_rollback`, `session_reuse_reset_on_prompt_change`) must continue to work correctly\n- Solution must handle concurrent access and partial writes gracefully\n\n## Proposed Implementation\n\nPersist session store to a file (`session_store.json`) in the loop artifacts directory:\n- Write `session_store.json` after each workflow step that populates/modifies the session store\n- Load `session_store.json` during `reconstruct_project_state_internal` if it exists\n- Clear/invalidate the file when rollback or prompt change triggers session reset\n\n## Acceptance Criteria\n\n- [ ] Session records persist to disk in a structured format (JSON)\n- [ ] `reconstruct_project_state` loads existing session store from disk if available\n- [ ] Session reuse works across separate `ralph run` invocations\n- [ ] Rollback correctly invalidates persisted sessions when `session_reuse_reset_on_rollback` is enabled\n- [ ] Prompt changes correctly invalidate persisted sessions when `session_reuse_reset_on_prompt_change` is enabled\n- [ ] No session leakage between different projects or loops\n- [ ] Tests verify cross-restart session persistence and invalidation rules\n\n## Relevant Code Locations\n\n- `src/project/lifecycle.rs:216-230` — state reconstruction (add session store loading)\n- `src/project/state.rs:48-53` — `SessionStore` struct (may need serialization traits)\n- `src/workflow/orchestrator.rs:2320-2332` — session store population (add persistence after updates)\n- `src/cli/rollback.rs:139-154` — session invalidation (add file deletion/clearing)",
+  "idea_hash": "f70b93223067",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-20T15:09:27Z",
+  "completed_at": "2026-02-20T15:28:03Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 442.015476189,
+  "review_times_secs": [
+    359.903036141
+  ],
+  "revision_times_secs": [
+    313.55137686
+  ]
+}

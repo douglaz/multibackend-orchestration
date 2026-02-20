@@ -1,0 +1,11 @@
+The revised specification has been written. Here's a summary of how each review issue was addressed:
+
+**Issue 1 — Durability / Crash Safety**: Replaced plain `fs::write` with an atomic write pattern using `tempfile::NamedTempFile` (already a dependency) → `write_all` → `sync_all` → `persist` (rename). The summary, persistence helper, and acceptance criteria (new #11) now reflect this. The "Atomic/journaled writes" bullet was removed from Out of Scope, and a new "fsync of parent directory" entry explains why that specific level of durability is not needed.
+
+**Issue 2 — Mutation Coverage**: Added 2 new write points after `rollback_current_loop` in the QA iteration limit path (line ~1053) and review iteration limit path (line ~1941). The spec now explains that when `until_complete=false`, these paths return `Err` immediately with no subsequent `upsert_session_after_execution` call, so stale sessions would survive on disk without the explicit persist. Total write points increased from 6 to 8.
+
+**Issue 3 — Acceptance Criteria Feasibility**: Criterion #3 was rewritten: instead of running `--loops 1` twice (which would run loop 2 on the second invocation and never match loop 1 sessions), the test now uses `--until-review` to leave loop 1 in-progress, then resumes with a second `ralph run --loops 1` that continues the same loop. This is the only valid way to test cross-invocation reuse since sessions are keyed by `loop_number`.
+
+**Issue 4 — Prompt-Change Test Design**: Test #6 now explicitly uses `--until-review` to leave the loop in-progress before editing the prompt, and sets `prompt_change_action=restart-loop`. The spec explains why: `handle_prompt_change` short-circuits with a simple hash update when no loop is in progress, so a completed loop would never trigger `RestartLoop`.
+
+**Issue 5 — Naming/Location Consistency**: The spec now uses `session-store.json` in `<project_dir>/` consistently everywhere — the constant, acceptance criteria, write points, read point, tests, and out-of-scope section all reference the same canonical path. The requirements-mentioned `session_store.json` in loop artifacts is not carried forward.
