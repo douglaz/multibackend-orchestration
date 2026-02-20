@@ -19,7 +19,7 @@ use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
-    count_phase_transition_checkpoints, reset_and_clean_working_tree, rev_parse,
+    reset_and_clean_working_tree, rev_parse,
     stage_implementation_changes,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
@@ -3086,7 +3086,7 @@ async fn run_final_review_phase(
         .join(format!("{loop_number:03}-{loop_slug}"));
     ensure_final_review_config_snapshot(&loop_dir, &snapshot)?;
 
-    let restart_count = final_review_restart_count_from_history(workspace_root, &state.project_id)?;
+    let restart_count = final_review_restart_count_from_artifacts(project_dir);
     let round = restart_count.saturating_add(1);
 
     let mut reviewer_decisions: Vec<(String, FinalReviewerDecision)> = Vec::new();
@@ -3509,14 +3509,30 @@ fn canonicalize_backend_spec(spec: &str) -> Result<String> {
     })
 }
 
-fn final_review_restart_count_from_history(workspace_root: &Path, project_id: &str) -> Result<u32> {
-    let Some(repo_root) = workspace_root.parent() else {
-        return Ok(0);
+fn final_review_restart_count_from_artifacts(project_dir: &Path) -> u32 {
+    let loops_dir = project_dir.join("loops");
+    let Ok(loop_entries) = fs::read_dir(&loops_dir) else {
+        return 0;
     };
-    if !is_git_repo(repo_root) {
-        return Ok(0);
+    let mut count = 0u32;
+    for loop_entry in loop_entries.flatten() {
+        if !loop_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(loop_entry.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if file
+                .file_name()
+                .to_string_lossy()
+                .ends_with("-final-review-exit-restart.md")
+            {
+                count += 1;
+            }
+        }
     }
-    count_phase_transition_checkpoints(repo_root, project_id, "final_review", "planning")
+    count
 }
 
 fn resolve_final_review_artifact(

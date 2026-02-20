@@ -7,6 +7,14 @@ use crate::Result;
 
 pub const ARTIFACT_TIMESTAMP_LEN: usize = 14;
 
+/// Sanitize a backend spec for use in filenames by replacing path-unsafe characters.
+/// e.g. `claude(model/v2)` → `claude-model-v2`
+fn slugify_backend(spec: &str) -> String {
+    spec.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub enum ArtifactKind {
     Spec,
@@ -72,10 +80,12 @@ impl ArtifactKind {
             Self::TerminationRequest => "termination-request.md".to_owned(),
             Self::CompleterVerdict => "completer-verdict.md".to_owned(),
             Self::FinalReviewProposals { backend } => {
-                format!("final-review-proposals-{backend}.md")
+                format!("final-review-proposals-{}.md", slugify_backend(backend))
             }
             Self::FinalReviewPlannerPositions => "final-review-planner-positions.md".to_owned(),
-            Self::FinalReviewVotes { backend } => format!("final-review-votes-{backend}.md"),
+            Self::FinalReviewVotes { backend } => {
+                format!("final-review-votes-{}.md", slugify_backend(backend))
+            }
             Self::FinalReviewArbiterRuling => "final-review-arbiter-ruling.md".to_owned(),
             Self::FinalReviewExit { outcome } => format!("final-review-exit-{outcome}.md"),
         }
@@ -418,7 +428,7 @@ mod tests {
                 backend: "codex(gpt-5)".to_owned()
             }
             .file_name(),
-            "final-review-votes-codex(gpt-5).md"
+            "final-review-votes-codex-gpt-5-.md"
         );
         assert_eq!(
             ArtifactKind::FinalReviewArbiterRuling.file_name(),
