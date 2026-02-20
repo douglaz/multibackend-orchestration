@@ -448,6 +448,9 @@ fn review_limit_fails(h: &RalphHarness) -> TestResult {
         let state = h.load_state(project_id).expect("load_state failed");
         assert_json_field(&state, "status", &json!("pending"));
         assert_json_array_len(&state, "loops", 0);
+        // No-checkpoint baseline: current_loop=1, current_phase=planning
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
         assert_no_loop_artifacts(&h.project_dir(project_id));
     })
 }
@@ -471,6 +474,13 @@ fn dry_run(h: &RalphHarness) -> TestResult {
             "prompt should not change during dry-run"
         );
         assert_no_loop_artifacts(&h.project_dir(project_id));
+
+        // Dry-run produces no checkpoint commits; reconstruction defaults
+        // to the no-checkpoint baseline: loop 1, phase planning.
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_array_len(&state, "loops", 0);
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
     })
 }
 

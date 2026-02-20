@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 8,
+  "current_loop": 10,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -199,7 +199,7 @@
       "slug": "final-contract-alignment-for-checkpoint-defaults",
       "feature_name": "Final Contract Alignment for Checkpoint Defaults and Temporary Log Routing",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -220,8 +220,32 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "b70130ea745eacfda5ddfb2c9e97e1b7dcf19f83",
       "started_at": "2026-02-19T23:30:15.955583445Z",
+      "completed_at": "2026-02-19T23:50:08.573296278Z"
+    },
+    {
+      "loop_number": 10,
+      "slug": "orchestrator-integration-test-contract-alignment",
+      "feature_name": "Orchestrator Integration Test Contract Alignment for Loop-1 Defaults",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/010-orchestrator-integration-test-contract-alignment/20260220000404-spec.md",
+        "impl_notes": "loops/010-orchestrator-integration-test-contract-alignment/20260220000811-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/010-orchestrator-integration-test-contract-alignment/20260220001009-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-20T00:04:04.914453038Z",
       "completed_at": null
     }
   ],
@@ -243,6 +267,24 @@
       "verdict": "continue",
       "started_at": "2026-02-19T23:19:53.080249212Z",
       "completed_at": "2026-02-19T23:26:11.281805702Z"
+    },
+    {
+      "loop_number": 9,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/009-completion/20260219235425-termination-request.md",
+        "verdict": "loops/009-completion/20260220000113-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-19T23:54:25.714295127Z",
+      "completed_at": "2026-02-20T00:01:13.177317921Z"
     }
   ],
   "session_store": {

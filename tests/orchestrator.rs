@@ -522,7 +522,14 @@ async fn dry_run_does_not_checkout_project_branch() {
 
     let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
-    assert_eq!(state.current_loop, 0);
+    // No checkpoint commits exist after dry-run; reconstruction defaults to loop 1.
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after dry-run"
+    );
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
+    assert_eq!(state.phase_iteration, 1);
     assert_eq!(state.status, ProjectStatus::Pending);
 }
 
@@ -604,7 +611,14 @@ async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
 
     let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
-    assert_eq!(state.current_loop, 0);
+    // Dirty-tree rejection prevents any loops; reconstruction defaults to loop 1.
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after dirty-tree rejection"
+    );
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
+    assert_eq!(state.phase_iteration, 1);
     assert_eq!(state.status, ProjectStatus::Pending);
 }
 
@@ -1358,8 +1372,8 @@ async fn review_iteration_limit_rollback() {
         "phase_iteration should be reset to 1"
     );
     assert_eq!(
-        state.current_loop, 0,
-        "current_loop should be 0 after rollback"
+        state.current_loop, 1,
+        "current_loop should be 1 after rollback (no-checkpoint default)"
     );
     // With checkpoint commits, new_module.rs is committed during the
     // implementing→reviewing phase transition and persists in git history
@@ -2536,7 +2550,10 @@ async fn qa_limit_exceeded_rolls_back() {
     );
     assert_eq!(state.current_phase, Phase::Planning);
     assert_eq!(state.phase_iteration, 1);
-    assert_eq!(state.current_loop, 0);
+    assert_eq!(
+        state.current_loop, 1,
+        "current_loop should be 1 after QA limit rollback (no-checkpoint default)"
+    );
 }
 
 // resume_from_phase_qa was removed: it depended on save_project_state to

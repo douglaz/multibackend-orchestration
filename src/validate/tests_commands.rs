@@ -284,7 +284,7 @@ fn rollback_resets_phase(h: &RalphHarness) -> TestResult {
             .expect("load_state after rollback failed");
         // With checkpoint-based state derivation, the rollback removes loop
         // artifacts but checkpoint commits on the remote may still influence
-        // reconstruction.  Verify the loop count is zero after rollback.
+        // reconstruction.  Verify the no-checkpoint baseline tuple.
         let loops = state["loops"]
             .as_array()
             .expect("loops should be an array");
@@ -293,6 +293,8 @@ fn rollback_resets_phase(h: &RalphHarness) -> TestResult {
             "expected no loops after rollback to 0, got {}",
             loops.len()
         );
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
     })
 }
 
