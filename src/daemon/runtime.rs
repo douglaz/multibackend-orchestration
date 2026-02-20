@@ -152,12 +152,14 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     loop {
         iteration = iteration.saturating_add(1);
 
-        // Collect finished children
-        collect_children(config, &mut children).await;
-
         // Kill children whose issues were externally aborted (label changed
         // from ralph:in-progress to ralph:failed via CLI `daemon abort`).
+        // Runs before collect_children so that a fast-finishing aborted task
+        // is not mistakenly treated as a normal success.
         kill_aborted_children(config, &mut children).await;
+
+        // Collect finished children
+        collect_children(config, &mut children).await;
 
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children).await;

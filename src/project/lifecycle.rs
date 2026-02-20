@@ -288,7 +288,25 @@ fn reconstruct_project_state_internal(
     // fallback).  When no checkpoint exists, derive_position defaults to
     // loop=1, phase=planning.  The loop 1→0 remap is removed.
     state.current_loop = checkpoint_loop;
-    state.current_phase = checkpoint_phase;
+    state.current_phase = checkpoint_phase.clone();
+
+    // When a real checkpoint exists and the phase is not Planning, the
+    // current loop is still actively mid-workflow — override any
+    // artifact-based Completed status.  For example, review-approved.md may
+    // exist while the checkpoint phase is Committing (after --until-review);
+    // marking the loop as Completed would make has_in_progress_loop() false
+    // and the orchestrator would skip finishing the commit phase on resume.
+    //
+    // Skip this override when checkpoint_phase is Planning, because the
+    // "committing -> planning" transition proves the loop completed.  Also
+    // skip in non-git contexts where checkpoint_commits is empty.
+    if !checkpoint_commits.is_empty() && checkpoint_phase != Phase::Planning {
+        if let Some(current) = state.loops.iter_mut().find(|l| l.loop_number == checkpoint_loop) {
+            if current.status == LoopStatus::Completed {
+                current.status = LoopStatus::InProgress;
+            }
+        }
+    }
 
     state.phase_iteration = infer_phase_iteration(&state);
 

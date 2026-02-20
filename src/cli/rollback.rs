@@ -241,6 +241,23 @@ fn resolve_hard_reset_ref(
         .iter()
         .find(|loop_state| loop_state.loop_number == target_loop_number);
 
+    if target_feature.is_none() && target_completion.is_none() && target_loop_number != 0 {
+        return Err(RalphError::Validation(format!(
+            "loop {} does not exist",
+            target_loop_number
+        )));
+    }
+
+    // Prefer checkpoint commit for the target loop — this is authoritative
+    // and works for both legacy-tagged and checkpoint-only loops, avoiding
+    // the risk of find_prior_tag returning an older loop's tag.
+    let branch = resolve_branch_name(&workspace.config.git.branch_format, project_id);
+    if let Some(hash) = find_checkpoint_commit(repo_root, &branch, project_id, target_loop_number)?
+    {
+        return Ok(hash);
+    }
+
+    // Fall back to tag-based resolution.
     let desired_ref = if target_loop_number == 0 {
         None
     } else if let Some(feature) = target_feature {
@@ -272,21 +289,11 @@ fn resolve_hard_reset_ref(
             target_loop_number.saturating_sub(1),
         )?
     } else {
-        return Err(RalphError::Validation(format!(
-            "loop {} does not exist",
-            target_loop_number
-        )));
+        None
     };
 
     if let Some(reference) = desired_ref {
         return Ok(reference);
-    }
-
-    // Fall back to checkpoint commits when tags are not available.
-    let branch = resolve_branch_name(&workspace.config.git.branch_format, project_id);
-    if let Some(hash) = find_checkpoint_commit(repo_root, &branch, project_id, target_loop_number)?
-    {
-        return Ok(hash);
     }
 
     resolve_project_base_commit(workspace, state, project_id, repo_root)
