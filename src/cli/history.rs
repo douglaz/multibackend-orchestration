@@ -127,17 +127,6 @@ fn collect_checkpoint_history(workspace: &Workspace, project_id: &str) -> Result
     Ok(entries)
 }
 
-fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
-    match phase {
-        crate::project::state::Phase::Planning => "planning",
-        crate::project::state::Phase::Implementing => "implementing",
-        crate::project::state::Phase::QA => "qa",
-        crate::project::state::Phase::Reviewing => "reviewing",
-        crate::project::state::Phase::Committing => "committing",
-        crate::project::state::Phase::Completing => "completing",
-    }
-}
-
 fn loop_status_label(status: &crate::project::state::LoopStatus) -> &'static str {
     match status {
         crate::project::state::LoopStatus::Pending => "pending",

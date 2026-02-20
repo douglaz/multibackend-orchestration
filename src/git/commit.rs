@@ -339,7 +339,6 @@ mod tests {
             .current_dir(repo)
             .status()
             .expect("git command should execute");
-<<<<<<< HEAD
         assert!(
             status.success(),
             "git command failed: git {}",

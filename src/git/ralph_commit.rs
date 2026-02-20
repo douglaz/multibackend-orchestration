@@ -325,8 +325,9 @@ fn parse_phase(value: &str, source: &str) -> Result<Phase> {
         "reviewing" => Ok(Phase::Reviewing),
         "committing" => Ok(Phase::Committing),
         "completing" => Ok(Phase::Completing),
+        "final_review" => Ok(Phase::FinalReview),
         _ => Err(RalphError::ParseError(format!(
-            "invalid phase '{value}' in {source}; expected one of planning, implementing, qa, reviewing, committing, completing"
+            "invalid phase '{value}' in {source}; expected one of planning, implementing, qa, reviewing, committing, completing, final_review"
         ))),
     }
 }
@@ -339,6 +340,7 @@ fn phase_label(phase: &Phase) -> &'static str {
         Phase::Reviewing => "reviewing",
         Phase::Committing => "committing",
         Phase::Completing => "completing",
+        Phase::FinalReview => "final_review",
     }
 }
 

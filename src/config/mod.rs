@@ -1031,6 +1031,7 @@ mod tests {
     #[test]
     fn resolve_effective_config_rejects_when_unique_reviewer_count_below_minimum() {
         let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
         global.workflow.final_review_backends = vec![
             "claude".to_owned(),
             "claude".to_owned(),
@@ -1054,6 +1055,7 @@ mod tests {
     #[test]
     fn resolve_effective_config_deduplicates_final_review_backends_before_minimum_check() {
         let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
         global.workflow.final_review_backends = vec![
             "claude".to_owned(),
             "claude".to_owned(),

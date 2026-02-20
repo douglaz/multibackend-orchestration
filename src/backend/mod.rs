@@ -10,8 +10,7 @@ pub use mock::MockBackend;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 

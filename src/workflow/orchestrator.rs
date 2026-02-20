@@ -3061,6 +3061,8 @@ async fn run_final_review_phase(
         loop = state.current_loop,
         "starting final review orchestration phase"
     );
+    let log_dir = workspace_root.join("tmp").join("logs");
+    let project_id = &state.project_id;
     let completion = state.current_completion_attempt().ok_or_else(|| {
         RalphError::Orchestration(
             "current phase is final_review but no completion attempt exists".to_owned(),
@@ -3122,7 +3124,7 @@ async fn run_final_review_phase(
                 "invoking final reviewer..."
             );
             let mut reviewer_log =
-                LogWriter::open(project_dir, Some(loop_number), Some(&loop_slug), "final-reviewer");
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
             let retry_result: ParseRetryResult<FinalReviewerDecision> = execute_with_parse_retries(
                 reviewer_backend_impl,
                 registry,
@@ -3226,7 +3228,7 @@ async fn run_final_review_phase(
             "invoking planner for final-review positions..."
         );
         let mut planner_position_log =
-            LogWriter::open(project_dir, Some(loop_number), Some(&loop_slug), "planner");
+            LogWriter::open(&log_dir, project_id, Some(loop_number), "planner");
         let retry_result: ParseRetryResult<PlannerPositionsDecision> = execute_with_parse_retries(
             planner_backend,
             registry,
@@ -3295,7 +3297,7 @@ async fn run_final_review_phase(
                 "invoking final reviewer vote..."
             );
             let mut vote_log =
-                LogWriter::open(project_dir, Some(loop_number), Some(&loop_slug), "final-reviewer");
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
             let retry_result: ParseRetryResult<VoteDecision> = execute_with_parse_retries(
                 reviewer_backend_impl,
                 registry,
@@ -3380,7 +3382,7 @@ async fn run_final_review_phase(
                 "invoking final-review arbiter..."
             );
             let mut arbiter_log =
-                LogWriter::open(project_dir, Some(loop_number), Some(&loop_slug), "arbiter");
+                LogWriter::open(&log_dir, project_id, Some(loop_number), "arbiter");
             let retry_result: ParseRetryResult<ArbiterDecision> = execute_with_parse_retries(
                 arbiter_backend_impl,
                 registry,

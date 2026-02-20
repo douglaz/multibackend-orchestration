@@ -3016,6 +3016,8 @@ fn setup_workspace_for_final_review(
     git_ok(repo_root, &["add", "mock_final_review.sh"]);
     git_ok(repo_root, &["commit", "-m", "test: add final review mock"]);
 
+    add_local_bare_remote(repo_root);
+
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
 
@@ -3141,7 +3143,7 @@ async fn final_review_no_amendments_completes_project() {
         .expect("run should succeed");
 
     let project_dir = workspace_root.join("projects").join(&project_id);
-    let state = load_project_state(&project_dir).expect("load state");
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.current_phase, Phase::Completing);
     assert_eq!(state.completion_attempts.len(), 1);
@@ -3170,7 +3172,7 @@ async fn final_review_accepted_amendments_restart_to_planning_then_complete() {
         .expect("run should succeed");
 
     let project_dir = workspace_root.join("projects").join(&project_id);
-    let state = load_project_state(&project_dir).expect("load state");
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(
         state.completion_attempts.len(),
@@ -3335,7 +3337,7 @@ async fn final_review_restart_cap_triggers_force_complete() {
         .expect("run should succeed");
 
     let project_dir = workspace_root.join("projects").join(&project_id);
-    let state = load_project_state(&project_dir).expect("load state");
+    let state = reconstruct_project_state_from_project_dir(&project_dir).expect("load state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.completion_attempts.len(), 2);
     assert!(

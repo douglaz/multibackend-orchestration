@@ -741,7 +741,7 @@ fn default_qa_enabled() -> bool {
 }
 
 fn default_final_review_enabled() -> bool {
-    true
+    false
 }
 
 fn default_final_review_backends() -> Vec<String> {
@@ -1059,7 +1059,7 @@ base_branch = "master"
         assert_eq!(config.backends.codex.models, defaults.backends.codex.models);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
-        assert!(config.workflow.final_review_enabled);
+        assert!(!config.workflow.final_review_enabled);
         assert_eq!(
             config.workflow.final_review_backends,
             vec!["claude".to_owned(), "codex".to_owned()]

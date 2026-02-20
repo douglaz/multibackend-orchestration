@@ -409,20 +409,6 @@ fn collect_loop_directories(project_dir: &Path) -> Result<Vec<(u32, String, Path
     Ok(loop_dirs)
 }
 
-pub fn save_project_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
-    let mut normalized = state.clone();
-    if normalized.current_phase == Phase::FinalReview {
-        normalized.phase_iteration = 1;
-    }
-
-    if let Err(reason) = normalized.validate_invariants() {
-        return Err(RalphError::Orchestration(format!(
-            "refusing to save invalid state: {reason}"
-        )));
-    }
-    normalized.save(&project_dir.join("state.json"))
-}
-
 fn collect_loop_artifacts(project_dir: &Path, loop_dir: &Path) -> Result<Vec<ArtifactEntry>> {
     let entries = fs::read_dir(loop_dir)?;
     let mut out = Vec::new();
@@ -770,6 +756,7 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
             .last()
             .map(|review| review.iteration + 1)
             .unwrap_or(1),
+        Phase::FinalReview => 1,
     }
 }
 
