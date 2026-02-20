@@ -1,0 +1,14 @@
+Here's a summary of how each review issue was addressed:
+
+| Issue | Resolution |
+|-------|-----------|
+| **1. State Reconstruction / Resume** | Added explicit `FinalReview` checkpoint guard in `reconstruct_project_state_internal` that overrides `completion.status` to `InProgress` and sets `ProjectStatus::InProgress` when checkpoint phase is `FinalReview`, preventing premature completion. Detailed code placement specified (before the verdict check). |
+| **2. Config Type Feasibility (f64 vs Eq)** | Changed `final_review_consensus_threshold` from `f64` to `u8` (percentage 1–100). This preserves `Eq` derive on `WorkflowConfig`/`GlobalConfig`. Orchestrator converts to `f64` fraction at point of use only. |
+| **3. Config Validation Completeness** | Added full validation table: threshold bounds (1..=100), `min_reviewers >= 1`, `min_reviewers <= backends.len()`, duplicate backend detection, runtime behavior when successful reviewers < min\_reviewers (write artifact, treat as restart). |
+| **4. Default-Enabled Migration Risk** | Changed default from `true` to `false` (opt-in). Existing tests and mocks require zero changes. New tests explicitly set `final_review_enabled = true`. Added `FINAL_REVIEW_MODE` env var for mock scripts. |
+| **5. Template File Creation** | Extended `TEMPLATE_FILES` in `init.rs` with 4 new entries. Existing workspaces use `render_template_with_fallback` (no file needed on disk). New workspaces get all files via `ralph init`. |
+| **6. Config CLI Coverage** | Added all 6 workflow fields, 4 template paths, and per-backend `final_reviewer`/`arbiter` model+timeout entries to the explicit field maps in `config.rs` show/get/set. |
+| **7. Checkpoint Semantics** | Defined explicit checkpoint sequences for no-amendment, restart, force-complete, and arbiter paths. Force-complete emits `final_review -> completing` (not a special checkpoint). Restart count derived solely from `final_review -> planning` commits. |
+| **8. Artifact Model** | Used `backend_slug: String` field on per-backend variants (matching acceptance QA pattern). Added 8 total variant kinds including config, exit, and insufficient-reviewers. Specified deterministic ordering via `Vec<String>` iteration order. |
+| **9. Parser / ID Safety** | Added three-invariant enforcement: missing IDs, extra/unknown IDs, and duplicate IDs all return `ParseError`. Amendment IDs globally unique via `{backend_slug}/{original_id}` prefix. |
+| **10. Amendment Injection Lifecycle** | Defined write-once-per-round, consume-once, delete-on-reentry lifecycle. File overwritten (not appended) per round. Deleted at `Completing` phase entry before completer invocation. Prevents stale accumulation. |

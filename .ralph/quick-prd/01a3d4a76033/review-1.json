@@ -1,0 +1,45 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "State Reconstruction / Resume",
+      "feedback": "The spec misses critical lifecycle updates in `src/project/lifecycle.rs`: today state is marked `Completed` if any completion attempt has `verdict=Complete`, and the non-planning checkpoint override only re-opens feature loops. With `Phase::FinalReview`, this can incorrectly mark projects completed and skip final-review resume. Define explicit status derivation and in-progress handling for completion attempts when checkpoint phase is `final_review`."
+    },
+    {
+      "area": "Config Type Feasibility",
+      "feedback": "Using `f64` for `final_review_consensus_threshold` conflicts with current `Eq` derives on config structs (`WorkflowConfig`, `GlobalConfig`). This will not compile without broader type/derive changes. Use an `Eq`-compatible representation (e.g., rational/int) or explicitly scope the refactor."
+    },
+    {
+      "area": "Config Validation Completeness",
+      "feedback": "Validation rules are underspecified for new fields: threshold bounds (`0 < x <= 1`), `min_reviewers` constraints, deduplication/validation of `final_review_backends`, and behavior when successful reviewers are fewer than `min_reviewers` are not defined."
+    },
+    {
+      "area": "Default-Enabled Migration Risk",
+      "feedback": "Since `final_review_enabled` defaults to `true`, existing completion flows and mocks/tests will change behavior. The spec adds new tests but does not cover updating existing integration/validate suites and mock scripts that currently end at acceptance QA."
+    },
+    {
+      "area": "Template File Creation",
+      "feedback": "Requirement says four new template files must be created, but spec does not include updates to workspace initialization/template emission (`src/cli/init.rs`, related init/auto tests). Adding fallback functions alone does not create files on disk."
+    },
+    {
+      "area": "Config CLI Coverage",
+      "feedback": "`ralph config show/get/set` uses explicit field maps (`src/cli/config.rs`). The spec omits adding new workflow/template keys and related role-model/timeout surfaces, so operators cannot fully inspect/set new config through CLI."
+    },
+    {
+      "area": "Checkpoint Semantics",
+      "feedback": "Force-complete checkpoint behavior is undefined. Also current completion logic emits a final `completing -> completing` checkpoint; spec should explicitly define expected checkpoint sequence for no-amendment, restart, and force-complete paths to keep restart-count derivation deterministic."
+    },
+    {
+      "area": "Artifact Model",
+      "feedback": "Proposed `ArtifactKind` variants are not sufficient as written for per-backend filenames like `final-review-proposals-{backend}.md` and votes. Specify exact mechanism (backend-carrying variant or post-write rename helper) and deterministic ordering for resume probing."
+    },
+    {
+      "area": "Parser / ID Safety",
+      "feedback": "Fail-closed validation currently mentions only missing IDs. The spec should also define rejection of unknown extra IDs and duplicate/colliding amendment IDs across reviewer/planner/vote/arbiter outputs to avoid silent overwrite or nondeterministic decisions."
+    },
+    {
+      "area": "Amendment Injection Lifecycle",
+      "feedback": "Lifecycle of `final-review-amendments-applied.md` is unclear (overwrite vs append vs one-shot consumption). Without explicit rules, planner prompts can repeatedly include stale amendments in later loops."
+    }
+  ]
+}
