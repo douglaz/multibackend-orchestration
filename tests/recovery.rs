@@ -1,7 +1,9 @@
-//! Integration tests for state reconstruction from git and artifacts.
+//! Integration tests for checkpoint-derived state reconstruction.
 //!
-//! These tests verify that `reconstruct_project_state_from_project_dir` correctly
-//! derives workflow position from on-disk artifacts instead of durable state.json.
+//! These tests verify that `reconstruct_project_state_from_project_dir` derives
+//! workflow position exclusively from checkpoint commits on the project branch.
+//! When no checkpoint commit exists, the default position is `loop=1`,
+//! `phase=planning` regardless of which loop artifacts are present on disk.
 
 use std::fs;
 use std::path::Path;
@@ -77,7 +79,7 @@ fn setup_project() -> (TempDir, std::path::PathBuf, String) {
 }
 
 #[test]
-fn reconstructs_default_state_from_fresh_project() {
+fn no_checkpoint_defaults_to_loop_1_planning() {
     let (_temp, workspace_root, project_id) = setup_project();
     let project_dir = workspace_root.join("projects").join(&project_id);
 
@@ -85,17 +87,19 @@ fn reconstructs_default_state_from_fresh_project() {
         .expect("reconstruction should succeed for fresh project");
 
     assert_eq!(state.project_id, project_id);
+    // No checkpoint commit exists, so position defaults to loop=1, planning.
+    assert_eq!(state.current_loop, 1);
     assert_eq!(state.current_phase, Phase::Planning);
     assert!(state.loops.is_empty());
     assert!(state.completion_attempts.is_empty());
 }
 
 #[test]
-fn reconstruction_is_unaffected_by_stale_state_json() {
+fn stale_state_json_does_not_affect_checkpoint_position() {
     let (_temp, workspace_root, project_id) = setup_project();
     let project_dir = workspace_root.join("projects").join(&project_id);
 
-    // Write a stale/corrupt state.json — reconstruction ignores it
+    // Write a stale/corrupt state.json — checkpoint derivation ignores it
     let state_path = project_dir.join("state.json");
     fs::write(&state_path, "{ definitely invalid }").expect("write corrupt state.json");
 
@@ -103,15 +107,17 @@ fn reconstruction_is_unaffected_by_stale_state_json() {
         .expect("reconstruction should succeed even with corrupt state.json on disk");
 
     assert_eq!(state.project_id, project_id);
+    // No checkpoint commit → defaults to loop=1, planning despite state.json
+    assert_eq!(state.current_loop, 1);
     assert_eq!(state.current_phase, Phase::Planning);
 }
 
 #[test]
-fn reconstructs_state_from_loop_artifacts() {
+fn artifacts_without_checkpoint_default_to_loop_1_planning() {
     let (_temp, workspace_root, project_id) = setup_project();
     let project_dir = workspace_root.join("projects").join(&project_id);
 
-    // Create a loop directory with a spec artifact
+    // Create a loop directory with a spec artifact — but no checkpoint commit
     let loop_dir = project_dir.join("loops/001-demo-feature");
     fs::create_dir_all(&loop_dir).expect("create loop dir");
     fs::write(
@@ -123,7 +129,10 @@ fn reconstructs_state_from_loop_artifacts() {
     let state = reconstruct_project_state_from_project_dir(&project_dir)
         .expect("reconstruction should succeed with spec artifact");
 
+    // Loop artifacts are collected but position is checkpoint-derived.
+    // No checkpoint commit → default loop=1, planning.
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].loop_number, 1);
-    assert_eq!(state.current_phase, Phase::Implementing);
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
 }
