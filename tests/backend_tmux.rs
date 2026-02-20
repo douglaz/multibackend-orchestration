@@ -880,3 +880,126 @@ async fn tmux_backend_returns_actionable_error_on_window_disappearance() {
         other => panic!("expected BackendCommandFailed, got: {other:?}"),
     }
 }
+
+// --- Log artifact absence tests ---
+// These tests verify that tmux backend does NOT write agent-output-*.log
+// artifacts into loop directories, enforcing the durable-state contract
+// (only .ralph/tmp/logs receives transient diagnostics).
+
+#[tokio::test]
+async fn tmux_backend_success_does_not_write_loop_dir_log_artifact() {
+    let loop_dir = tempfile::tempdir().expect("tempdir for loop_dir");
+    let shared_ctx = SharedTmuxContext::default();
+    shared_ctx
+        .set(TmuxExecutionContext {
+            loop_number: Some(1),
+            role: Some("implementer".to_owned()),
+            loop_dir: Some(loop_dir.path().to_path_buf()),
+            session_id: None,
+        })
+        .await;
+
+    let runner = MockTmuxRunner::with_responses(vec![
+        Ok(String::new()),    // has-session
+        Ok("1\n".to_owned()), // create_window
+        Ok(String::new()),    // kill_window
+    ]);
+
+    let cli = CliBackend::new(
+        "log-test",
+        "echo".to_owned(),
+        vec![],
+        Duration::from_secs(5),
+        BTreeMap::new(),
+    );
+    let backend = TmuxBackend::new(
+        cli,
+        "log-test-session".to_owned(),
+        runner,
+        0,
+        shared_ctx,
+    );
+
+    let watcher = spawn_file_watcher("log-test-session", "hello from tmux", 0);
+    let result = backend.execute("test prompt").await;
+    watcher.await.unwrap();
+
+    assert!(result.is_ok(), "execute should succeed: {result:?}");
+
+    // Verify NO agent-output-*.log files were created in the loop dir
+    let entries: Vec<_> = std::fs::read_dir(loop_dir.path())
+        .expect("read loop dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.contains("agent-output") && name.ends_with(".log")
+        })
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "tmux backend must NOT write agent-output-*.log to loop dir; found: {:?}",
+        entries
+            .iter()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn tmux_backend_failure_does_not_write_loop_dir_log_artifact() {
+    let loop_dir = tempfile::tempdir().expect("tempdir for loop_dir");
+    let shared_ctx = SharedTmuxContext::default();
+    shared_ctx
+        .set(TmuxExecutionContext {
+            loop_number: Some(2),
+            role: Some("reviewer".to_owned()),
+            loop_dir: Some(loop_dir.path().to_path_buf()),
+            session_id: None,
+        })
+        .await;
+
+    let runner = MockTmuxRunner::with_responses(vec![
+        Ok(String::new()),    // has-session
+        Ok("1\n".to_owned()), // create_window
+        Ok(String::new()),    // kill_window
+    ]);
+
+    let cli = CliBackend::new(
+        "log-fail-test",
+        "false".to_owned(),
+        vec![],
+        Duration::from_secs(5),
+        BTreeMap::new(),
+    );
+    let backend = TmuxBackend::new(
+        cli,
+        "log-fail-session".to_owned(),
+        runner,
+        0,
+        shared_ctx,
+    );
+
+    let watcher = spawn_file_watcher("log-fail-session", "error output", 1);
+    let result = backend.execute("test prompt").await;
+    watcher.await.unwrap();
+
+    assert!(result.is_err(), "execute should fail with non-zero exit");
+
+    // Verify NO agent-output-*.log files were created in the loop dir
+    let entries: Vec<_> = std::fs::read_dir(loop_dir.path())
+        .expect("read loop dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.contains("agent-output") && name.ends_with(".log")
+        })
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "tmux backend must NOT write agent-output-*.log to loop dir on failure; found: {:?}",
+        entries
+            .iter()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+}

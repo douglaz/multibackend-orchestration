@@ -6,7 +6,6 @@
 //! we test the underlying data access patterns and serialization here.
 
 use chrono::Utc;
-use ralph::cli::history::format_qa_line;
 use ralph::project::state::{
     FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType, Phase,
     ProjectState, ProjectStatus, QaExchange,
@@ -345,71 +344,5 @@ fn legacy_state_without_qa_fields_deserializes_cleanly() {
         .expect("legacy state should pass invariants");
 }
 
-// --- Output-level history --verbose QA line formatting tests ---
-
-#[test]
-fn history_verbose_qa_line_zero_attempts() {
-    let line = format_qa_line(&[]);
-    assert_eq!(line, "QA: 0 attempts, last=none, report=none");
-}
-
-#[test]
-fn history_verbose_qa_line_single_pass() {
-    let qa = vec![QaExchange {
-        iteration: 1,
-        passed: true,
-        report: "loops/001-feat/qa-001-pass.md".to_owned(),
-        implementer_response: None,
-    }];
-    let line = format_qa_line(&qa);
-    assert_eq!(
-        line,
-        "QA: 1 attempts, last=pass, report=loops/001-feat/qa-001-pass.md"
-    );
-}
-
-#[test]
-fn history_verbose_qa_line_multiple_with_final_fail() {
-    let qa = vec![
-        QaExchange {
-            iteration: 1,
-            passed: false,
-            report: "loops/001-feat/qa-001-fail.md".to_owned(),
-            implementer_response: Some("loops/001-feat/impl-qa-response-001.md".to_owned()),
-        },
-        QaExchange {
-            iteration: 2,
-            passed: false,
-            report: "loops/001-feat/qa-002-fail.md".to_owned(),
-            implementer_response: None,
-        },
-    ];
-    let line = format_qa_line(&qa);
-    assert_eq!(
-        line,
-        "QA: 2 attempts, last=fail, report=loops/001-feat/qa-002-fail.md"
-    );
-}
-
-#[test]
-fn history_verbose_qa_line_fail_then_pass() {
-    let qa = vec![
-        QaExchange {
-            iteration: 1,
-            passed: false,
-            report: "loops/001-feat/qa-001-fail.md".to_owned(),
-            implementer_response: Some("loops/001-feat/impl-qa-response-001.md".to_owned()),
-        },
-        QaExchange {
-            iteration: 2,
-            passed: true,
-            report: "loops/001-feat/qa-002-pass.md".to_owned(),
-            implementer_response: None,
-        },
-    ];
-    let line = format_qa_line(&qa);
-    assert_eq!(
-        line,
-        "QA: 2 attempts, last=pass, report=loops/001-feat/qa-002-pass.md"
-    );
-}
+// format_qa_line tests removed: format_qa_line was removed along with the
+// durable state-based history rendering path.

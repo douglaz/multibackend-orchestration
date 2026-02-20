@@ -158,13 +158,9 @@ impl RalphHarness {
     }
 
     pub fn load_state(&self, project_id: &str) -> Result<Value> {
-        let path = self
-            .repo_root
-            .join(".ralph")
-            .join("projects")
-            .join(project_id)
-            .join("state.json");
-        load_json(&path)
+        let stdout = self.ralph_ok(["project", "show", project_id, "--json"])?;
+        let parsed: Value = serde_json::from_str(&stdout)?;
+        Ok(parsed.get("state").cloned().unwrap_or(Value::Null))
     }
 
     /// Read the worktree-local active-project file (`.git/ralph-active-project`).
@@ -322,6 +318,10 @@ impl RalphHarness {
             .join(project_id)
     }
 
+    pub fn tmp_log_dir(&self) -> PathBuf {
+        self.repo_root.join(".ralph").join("tmp").join("logs")
+    }
+
     pub fn loop_dir(&self, project_id: &str, loop_number: u32) -> Result<Option<PathBuf>> {
         let loops_dir = self.project_dir(project_id).join("loops");
         let entries = match fs::read_dir(&loops_dir) {
@@ -343,6 +343,30 @@ impl RalphHarness {
         }
 
         Ok(None)
+    }
+
+    /// Run ralph with additional directories prepended to `$PATH`.
+    /// Used to inject mock binaries (e.g. mock `tmux`) for tmux-enabled tests.
+    pub fn ralph_with_path<I, S>(&self, args: I, extra_path_dirs: &[&Path]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = self.prepare_cli_args(args);
+        let mut command = Command::new(&self.ralph_bin);
+        command.args(args).current_dir(&self.repo_root);
+
+        // Prepend extra directories to PATH using std::env::join_paths for
+        // robust, portable path separator handling.
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let existing: Vec<PathBuf> = std::env::split_paths(&current_path).collect();
+        let mut all_paths: Vec<&Path> = extra_path_dirs.to_vec();
+        all_paths.extend(existing.iter().map(|p| p.as_path()));
+        let new_path = std::env::join_paths(&all_paths)
+            .expect("PATH components should not contain invalid characters");
+        command.env("PATH", new_path);
+
+        Ok(command.output()?)
     }
 
     pub fn list_artifacts(&self, project_id: &str, loop_number: u32) -> Result<Vec<PathBuf>> {
@@ -368,12 +392,27 @@ fn initialize_git_repo(repo_root: &Path, with_initial_commit: bool) -> Result<()
     run_git(repo_root, &["init"])?;
     run_git(repo_root, &["config", "user.email", "validate@example.com"])?;
     run_git(repo_root, &["config", "user.name", "Validate Harness"])?;
+    let origin_bare = repo_root.parent().unwrap_or(repo_root).join("origin.git");
+    run_git(
+        repo_root,
+        &["init", "--bare", origin_bare.to_string_lossy().as_ref()],
+    )?;
+    run_git(
+        repo_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin_bare.to_string_lossy().as_ref(),
+        ],
+    )?;
 
     if with_initial_commit {
         fs::write(repo_root.join(".gitkeep"), "")?;
         run_git(repo_root, &["add", ".gitkeep"])?;
         run_git(repo_root, &["commit", "-m", "chore: initial commit"])?;
         run_git(repo_root, &["branch", "-M", "master"])?;
+        run_git(repo_root, &["push", "-u", "origin", "master"])?;
     }
 
     Ok(())
@@ -402,11 +441,6 @@ fn inject_daemon_data_dir_arg(data_dir: &Path, args: &mut Vec<OsString>) {
 
     args.insert(2, data_dir.as_os_str().to_os_string());
     args.insert(2, OsString::from("--data-dir"));
-}
-
-fn load_json(path: &Path) -> Result<Value> {
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
 }
 
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {

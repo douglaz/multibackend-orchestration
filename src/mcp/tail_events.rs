@@ -8,7 +8,7 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 
 use crate::project::artifacts::parse_artifact_filename_timestamp;
-use crate::project::lifecycle::load_project_state;
+use crate::project::lifecycle::reconstruct_project_state_from_project_dir;
 use crate::project::state::{CompletionVerdict, LoopStatus};
 
 const EVENT_ORDER_ARTIFACT: u8 = 0;
@@ -175,12 +175,7 @@ fn collect_artifact_events(project_dir: &Path, project_id: &str) -> crate::Resul
 }
 
 fn collect_state_events(project_dir: &Path, project_id: &str) -> Vec<RawEvent> {
-    let state_path = project_dir.join("state.json");
-    if !state_path.exists() {
-        return Vec::new();
-    }
-
-    let state = match load_project_state(project_dir) {
+    let state = match reconstruct_project_state_from_project_dir(project_dir) {
         Ok(state) => state,
         Err(_) => return Vec::new(),
     };
@@ -472,56 +467,9 @@ mod tests {
     }
 
     #[test]
-    fn collects_state_and_git_events_as_json() {
-        let temp = tempdir().unwrap();
-        let state = demo_project_state();
-        state.save(&temp.path().join("state.json")).unwrap();
-
-        let events = collect_tail_events(temp.path(), "demo", None).unwrap();
-        assert!(!events.is_empty());
-
-        let state_events: Vec<&Value> = events
-            .iter()
-            .filter(|e| e["event_type"] == "state")
-            .collect();
-        assert!(state_events.len() >= 3);
-
-        let git_events: Vec<&Value> = events.iter().filter(|e| e["event_type"] == "git").collect();
-        assert_eq!(git_events.len(), 1);
-        assert_eq!(git_events[0]["commit_hash"], "abc123");
-        assert_eq!(git_events[0]["loop_number"], 1);
-    }
-
-    #[test]
-    fn last_truncates_events() {
-        let temp = tempdir().unwrap();
-        let state = demo_project_state();
-        state.save(&temp.path().join("state.json")).unwrap();
-
-        let all = collect_tail_events(temp.path(), "demo", None).unwrap();
-        let last2 = collect_tail_events(temp.path(), "demo", Some(2)).unwrap();
-
-        assert_eq!(last2.len(), 2);
-        assert_eq!(last2[0], all[all.len() - 2]);
-        assert_eq!(last2[1], all[all.len() - 1]);
-    }
-
-    #[test]
-    fn returns_empty_when_no_state() {
+    fn returns_empty_when_no_artifacts() {
         let temp = tempdir().unwrap();
         let events = collect_tail_events(temp.path(), "demo", None).unwrap();
         assert!(events.is_empty());
-    }
-
-    #[test]
-    fn deterministic_sort_ordering() {
-        let temp = tempdir().unwrap();
-        let state = demo_project_state();
-        state.save(&temp.path().join("state.json")).unwrap();
-
-        let events1 = collect_tail_events(temp.path(), "demo", None).unwrap();
-        let events2 = collect_tail_events(temp.path(), "demo", None).unwrap();
-
-        assert_eq!(events1, events2);
     }
 }

@@ -1,12 +1,7 @@
 use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -56,7 +51,12 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn lookup(&self, loop_number: u32, role: &str, backend_spec: &str) -> Option<&SessionRecord> {
+    pub fn lookup(
+        &self,
+        loop_number: u32,
+        role: &str,
+        backend_spec: &str,
+    ) -> Option<&SessionRecord> {
         self.records.iter().find(|r| {
             r.loop_number == loop_number && r.role == role && r.backend_spec == backend_spec
         })
@@ -242,22 +242,6 @@ impl ProjectState {
             completion_attempts: Vec::new(),
             session_store: SessionStore::default(),
         }
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = fs::read_to_string(path)?;
-        let mut state: Self = serde_json::from_str(&raw)?;
-        state.migrate_legacy_acceptance_results();
-        Ok(state)
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let raw = serde_json::to_string_pretty(self)?;
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut temp = tempfile::NamedTempFile::new_in(dir)?;
-        temp.write_all(raw.as_bytes())?;
-        temp.persist(path).map_err(|err| err.error)?;
-        Ok(())
     }
 
     pub fn next_loop_number(&self) -> u32 {
@@ -446,11 +430,6 @@ impl ProjectState {
         Ok(())
     }
 
-    fn migrate_legacy_acceptance_results(&mut self) {
-        for attempt in &mut self.completion_attempts {
-            attempt.artifacts.migrate_legacy_acceptance_result();
-        }
-    }
 }
 
 impl CompletionLoopArtifacts {
@@ -489,29 +468,11 @@ impl CompletionLoopArtifacts {
         })
     }
 
-    fn migrate_legacy_acceptance_result(&mut self) {
-        if self.acceptance_results.is_empty() {
-            if let (Some(artifact), Some(passed)) =
-                (self.acceptance_result.clone(), self.acceptance_passed)
-            {
-                self.acceptance_results.push(AcceptanceQaResult {
-                    backend: "unknown".to_owned(),
-                    passed,
-                    artifact,
-                });
-            }
-        }
-
-        self.acceptance_result = None;
-        self.acceptance_passed = None;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
-    use tempfile::tempdir;
-
     use super::{default_created_at, ProjectState};
 
     #[test]
@@ -557,21 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn save_is_atomic_and_roundtrips() {
-        let temp = tempdir().expect("temp dir");
-        let state_path = temp.path().join("state.json");
-        let state = ProjectState::new("demo", "Demo", "abc123", None);
-
-        state.save(&state_path).expect("save state");
-        assert!(state_path.exists());
-
-        let loaded = ProjectState::load(&state_path).expect("load state");
-        assert_eq!(loaded.project_id, state.project_id);
-        assert_eq!(loaded.project_name, state.project_name);
-        assert_eq!(loaded.created_at, state.created_at);
-    }
-
-    #[test]
     fn legacy_state_without_session_store_deserializes_to_empty() {
         let state = ProjectState::new("demo", "Demo", "abc123", None);
         let mut value = serde_json::to_value(&state).expect("serialize state");
@@ -580,8 +526,7 @@ mod tests {
             .expect("state should serialize as object")
             .remove("session_store");
 
-        let parsed: ProjectState =
-            serde_json::from_value(value).expect("deserialize legacy state");
+        let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
         assert!(parsed.session_store.records.is_empty());
     }
 
@@ -714,7 +659,11 @@ mod tests {
         });
         // remove_loop must clear session records for that loop (spec D1)
         state.remove_loop(1);
-        assert_eq!(state.session_store.records.len(), 1, "only loop 2 session should remain");
+        assert_eq!(
+            state.session_store.records.len(),
+            1,
+            "only loop 2 session should remain"
+        );
         assert_eq!(state.session_store.records[0].loop_number, 2);
     }
 }

@@ -5,7 +5,8 @@ use crate::cli::{ProjectArgs, ProjectCommand};
 use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
 use crate::git::is_git_repo;
 use crate::project::lifecycle::{
-    create_project, load_project_state, validate_project_id, CreateProjectOptions, PromptSource,
+    create_project, reconstruct_project_state, validate_project_id, CreateProjectOptions,
+    PromptSource,
 };
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
@@ -95,8 +96,7 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             }
 
             let summary = workspace.load_project_summary(&project_id)?;
-            let project_dir = workspace.project_dir(&project_id);
-            let state = load_project_state(&project_dir)?;
+            let state = reconstruct_project_state(&workspace, &project_id)?;
 
             if show_args.json {
                 let value = serde_json::json!({

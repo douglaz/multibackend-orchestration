@@ -5,23 +5,22 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::warn;
 
+/// Derives a deterministic, collision-safe log file path under `.ralph/tmp/logs`.
+///
+/// Filenames encode project, loop, and role to prevent collisions:
+/// - With loop: `{log_dir}/{project_id}-{loop_number:03}-{role}.log`
+/// - Without loop: `{log_dir}/{project_id}-{role}.log`
 pub fn log_path_for_role(
-    project_dir: &Path,
+    log_dir: &Path,
+    project_id: &str,
     loop_number: Option<u32>,
-    slug: Option<&str>,
     role: &str,
 ) -> PathBuf {
-    let filename = format!("agent-output-{role}.log");
-    match loop_number {
-        Some(loop_number) => {
-            let dir_name = match slug {
-                Some(s) => format!("{loop_number:03}-{s}"),
-                None => format!("{loop_number:03}"),
-            };
-            project_dir.join("loops").join(dir_name).join(filename)
-        }
-        None => project_dir.join(filename),
-    }
+    let filename = match loop_number {
+        Some(n) => format!("{project_id}-{n:03}-{role}.log"),
+        None => format!("{project_id}-{role}.log"),
+    };
+    log_dir.join(filename)
 }
 
 pub fn ensure_log_parent(path: &Path) -> io::Result<()> {
@@ -88,13 +87,15 @@ impl LogWriter {
     /// Returns a writer that is always usable — if the open fails, the writer
     /// is in a disabled state and all subsequent writes are silently skipped
     /// after a single warning.
+    ///
+    /// `log_dir` should point to `.ralph/tmp/logs`.
     pub fn open(
-        project_dir: &Path,
+        log_dir: &Path,
+        project_id: &str,
         loop_number: Option<u32>,
-        slug: Option<&str>,
         role: &str,
     ) -> Self {
-        let path = log_path_for_role(project_dir, loop_number, slug, role);
+        let path = log_path_for_role(log_dir, project_id, loop_number, role);
         let file = match Self::try_open(&path) {
             Ok(f) => Some(f),
             Err(e) => {
@@ -177,55 +178,53 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn derives_loop_scoped_log_path_without_slug() {
-        let project_dir = Path::new("/tmp/project");
-        let path = log_path_for_role(project_dir, Some(7), None, "implementer");
+    fn derives_loop_scoped_log_path() {
+        let log_dir = Path::new("/tmp/logs");
+        let path = log_path_for_role(log_dir, "issue-42", Some(7), "implementer");
         assert_eq!(
             path,
-            Path::new("/tmp/project/loops/007/agent-output-implementer.log")
+            Path::new("/tmp/logs/issue-42-007-implementer.log")
         );
     }
 
     #[test]
-    fn derives_loop_scoped_log_path_with_slug() {
-        let project_dir = Path::new("/tmp/project");
-        let path = log_path_for_role(project_dir, Some(7), Some("add-auth"), "implementer");
+    fn derives_prompt_reviewer_log_path_when_loop_is_none() {
+        let log_dir = Path::new("/tmp/logs");
+        let path = log_path_for_role(log_dir, "issue-42", None, "prompt-reviewer");
         assert_eq!(
             path,
-            Path::new("/tmp/project/loops/007-add-auth/agent-output-implementer.log")
-        );
-    }
-
-    #[test]
-    fn derives_prompt_reviewer_root_log_path_when_loop_is_none() {
-        let project_dir = Path::new("/tmp/project");
-        let path = log_path_for_role(project_dir, None, None, "prompt-reviewer");
-        assert_eq!(
-            path,
-            Path::new("/tmp/project/agent-output-prompt-reviewer.log")
+            Path::new("/tmp/logs/issue-42-prompt-reviewer.log")
         );
     }
 
     #[test]
     fn formats_loop_number_edges_with_three_digits() {
-        let project_dir = Path::new("/tmp/project");
-        let loop_zero = log_path_for_role(project_dir, Some(0), None, "planner");
-        let loop_max = log_path_for_role(project_dir, Some(999), None, "planner");
+        let log_dir = Path::new("/tmp/logs");
+        let loop_zero = log_path_for_role(log_dir, "issue-1", Some(0), "planner");
+        let loop_max = log_path_for_role(log_dir, "issue-1", Some(999), "planner");
 
         assert_eq!(
             loop_zero,
-            Path::new("/tmp/project/loops/000/agent-output-planner.log")
+            Path::new("/tmp/logs/issue-1-000-planner.log")
         );
         assert_eq!(
             loop_max,
-            Path::new("/tmp/project/loops/999/agent-output-planner.log")
+            Path::new("/tmp/logs/issue-1-999-planner.log")
         );
+    }
+
+    #[test]
+    fn collision_safe_across_projects() {
+        let log_dir = Path::new("/tmp/logs");
+        let path_a = log_path_for_role(log_dir, "issue-1", Some(1), "planner");
+        let path_b = log_path_for_role(log_dir, "issue-2", Some(1), "planner");
+        assert_ne!(path_a, path_b, "different projects should produce different paths");
     }
 
     #[test]
     fn creates_missing_parent_directories() {
         let temp = tempdir().expect("tempdir");
-        let log_path = temp.path().join("loops/004/agent-output-reviewer.log");
+        let log_path = temp.path().join("tmp/logs/issue-1-004-reviewer.log");
 
         ensure_log_parent(&log_path).expect("parent directories should be created");
 
@@ -288,9 +287,9 @@ mod tests {
     #[test]
     fn log_writer_opens_and_appends() {
         let temp = tempdir().expect("tempdir");
-        let project_dir = temp.path();
+        let log_dir = temp.path();
 
-        let mut writer = LogWriter::open(project_dir, Some(1), None, "planner");
+        let mut writer = LogWriter::open(log_dir, "issue-1", Some(1), "planner");
         assert!(writer.is_active());
 
         writer.write_attempt_separator("claude(opus)", false);
@@ -309,7 +308,7 @@ mod tests {
     #[test]
     fn log_writer_preserves_cr_and_partial_line_bytes() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(9), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-9", Some(9), "planner");
 
         writer.write_bytes(b"progress 10%\r");
         writer.write_bytes(b"progress 20%\r");
@@ -322,7 +321,7 @@ mod tests {
     #[test]
     fn log_writer_timeout_footer_appends() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(3), None, "implementer");
+        let mut writer = LogWriter::open(temp.path(), "issue-3", Some(3), "implementer");
 
         writer.write_bytes(b"partial output");
         writer.write_timeout_footer("2026-01-01T00:00:00Z");
@@ -335,21 +334,21 @@ mod tests {
     #[test]
     fn log_writer_appends_across_instances() {
         let temp = tempdir().expect("tempdir");
-        let project_dir = temp.path();
+        let log_dir = temp.path();
 
         {
-            let mut w = LogWriter::open(project_dir, Some(1), None, "implementer");
+            let mut w = LogWriter::open(log_dir, "issue-1", Some(1), "implementer");
             w.write_attempt_separator("claude", false);
             w.write_str("first run\n");
         }
         {
-            let mut w = LogWriter::open(project_dir, Some(1), None, "implementer");
+            let mut w = LogWriter::open(log_dir, "issue-1", Some(1), "implementer");
             w.write_attempt_separator("codex", false);
             w.write_str("second run\n");
         }
 
         let content =
-            fs::read_to_string(log_path_for_role(project_dir, Some(1), None, "implementer"))
+            fs::read_to_string(log_path_for_role(log_dir, "issue-1", Some(1), "implementer"))
                 .expect("read log");
         assert!(content.contains("first run"));
         assert!(content.contains("second run"));
@@ -358,7 +357,7 @@ mod tests {
     #[test]
     fn log_writer_attempt_counter_increments() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), None, None, "prompt-reviewer");
+        let mut writer = LogWriter::open(temp.path(), "issue-1", None, "prompt-reviewer");
 
         assert_eq!(writer.attempt(), 0);
         writer.write_attempt_separator("backend-a", false);
@@ -370,19 +369,18 @@ mod tests {
     #[test]
     fn log_writer_disabled_on_bad_path_continues_silently() {
         // Open a writer against a path that can't be opened (device file as dir).
-        let writer = LogWriter::open(Path::new("/dev/null"), Some(1), None, "planner");
-        // /dev/null is a file, so creating /dev/null/loops/001/ will fail.
-        // The writer should be disabled but not panic.
+        // /dev/null is not a directory, so creating a file under it will fail.
+        let writer = LogWriter::open(Path::new("/dev/null/nonexistent"), "issue-1", Some(1), "planner");
         assert!(!writer.is_active());
     }
 
     #[test]
-    fn log_writer_prompt_reviewer_uses_root_path() {
+    fn log_writer_prompt_reviewer_uses_flat_path() {
         let temp = tempdir().expect("tempdir");
-        let writer = LogWriter::open(temp.path(), None, None, "prompt-reviewer");
+        let writer = LogWriter::open(temp.path(), "issue-42", None, "prompt-reviewer");
         assert_eq!(
             writer.path(),
-            temp.path().join("agent-output-prompt-reviewer.log")
+            temp.path().join("issue-42-prompt-reviewer.log")
         );
     }
 
@@ -393,7 +391,7 @@ mod tests {
     #[test]
     fn timeout_retry_path_attempt_numbering() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(1), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-1", Some(1), "planner");
 
         // Simulate 3 timeout retries as in execute_with_timeout_retries:
         // for attempt in 1..=3 { is_fallback = writer.attempt() > 0; write_separator; }
@@ -438,7 +436,7 @@ mod tests {
     #[test]
     fn parse_retry_path_attempt_numbering() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(1), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-1", Some(1), "planner");
 
         // Step 1: First backend call succeeds (execute_with_timeout_retries, 1 attempt)
         let is_fallback = writer.attempt() > 0;
@@ -490,7 +488,7 @@ mod tests {
     #[test]
     fn mixed_timeout_and_parse_retry_numbering() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
+        let mut writer = LogWriter::open(temp.path(), "issue-2", Some(2), "implementer");
 
         // execute_with_timeout_retries: attempt 1 times out
         let is_fallback = writer.attempt() > 0;
@@ -531,7 +529,7 @@ mod tests {
     #[test]
     fn fallback_flag_semantics_locked_down() {
         let temp = tempdir().expect("tempdir");
-        let mut writer = LogWriter::open(temp.path(), Some(1), None, "reviewer");
+        let mut writer = LogWriter::open(temp.path(), "issue-1", Some(1), "reviewer");
 
         // Before any writes, attempt is 0
         assert_eq!(writer.attempt(), 0);

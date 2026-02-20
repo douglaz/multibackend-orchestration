@@ -35,12 +35,12 @@ fn test_render_template_replaces_multiple_variables() {
     .unwrap();
 
     let mut vars = BTreeMap::new();
-    vars.insert("project_id".to_owned(), "01-poc".to_owned());
+    vars.insert("project_id".to_owned(), "issue-1".to_owned());
     vars.insert("loop_number".to_owned(), "3".to_owned());
     vars.insert("phase".to_owned(), "reviewing".to_owned());
 
     let result = render_template(&template_path, &vars).unwrap();
-    assert_eq!(result, "Project: 01-poc\nLoop: 3\nPhase: reviewing");
+    assert_eq!(result, "Project: issue-1\nLoop: 3\nPhase: reviewing");
 }
 
 #[test]

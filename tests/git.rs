@@ -280,13 +280,14 @@ fn test_commit_feature_loop() {
     let commit_hash = commit_feature_loop(
         temp_dir.path(),
         "feat: add new feature",
-        Some("ralph/test/loop-1"),
+        Some("unused-tag"),
         false,
     )
     .unwrap();
 
     assert!(!commit_hash.is_empty());
-    assert!(ref_exists(temp_dir.path(), "ralph/test/loop-1").unwrap());
+    let head = rev_parse(temp_dir.path(), "HEAD").unwrap();
+    assert_eq!(head, commit_hash);
 }
 
 #[test]

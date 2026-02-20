@@ -9,7 +9,7 @@ use crate::mcp::protocol::CallToolResult;
 use crate::mcp::tail_events::collect_tail_events;
 use crate::prd::quick::{render_prompt, QuickPrdOptions, QuickPrdPipeline, DRAFT_PROMPT};
 use crate::project::lifecycle::{
-    create_project, load_project_state, CreateProjectOptions, PromptSource,
+    create_project, reconstruct_project_state, CreateProjectOptions, PromptSource,
 };
 use crate::project::load_project_config_if_exists;
 use crate::workflow::orchestrator::{Orchestrator, RunOptions};
@@ -158,8 +158,7 @@ async fn handle_project_show(args: Value) -> Result<Value, String> {
     let summary = workspace
         .load_project_summary(&project_id)
         .map_err(map_err)?;
-    let project_dir = workspace.project_dir(&project_id);
-    let state = load_project_state(&project_dir).map_err(map_err)?;
+    let state = reconstruct_project_state(&workspace, &project_id).map_err(map_err)?;
 
     Ok(CallToolResult::success_json(json!({
         "project": {
@@ -227,8 +226,7 @@ async fn handle_status(args: Value) -> Result<Value, String> {
     if !workspace.project_exists(&project_id) {
         return Err(format!("project not found: {project_id}"));
     }
-    let project_dir = workspace.project_dir(&project_id);
-    let state = load_project_state(&project_dir).map_err(map_err)?;
+    let state = reconstruct_project_state(&workspace, &project_id).map_err(map_err)?;
 
     let mut result = json!({
         "project_id": state.project_id,
@@ -280,8 +278,7 @@ async fn handle_history(args: Value) -> Result<Value, String> {
     if !workspace.project_exists(&project_id) {
         return Err(format!("project not found: {project_id}"));
     }
-    let project_dir = workspace.project_dir(&project_id);
-    let state = load_project_state(&project_dir).map_err(map_err)?;
+    let state = reconstruct_project_state(&workspace, &project_id).map_err(map_err)?;
 
     let mut entries: Vec<Value> = Vec::new();
     for loop_state in &state.loops {

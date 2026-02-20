@@ -509,9 +509,27 @@ if [ $# -ge 2 ] && [ "$1" = "pr" ] && [ "$2" = "create" ]; then
 fi
 
 case "${1:-}" in
+  label)
+    # label create is best-effort; always succeed
+    exit 0
+    ;;
   issue)
     case "${2:-}" in
-      list) printf '[]'; exit 0 ;;
+      list)
+        # Check whether --label ralph:ready is among the args
+        has_ready=0
+        for arg in "$@"; do
+          if [ "$arg" = "ralph:ready" ]; then
+            has_ready=1
+          fi
+        done
+        if [ "$has_ready" = "1" ] && [ -n "${RALPH_E2E_MOCK_ISSUES:-}" ]; then
+          printf '%s' "$RALPH_E2E_MOCK_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
       edit) exit 0 ;;
       view)
         want_title_body=0
@@ -754,8 +772,9 @@ fi
 
 /// Mock `gh` script for daemon runtime tests. Handles:
 /// - `gh issue list ...` — returns configurable JSON issues
-/// - `gh issue edit ...` — no-op success
+/// - `gh issue edit ...` — logs label add/remove, always succeeds
 /// - `gh issue view --json title,body ...` — returns title/body JSON
+/// - `gh issue view --json labels ...` — returns labels JSON
 /// - `gh issue view ... -q .comments[].body` — returns empty comments
 /// - `gh issue comment ...` — no-op success
 /// - `gh pr list ...` — returns empty
@@ -764,11 +783,15 @@ fi
 ///
 /// Set `MOCK_GH_ISSUES` env var to a JSON array of issues for poll responses.
 /// Set `MOCK_GH_OVERFLOW` to "true" to return exactly 100 issues.
+/// Set `MOCK_GH_LABEL_LOG` to a file path to log label add/remove operations.
+/// Set `MOCK_GH_ISSUE_LABELS` to JSON for `issue view --json labels` responses.
 pub fn daemon_mock_gh_script() -> String {
     r###"#!/bin/sh
 # Mock gh for daemon runtime tests.
 # Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
 # Env: MOCK_GH_OVERFLOW - if "true", return 100 identical issues
+# Env: MOCK_GH_LABEL_LOG - file to log label add/remove operations
+# Env: MOCK_GH_ISSUE_LABELS - JSON for `issue view --json labels`
 
 case "$1" in
   issue)
@@ -794,17 +817,36 @@ case "$1" in
         exit 0
         ;;
       edit)
+        # Log label operations if logging enabled
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
         # Claiming / label update — always succeed
         exit 0
         ;;
       view)
-        # Title/body fetch used by pending-task hydration.
+        # Check for --json labels query
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+
+        # Title/body fetch used by pending-task hydration.
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
@@ -1001,8 +1043,29 @@ case "$1" in
   issue)
     case "$2" in
       list) printf '[]' ; exit 0 ;;
-      edit) exit 0 ;;
-      view) printf '' ; exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        printf '' ; exit 0
+        ;;
       comment) exit 0 ;;
     esac
     ;;
@@ -1113,6 +1176,8 @@ printf 'Refined task body with explicit steps and acceptance checks for safe det
 /// - `MOCK_PR_VIEW_JSON` — JSON response for `gh pr view --json ...`
 /// - `MOCK_PR_VIEW_EXIT` — exit code for `gh pr view` (default: 0)
 /// - `MOCK_PR_COMMENT_LOG` — file path to log pr comment bodies
+/// - `MOCK_GH_LABEL_LOG` — file path to log label add/remove operations
+/// - `MOCK_GH_ISSUE_LABELS` — JSON for `issue view --json labels` responses
 pub fn daemon_mock_gh_rebase_script() -> String {
     r###"#!/bin/sh
 # Mock gh for daemon auto-rebase tests.
@@ -1120,6 +1185,8 @@ pub fn daemon_mock_gh_rebase_script() -> String {
 # Env: MOCK_PR_VIEW_JSON - JSON response for `pr view --json`
 # Env: MOCK_PR_VIEW_EXIT - exit code for `pr view` (default 0)
 # Env: MOCK_PR_COMMENT_LOG - file to log pr comment bodies
+# Env: MOCK_GH_LABEL_LOG - file to log label add/remove operations
+# Env: MOCK_GH_ISSUE_LABELS - JSON for `issue view --json labels`
 
 case "$1" in
   issue)
@@ -1132,14 +1199,31 @@ case "$1" in
         fi
         exit 0
         ;;
-      edit) exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
       view)
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
@@ -1434,14 +1518,31 @@ case "$1" in
         fi
         exit 0
         ;;
-      edit) exit 0 ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
       view)
+        want_labels=0
         want_title_body=0
         for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
           if [ "$arg" = "title,body" ]; then
             want_title_body=1
           fi
         done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
         if [ "$want_title_body" = "1" ]; then
           issue_number="${3:-0}"
           printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
@@ -2293,6 +2394,65 @@ else
   echo "unrecognized prompt" >&2
   exit 1
 fi
+"###
+    .to_owned()
+}
+
+/// Mock `tmux` script for conformance tests that enables tmux-mode execution
+/// without a real tmux binary. Handles the tmux commands that `TmuxBackend`
+/// issues: `has-session`, `new-session`, `new-window`, `set-option`,
+/// `list-windows`, and `kill-window`.
+///
+/// The mock creates the output and exit files that `wait_for_exit_with_activity`
+/// polls for, by extracting the shell command from `new-window` and running the
+/// backend script inline.
+pub fn mock_tmux_script() -> String {
+    r###"#!/bin/sh
+# Mock tmux for conformance tests.
+# Handles: has-session, new-session, new-window, set-option, list-windows, kill-window
+set -eu
+
+case "$1" in
+  has-session)
+    # Session always exists (or will be created)
+    exit 0
+    ;;
+  new-session)
+    exit 0
+    ;;
+  new-window)
+    # Extract the shell command (last argument) and run it.
+    # new-window is called as: tmux new-window -t <session> -n <label> -P -F '#{window_id}' <shell_cmd>
+    # The shell command is the last positional argument.
+    shift  # skip 'new-window'
+    shell_cmd=""
+    while [ $# -gt 0 ]; do
+      shell_cmd="$1"
+      shift
+    done
+    # Run the shell command in background via sh, then print a fake window id
+    if [ -n "$shell_cmd" ]; then
+      sh -c "$shell_cmd" &
+    fi
+    printf '1\n'
+    exit 0
+    ;;
+  set-option)
+    exit 0
+    ;;
+  list-windows)
+    # Return the window id so has_window succeeds
+    printf '1\n'
+    exit 0
+    ;;
+  kill-window)
+    exit 0
+    ;;
+  *)
+    echo "mock tmux: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
 "###
     .to_owned()
 }

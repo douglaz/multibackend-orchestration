@@ -8,9 +8,10 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use tokio::time::{sleep, Duration};
 
+use crate::git::ralph_commit::{derive_position, parse_last_ralph_commit};
 use crate::cli::TailArgs;
 use crate::project::artifacts::parse_artifact_filename_timestamp;
-use crate::project::lifecycle::load_project_state;
+use crate::project::lifecycle::{project_git_context, reconstruct_project_state};
 use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
@@ -76,7 +77,7 @@ struct PhaseSnapshot {
     current_loop: u32,
     timestamp: String,
     sort_epoch_ms: i64,
-    state_mtime_ns: u128,
+    checkpoint_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,8 +128,10 @@ pub async fn execute(args: TailArgs) -> Result<()> {
         return Err(RalphError::ProjectNotFound(project_id));
     }
 
+    let git_context = project_git_context(&workspace, &project_id);
+
     // Warn if showing a completed project (may be stale)
-    if let Ok(state) = load_project_state(&project_dir) {
+    if let Ok(state) = reconstruct_project_state(&workspace, &project_id) {
         if state.status == ProjectStatus::Completed {
             eprintln!(
                 "warning: project '{}' is completed. Output may be stale.",
@@ -137,7 +140,7 @@ pub async fn execute(args: TailArgs) -> Result<()> {
         }
     }
 
-    let mut events = collect_all_events(&project_dir, &project_id)?;
+    let mut events = collect_all_events(&workspace, &project_id)?;
     sort_events(&mut events);
 
     let mut seen: HashSet<String> = events.iter().map(TailEvent::event_key).collect();
@@ -147,13 +150,13 @@ pub async fn execute(args: TailArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut phase_snapshot = collect_phase_snapshot(&project_dir);
+    let mut phase_snapshot = collect_phase_snapshot(git_context.as_ref());
 
     loop {
         sleep(Duration::from_millis(args.poll_interval_ms)).await;
 
-        let mut rescanned = collect_all_events(&project_dir, &project_id)?;
-        let current_phase_snapshot = collect_phase_snapshot(&project_dir);
+        let mut rescanned = collect_all_events(&workspace, &project_id)?;
+        let current_phase_snapshot = collect_phase_snapshot(git_context.as_ref());
         if let (Some(previous), Some(current)) = (&phase_snapshot, &current_phase_snapshot) {
             if let Some(phase_event) = create_phase_change_event(previous, current) {
                 rescanned.push(phase_event);
@@ -228,9 +231,10 @@ pub async fn tmux_attach(session_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn collect_all_events(project_dir: &Path, project_id: &str) -> Result<Vec<TailEvent>> {
-    let mut events = collect_artifact_events(project_dir)?;
-    events.extend(collect_state_events(project_dir, project_id));
+fn collect_all_events(workspace: &Workspace, project_id: &str) -> Result<Vec<TailEvent>> {
+    let project_dir = workspace.project_dir(project_id);
+    let mut events = collect_artifact_events(&project_dir)?;
+    events.extend(collect_state_events(workspace, project_id));
     Ok(events)
 }
 
@@ -511,19 +515,11 @@ fn collect_artifact_events(project_dir: &Path) -> Result<Vec<TailEvent>> {
     Ok(events)
 }
 
-fn collect_state_events(project_dir: &Path, project_id: &str) -> Vec<TailEvent> {
-    let state_path = project_dir.join("state.json");
-    if !state_path.exists() {
-        return Vec::new();
-    }
-
-    let state = match load_project_state(project_dir) {
+fn collect_state_events(workspace: &Workspace, project_id: &str) -> Vec<TailEvent> {
+    let state = match reconstruct_project_state(workspace, project_id) {
         Ok(state) => state,
         Err(err) => {
-            eprintln!(
-                "warning: failed to load state for tail at {}: {err}",
-                state_path.display()
-            );
+            eprintln!("warning: failed to derive state for tail: {err}");
             return Vec::new();
         }
     };
@@ -646,27 +642,24 @@ fn collect_state_events(project_dir: &Path, project_id: &str) -> Vec<TailEvent> 
     events
 }
 
-fn collect_phase_snapshot(project_dir: &Path) -> Option<PhaseSnapshot> {
-    let state_path = project_dir.join("state.json");
-    if !state_path.exists() {
-        return None;
-    }
-
-    let state = load_project_state(project_dir).ok()?;
-    let metadata = fs::metadata(&state_path).ok()?;
-    let modified = metadata.modified().ok();
-    let (timestamp, sort_epoch_ms) = normalize_event_time(None, None, modified);
-    let state_mtime_ns = modified
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+fn collect_phase_snapshot(
+    git_context: Option<&crate::project::lifecycle::ProjectGitContext>,
+) -> Option<PhaseSnapshot> {
+    let ctx = git_context?;
+    let (current_loop, current_phase) = derive_position(&ctx.repo_root, &ctx.branch).ok()?;
+    let checkpoint_hash = parse_last_ralph_commit(&ctx.repo_root, &ctx.branch)
+        .ok()
+        .flatten()
+        .and_then(|commit| commit.commit_hash);
+    let now = Utc::now();
+    let (timestamp, sort_epoch_ms) = to_timestamp(now);
 
     Some(PhaseSnapshot {
-        current_phase: state.current_phase,
-        current_loop: state.current_loop,
+        current_phase,
+        current_loop,
         timestamp,
         sort_epoch_ms,
-        state_mtime_ns,
+        checkpoint_hash,
     })
 }
 
@@ -706,7 +699,10 @@ fn create_phase_change_event(
             phase_label(&previous.current_phase),
             phase_label(&current.current_phase),
             current.current_loop,
-            current.state_mtime_ns
+            current
+                .checkpoint_hash
+                .as_deref()
+                .unwrap_or("no-checkpoint-hash")
         ),
         kind: TailEventKind::StateTransition {
             description,
@@ -1025,66 +1021,20 @@ created_at: 2026-02-06T20:00:00Z
     }
 
     #[test]
-    fn collects_state_and_git_events_from_project_state() {
-        let temp = tempdir().unwrap();
-        let state = demo_project_state();
-        state.save(&temp.path().join("state.json")).unwrap();
-
-        let events = collect_state_events(temp.path(), "demo");
-
-        let descriptions: Vec<&str> = events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                TailEventKind::StateTransition { description, .. } => Some(description.as_str()),
-                TailEventKind::Artifact { .. } | TailEventKind::GitCommit { .. } => None,
-            })
-            .collect();
-        assert!(descriptions.contains(&"loop 1 (Feature A) started"));
-        assert!(descriptions.contains(&"loop 1 (Feature A) completed"));
-        assert!(descriptions.contains(&"loop 2 completion check started"));
-        assert!(descriptions.contains(&"loop 2 completion verdict: CONTINUE"));
-
-        let git = events.iter().find_map(|event| match &event.kind {
-            TailEventKind::GitCommit {
-                loop_number,
-                commit_hash,
-                tag,
-            } => Some((*loop_number, commit_hash.as_str(), tag.as_deref())),
-            TailEventKind::Artifact { .. } | TailEventKind::StateTransition { .. } => None,
-        });
-        assert_eq!(git, Some((1, "abc123", Some("demo/1"))));
-    }
-
-    #[test]
-    fn returns_empty_state_events_when_state_is_missing() {
-        let temp = tempdir().unwrap();
-        let events = collect_state_events(temp.path(), "demo");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn returns_empty_state_events_when_state_is_unreadable() {
-        let temp = tempdir().unwrap();
-        fs::write(temp.path().join("state.json"), "{not valid json").unwrap();
-        let events = collect_state_events(temp.path(), "demo");
-        assert!(events.is_empty());
-    }
-
-    #[test]
     fn emits_phase_change_event_with_new_phase_details() {
         let previous = PhaseSnapshot {
             current_phase: Phase::Planning,
             current_loop: 1,
             timestamp: "2026-02-06T21:00:00Z".to_owned(),
             sort_epoch_ms: 1,
-            state_mtime_ns: 11,
+            checkpoint_hash: Some("abc".to_owned()),
         };
         let current = PhaseSnapshot {
             current_phase: Phase::Implementing,
             current_loop: 1,
             timestamp: "2026-02-06T21:01:00Z".to_owned(),
             sort_epoch_ms: 2,
-            state_mtime_ns: 12,
+            checkpoint_hash: Some("def".to_owned()),
         };
 
         let event = create_phase_change_event(&previous, &current).unwrap();

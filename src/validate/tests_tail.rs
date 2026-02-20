@@ -27,7 +27,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 
 fn one_shot_shows_artifacts(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "tail-one-shot";
+        let project_id = "issue-101";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -43,7 +43,7 @@ fn one_shot_shows_artifacts(h: &RalphHarness) -> TestResult {
 
 fn json_output_valid(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "tail-json";
+        let project_id = "issue-102";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -91,7 +91,7 @@ fn json_output_valid(h: &RalphHarness) -> TestResult {
 
 fn last_flag_limits_output(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "tail-last";
+        let project_id = "issue-103";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])

@@ -88,7 +88,7 @@ fn new_creates_state(h: &RalphHarness) -> TestResult {
 
         let state = h.load_state("test-proj").expect("load_state failed");
 
-        assert_json_field(&state, "current_loop", &json!(0));
+        assert_json_field(&state, "current_loop", &json!(1));
         assert_json_field(&state, "current_phase", &json!("planning"));
         assert_json_field(&state, "status", &json!("pending"));
     })) {
@@ -139,11 +139,11 @@ fn new_activates_project(h: &RalphHarness) -> TestResult {
             "first project should be auto-activated"
         );
 
-        // state.json should contain created_at
+        // Derived state should contain created_at
         let state = h.load_state("act-test").expect("load_state failed");
         assert!(
             state.get("created_at").is_some(),
-            "state.json should contain created_at"
+            "derived state should contain created_at"
         );
     })) {
         Ok(()) => TestResult::Pass,
@@ -282,7 +282,7 @@ fn delete_refuses_active(h: &RalphHarness) -> TestResult {
             .ralph_exit(["project", "delete", "active-del"], 2)
             .expect("project delete should execute");
         assert_stderr_contains(&output, "cannot delete the active project 'active-del'");
-        assert_file_exists(&h.project_dir("active-del").join("state.json"));
+        assert_file_exists(&h.project_dir("active-del").join("prompt.md"));
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -365,7 +365,7 @@ fn show_json(h: &RalphHarness) -> TestResult {
 
         // Should contain project and state sections with correct fields
         assert_json_field(&parsed, "project.id", &json!("json-test"));
-        assert_json_field(&parsed, "state.current_loop", &json!(0));
+        assert_json_field(&parsed, "state.current_loop", &json!(1));
         assert_json_field(&parsed, "state.current_phase", &json!("planning"));
         assert_json_field(&parsed, "state.status", &json!("pending"));
     })) {

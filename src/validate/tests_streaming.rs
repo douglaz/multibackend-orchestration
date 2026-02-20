@@ -59,7 +59,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 /// attempt=2, etc.) with appended content across attempts.
 fn retry_append_behavior(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-retry";
+        let project_id = "issue-601";
         let counter_file = h.temp_dir.path().join("planner-counter.txt");
 
         h.init_workspace().expect("init failed");
@@ -81,12 +81,10 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        // Planner log path: .ralph/projects/<id>/loops/001/agent-output-planner.log
+        // Planner log path: .ralph/tmp/logs/{project_id}-001-planner.log
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
 
         assert!(
             planner_log.exists(),
@@ -137,12 +135,9 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         );
 
         // Implementer log should also exist (after planner succeeded on retry)
-        // The implementer log is in the slug-prefixed loop directory (e.g., 001-feature/)
-        let loop_dir = h
-            .loop_dir(project_id, 1)
-            .expect("loop_dir should succeed")
-            .expect("loop directory should exist");
-        let impl_log = loop_dir.join("agent-output-implementer.log");
+        let impl_log = h
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-implementer.log"));
         assert!(
             impl_log.exists(),
             "implementer log file should exist at {}",
@@ -161,7 +156,7 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
 /// (no loop subdirectory) with loop_number=None.
 fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-prompt-review";
+        let project_id = "issue-602";
         setup_with_standard_mock(h, project_id);
 
         // Enable prompt review and run
@@ -171,14 +166,14 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        // Prompt reviewer log should be at project root, not in a loop dir
+        // Prompt reviewer log should be at .ralph/tmp/logs/{project_id}-prompt-reviewer.log
         let pr_log = h
-            .project_dir(project_id)
-            .join("agent-output-prompt-reviewer.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-prompt-reviewer.log"));
 
         assert!(
             pr_log.exists(),
-            "prompt-reviewer log should exist at project root: {}",
+            "prompt-reviewer log should exist at tmp/logs: {}",
             pr_log.display()
         );
 
@@ -188,21 +183,15 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
             "prompt-reviewer log should contain attempt separator, got:\n{content}"
         );
 
-        // It should NOT be inside any loop directory
-        let loops_dir = h.project_dir(project_id).join("loops");
-        if loops_dir.exists() {
-            for entry in fs::read_dir(&loops_dir).expect("read loops dir") {
-                let entry = entry.expect("dir entry");
-                if entry.file_type().expect("file type").is_dir() {
-                    let bad_path = entry.path().join("agent-output-prompt-reviewer.log");
-                    assert!(
-                        !bad_path.exists(),
-                        "prompt-reviewer log should NOT exist inside loop dir: {}",
-                        bad_path.display()
-                    );
-                }
-            }
-        }
+        // It should NOT be inside any project directory or loop directory
+        let project_root_log = h
+            .project_dir(project_id)
+            .join("agent-output-prompt-reviewer.log");
+        assert!(
+            !project_root_log.exists(),
+            "prompt-reviewer log should NOT exist at project root: {}",
+            project_root_log.display()
+        );
     })
 }
 
@@ -210,7 +199,7 @@ fn prompt_reviewer_path(h: &RalphHarness) -> TestResult {
 /// still in progress (chunked streaming, not post-hoc write).
 fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-mid-visibility";
+        let project_id = "issue-603";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -226,10 +215,8 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
         .expect("create_project failed");
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
 
         let mut child = Command::new(&h.ralph_bin)
             .args(["run", "--loops", "1"])
@@ -281,7 +268,7 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
 /// and the hanging planner child process is dead after retries.
 fn timeout_cleanup(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-timeout-cleanup";
+        let project_id = "issue-604";
         let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
 
         h.init_workspace().expect("init failed");
@@ -310,10 +297,8 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 1);
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -349,7 +334,7 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
 /// runtime exceeding timeout_seconds (~2.4s > 1s). Must succeed (no timeout).
 fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-active-no-timeout";
+        let project_id = "issue-605";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -382,10 +367,8 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -410,7 +393,7 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
 /// retain partial output in the log.
 fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-hanging-stall-timeout";
+        let project_id = "issue-606";
         let pid_file = h.temp_dir.path().join("hanging-stall.pid");
 
         h.init_workspace().expect("init failed");
@@ -452,10 +435,8 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -491,7 +472,7 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
 /// planner runtime exceeds nominal timeout, run succeeds, and no timeout footer.
 fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "streaming-idle-timeout-reset";
+        let project_id = "issue-607";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -525,10 +506,8 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -552,11 +531,11 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
 
 /// Codex-specific active-stream conformance: set planner backend to Codex, emit
 /// output at intervals shorter than timeout_seconds, with total runtime exceeding
-/// timeout_seconds. Must succeed (no timeout). Asserts state.json reflects Codex
+/// timeout_seconds. Must succeed (no timeout). Asserts derived state reflects Codex
 /// as the planner backend.
 fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "codex-active-no-timeout";
+        let project_id = "issue-608";
 
         h.init_workspace().expect("init failed");
         let script = h
@@ -591,7 +570,7 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
             .expect("ralph run should execute");
         assert_exit_code(&output, 0);
 
-        // Verify state.json reflects Codex as the planner backend
+        // Verify derived state reflects Codex as the planner backend
         let state = h.load_state(project_id).expect("load_state failed");
         let planner_backend = state["loops"][0]["backends"]["planner"]
             .as_str()
@@ -602,10 +581,8 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",
@@ -632,11 +609,11 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
 
 /// Codex-specific stall conformance: set planner backend to Codex, emit partial
 /// output then stall past timeout_seconds. Must timeout with cleanup and retain
-/// partial output in the log. Asserts state.json reflects Codex as the planner
+/// partial output in the log. Asserts derived state reflects Codex as the planner
 /// backend and verifies the stalled process is killed.
 fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "codex-hanging-stall-timeout";
+        let project_id = "issue-609";
         let pid_file = h.temp_dir.path().join("codex-hanging-stall.pid");
 
         h.init_workspace().expect("init failed");
@@ -665,7 +642,7 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         )
         .expect("create_project failed");
 
-        // Verify state.json reflects Codex as the planner backend (check after
+        // Verify derived state reflects Codex as the planner backend (check after
         // run, since state is written during execution)
         let start = Instant::now();
         let output = h
@@ -695,10 +672,8 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         );
 
         let planner_log = h
-            .project_dir(project_id)
-            .join("loops")
-            .join("001")
-            .join("agent-output-planner.log");
+            .tmp_log_dir()
+            .join(format!("{project_id}-001-planner.log"));
         assert!(
             planner_log.exists(),
             "planner log should exist at {}",

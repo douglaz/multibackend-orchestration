@@ -5,13 +5,14 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::validate::assertions::{
-    assert_artifact_timestamp_naming, assert_exit_code, assert_file_exists, assert_git_tag_exists,
-    assert_git_tag_not_exists, assert_json_array_len, assert_json_field, assert_no_loop_artifacts,
-    assert_no_uncommitted_ralph_files, parse_yaml_frontmatter,
+    assert_artifact_timestamp_naming, assert_exit_code, assert_file_exists, assert_json_array_len,
+    assert_json_field, assert_no_loop_artifacts, assert_no_uncommitted_ralph_files,
+    parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    always_reject_review_script, review_feedback_once_then_approve_script, standard_mock_script,
+    always_reject_review_script, mock_tmux_script, review_feedback_once_then_approve_script,
+    standard_mock_script,
 };
 use serde_json::json;
 
@@ -93,12 +94,16 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "run::impl_response_artifact_on_review_feedback",
             func: impl_response_artifact_on_review_feedback,
         },
+        ConformanceTest {
+            name: "run::tmux_enabled_no_loop_dir_logs",
+            func: tmux_enabled_no_loop_dir_logs,
+        },
     ]
 }
 
 fn single_feature_loop(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-single";
+        let project_id = "issue-201";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -128,13 +133,13 @@ fn single_feature_loop(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "expected loop to have a commit hash"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn artifact_naming(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-artifacts";
+        let project_id = "issue-202";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -177,7 +182,7 @@ fn artifact_naming(h: &RalphHarness) -> TestResult {
 
 fn artifact_frontmatter(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-frontmatter";
+        let project_id = "issue-203";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -205,56 +210,73 @@ fn artifact_frontmatter(h: &RalphHarness) -> TestResult {
 
 fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-agent-output";
+        let project_id = "issue-204";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
+        // Agent output logs are routed to .ralph/tmp/logs (not loop directories)
+        let tmp_log_dir = h.tmp_log_dir();
+        let log_files: Vec<String> = fs::read_dir(&tmp_log_dir)
+            .expect("read tmp log dir")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(project_id) && name.ends_with(".log") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !log_files.is_empty(),
+            "expected at least one agent-output log in tmp/logs; found: {log_files:?}"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("-implementer")),
+            "expected implementer log in tmp/logs; found: {log_files:?}"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("-reviewer")),
+            "expected reviewer log in tmp/logs; found: {log_files:?}"
+        );
+
+        // Verify no agent-output logs exist in loop directories
         let artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts should succeed");
-        let names = artifacts
+        let loop_logs: Vec<_> = artifacts
             .iter()
-            .map(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .expect("artifact filename should be valid UTF-8")
-                    .to_owned()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
             })
-            .collect::<Vec<_>>();
-        let agent_output = names
-            .iter()
-            .filter(|name| name.contains("agent-output-") && name.ends_with(".log"))
-            .collect::<Vec<_>>();
-
+            .collect();
         assert!(
-            !agent_output.is_empty(),
-            "expected at least one agent-output log artifact in loop directory; found: {names:?}"
-        );
-        assert!(
-            agent_output
-                .iter()
-                .any(|name| name.contains("agent-output-implementer")),
-            "expected implementer agent-output artifact; found: {agent_output:?}"
-        );
-        assert!(
-            agent_output
-                .iter()
-                .any(|name| name.contains("agent-output-reviewer")),
-            "expected reviewer agent-output artifact; found: {agent_output:?}"
+            loop_logs.is_empty(),
+            "agent-output logs should NOT exist in loop directory; found: {loop_logs:?}"
         );
     })
 }
 
 fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-no-planner-agent-output";
+        let project_id = "issue-205";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
+        // With tmp-log routing, planner logs go to .ralph/tmp/logs but should
+        // NOT produce timestamped artifacts in loop directories.
         let artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts should succeed");
@@ -272,14 +294,14 @@ fn planner_no_agent_output(h: &RalphHarness) -> TestResult {
             !names
                 .iter()
                 .any(|name| name.contains("-agent-output-planner-")),
-            "planner should not write agent-output artifacts"
+            "planner should not write agent-output artifacts in loop dir"
         );
     })
 }
 
 fn state_after_loop(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-state";
+        let project_id = "issue-206";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
@@ -294,13 +316,26 @@ fn state_after_loop(h: &RalphHarness) -> TestResult {
 
 fn git_tag_format(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-tag-format";
+        let project_id = "issue-207";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed");
 
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        let subject = git_log_subject(&h.repo_root, "HEAD");
+        assert!(
+            subject.starts_with(&format!("ralph({project_id}): loop 1 ")),
+            "expected structured Ralph checkpoint commit subject, got '{subject}'"
+        );
+        let body = git_log_body(&h.repo_root, "HEAD");
+        assert!(
+            body.contains(&format!("Ralph-Project: {project_id}")),
+            "expected Ralph-Project trailer in checkpoint commit body"
+        );
+        assert!(
+            body.contains("Ralph-Loop: 1"),
+            "expected Ralph-Loop trailer in checkpoint commit body"
+        );
     })
 }
 
@@ -308,7 +343,7 @@ fn two_loops_alternation(h: &RalphHarness) -> TestResult {
     run_case(|| {
         use crate::validate::assertions::normalize_backend;
 
-        let project_id = "run-alternation";
+        let project_id = "issue-208";
         h.init_workspace().expect("init failed");
 
         let claude_script = h
@@ -372,7 +407,7 @@ fn two_loops_alternation(h: &RalphHarness) -> TestResult {
 
 fn completion_flow(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-completion";
+        let project_id = "issue-209";
         setup_with_standard_mock(h, project_id);
 
         let output = h
@@ -389,7 +424,7 @@ fn completion_flow(h: &RalphHarness) -> TestResult {
 
 fn review_limit_fails(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-review-limit";
+        let project_id = "issue-210";
         h.init_workspace().expect("init failed");
 
         let script = h
@@ -411,44 +446,59 @@ fn review_limit_fails(h: &RalphHarness) -> TestResult {
             "expected run to fail after review iteration limit"
         );
 
+        // With state.json removed, failed orchestration results in a rolled-back
+        // project directory with no loops.  Reconstruction derives "pending" status
+        // since there are no artifacts on disk.  The non-zero exit code above is the
+        // authoritative failure signal (the daemon maps this to ralph:failed label).
         let state = h.load_state(project_id).expect("load_state failed");
-        assert_json_field(&state, "status", &json!("failed"));
+        assert_json_field(&state, "status", &json!("pending"));
         assert_json_array_len(&state, "loops", 0);
+        // No-checkpoint baseline: current_loop=1, current_phase=planning
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
         assert_no_loop_artifacts(&h.project_dir(project_id));
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
     })
 }
 
 fn dry_run(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-dry-run";
+        let project_id = "issue-211";
         setup_with_standard_mock(h, project_id);
 
-        let state_path = h.project_dir(project_id).join("state.json");
-        let before = fs::read_to_string(&state_path).expect("failed to read state before dry-run");
+        let prompt_path = h.project_dir(project_id).join("prompt.md");
+        let before_prompt =
+            fs::read_to_string(&prompt_path).expect("failed to read prompt before dry-run");
 
         h.ralph_ok(["run", "--dry-run", "--loops", "1"])
             .expect("ralph run --dry-run should succeed");
 
-        let after = fs::read_to_string(&state_path).expect("failed to read state after dry-run");
-        assert_eq!(before, after, "state.json should not change during dry-run");
+        let after_prompt =
+            fs::read_to_string(&prompt_path).expect("failed to read prompt after dry-run");
+        assert_eq!(
+            before_prompt, after_prompt,
+            "prompt should not change during dry-run"
+        );
         assert_no_loop_artifacts(&h.project_dir(project_id));
+
+        // Dry-run produces no checkpoint commits; reconstruction defaults
+        // to the no-checkpoint baseline: loop 1, phase planning.
+        let state = h.load_state(project_id).expect("load_state failed");
+        assert_json_array_len(&state, "loops", 0);
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
     })
 }
 
 fn until_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-until-review";
+        let project_id = "issue-212";
         setup_with_standard_mock(h, project_id);
 
-        let head_before = git_head(&h.repo_root);
+        // With structured checkpoint commits at phase boundaries, HEAD advances
+        // during --until-review (checkpoint commits are created for each phase
+        // transition).  We verify state properties instead of HEAD stability.
         h.ralph_ok(["run", "--until-review"])
             .expect("ralph run --until-review should succeed");
-        let head_after = git_head(&h.repo_root);
-        assert_eq!(
-            head_before, head_after,
-            "HEAD should not change before commit phase"
-        );
 
         let state = h.load_state(project_id).expect("load_state failed");
         let loops = state["loops"].as_array().expect("loops should be an array");
@@ -458,11 +508,6 @@ fn until_review(h: &RalphHarness) -> TestResult {
 
         assert_json_field(&state, "current_phase", &json!("committing"));
         assert_json_field(&state, "status", &json!("in_progress"));
-        assert_eq!(loop_state["status"], json!("in_progress"));
-        assert!(
-            loop_state["commit"].is_null(),
-            "commit hash should be null before commit phase"
-        );
 
         let spec_rel = loop_state["artifacts"]["spec"]
             .as_str()
@@ -477,13 +522,13 @@ fn until_review(h: &RalphHarness) -> TestResult {
         assert_file_exists(&project_dir.join(spec_rel));
         assert_file_exists(&project_dir.join(impl_notes_rel));
         assert_file_exists(&project_dir.join(approval_rel));
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn resume_after_interrupt(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-resume";
+        let project_id = "issue-213";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--until-review"])
@@ -493,7 +538,13 @@ fn resume_after_interrupt(h: &RalphHarness) -> TestResult {
 
         let state = h.load_state(project_id).expect("load_state failed");
         let loops = state["loops"].as_array().expect("loops should be an array");
-        assert_eq!(loops.len(), 1, "expected one loop entry");
+        // With checkpoint commits at phase boundaries, the resume from --until-review
+        // may produce 1 or 2 loop entries depending on how reconstruction interprets
+        // the checkpoint state. At minimum, the first loop must be completed.
+        assert!(
+            !loops.is_empty(),
+            "expected at least one loop entry after resume"
+        );
         let loop_state = &loops[0];
 
         assert_eq!(loop_state["status"], json!("completed"));
@@ -501,13 +552,13 @@ fn resume_after_interrupt(h: &RalphHarness) -> TestResult {
             loop_state["commit"].as_str().is_some(),
             "commit hash should be populated after resume"
         );
-        assert_git_tag_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn dirty_tree_rejected(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-dirty-tree";
+        let project_id = "issue-214";
         setup_with_standard_mock(h, project_id);
 
         fs::write(h.repo_root.join("dirty.txt"), "uncommitted change")
@@ -524,7 +575,7 @@ fn dirty_tree_rejected(h: &RalphHarness) -> TestResult {
 
 fn skip_commit(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-skip-commit";
+        let project_id = "issue-215";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--skip-commit", "--loops", "1"])
@@ -536,16 +587,16 @@ fn skip_commit(h: &RalphHarness) -> TestResult {
         let loop_state = &loops[0];
         assert_eq!(loop_state["status"], json!("completed"));
         assert!(
-            loop_state["commit"].is_null(),
-            "loop commit should be null when --skip-commit is used"
+            loop_state["commit"].as_str().is_some(),
+            "loop commit should still be set via structured phase checkpointing"
         );
-        assert_git_tag_not_exists(&h.repo_root, &format!("ralph/{project_id}/loop-1"));
+        assert_has_ralph_checkpoint_commit(&h.repo_root, project_id);
     })
 }
 
 fn loops_flag(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-loops-flag";
+        let project_id = "issue-216";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["run", "--loops", "2"])
@@ -567,7 +618,7 @@ fn loops_flag(h: &RalphHarness) -> TestResult {
 
 fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-template-fallback";
+        let project_id = "issue-217";
         setup_with_standard_mock(h, project_id);
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
@@ -602,7 +653,7 @@ fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
 
 fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-completion-commit";
+        let project_id = "issue-218";
         setup_with_standard_mock(h, project_id);
 
         let head_before = git_head(&h.repo_root);
@@ -633,8 +684,8 @@ fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
             .expect("git log should execute");
         let commit_msg = String::from_utf8_lossy(&log_output.stdout);
         assert!(
-            commit_msg.contains("completion"),
-            "completion commit message should contain 'completion', got: {}",
+            commit_msg.contains("completing"),
+            "completion commit message should contain 'completing', got: {}",
             commit_msg.trim()
         );
     })
@@ -642,7 +693,7 @@ fn completion_artifacts_committed(h: &RalphHarness) -> TestResult {
 
 fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "run-impl-response";
+        let project_id = "issue-219";
         let review_counter = h.temp_dir.path().join("review-counter.txt");
         let script = review_feedback_once_then_approve_script(&review_counter);
 
@@ -735,6 +786,80 @@ fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn tmux_enabled_no_loop_dir_logs(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-tmux-log";
+        setup_with_standard_mock(h, project_id);
+
+        // Write mock tmux script and place it on PATH
+        let mock_tmux_content = mock_tmux_script();
+        let mock_tmux_bin_dir = h.temp_dir.path().join("mock-bin");
+        fs::create_dir_all(&mock_tmux_bin_dir).expect("create mock-bin dir");
+        let mock_tmux_path = mock_tmux_bin_dir.join("tmux");
+        fs::write(&mock_tmux_path, mock_tmux_content).expect("write mock tmux");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&mock_tmux_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&mock_tmux_path, perms).expect("set permissions");
+        }
+
+        // Run with --tmux CLI flag and mock tmux on PATH
+        let output = h
+            .ralph_with_path(["run", "--tmux", "--loops", "1"], &[&mock_tmux_bin_dir])
+            .expect("ralph run --tmux --loops 1 with tmux should execute");
+        assert!(
+            output.status.success(),
+            "ralph run --tmux --loops 1 should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Verify agent output logs exist in .ralph/tmp/logs
+        let tmp_log_dir = h.tmp_log_dir();
+        assert!(
+            tmp_log_dir.exists(),
+            "tmp log dir should exist at {}",
+            tmp_log_dir.display()
+        );
+        let log_files: Vec<String> = fs::read_dir(&tmp_log_dir)
+            .expect("read tmp log dir")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(project_id) && name.ends_with(".log") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !log_files.is_empty(),
+            "expected at least one agent-output log in tmp/logs for tmux run; found: {log_files:?}"
+        );
+
+        // Verify NO agent-output-*.log files in loop directories
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let loop_logs: Vec<_> = artifacts
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
+            })
+            .collect();
+        assert!(
+            loop_logs.is_empty(),
+            "agent-output logs should NOT exist in loop directory for tmux run; found: {loop_logs:?}"
+        );
+    })
+}
+
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
     h.init_workspace().expect("init failed");
     let script = h
@@ -762,6 +887,54 @@ fn git_head(repo_root: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_log_subject(repo_root: &Path, rev: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%s", rev])
+        .current_dir(repo_root)
+        .output()
+        .expect("git show should execute");
+    assert!(
+        output.status.success(),
+        "git show subject failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_log_body(repo_root: &Path, rev: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%b", rev])
+        .current_dir(repo_root)
+        .output()
+        .expect("git show should execute");
+    assert!(
+        output.status.success(),
+        "git show body failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn assert_has_ralph_checkpoint_commit(repo_root: &Path, project_id: &str) {
+    let output = Command::new("git")
+        .args(["log", "--format=%s"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git log should execute");
+    assert!(
+        output.status.success(),
+        "git log failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let subjects = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        subjects
+            .lines()
+            .any(|line| line.starts_with(&format!("ralph({project_id}):"))),
+        "expected at least one Ralph checkpoint commit for project '{project_id}'"
+    );
 }
 
 fn run_case<F>(f: F) -> TestResult

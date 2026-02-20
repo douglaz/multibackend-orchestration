@@ -11,15 +11,15 @@ use tracing::{debug, info, warn};
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
-    resolve_effective_config, CommitMessageStyle, EffectiveConfig, PlannerStateInPrompt,
-    PreviousSpecsInPrompt, PromptChangeAction, RunWorkflowOverrides,
+    resolve_effective_config, EffectiveConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    PromptChangeAction, RunWorkflowOverrides,
 };
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_feature_loop, reset_and_clean_working_tree,
-    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
-    ORCHESTRATION_STATE_PATH_PREFIX,
+    changed_paths_excluding_prefixes, commit_and_push_phase_transition,
+    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
+    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
 use crate::output_log::LogWriter;
@@ -28,7 +28,7 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
-use crate::project::lifecycle::{load_project_state, save_project_state};
+use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
     AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
@@ -187,12 +187,15 @@ impl Orchestrator {
             debug!("all backends available");
         }
 
-        let mut state = load_project_state(&project_dir)?;
+        let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
         // Compute repo root for cwd invariant assertions (spec D6).
         let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
         let repo_root_ref = repo_root.as_deref();
+
+        // Route agent logs to .ralph/tmp/logs (deterministic, collision-safe).
+        let log_dir = self.workspace.root.join("tmp").join("logs");
 
         if !options.dry_run && self.workspace.config.git.auto_branch {
             if let Some(repo_root) = self.workspace.root.parent() {
@@ -220,14 +223,12 @@ impl Orchestrator {
         {
             info!("migration guard: setting prompt_review_completed for existing project");
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
         }
 
         // Skip-flag handling: mark completed immediately so future resumes also skip.
         if options.skip_prompt_review && !state.prompt_review_completed {
             info!("--skip-prompt-review: marking prompt review as completed");
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
         }
 
         // Execute prompt review if all gates pass.
@@ -262,7 +263,7 @@ impl Orchestrator {
                 .await;
 
             info!(backend = pr_backend.name(), "invoking prompt reviewer...");
-            let mut pr_log = LogWriter::open(&project_dir, None, None, "prompt-reviewer");
+            let mut pr_log = LogWriter::open(&log_dir, &project_id, None, "prompt-reviewer");
             let _retry_result = execute_with_parse_retries(
                 pr_backend,
                 &registry,
@@ -317,7 +318,6 @@ impl Orchestrator {
             state.prompt_hash = new_hash.clone();
             state.prompt_hash_at_loop_start = new_hash;
             state.prompt_review_completed = true;
-            persist_state(&project_dir, &state)?;
             info!("prompt review completed; prompt file updated");
         }
 
@@ -360,6 +360,9 @@ impl Orchestrator {
 
             let mut until_review_stop: Option<u32> = None;
             let mut review_limit_hit: Option<(u32, u32)> = None;
+            let phase_at_step_start = state.current_phase.clone();
+            let phase_iteration_at_step_start = state.phase_iteration;
+            let mut completed_feature_loop_for_checkpoint: Option<u32> = None;
 
             match state.current_phase {
                 Phase::Planning => {
@@ -412,7 +415,7 @@ impl Orchestrator {
                         "invoking planner..."
                     );
                     let mut planner_log =
-                        LogWriter::open(&project_dir, Some(loop_number), None, "planner");
+                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "planner");
                     let _retry_result = execute_with_parse_retries(
                         planner_backend,
                         &registry,
@@ -597,7 +600,7 @@ impl Orchestrator {
                             "invoking implementer..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -754,7 +757,7 @@ impl Orchestrator {
                             "invoking implementer for QA feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -913,7 +916,7 @@ impl Orchestrator {
                             "invoking implementer for feedback response..."
                         );
                         let mut impl_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "implementer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
                         let mut impl_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             implementer_backend,
@@ -1038,8 +1041,18 @@ impl Orchestrator {
                             max_iterations = max_iter,
                             "QA iteration limit exceeded, rolling back loop"
                         );
+                        let state_before_rollback = state.clone();
                         rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
-                        persist_state(&project_dir, &state)?;
+                        if let Err(err) = checkpoint_phase_transition(
+                            &self.workspace.root,
+                            &state.project_id,
+                            ln,
+                            Phase::QA,
+                            Phase::Planning,
+                        ) {
+                            state = state_before_rollback;
+                            return Err(err);
+                        }
                         if options.until_complete {
                             logs.push(format!(
                                 "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1129,7 +1142,7 @@ impl Orchestrator {
                         iteration = state.phase_iteration,
                         "invoking QA..."
                     );
-                    let mut qa_log = LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "qa");
+                    let mut qa_log = LogWriter::open(&log_dir, &project_id, Some(loop_number), "qa");
                     let mut qa_out_session_id: Option<String> = None;
                     let retry_result = execute_with_parse_retries(
                         qa_backend,
@@ -1377,7 +1390,7 @@ impl Orchestrator {
                             "invoking reviewer..."
                         );
                         let mut reviewer_log =
-                            LogWriter::open(&project_dir, Some(loop_number), Some(&loop_slug), "reviewer");
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "reviewer");
                         let mut reviewer_out_session_id: Option<String> = None;
                         let retry_result = execute_with_parse_retries(
                             reviewer_backend,
@@ -1493,7 +1506,7 @@ impl Orchestrator {
                 }
                 Phase::Committing => {
                     info!(loop = state.current_loop, "starting commit phase");
-                    let (loop_number, loop_slug, feature_name, approval_rel) = {
+                    let loop_number = {
                         let loop_state = state.current_feature_loop().ok_or_else(|| {
                             RalphError::Orchestration(
                                 "current phase is committing but no current feature loop exists"
@@ -1501,64 +1514,20 @@ impl Orchestrator {
                             )
                         })?;
 
-                        (
-                            loop_state.loop_number,
-                            loop_state.slug.clone(),
-                            loop_state.feature_name.clone(),
-                            loop_state.artifacts.approval.clone().ok_or_else(|| {
-                                RalphError::Orchestration(
-                                    "cannot commit without review-approved artifact".to_owned(),
-                                )
-                            })?,
-                        )
-                    };
-
-                    let approval_content = read_project_relative_file(&project_dir, &approval_rel)?;
-                    let reviewer_commit_message =
-                        extract_reviewer_commit_message(&approval_content);
-                    let commit_message = reviewer_commit_message.unwrap_or_else(|| {
-                        generate_commit_message(
-                            &effective.workflow.commit_message_style,
-                            &feature_name,
-                            loop_number,
-                            &state,
-                        )
-                    });
-
-                    let mut commit_hash: Option<String> = None;
-                    if effective.workflow.auto_commit && !options.skip_commit {
-                        let repo_root = self.workspace.root.parent().ok_or_else(|| {
+                        let _ = loop_state.artifacts.approval.clone().ok_or_else(|| {
                             RalphError::Orchestration(
-                                "workspace root has no parent path".to_owned(),
+                                "cannot commit without review-approved artifact".to_owned(),
                             )
                         })?;
 
-                        if !is_git_repo(repo_root) {
-                            return Err(RalphError::Orchestration(
-                                "cannot commit: repository is not a git workspace".to_owned(),
-                            ));
-                        }
+                        loop_state.loop_number
+                    };
 
-                        let tag_name = effective
-                            .workflow
-                            .commit_tag_format
-                            .replace("{project_id}", &state.project_id)
-                            .replace("{loop_number}", &loop_number.to_string());
-
-                        let hash = commit_feature_loop(
-                            repo_root,
-                            &commit_message,
-                            Some(&tag_name),
-                            effective.global.git.sign_commits,
-                        )?;
-                        commit_hash = Some(hash.clone());
+                    if !effective.workflow.auto_commit || options.skip_commit {
                         logs.push(format!(
-                            "loop {loop_number}: committed and tagged ({tag_name})"
-                        ));
-                    } else {
-                        logs.push(format!(
-                            "loop {loop_number}: commit skipped (auto_commit={} skip_commit={})",
-                            effective.workflow.auto_commit, options.skip_commit
+                            "loop {loop_number}: using structured phase checkpoint commit (auto_commit={} skip_commit={})",
+                            effective.workflow.auto_commit,
+                            options.skip_commit
                         ));
                     }
 
@@ -1568,12 +1537,12 @@ impl Orchestrator {
                                 "failed to reload current loop for completion update".to_owned(),
                             )
                         })?;
-                        loop_state.commit = commit_hash;
+                        loop_state.commit = None;
                         loop_state.status = LoopStatus::Completed;
                         loop_state.completed_at = Some(Utc::now());
-                        let _ = loop_slug;
                     }
 
+                    completed_feature_loop_for_checkpoint = Some(loop_number);
                     state.current_phase = Phase::Planning;
                     state.phase_iteration = 1;
                     state.current_loop = state.last_loop_number();
@@ -1648,7 +1617,7 @@ impl Orchestrator {
                         "invoking completer..."
                     );
                     let mut completer_log =
-                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "completer");
+                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
                     let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
                         completer_backend,
                         &registry,
@@ -1750,7 +1719,7 @@ impl Orchestrator {
                                         "invoking acceptance QA..."
                                     );
                                     let mut acceptance_log =
-                                        LogWriter::open(&project_dir, Some(loop_number), Some("completion"), "qa");
+                                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "qa");
                                     let retry_result = execute_with_parse_retries(
                                         acceptance_qa_backend,
                                         &registry,
@@ -1958,8 +1927,18 @@ impl Orchestrator {
                     max_iterations = max_iter,
                     "review iteration limit exceeded, rolling back loop"
                 );
+                let state_before_rollback = state.clone();
                 rollback_current_loop(&mut state, &project_dir, &self.workspace.root)?;
-                persist_state(&project_dir, &state)?;
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    ln,
+                    Phase::Reviewing,
+                    Phase::Planning,
+                ) {
+                    state = state_before_rollback;
+                    return Err(err);
+                }
                 if options.until_complete {
                     logs.push(format!(
                         "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
@@ -1972,7 +1951,50 @@ impl Orchestrator {
                 });
             }
 
-            persist_state(&project_dir, &state)?;
+            let transitioned_phase = state.current_phase.clone();
+            if transitioned_phase != phase_at_step_start {
+                let transitioned_iteration = state.phase_iteration;
+                let checkpoint_loop_number = state.current_loop;
+                if checkpoint_loop_number == 0 {
+                    return Err(RalphError::Orchestration(
+                        "cannot checkpoint phase transition without a current loop".to_owned(),
+                    ));
+                }
+
+                state.current_phase = phase_at_step_start.clone();
+                state.phase_iteration = phase_iteration_at_step_start;
+
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    checkpoint_loop_number,
+                    phase_at_step_start,
+                    transitioned_phase.clone(),
+                ) {
+                    state.current_phase = transitioned_phase;
+                    state.phase_iteration = transitioned_iteration;
+                    return Err(err);
+                }
+
+                state.current_phase = transitioned_phase;
+                state.phase_iteration = transitioned_iteration;
+
+                if let Some(loop_number) = completed_feature_loop_for_checkpoint {
+                    let repo_root = self.workspace.root.parent().ok_or_else(|| {
+                        RalphError::Orchestration("workspace root has no parent path".to_owned())
+                    })?;
+                    let commit_hash = rev_parse(repo_root, "HEAD")?;
+                    if let Some(loop_state) = state
+                        .loops
+                        .iter_mut()
+                        .find(|loop_state| loop_state.loop_number == loop_number)
+                    {
+                        loop_state.commit = Some(commit_hash);
+                    }
+                    logs.push(format!("loop {loop_number}: committed structured checkpoint"));
+                }
+            }
+
 
             // Handle --until-review stop
             if let Some(ln) = until_review_stop {
@@ -1985,22 +2007,16 @@ impl Orchestrator {
             }
 
             if state.status == ProjectStatus::Completed {
-                // Commit completion artifacts (acceptance QA results, state, etc.)
-                if effective.workflow.auto_commit && !options.skip_commit {
-                    if let Some(repo_root) = self.workspace.root.parent() {
-                        if is_git_repo(repo_root) {
-                            let msg =
-                                format!("chore({}): add completion artifacts", state.project_id);
-                            let _ = commit_feature_loop(
-                                repo_root,
-                                &msg,
-                                None,
-                                effective.global.git.sign_commits,
-                            );
-                        }
-                    }
+                // Final checkpoint: commit any uncommitted completion artifacts.
+                if let Err(err) = checkpoint_phase_transition(
+                    &self.workspace.root,
+                    &state.project_id,
+                    state.current_loop,
+                    Phase::Completing,
+                    Phase::Completing,
+                ) {
+                    warn!("failed to checkpoint completion artifacts: {err}");
                 }
-
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
                         "project completed".to_owned()
@@ -2032,36 +2048,8 @@ impl Orchestrator {
         )))
         }.await;
 
-        // Mark the project as failed while we still hold the lock.
-        if let Err(ref err) = result {
-            if is_terminal_orchestration_error(err) {
-                if let Ok(mut st) = load_project_state(&project_dir) {
-                    if st.status != ProjectStatus::Completed {
-                        st.status = ProjectStatus::Failed;
-                        let _ = save_project_state(&project_dir, &st);
-                    }
-                }
-            }
-        }
-
         result
     }
-}
-
-/// Returns `true` for error variants that indicate the orchestration loop hit
-/// a terminal failure (as opposed to setup/validation issues or transient IO
-/// errors).  Used to decide whether to mark the project as `Failed`.
-fn is_terminal_orchestration_error(err: &RalphError) -> bool {
-    matches!(
-        err,
-        RalphError::BackendTimeoutExhausted { .. }
-            | RalphError::ParseRetriesExhausted { .. }
-            | RalphError::ReviewIterationLimitExceeded { .. }
-            | RalphError::QaIterationLimitExceeded { .. }
-            | RalphError::BackendCommandFailed { .. }
-            | RalphError::Orchestration(_)
-            | RalphError::GitConflict { .. }
-    )
 }
 
 #[derive(Debug, Clone)]
@@ -2252,8 +2240,8 @@ fn rollback_current_loop(
         }
     }
 
-    // Also remove the bare loop-number directory used by agent-output log files
-    // (e.g., loops/001/agent-output-planner.log).
+    // Remove the bare loop-number directory (legacy layout; agent-output logs
+    // are now routed to .ralph/tmp/logs).
     let log_dir = project_dir.join("loops").join(format!("{loop_number:03}"));
     if log_dir.exists() {
         if let Err(e) = fs::remove_dir_all(&log_dir) {
@@ -2261,7 +2249,7 @@ fn rollback_current_loop(
                 loop_number = loop_number,
                 path = %log_dir.display(),
                 error = %e,
-                "failed to remove agent-output log directory during rollback"
+                "failed to remove legacy loop-number directory during rollback"
             );
         }
     }
@@ -3351,8 +3339,23 @@ fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<Stri
     Ok(content)
 }
 
-fn persist_state(project_dir: &Path, state: &ProjectState) -> Result<()> {
-    save_project_state(project_dir, state)
+fn checkpoint_phase_transition(
+    workspace_root: &Path,
+    project_id: &str,
+    loop_number: u32,
+    from_phase: Phase,
+    to_phase: Phase,
+) -> Result<()> {
+    let repo_root = workspace_root
+        .parent()
+        .ok_or_else(|| RalphError::Orchestration("workspace root has no parent path".to_owned()))?;
+    if !is_git_repo(repo_root) {
+        return Err(RalphError::Orchestration(
+            "cannot checkpoint phase transition: repository is not a git workspace".to_owned(),
+        ));
+    }
+
+    commit_and_push_phase_transition(repo_root, project_id, loop_number, from_phase, to_phase)
 }
 
 fn phase_label(phase: &Phase) -> &'static str {
@@ -3439,61 +3442,6 @@ fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {
         return Ok(());
     }
     stage_implementation_changes(repo_root)
-}
-
-fn generate_commit_message(
-    style: &CommitMessageStyle,
-    feature_name: &str,
-    loop_number: u32,
-    state: &ProjectState,
-) -> String {
-    match style {
-        CommitMessageStyle::Conventional => {
-            format!("feat(ralph): {feature_name} [loop-{loop_number}]")
-        }
-        CommitMessageStyle::Descriptive => {
-            if let Some(loop_state) = state.current_feature_loop() {
-                format!(
-                    "{feature_name}\n\nImplemented via ralph loop {loop_number}.\nBackends: planner={}, implementer={}, reviewer={}",
-                    loop_state.backends.planner,
-                    loop_state.backends.implementer,
-                    loop_state.backends.reviewer,
-                )
-            } else {
-                format!("{feature_name}\n\nImplemented via ralph loop {loop_number}.")
-            }
-        }
-        CommitMessageStyle::Minimal => feature_name.to_owned(),
-    }
-}
-
-fn extract_reviewer_commit_message(body: &str) -> Option<String> {
-    let mut in_commit_section = false;
-    let mut lines = Vec::new();
-
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed == "## Commit Message" {
-            in_commit_section = true;
-            continue;
-        }
-
-        if in_commit_section {
-            if trimmed.starts_with("## ") {
-                break;
-            }
-            if trimmed.is_empty() {
-                continue;
-            }
-            lines.push(trimmed.to_owned());
-        }
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join(" "))
-    }
 }
 
 fn expected_format_template_for(role: &str, iteration: Option<u32>) -> String {
@@ -3651,7 +3599,11 @@ fn log_parse_retry_token_metrics(
     session_reused: bool,
     normalized: &crate::backend::output_normalizer::NormalizedOutput,
 ) {
-    match (normalized.tokens_in, normalized.tokens_out, normalized.cached_in) {
+    match (
+        normalized.tokens_in,
+        normalized.tokens_out,
+        normalized.cached_in,
+    ) {
         (Some(tokens_in), Some(tokens_out), Some(cached_in)) => info!(
             role = role,
             phase = phase,
@@ -3792,7 +3744,9 @@ where
     );
     let mut last_session_id: Option<String> = None;
 
-    registry.override_session_id(active_session_id.clone()).await;
+    registry
+        .override_session_id(active_session_id.clone())
+        .await;
 
     let first_raw = execute_with_timeout_retries(
         backend.clone(),
@@ -3874,7 +3828,9 @@ where
             &loop_dir_hint,
             role,
         );
-        registry.override_session_id(resume_session_id.clone()).await;
+        registry
+            .override_session_id(resume_session_id.clone())
+            .await;
         if let Some(parse_error) = &parse_error_first {
             warn!(
                 role = role,
@@ -4030,7 +3986,11 @@ where
         });
     }
 
-    warn!(role = role, attempts = attempts_executed, "all parse retries exhausted");
+    warn!(
+        role = role,
+        attempts = attempts_executed,
+        "all parse retries exhausted"
+    );
     // Write last discovered session_id even on failure (D6 lifecycle rule).
     if let Some(out) = out_session_id {
         *out = last_session_id;
@@ -4059,14 +4019,14 @@ async fn execute_with_timeout_retries(
     if let (Ok(cwd), Some(root)) = (std::env::current_dir(), repo_root) {
         if cwd.starts_with(root) || root.starts_with(&cwd) {
             debug_assert_eq!(
-                cwd, root,
+                cwd,
+                root,
                 "backend invocation cwd ({}) must equal repo root ({})",
                 cwd.display(),
                 root.display()
             );
         }
     }
-
 
     let retry_started = Instant::now();
 
@@ -4228,9 +4188,7 @@ fn upsert_session_after_execution(
     match new_session_id {
         Some(sid) => {
             // New session id: store or update
-            let existing = state
-                .session_store
-                .lookup(loop_number, role, backend_spec);
+            let existing = state.session_store.lookup(loop_number, role, backend_spec);
             let (call_count, created_at) = match existing {
                 Some(r) => (r.call_count + 1, r.created_at),
                 None => (1, Utc::now()),
@@ -4249,10 +4207,7 @@ fn upsert_session_after_execution(
         None if had_prior_session => {
             // Resume response omitted session_id: keep prior stored id,
             // just bump call_count and last_used_at.
-            if let Some(existing) = state
-                .session_store
-                .lookup(loop_number, role, backend_spec)
-            {
+            if let Some(existing) = state.session_store.lookup(loop_number, role, backend_spec) {
                 let mut updated = existing.clone();
                 updated.call_count += 1;
                 updated.last_used_at = Utc::now();
@@ -4277,9 +4232,9 @@ fn ensure_prompt_hash_at_loop_start(state: &mut ProjectState) {
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use tempfile::tempdir;
@@ -5484,7 +5439,8 @@ mod tests {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut visitor = MetricsVisitor::default();
             event.record(&mut visitor);
-            if let (Some(attempt), Some(session_reused)) = (visitor.attempt, visitor.session_reused) {
+            if let (Some(attempt), Some(session_reused)) = (visitor.attempt, visitor.session_reused)
+            {
                 self.events
                     .lock()
                     .expect("capture lock")
@@ -5513,7 +5469,7 @@ mod tests {
         let backend_handle = backend.clone();
         let backend: Arc<dyn Backend> = Arc::new(backend);
         let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
-        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+        let mut log = LogWriter::open(temp.path(), "issue-test", Some(1), "implementer");
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5539,7 +5495,10 @@ mod tests {
 
         match result {
             Err(RalphError::ParseRetriesExhausted { attempts, .. }) => {
-                assert_eq!(attempts, 3, "without a session, exactly 3 attempts should run")
+                assert_eq!(
+                    attempts, 3,
+                    "without a session, exactly 3 attempts should run"
+                )
             }
             _ => panic!("expected ParseRetriesExhausted"),
         }
@@ -5565,7 +5524,7 @@ mod tests {
         let backend_handle = backend.clone();
         let backend: Arc<dyn Backend> = Arc::new(backend);
         let registry = BackendRegistry::new(&GlobalConfig::default(), tmux_disabled());
-        let mut log = LogWriter::open(temp.path(), Some(1), Some("retry"), "implementer");
+        let mut log = LogWriter::open(temp.path(), "issue-test", Some(1), "implementer");
 
         let capture_layer = MetricsCaptureLayer::default();
         let captured = capture_layer.events.clone();
@@ -5619,10 +5578,7 @@ mod tests {
             "attempt numbers should be 1-based within the executed retry sequence"
         );
         assert_eq!(
-            events
-                .iter()
-                .map(|e| e.session_reused)
-                .collect::<Vec<_>>(),
+            events.iter().map(|e| e.session_reused).collect::<Vec<_>>(),
             vec![false, true, false, false],
             "attempt 2 should reuse the session id discovered on attempt 1"
         );
@@ -5657,7 +5613,10 @@ mod tests {
             "spec body",
             "template content",
         );
-        assert_eq!(hash1, hash2, "identical inputs must produce identical hashes");
+        assert_eq!(
+            hash1, hash2,
+            "identical inputs must produce identical hashes"
+        );
     }
 
     #[test]
@@ -5669,14 +5628,12 @@ mod tests {
             "spec",
             "template",
         );
-        let changed = super::compute_bootstrap_hash(
-            "reviewer",
-            "claude(opus)",
-            "phash",
-            "spec",
-            "template",
+        let changed =
+            super::compute_bootstrap_hash("reviewer", "claude(opus)", "phash", "spec", "template");
+        assert_ne!(
+            base, changed,
+            "different roles must produce different hashes"
         );
-        assert_ne!(base, changed, "different roles must produce different hashes");
     }
 
     #[test]
@@ -5695,7 +5652,10 @@ mod tests {
             "spec",
             "template",
         );
-        assert_ne!(base, changed, "different backends must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different backends must produce different hashes"
+        );
     }
 
     #[test]
@@ -5714,7 +5674,10 @@ mod tests {
             "spec",
             "template",
         );
-        assert_ne!(base, changed, "different prompt hashes must produce different bootstrap hashes");
+        assert_ne!(
+            base, changed,
+            "different prompt hashes must produce different bootstrap hashes"
+        );
     }
 
     #[test]
@@ -5733,7 +5696,10 @@ mod tests {
             "spec v2",
             "template",
         );
-        assert_ne!(base, changed, "different spec content must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different spec content must produce different hashes"
+        );
     }
 
     #[test]
@@ -5752,7 +5718,10 @@ mod tests {
             "spec",
             "template v2",
         );
-        assert_ne!(base, changed, "different template content must produce different hashes");
+        assert_ne!(
+            base, changed,
+            "different template content must produce different hashes"
+        );
     }
 
     #[test]

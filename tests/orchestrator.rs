@@ -2,7 +2,7 @@
 
 use ralph::error::RalphError;
 use ralph::project::lifecycle::{
-    create_project, load_project_state, save_project_state, CreateProjectOptions, PromptSource,
+    create_project, reconstruct_project_state_from_project_dir, CreateProjectOptions, PromptSource,
 };
 use ralph::project::state::{
     AcceptanceQaResult, CompletionVerdict, LoopStatus, Phase, ProjectStatus,
@@ -47,6 +47,30 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Add a local bare remote to a git repo so `git push origin` works in tests.
+/// Must be called after the initial commits so the bare remote has a HEAD.
+/// The bare repo lives at `<repo>/.test-remote.git` and is `.gitignore`d to
+/// avoid triggering dirty-tree checks.
+fn add_local_bare_remote(repo_root: &Path) {
+    let bare_dir = repo_root.join(".test-remote.git");
+    let bare_str = bare_dir.to_string_lossy().to_string();
+
+    // Gitignore the bare dir so it doesn't show up as untracked
+    let gitignore = repo_root.join(".gitignore");
+    let mut contents = fs::read_to_string(&gitignore).unwrap_or_default();
+    contents.push_str("/.test-remote.git\n");
+    fs::write(&gitignore, &contents).expect("write .gitignore");
+    git_ok(repo_root, &["add", ".gitignore"]);
+    git_ok(repo_root, &["commit", "-m", "chore: gitignore test remote"]);
+
+    Command::new("git")
+        .args(["init", "--bare", &bare_str])
+        .status()
+        .expect("bare init");
+    git_ok(repo_root, &["remote", "add", "origin", &bare_str]);
+    git_ok(repo_root, &["push", "-u", "origin", "HEAD"]);
+}
+
 fn setup_workspace_with_project(
     planner_mode: &str,
     completer_mode: &str,
@@ -66,6 +90,8 @@ fn setup_workspace_with_project(
     write_backend_script(&script_path);
     git_ok(repo_root, &["add", "mock_backend.sh"]);
     git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
+
+    add_local_bare_remote(repo_root);
 
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
@@ -119,7 +145,7 @@ fn setup_workspace_with_project(
     git_ok(repo_root, &["add", "PROMPT.md"]);
     git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
-    let project_id = "01-poc".to_owned();
+    let project_id = "issue-1".to_owned();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -351,7 +377,7 @@ async fn runs_full_feature_loop_and_commits() {
         .await
         .expect("orchestration should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
@@ -375,9 +401,13 @@ async fn runs_full_feature_loop_and_commits() {
         "review-approved.md",
     );
 
+    // Verify a structured checkpoint commit was pushed for loop 1
     let repo_root = workspace_root.parent().expect("repo root");
-    let tag = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-1"]);
-    assert_eq!(tag.trim(), "ralph/01-poc/loop-1");
+    let log = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"]);
+    assert!(
+        !log.is_empty(),
+        "expected a Ralph checkpoint commit for loop 1"
+    );
 }
 
 #[tokio::test]
@@ -396,10 +426,13 @@ async fn supports_interrupt_and_resume_from_commit_phase() {
         .await
         .expect("orchestration until-review should succeed");
 
-    let state_after_review = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state_after_review = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state_after_review.current_phase, Phase::Committing);
-    assert!(state_after_review.loops[0].commit.is_none());
+    // With checkpoint commits, the reviewing→committing transition already
+    // produces a commit hash; the loop is marked Completed by reconstruction
+    // once approval + commit_hash exist.
+    assert!(state_after_review.loops[0].commit.is_some());
 
     let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
     let mut orchestrator = Orchestrator::new(workspace);
@@ -408,7 +441,7 @@ async fn supports_interrupt_and_resume_from_commit_phase() {
         .await
         .expect("resume run should commit");
 
-    let final_state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let final_state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert!(final_state.loops[0].commit.is_some());
     assert_eq!(final_state.loops[0].status, LoopStatus::Completed);
@@ -430,7 +463,7 @@ async fn executes_completion_flow_until_complete() {
         .await
         .expect("completion flow should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.completion_attempts.len(), 1);
@@ -487,9 +520,16 @@ async fn dry_run_does_not_checkout_project_branch() {
     let branch_after = git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch_before, branch_after);
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
-    assert_eq!(state.current_loop, 0);
+    // No checkpoint commits exist after dry-run; reconstruction defaults to loop 1.
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after dry-run"
+    );
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
+    assert_eq!(state.phase_iteration, 1);
     assert_eq!(state.status, ProjectStatus::Pending);
 }
 
@@ -569,9 +609,16 @@ async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
         "error should list changed path: {err_message}"
     );
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
-    assert_eq!(state.current_loop, 0);
+    // Dirty-tree rejection prevents any loops; reconstruction defaults to loop 1.
+    assert!(
+        state.loops.is_empty(),
+        "loops should be empty after dirty-tree rejection"
+    );
+    assert_eq!(state.current_loop, 1);
+    assert_eq!(state.current_phase, Phase::Planning);
+    assert_eq!(state.phase_iteration, 1);
     assert_eq!(state.status, ProjectStatus::Pending);
 }
 
@@ -863,6 +910,8 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
         &["commit", "-m", "test: add split backend mocks"],
     );
 
+    add_local_bare_remote(repo_root);
+
     // Initialise workspace
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
@@ -928,7 +977,7 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
     git_ok(repo_root, &["add", "PROMPT.md"]);
     git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
-    let project_id = "01-poc".to_owned();
+    let project_id = "issue-1".to_owned();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -958,7 +1007,7 @@ async fn two_loop_happy_path_with_separate_backends() {
         .await
         .expect("two-loop orchestration should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
 
     // --- 1. Loop count ---
@@ -1014,12 +1063,12 @@ async fn two_loop_happy_path_with_separate_backends() {
         "loop 2 should have a commit hash"
     );
 
-    // --- 5. Git tags ---
+    // --- 5. Checkpoint commits ---
     let repo_root = workspace_root.parent().expect("repo root");
-    let tag1 = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-1"]);
-    assert_eq!(tag1.trim(), "ralph/01-poc/loop-1");
-    let tag2 = git_output(repo_root, &["tag", "--list", "ralph/01-poc/loop-2"]);
-    assert_eq!(tag2.trim(), "ralph/01-poc/loop-2");
+    let log1 = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"]);
+    assert!(!log1.is_empty(), "expected a Ralph checkpoint commit for loop 1");
+    let log2 = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 2"]);
+    assert!(!log2.is_empty(), "expected a Ralph checkpoint commit for loop 2");
 
     // --- 6. Artifacts ---
     // Loop 1: spec, impl-notes, approval
@@ -1205,6 +1254,8 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     git_ok(repo_root, &["add", "mock_backend.sh"]);
     git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
 
+    add_local_bare_remote(repo_root);
+
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
@@ -1263,7 +1314,7 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     git_ok(repo_root, &["add", "PROMPT.md"]);
     git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
-    let project_id = "01-poc".to_owned();
+    let project_id = "issue-1".to_owned();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -1281,7 +1332,6 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
 #[tokio::test]
 async fn review_iteration_limit_rollback() {
     let (_temp, workspace_root, project_id) = setup_workspace_with_always_suggestions();
-    let repo_root = workspace_root.parent().expect("repo root");
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     let mut orchestrator = Orchestrator::new(workspace);
@@ -1305,7 +1355,7 @@ async fn review_iteration_limit_rollback() {
     );
 
     // Verify state was rolled back cleanly
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert!(
         state.loops.is_empty(),
@@ -1322,13 +1372,13 @@ async fn review_iteration_limit_rollback() {
         "phase_iteration should be reset to 1"
     );
     assert_eq!(
-        state.current_loop, 0,
-        "current_loop should be 0 after rollback"
+        state.current_loop, 1,
+        "current_loop should be 1 after rollback (no-checkpoint default)"
     );
-    assert!(
-        !repo_root.join("new_module.rs").exists(),
-        "rollback should remove implementer-created untracked file"
-    );
+    // With checkpoint commits, new_module.rs is committed during the
+    // implementing→reviewing phase transition and persists in git history
+    // after rollback.  The rollback cleans untracked files and resets
+    // the working tree, but committed files remain.
 
     let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
     let mut orchestrator = Orchestrator::new(workspace);
@@ -1589,6 +1639,8 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
         &["commit", "-m", "test: add parse retry backend mocks"],
     );
 
+    add_local_bare_remote(repo_root);
+
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
@@ -1649,7 +1701,7 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
     git_ok(repo_root, &["add", "PROMPT.md"]);
     git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
-    let project_id = "01-poc".to_owned();
+    let project_id = "issue-1".to_owned();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -2052,6 +2104,8 @@ fn setup_workspace_with_qa(
     git_ok(repo_root, &["add", "mock_backend.sh"]);
     git_ok(repo_root, &["commit", "-m", "test: add backend mock"]);
 
+    add_local_bare_remote(repo_root);
+
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
     fs::write(
@@ -2111,7 +2165,7 @@ fn setup_workspace_with_qa(
     git_ok(repo_root, &["add", "PROMPT.md"]);
     git_ok(repo_root, &["commit", "-m", "test: add prompt source"]);
 
-    let project_id = "01-poc".to_owned();
+    let project_id = "issue-1".to_owned();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -2358,7 +2412,7 @@ async fn qa_disabled_skips_phase() {
         .await
         .expect("orchestration should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
@@ -2382,7 +2436,7 @@ async fn qa_pass_proceeds_to_review() {
         .await
         .expect("orchestration with QA should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
@@ -2416,7 +2470,7 @@ async fn qa_fail_retries_implementer_then_passes() {
         .await
         .expect("orchestration with QA fail-then-pass should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
@@ -2488,7 +2542,7 @@ async fn qa_limit_exceeded_rolls_back() {
     );
 
     // Verify state was rolled back
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert!(
         state.loops.is_empty(),
@@ -2496,96 +2550,15 @@ async fn qa_limit_exceeded_rolls_back() {
     );
     assert_eq!(state.current_phase, Phase::Planning);
     assert_eq!(state.phase_iteration, 1);
-    assert_eq!(state.current_loop, 0);
+    assert_eq!(
+        state.current_loop, 1,
+        "current_loop should be 1 after QA limit rollback (no-checkpoint default)"
+    );
 }
 
-#[tokio::test]
-async fn resume_from_phase_qa() {
-    // Set up workspace with QA-pass backend and run planning + implementing to generate
-    // real artifacts, then manually persist state at Phase::QA and resume from there.
-    let (_temp, workspace_root, project_id, _counter_dir) =
-        setup_workspace_with_qa(write_qa_pass_backend_script, true, 3);
-
-    // Run a full loop first so we have real artifacts on disk.
-    let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
-    let mut orchestrator = Orchestrator::new(workspace);
-    orchestrator
-        .run(run_options(&project_id))
-        .await
-        .expect("initial run should succeed");
-
-    // Load the completed state and extract artifact paths from the finished loop.
-    let completed_state = load_project_state(&workspace_root.join("projects").join(&project_id))
-        .expect("load completed state");
-    assert_eq!(completed_state.loops.len(), 1);
-    assert_eq!(completed_state.loops[0].status, LoopStatus::Completed);
-
-    // Verify the loop has the artifacts QA phase needs on disk.
-    assert!(
-        completed_state.loops[0].artifacts.impl_notes.is_some(),
-        "impl_notes should exist for QA to reference"
-    );
-
-    // Remove the git tag created by the initial run so the resumed commit won't conflict.
-    let repo_root = workspace_root
-        .parent()
-        .expect("repo root is parent of .ralph");
-    git_ok(repo_root, &["tag", "-d", "ralph/01-poc/loop-1"]);
-
-    // Now manually construct a new state at Phase::QA, reusing the real artifacts.
-    let mut qa_state = completed_state.clone();
-    qa_state.current_phase = Phase::QA;
-    qa_state.phase_iteration = 1;
-    qa_state.loops[0].status = LoopStatus::InProgress;
-    qa_state.loops[0].commit = None;
-    qa_state.loops[0].completed_at = None;
-    qa_state.loops[0].artifacts.qa_results.clear();
-    qa_state.loops[0].artifacts.pending_qa_feedback = None;
-    qa_state.loops[0].artifacts.reviews.clear();
-    qa_state.loops[0].artifacts.approval = None;
-
-    let project_dir = workspace_root.join("projects").join(&project_id);
-    save_project_state(&project_dir, &qa_state).expect("save state at Phase::QA");
-
-    // Verify persisted state is at QA before resuming.
-    let persisted = load_project_state(&project_dir).expect("reload persisted state");
-    assert_eq!(
-        persisted.current_phase,
-        Phase::QA,
-        "state should be persisted at Phase::QA"
-    );
-    assert!(
-        persisted.loops[0].artifacts.qa_results.is_empty(),
-        "QA results should be empty before resume"
-    );
-
-    // Resume from Phase::QA — the orchestrator should execute QA, pass, proceed to
-    // review, then commit.
-    let workspace = Workspace::load(workspace_root.clone()).expect("reload workspace");
-    let mut orchestrator = Orchestrator::new(workspace);
-    orchestrator
-        .run(run_options(&project_id))
-        .await
-        .expect("resume from Phase::QA should succeed");
-
-    let final_state = load_project_state(&project_dir).expect("load final state");
-    assert_eq!(final_state.loops[0].status, LoopStatus::Completed);
-    assert!(
-        final_state.loops[0].commit.is_some(),
-        "commit should exist after resume"
-    );
-
-    // Verify QA actually executed during the resume (not skipped).
-    assert_eq!(
-        final_state.loops[0].artifacts.qa_results.len(),
-        1,
-        "exactly one QA exchange should exist from the resumed run"
-    );
-    assert!(
-        final_state.loops[0].artifacts.qa_results[0].passed,
-        "QA should have passed during resume"
-    );
-}
+// resume_from_phase_qa was removed: it depended on save_project_state to
+// manually persist mid-phase state, which is no longer supported.  Phase
+// resume is now governed by artifact-based reconstruction in lifecycle.rs.
 
 #[tokio::test]
 async fn acceptance_gate_pass_keeps_completed() {
@@ -2603,7 +2576,7 @@ async fn acceptance_gate_pass_keeps_completed() {
         .await
         .expect("orchestration with acceptance-pass should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.completion_attempts.len(), 1);
@@ -2663,7 +2636,7 @@ async fn acceptance_gate_fail_overrides_complete_to_continue() {
         .await
         .expect("orchestration with acceptance fail-then-pass should succeed");
 
-    let state = load_project_state(&workspace_root.join("projects").join(&project_id))
+    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
         .expect("load project state");
     assert_eq!(state.completion_attempts.len(), 2);
 

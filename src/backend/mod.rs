@@ -8,12 +8,11 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -21,19 +20,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::GlobalConfig;
 use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
-use crate::util::time::now_timestamp_yyyymmddhhmmss;
 use crate::Result;
 
 use self::tmux::RealTmuxRunner;
 use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
-
-pub(crate) static CLI_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -112,97 +108,6 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
     })
 }
 
-fn sanitize_role_for_filename(role: &str) -> String {
-    let sanitized = role
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    if sanitized.is_empty() {
-        "unknown".to_owned()
-    } else {
-        sanitized
-    }
-}
-
-fn build_cli_output_filename(role: &str) -> String {
-    let timestamp = now_timestamp_yyyymmddhhmmss();
-    let counter = CLI_OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{timestamp}-agent-output-{role}-{counter}.log")
-}
-
-pub(crate) async fn persist_cli_output(
-    loop_dir: Option<&Path>,
-    backend_name: &str,
-    role: Option<&str>,
-    exit_status: Option<i32>,
-    stdout: &[u8],
-    stderr: &[u8],
-) {
-    let Some(loop_dir) = loop_dir else {
-        debug!(
-            backend = backend_name,
-            role = ?role,
-            "skipping backend output artifact: loop_dir is not set"
-        );
-        return;
-    };
-
-    let role_value = role
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("unknown");
-    let file_role = sanitize_role_for_filename(role_value);
-    let filename = build_cli_output_filename(&file_role);
-    let artifact_path = loop_dir.join(filename);
-    let exit_status_text = exit_status
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    let content = format!(
-        "=== Backend Output Log ===\nbackend: {backend_name}\nrole: {role_value}\nexit_status: {exit_status_text}\n\n=== STDOUT ===\n{}\n\n=== STDERR ===\n{}\n",
-        String::from_utf8_lossy(stdout),
-        String::from_utf8_lossy(stderr)
-    );
-
-    if let Err(err) = tokio::fs::create_dir_all(loop_dir).await {
-        warn!(
-            backend = backend_name,
-            role = role_value,
-            path = %loop_dir.display(),
-            error = %err,
-            "failed to prepare loop directory for backend output artifact"
-        );
-        return;
-    }
-
-    match tokio::fs::write(&artifact_path, content).await {
-        Ok(()) => {
-            info!(
-                path = %artifact_path.display(),
-                backend = backend_name,
-                role = role_value,
-                "wrote backend output artifact"
-            );
-        }
-        Err(err) => {
-            warn!(
-                backend = backend_name,
-                role = role_value,
-                path = %artifact_path.display(),
-                error = %err,
-                "failed to write backend output artifact"
-            );
-        }
-    }
-}
-
 /// Context provided by the orchestrator for each backend invocation,
 /// enabling session-aware argument rewriting.
 #[derive(Debug, Clone)]
@@ -265,7 +170,6 @@ impl CliBackend {
         }
     }
 
-
     pub fn resolved_command_path(&self) -> PathBuf {
         which::which(&self.command).unwrap_or_else(|_| PathBuf::from(&self.command))
     }
@@ -293,17 +197,11 @@ impl CliBackend {
     pub fn effective_args(&self, ctx: &BackendInvocationContext) -> Result<Vec<String>> {
         match &ctx.session_id {
             Some(id) => match self.name.as_str() {
-                n if n.starts_with("claude") || n == "claude" => {
-                    self.effective_args_claude(id)
-                }
-                n if n.starts_with("codex") || n == "codex" => {
-                    self.effective_args_codex(id)
-                }
+                n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
+                n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 _ => Ok(self.args.clone()),
             },
-            None if ctx.json_output_required => {
-                self.ensure_json_output_args()
-            }
+            None if ctx.json_output_required => self.ensure_json_output_args(),
             None => Ok(self.args.clone()),
         }
     }
@@ -316,7 +214,10 @@ impl CliBackend {
             n if n.starts_with("claude") || n == "claude" => {
                 let mut args = self.args.clone();
                 // Only add if not already present
-                if !args.iter().any(|a| a == "--output-format" || a.starts_with("--output-format=")) {
+                if !args
+                    .iter()
+                    .any(|a| a == "--output-format" || a.starts_with("--output-format="))
+                {
                     args.push("--output-format".to_owned());
                     args.push("json".to_owned());
                 }
@@ -424,7 +325,11 @@ impl CliBackend {
                     i += 1;
                     if i < args.len() && args[i] == "resume" {
                         i += 1; // skip "resume"
-                        if i < args.len() && args[i] != "-" && args[i] != "--json" && !args[i].starts_with("--") {
+                        if i < args.len()
+                            && args[i] != "-"
+                            && args[i] != "--json"
+                            && !args[i].starts_with("--")
+                        {
                             i += 1; // skip old session id
                         }
                     }
@@ -474,19 +379,17 @@ impl CliBackend {
         let effective_args = {
             let ctx_opt = self.invocation_ctx.get().await;
             match ctx_opt {
-                Some(ref ctx) => {
-                    match self.effective_args(ctx) {
-                        Ok(args) => args,
-                        Err(e) => {
-                            debug!(
-                                backend = self.name,
-                                error = %e,
-                                "effective_args rewrite failed in CliBackend, using base args"
-                            );
-                            self.args.clone()
-                        }
+                Some(ref ctx) => match self.effective_args(ctx) {
+                    Ok(args) => args,
+                    Err(e) => {
+                        debug!(
+                            backend = self.name,
+                            error = %e,
+                            "effective_args rewrite failed in CliBackend, using base args"
+                        );
+                        self.args.clone()
                     }
-                }
+                },
                 None => self.args.clone(),
             }
         };
@@ -545,7 +448,6 @@ impl CliBackend {
                 backend: self.name.clone(),
                 details: "child stderr pipe unavailable".to_owned(),
             })?;
-
 
         let last_activity = Arc::new(Mutex::new(Instant::now()));
         let activity_notify = Arc::new(Notify::new());
@@ -902,11 +804,8 @@ impl BackendRegistry {
 
         let mut cli_backend = self.create_cli_backend_for_spec(&parsed, role)?;
         cli_backend.invocation_ctx = self.invocation_context.clone();
-        let backend = backend_with_optional_tmux(
-            cli_backend,
-            &self.tmux,
-            self.tmux_context.clone(),
-        );
+        let backend =
+            backend_with_optional_tmux(cli_backend, &self.tmux, self.tmux_context.clone());
         self.backends.insert(cache_key, backend.clone());
         Ok(backend)
     }
@@ -1254,7 +1153,7 @@ printf 'progress 20%%\rpartial-line'
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(1), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(1), "planner");
         let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
             .await
             .expect("backend should succeed");
@@ -1291,7 +1190,7 @@ sleep 30
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(2), None, "implementer");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(2), "implementer");
         let start = Instant::now();
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         let elapsed = start.elapsed();
@@ -1523,7 +1422,10 @@ sleep 30
         let result = backend.effective_args(&ctx);
         assert!(result.is_err(), "codex without 'exec' should fail");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("exec"), "error should mention 'exec': {err_msg}");
+        assert!(
+            err_msg.contains("exec"),
+            "error should mention 'exec': {err_msg}"
+        );
     }
 
     // --- Strengthened arg-rewrite tests with full token sequence assertions ---
@@ -1634,8 +1536,14 @@ sleep 30
         );
         let ctx = make_invocation_ctx(Some("new-session"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(!args.contains(&"old-session".to_owned()), "old session id must be replaced");
-        assert!(!args.contains(&"text".to_owned()), "old output-format value must be replaced");
+        assert!(
+            !args.contains(&"old-session".to_owned()),
+            "old session id must be replaced"
+        );
+        assert!(
+            !args.contains(&"text".to_owned()),
+            "old output-format value must be replaced"
+        );
         assert_eq!(
             args.iter().filter(|a| *a == "--resume").count(),
             1,
@@ -1663,7 +1571,10 @@ sleep 30
         );
         let ctx = make_invocation_ctx(Some("new-thread"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(!args.contains(&"old-thread".to_owned()), "old session must be replaced");
+        assert!(
+            !args.contains(&"old-thread".to_owned()),
+            "old session must be replaced"
+        );
         assert_eq!(args[2], "new-thread", "new session id in correct position");
         assert_eq!(
             args.iter().filter(|a| *a == "--json").count(),
@@ -1732,7 +1643,7 @@ sleep 30
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(3), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(3), "planner");
         let start = Instant::now();
         let result = Backend::execute_with_log(&backend, "ignored", Some(&mut writer)).await;
         let elapsed = start.elapsed();
@@ -1791,7 +1702,7 @@ done
             BTreeMap::new(),
         );
 
-        let mut writer = LogWriter::open(temp.path(), Some(3), None, "planner");
+        let mut writer = LogWriter::open(temp.path(), "issue-test", Some(3), "planner");
         let start = Instant::now();
         let output = Backend::execute_with_log(&backend, "ignored", Some(&mut writer))
             .await

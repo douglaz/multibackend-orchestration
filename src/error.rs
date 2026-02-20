@@ -46,6 +46,9 @@ pub enum RalphError {
         lock_path: PathBuf,
     },
 
+    #[error("daemon is already running for repo {repo_root}: {lock_path}")]
+    DaemonLocked { repo_root: PathBuf, lock_path: PathBuf },
+
     #[error("corrupted state at {path}: {reason}")]
     CorruptedState { path: PathBuf, reason: String },
 
@@ -133,7 +136,7 @@ impl RalphError {
             | Self::ProjectNotFound(_)
             | Self::ActiveProjectNotSet
             | Self::PrdCacheMismatch(_) => 2,
-            Self::StateLocked { .. } => 3,
+            Self::StateLocked { .. } | Self::DaemonLocked { .. } => 3,
             Self::PrdPipelineFailed(_) => 10,
             Self::PrdValidationFailed(_) => 11,
             Self::PrdMissingInfo => 12,

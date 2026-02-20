@@ -40,29 +40,28 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
 
     prune_worktrees(repo_root, task_id);
 
+    // Remote-first: fetch and use origin/HEAD as base ref. Never fall back
+    // to local refs (master, main, HEAD) for daemon worktree creation.
     match has_origin_remote(repo_root) {
         Ok(has_origin) => {
             if has_origin {
-                if let Err(err) = sync_remote_master(repo_root, task_id) {
-                    eprintln!(
-                        "warning: failed to sync origin master for task {task_id}; using local base ref: {err}"
-                    );
+                if let Err(err) = fetch_origin(repo_root, task_id) {
+                    eprintln!("warning: failed to fetch origin for task {task_id}: {err}");
                 }
             }
         }
         Err(err) => {
-            eprintln!(
-                "warning: failed to detect origin remote for task {task_id}; using local base ref: {err}"
-            );
+            eprintln!("warning: failed to detect origin remote for task {task_id}: {err}");
         }
     }
 
-    let base_ref = if revision_exists(repo_root, "origin/master")? {
-        "origin/master"
-    } else if revision_exists(repo_root, "master")? {
-        "master"
+    let base_ref = if revision_exists(repo_root, "origin/HEAD")? {
+        "origin/HEAD"
     } else {
-        "HEAD"
+        return Err(RalphError::Orchestration(format!(
+            "origin/HEAD is missing; cannot create worktree for task {task_id}. \
+             Ensure the remote has a default branch configured."
+        )));
     };
 
     // Check if the branch already exists (e.g. from a previous failed run
@@ -117,15 +116,13 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     Ok(wt_path)
 }
 
-fn sync_remote_master(repo_root: &Path, task_id: &str) -> Result<()> {
+fn fetch_origin(repo_root: &Path, task_id: &str) -> Result<()> {
     let output = std::process::Command::new("git")
-        .args(["fetch", "origin", "master"])
+        .args(["fetch", "origin"])
         .current_dir(repo_root)
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to fetch origin master for {task_id}: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to fetch origin for {task_id}: {err}"))
         })?;
 
     if output.status.success() {
@@ -133,7 +130,7 @@ fn sync_remote_master(repo_root: &Path, task_id: &str) -> Result<()> {
     }
 
     Err(RalphError::Orchestration(format!(
-        "git fetch origin master failed for {task_id}: {}",
+        "git fetch origin failed for {task_id}: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     )))
 }
