@@ -11,7 +11,8 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    always_reject_review_script, review_feedback_once_then_approve_script, standard_mock_script,
+    always_reject_review_script, mock_tmux_script, review_feedback_once_then_approve_script,
+    standard_mock_script,
 };
 use serde_json::json;
 
@@ -92,6 +93,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "run::impl_response_artifact_on_review_feedback",
             func: impl_response_artifact_on_review_feedback,
+        },
+        ConformanceTest {
+            name: "run::tmux_enabled_no_loop_dir_logs",
+            func: tmux_enabled_no_loop_dir_logs,
         },
     ]
 }
@@ -777,6 +782,80 @@ fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
         assert!(
             content.contains("Addressed reviewer feedback"),
             "impl-response artifact body should contain expected feedback response content"
+        );
+    })
+}
+
+fn tmux_enabled_no_loop_dir_logs(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-tmux-log";
+        setup_with_standard_mock(h, project_id);
+
+        // Write mock tmux script and place it on PATH
+        let mock_tmux_content = mock_tmux_script();
+        let mock_tmux_bin_dir = h.temp_dir.path().join("mock-bin");
+        fs::create_dir_all(&mock_tmux_bin_dir).expect("create mock-bin dir");
+        let mock_tmux_path = mock_tmux_bin_dir.join("tmux");
+        fs::write(&mock_tmux_path, mock_tmux_content).expect("write mock tmux");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&mock_tmux_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&mock_tmux_path, perms).expect("set permissions");
+        }
+
+        // Run with --tmux CLI flag and mock tmux on PATH
+        let output = h
+            .ralph_with_path(["run", "--tmux", "--loops", "1"], &[&mock_tmux_bin_dir])
+            .expect("ralph run --tmux --loops 1 with tmux should execute");
+        assert!(
+            output.status.success(),
+            "ralph run --tmux --loops 1 should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Verify agent output logs exist in .ralph/tmp/logs
+        let tmp_log_dir = h.tmp_log_dir();
+        assert!(
+            tmp_log_dir.exists(),
+            "tmp log dir should exist at {}",
+            tmp_log_dir.display()
+        );
+        let log_files: Vec<String> = fs::read_dir(&tmp_log_dir)
+            .expect("read tmp log dir")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(project_id) && name.ends_with(".log") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !log_files.is_empty(),
+            "expected at least one agent-output log in tmp/logs for tmux run; found: {log_files:?}"
+        );
+
+        // Verify NO agent-output-*.log files in loop directories
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        let loop_logs: Vec<_> = artifacts
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
+            })
+            .collect();
+        assert!(
+            loop_logs.is_empty(),
+            "agent-output logs should NOT exist in loop directory for tmux run; found: {loop_logs:?}"
         );
     })
 }

@@ -10,8 +10,7 @@ pub use mock::MockBackend;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,19 +20,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::GlobalConfig;
 use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
 use crate::project::state::{CompletionLoopBackends, FeatureLoopBackends};
-use crate::util::time::now_timestamp_yyyymmddhhmmss;
 use crate::Result;
 
 use self::tmux::RealTmuxRunner;
 use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
-
-pub(crate) static CLI_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[async_trait]
 pub trait Backend: Send + Sync {
@@ -110,97 +106,6 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
         name: name.to_owned(),
         model: Some(model.to_owned()),
     })
-}
-
-fn sanitize_role_for_filename(role: &str) -> String {
-    let sanitized = role
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    if sanitized.is_empty() {
-        "unknown".to_owned()
-    } else {
-        sanitized
-    }
-}
-
-fn build_cli_output_filename(role: &str) -> String {
-    let timestamp = now_timestamp_yyyymmddhhmmss();
-    let counter = CLI_OUTPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{timestamp}-agent-output-{role}-{counter}.log")
-}
-
-pub(crate) async fn persist_cli_output(
-    loop_dir: Option<&Path>,
-    backend_name: &str,
-    role: Option<&str>,
-    exit_status: Option<i32>,
-    stdout: &[u8],
-    stderr: &[u8],
-) {
-    let Some(loop_dir) = loop_dir else {
-        debug!(
-            backend = backend_name,
-            role = ?role,
-            "skipping backend output artifact: loop_dir is not set"
-        );
-        return;
-    };
-
-    let role_value = role
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("unknown");
-    let file_role = sanitize_role_for_filename(role_value);
-    let filename = build_cli_output_filename(&file_role);
-    let artifact_path = loop_dir.join(filename);
-    let exit_status_text = exit_status
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "unknown".to_owned());
-
-    let content = format!(
-        "=== Backend Output Log ===\nbackend: {backend_name}\nrole: {role_value}\nexit_status: {exit_status_text}\n\n=== STDOUT ===\n{}\n\n=== STDERR ===\n{}\n",
-        String::from_utf8_lossy(stdout),
-        String::from_utf8_lossy(stderr)
-    );
-
-    if let Err(err) = tokio::fs::create_dir_all(loop_dir).await {
-        warn!(
-            backend = backend_name,
-            role = role_value,
-            path = %loop_dir.display(),
-            error = %err,
-            "failed to prepare loop directory for backend output artifact"
-        );
-        return;
-    }
-
-    match tokio::fs::write(&artifact_path, content).await {
-        Ok(()) => {
-            info!(
-                path = %artifact_path.display(),
-                backend = backend_name,
-                role = role_value,
-                "wrote backend output artifact"
-            );
-        }
-        Err(err) => {
-            warn!(
-                backend = backend_name,
-                role = role_value,
-                path = %artifact_path.display(),
-                error = %err,
-                "failed to write backend output artifact"
-            );
-        }
-    }
 }
 
 /// Context provided by the orchestrator for each backend invocation,

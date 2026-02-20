@@ -7,7 +7,7 @@
   "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
   "prompt_review_completed": true,
   "parent_project": null,
-  "current_loop": 12,
+  "current_loop": 14,
   "current_phase": "committing",
   "phase_iteration": 1,
   "status": "in_progress",
@@ -253,7 +253,7 @@
       "slug": "recovery-test-contract-alignment-for-checkpoint",
       "feature_name": "Recovery Test Contract Alignment for Checkpoint-Only Defaults",
       "loop_type": "feature",
-      "status": "in_progress",
+      "status": "completed",
       "backends": {
         "planner": "codex(gpt-5.3-codex-xhigh)",
         "implementer": "claude(opus)",
@@ -268,8 +268,38 @@
         "qa_results": [],
         "pending_qa_feedback": null
       },
-      "commit": null,
+      "commit": "e349b9fa23fbeb2aacf4168aa6ca0e7295a131fc",
       "started_at": "2026-02-20T00:21:40.612292969Z",
+      "completed_at": "2026-02-20T00:25:18.947900449Z"
+    },
+    {
+      "loop_number": 14,
+      "slug": "tmux-output-log-routing-contract-completion",
+      "feature_name": "Tmux Output Log Routing Contract Completion",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/014-tmux-output-log-routing-contract-completion/20260220003607-spec.md",
+        "impl_notes": "loops/014-tmux-output-log-routing-contract-completion/20260220004706-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/014-tmux-output-log-routing-contract-completion/20260220005124-review-001-feedback.md",
+            "response": "loops/014-tmux-output-log-routing-contract-completion/20260220005627-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/014-tmux-output-log-routing-contract-completion/20260220005832-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-20T00:36:07.710720538Z",
       "completed_at": null
     }
   ],
@@ -327,6 +357,24 @@
       "verdict": "continue",
       "started_at": "2026-02-20T00:14:56.992327578Z",
       "completed_at": "2026-02-20T00:20:09.740441814Z"
+    },
+    {
+      "loop_number": 13,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/013-completion/20260220002746-termination-request.md",
+        "verdict": "loops/013-completion/20260220003319-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-20T00:27:46.289119950Z",
+      "completed_at": "2026-02-20T00:33:19.442234819Z"
     }
   ],
   "session_store": {

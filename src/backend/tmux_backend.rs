@@ -7,7 +7,7 @@ use tokio::fs;
 use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
-use super::{persist_cli_output, Backend, CliBackend, SharedTmuxContext};
+use super::{Backend, CliBackend, SharedTmuxContext};
 use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
 use crate::Result;
@@ -145,40 +145,12 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         parts.join(" ")
     }
-}
 
-/// RAII guard that removes a list of temp files on drop.
-struct TempFileGuard {
-    paths: Vec<PathBuf>,
-}
-
-impl TempFileGuard {
-    fn new(paths: Vec<PathBuf>) -> Self {
-        Self { paths }
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-/// Shell-escape a string by wrapping in single quotes and escaping embedded
-/// single quotes (the standard `'\''` trick).
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-#[async_trait]
-impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn execute(&self, prompt: &str) -> Result<String> {
+    /// Execute the tmux-backed command and return raw stdout, stderr, and exit
+    /// code without interpreting the exit code. Both `execute()` and
+    /// `execute_with_log()` delegate here so that log writes can happen
+    /// regardless of exit status.
+    async fn execute_raw(&self, prompt: &str) -> Result<TmuxRawOutput> {
         let prefix = self.temp_file_prefix();
         let tmp_dir = std::env::temp_dir();
         let prompt_file = tmp_dir.join(format!("{prefix}-prompt.txt"));
@@ -364,27 +336,76 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             }
         };
 
-        persist_cli_output(
-            ctx.loop_dir.as_deref(),
-            self.inner.name(),
-            ctx.role.as_deref(),
-            Some(exit_code),
-            &output_bytes,
-            &stderr_bytes,
-        )
-        .await;
+        debug!(
+            backend = self.inner.name(),
+            role = ?ctx.role,
+            exit_code = exit_code,
+            stdout_len = output_bytes.len(),
+            stderr_len = stderr_bytes.len(),
+            "tmux backend output captured (not persisted to loop dir)"
+        );
 
-        if exit_code != 0 {
+        Ok(TmuxRawOutput {
+            exit_code,
+            stdout: output_bytes,
+            stderr: stderr_bytes,
+        })
+    }
+}
+
+/// Raw output captured from a tmux execution, before interpreting the exit code.
+struct TmuxRawOutput {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// RAII guard that removes a list of temp files on drop.
+struct TempFileGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Shell-escape a string by wrapping in single quotes and escaping embedded
+/// single quotes (the standard `'\''` trick).
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[async_trait]
+impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn execute(&self, prompt: &str) -> Result<String> {
+        let raw = self.execute_raw(prompt).await?;
+
+        if raw.exit_code != 0 {
             return Err(RalphError::BackendCommandFailed {
                 backend: self.inner.name().to_owned(),
                 details: format!(
-                    "tmux command exited with code {exit_code} (command='{}')",
+                    "tmux command exited with code {} (command='{}')",
+                    raw.exit_code,
                     self.inner.command()
                 ),
             });
         }
 
-        Ok(String::from_utf8_lossy(&output_bytes).to_string())
+        Ok(String::from_utf8_lossy(&raw.stdout).to_string())
     }
 
     async fn execute_with_log(
@@ -392,11 +413,33 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         prompt: &str,
         mut log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
-        let output = self.execute(prompt).await?;
+        let raw = self.execute_raw(prompt).await?;
+
+        // Persist stdout and stderr to LogWriter (routed to `.ralph/tmp/logs`)
+        // for both success and failure paths. This ensures tmux diagnostics are
+        // always captured in tmp logs while keeping loop dirs artifact-free.
         if let Some(writer) = log_writer.as_deref_mut() {
-            writer.write_bytes(output.as_bytes());
+            if !raw.stdout.is_empty() {
+                writer.write_bytes(&raw.stdout);
+            }
+            if !raw.stderr.is_empty() {
+                writer.write_str("\n=== STDERR ===\n");
+                writer.write_bytes(&raw.stderr);
+            }
         }
-        Ok(output)
+
+        if raw.exit_code != 0 {
+            return Err(RalphError::BackendCommandFailed {
+                backend: self.inner.name().to_owned(),
+                details: format!(
+                    "tmux command exited with code {} (command='{}')",
+                    raw.exit_code,
+                    self.inner.command()
+                ),
+            });
+        }
+
+        Ok(String::from_utf8_lossy(&raw.stdout).to_string())
     }
 
     async fn health_check(&self) -> Result<()> {

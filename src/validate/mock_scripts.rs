@@ -2398,6 +2398,65 @@ fi
     .to_owned()
 }
 
+/// Mock `tmux` script for conformance tests that enables tmux-mode execution
+/// without a real tmux binary. Handles the tmux commands that `TmuxBackend`
+/// issues: `has-session`, `new-session`, `new-window`, `set-option`,
+/// `list-windows`, and `kill-window`.
+///
+/// The mock creates the output and exit files that `wait_for_exit_with_activity`
+/// polls for, by extracting the shell command from `new-window` and running the
+/// backend script inline.
+pub fn mock_tmux_script() -> String {
+    r###"#!/bin/sh
+# Mock tmux for conformance tests.
+# Handles: has-session, new-session, new-window, set-option, list-windows, kill-window
+set -eu
+
+case "$1" in
+  has-session)
+    # Session always exists (or will be created)
+    exit 0
+    ;;
+  new-session)
+    exit 0
+    ;;
+  new-window)
+    # Extract the shell command (last argument) and run it.
+    # new-window is called as: tmux new-window -t <session> -n <label> -P -F '#{window_id}' <shell_cmd>
+    # The shell command is the last positional argument.
+    shift  # skip 'new-window'
+    shell_cmd=""
+    while [ $# -gt 0 ]; do
+      shell_cmd="$1"
+      shift
+    done
+    # Run the shell command in background via sh, then print a fake window id
+    if [ -n "$shell_cmd" ]; then
+      sh -c "$shell_cmd" &
+    fi
+    printf '1\n'
+    exit 0
+    ;;
+  set-option)
+    exit 0
+    ;;
+  list-windows)
+    # Return the window id so has_window succeeds
+    printf '1\n'
+    exit 0
+    ;;
+  kill-window)
+    exit 0
+    ;;
+  *)
+    echo "mock tmux: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
 /// Mock script where the planner emits partial output then stalls, used to verify
 /// that inactivity timeout fires after the stall while preserving partial output.
 pub fn hanging_after_partial_planner_mock_script(pid_file: &Path) -> String {

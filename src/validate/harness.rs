@@ -345,6 +345,30 @@ impl RalphHarness {
         Ok(None)
     }
 
+    /// Run ralph with additional directories prepended to `$PATH`.
+    /// Used to inject mock binaries (e.g. mock `tmux`) for tmux-enabled tests.
+    pub fn ralph_with_path<I, S>(&self, args: I, extra_path_dirs: &[&Path]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = self.prepare_cli_args(args);
+        let mut command = Command::new(&self.ralph_bin);
+        command.args(args).current_dir(&self.repo_root);
+
+        // Prepend extra directories to PATH using std::env::join_paths for
+        // robust, portable path separator handling.
+        let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let existing: Vec<PathBuf> = std::env::split_paths(&current_path).collect();
+        let mut all_paths: Vec<&Path> = extra_path_dirs.to_vec();
+        all_paths.extend(existing.iter().map(|p| p.as_path()));
+        let new_path = std::env::join_paths(&all_paths)
+            .expect("PATH components should not contain invalid characters");
+        command.env("PATH", new_path);
+
+        Ok(command.output()?)
+    }
+
     pub fn list_artifacts(&self, project_id: &str, loop_number: u32) -> Result<Vec<PathBuf>> {
         let Some(loop_dir) = self.loop_dir(project_id, loop_number)? else {
             return Ok(Vec::new());
