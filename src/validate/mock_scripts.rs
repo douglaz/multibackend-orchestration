@@ -69,6 +69,13 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+The project is complete and requires no further amendments.
+EOF
 elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
   cat <<'EOF'
 # Prompt Review
@@ -248,6 +255,13 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
+elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+The project is complete and requires no further amendments.
+EOF
 elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
   cat <<'EOF'
 # Prompt Review
@@ -385,6 +399,13 @@ EOF
   fi
   echo "cwd-ok" > cwd_test.txt
   git add cwd_test.txt
+elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+The project is complete and requires no further amendments.
+EOF
 elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
   cat <<'EOF'
 # Prompt Review

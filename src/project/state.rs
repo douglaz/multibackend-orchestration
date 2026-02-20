@@ -353,6 +353,11 @@ impl ProjectState {
             .find(|loop_state| loop_state.loop_number == self.current_loop)
     }
 
+    pub fn current_completion_loop_identity(&self) -> Option<(u32, &str)> {
+        self.current_completion_attempt()
+            .map(|attempt| (attempt.loop_number, attempt.slug.as_str()))
+    }
+
     pub fn remove_loop(&mut self, loop_number: u32) {
         self.loops
             .retain(|loop_state| loop_state.loop_number != loop_number);
@@ -374,6 +379,9 @@ impl ProjectState {
     pub fn validate_invariants(&self) -> std::result::Result<(), String> {
         if self.phase_iteration == 0 {
             return Err("phase_iteration must be >= 1".to_owned());
+        }
+        if self.current_phase == Phase::FinalReview && self.phase_iteration != 1 {
+            return Err("phase_iteration must be 1 during final_review".to_owned());
         }
 
         let mut seen = HashSet::new();
@@ -666,5 +674,16 @@ mod tests {
             "only loop 2 session should remain"
         );
         assert_eq!(state.session_store.records[0].loop_number, 2);
+    }
+
+    #[test]
+    fn final_review_requires_iteration_one() {
+        let mut state = ProjectState::new("demo", "Demo", "abc123", None);
+        state.current_phase = super::Phase::FinalReview;
+        state.phase_iteration = 2;
+        let err = state
+            .validate_invariants()
+            .expect_err("final_review iteration > 1 should fail");
+        assert!(err.contains("final_review"));
     }
 }

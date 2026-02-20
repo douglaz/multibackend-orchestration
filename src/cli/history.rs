@@ -49,6 +49,15 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
     }
 
     println!("PROJECT: {} ({})", state.project_id, state.project_name);
+    println!(
+        "PARENT: {}",
+        state.parent_project.as_deref().unwrap_or("none")
+    );
+    println!(
+        "PROMPT: {} (sha256: {})",
+        state.prompt_file, state.prompt_hash
+    );
+    println!("CURRENT PHASE: {}", phase_label(&state.current_phase));
     println!();
     println!("CHECKPOINT HISTORY:");
 
@@ -135,4 +144,53 @@ fn loop_status_label(status: &crate::project::state::LoopStatus) -> &'static str
         crate::project::state::LoopStatus::InProgress => "in_progress",
         crate::project::state::LoopStatus::Completed => "completed",
     }
+}
+
+fn verdict_label(verdict: &crate::project::state::CompletionVerdict) -> String {
+    match verdict {
+        crate::project::state::CompletionVerdict::Continue => "continue".to_owned(),
+        crate::project::state::CompletionVerdict::Complete => "complete".to_owned(),
+    }
+}
+
+fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
+    match phase {
+        crate::project::state::Phase::Planning => "planning",
+        crate::project::state::Phase::Implementing => "implementing",
+        crate::project::state::Phase::QA => "qa",
+        crate::project::state::Phase::Reviewing => "reviewing",
+        crate::project::state::Phase::Committing => "committing",
+        crate::project::state::Phase::Completing => "completing",
+        crate::project::state::Phase::FinalReview => "final_review",
+    }
+}
+
+enum HistoryEntry<'a> {
+    Feature(&'a crate::project::state::FeatureLoopState),
+    Completion(&'a crate::project::state::CompletionLoopState),
+}
+
+impl<'a> HistoryEntry<'a> {
+    fn loop_number(&self) -> u32 {
+        match self {
+            Self::Feature(loop_state) => loop_state.loop_number,
+            Self::Completion(completion) => completion.loop_number,
+        }
+    }
+}
+
+pub fn format_qa_line(qa_results: &[crate::project::state::QaExchange]) -> String {
+    let qa_count = qa_results.len();
+    let qa_verdict = qa_results
+        .last()
+        .map(|q| if q.passed { "pass" } else { "fail" })
+        .unwrap_or("none");
+    let qa_report = qa_results
+        .last()
+        .map(|q| q.report.as_str())
+        .unwrap_or("none");
+    format!(
+        "QA: {} attempts, last={}, report={}",
+        qa_count, qa_verdict, qa_report
+    )
 }
