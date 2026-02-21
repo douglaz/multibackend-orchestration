@@ -8,6 +8,10 @@ use tokio_util::sync::CancellationToken;
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
+use crate::daemon::rebase_agent::{
+    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend,
+    RebaseFailureKind,
+};
 
 use crate::daemon::process;
 use crate::daemon::refine;
@@ -47,6 +51,10 @@ pub struct DaemonRuntimeConfig {
     pub max_rebases_per_cycle: u32,
     /// Per-attempt timeout (seconds) for rebase operations.
     pub rebase_timeout_seconds: u64,
+    /// Backend spec string for AI-assisted rebase conflict recovery.
+    /// Parsed internally by `resolve_rebase_conflicts`; supports "none",
+    /// "claude", "claude(<model>)".
+    pub rebase_agent_backend: String,
     /// Workspace root (`.ralph/` directory).
     pub workspace_root: PathBuf,
 }
@@ -1519,7 +1527,11 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
             let target = rebase_target.clone();
             let br = branch.clone();
             let timeout_dur = timeout;
-            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur)).await
+            let backend_str = config.rebase_agent_backend.clone();
+            spawn_blocking_op(move || {
+                execute_rebase(&wt, &target, &br, timeout_dur, &backend_str)
+            })
+            .await
         };
 
         // Clean up rebase worktree (best-effort)
@@ -1586,13 +1598,22 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
 /// All three steps share a single `timeout` budget. Time consumed by earlier
 /// steps is subtracted from the budget available for later steps, so the
 /// total wall-clock time stays bounded to roughly `timeout`.
+///
+/// When rebase fails due to merge conflicts and an agent backend is configured,
+/// the conflict recovery agent is invoked to resolve conflicts iteratively.
+/// The `agent_backend` is a raw string spec ("none", "claude", "claude(<model>)")
+/// parsed internally by `resolve_rebase_conflicts`.
 fn execute_rebase(
     worktree_path: &Path,
     rebase_target: &str,
     branch: &str,
     timeout: Duration,
+    agent_backend: &str,
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
+
+    // Parse backend once at the top so all branches use the typed enum.
+    let parsed_backend = parse_rebase_agent_backend(agent_backend)?;
 
     // Helper: remaining time or error if expired.
     let remaining = |label: &str| -> Result<Duration> {
@@ -1603,6 +1624,20 @@ fn execute_rebase(
             )));
         }
         Ok(deadline - now)
+    };
+
+    // Helper: bounded abort — abort rebase with timeout from shared deadline.
+    let bounded_abort = |wt: &Path| {
+        let abort_budget = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .unwrap_or(Duration::from_secs(10))
+            .max(Duration::from_secs(5));
+        let _ = process::run_command_with_timeout(
+            std::process::Command::new("git")
+                .args(["rebase", "--abort"])
+                .current_dir(wt),
+            abort_budget,
+        );
     };
 
     // Fetch
@@ -1631,16 +1666,61 @@ fn execute_rebase(
     )?;
 
     if !rebase_output.status.success() {
-        // Abort the rebase to leave worktree clean
-        let _ = std::process::Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(worktree_path)
-            .output();
+        // Step 1: Pure criteria check (no I/O, unit-testable)
+        let pure_kind = classify_rebase_failure_pure(
+            rebase_output.status.code().unwrap_or(-1),
+            &rebase_output.stderr,
+        );
 
-        return Err(RalphError::Orchestration(format!(
-            "git rebase failed: {}",
-            String::from_utf8_lossy(&rebase_output.stderr).trim()
-        )));
+        // Step 2: If pure check says conflict, verify with timeout-bounded I/O probe
+        let failure_kind = if pure_kind == RebaseFailureKind::Conflict {
+            // Compute remaining budget before the I/O probe; fail immediately
+            // if no time remains.
+            let classify_budget = remaining("conflict classification")?;
+            match crate::git::has_conflicts_with_timeout(worktree_path, classify_budget) {
+                Ok(true) => RebaseFailureKind::Conflict,
+                _ => RebaseFailureKind::Other,
+            }
+        } else {
+            RebaseFailureKind::Other
+        };
+
+        match failure_kind {
+            RebaseFailureKind::Conflict => {
+                match parsed_backend {
+                    RebaseAgentBackend::None => {
+                        // Disabled: abort with bounded timeout and fail as before
+                        bounded_abort(worktree_path);
+                        let stderr =
+                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                        return Err(RalphError::Orchestration(format!(
+                            "git rebase failed with merge conflicts (agent resolution was skipped/disabled): {stderr}"
+                        )));
+                    }
+                    RebaseAgentBackend::Claude { .. } => {
+                        eprintln!(
+                            "rebase-agent: conflict detected, invoking AI agent for resolution"
+                        );
+                        // resolve_rebase_conflicts handles abort-on-failure internally
+                        crate::daemon::rebase_agent::resolve_rebase_conflicts(
+                            worktree_path,
+                            rebase_target,
+                            agent_backend,
+                            deadline,
+                        )?;
+                        // Agent succeeded — fall through to push
+                    }
+                }
+            }
+            RebaseFailureKind::Other => {
+                // Non-conflict failure: abort with bounded timeout and return error
+                bounded_abort(worktree_path);
+                let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                return Err(RalphError::Orchestration(format!(
+                    "git rebase failed: {stderr}"
+                )));
+            }
+        }
     }
 
     // Push with --force-with-lease (also under remaining budget)

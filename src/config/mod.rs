@@ -86,6 +86,7 @@ pub struct EffectiveDaemonConfig {
     pub rebase_interval_seconds: u64,
     pub max_rebases_per_cycle: u32,
     pub rebase_timeout_seconds: u64,
+    pub rebase_agent_backend: String,
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +365,9 @@ pub fn resolve_daemon_config(
         rebase_timeout_seconds: daemon_overrides
             .and_then(|cfg| cfg.rebase_timeout_seconds)
             .unwrap_or(global.workspace.daemon_rebase_timeout_seconds),
+        rebase_agent_backend: daemon_overrides
+            .and_then(|cfg| cfg.rebase_agent_backend.clone())
+            .unwrap_or_else(|| global.workspace.daemon_rebase_agent_backend.clone()),
     }
 }
 
@@ -695,6 +699,7 @@ mod tests {
         global.workspace.daemon_rebase_interval_seconds = 1800;
         global.workspace.daemon_max_rebases_per_cycle = 3;
         global.workspace.daemon_rebase_timeout_seconds = 120;
+        global.workspace.daemon_rebase_agent_backend = "claude(opus)".to_owned();
 
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
@@ -708,6 +713,7 @@ mod tests {
                 rebase_interval_seconds: Some(900),
                 max_rebases_per_cycle: Some(5),
                 rebase_timeout_seconds: Some(240),
+                rebase_agent_backend: Some("none".to_owned()),
             },
             ..ProjectConfig::default()
         };
@@ -723,6 +729,7 @@ mod tests {
         assert_eq!(effective.rebase_interval_seconds, 900);
         assert_eq!(effective.max_rebases_per_cycle, 5);
         assert_eq!(effective.rebase_timeout_seconds, 240);
+        assert_eq!(effective.rebase_agent_backend, "none");
 
         let no_project = resolve_daemon_config(&global, None);
         assert_eq!(no_project.poll_seconds, 60);
@@ -735,6 +742,7 @@ mod tests {
         assert_eq!(no_project.rebase_interval_seconds, 1800);
         assert_eq!(no_project.max_rebases_per_cycle, 3);
         assert_eq!(no_project.rebase_timeout_seconds, 120);
+        assert_eq!(no_project.rebase_agent_backend, "claude(opus)");
     }
 
     #[test]

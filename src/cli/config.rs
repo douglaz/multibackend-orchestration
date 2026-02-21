@@ -8,6 +8,7 @@ use crate::config::{
     resolve_effective_config, CommitMessageStyle, PlannerStateInPrompt, PreviousSpecsInPrompt,
     ProjectConfig, PromptChangeAction, RunWorkflowOverrides,
 };
+use crate::daemon::rebase_agent::parse_rebase_agent_backend;
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
@@ -167,6 +168,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "rebase_interval_seconds": effective.daemon.rebase_interval_seconds,
                     "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
                     "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
+                    "rebase_agent_backend": effective.daemon.rebase_agent_backend,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -260,6 +262,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "rebase_interval_seconds": effective.daemon.rebase_interval_seconds,
                     "max_rebases_per_cycle": effective.daemon.max_rebases_per_cycle,
                     "rebase_timeout_seconds": effective.daemon.rebase_timeout_seconds,
+                    "rebase_agent_backend": effective.daemon.rebase_agent_backend,
                 },
                 "templates": {
                     "planner": effective.templates.planner,
@@ -411,6 +414,10 @@ fn set_global_value(
         "workspace.daemon_rebase_timeout_seconds" => {
             config.workspace.daemon_rebase_timeout_seconds = parse_u64(raw_value, key)?;
         }
+        "workspace.daemon_rebase_agent_backend" => {
+            parse_rebase_agent_backend(raw_value)?;
+            config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
+        }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
         }
@@ -462,9 +469,9 @@ fn set_global_value(
             config.workflow.final_review_min_reviewers = parse_u32(raw_value, key)?;
         }
         "workflow.final_review_consensus_threshold" => {
-            let v: f64 = raw_value.parse().map_err(|_| {
-                RalphError::Validation(format!("key '{key}' expects float value"))
-            })?;
+            let v: f64 = raw_value
+                .parse()
+                .map_err(|_| RalphError::Validation(format!("key '{key}' expects float value")))?;
             config.workflow.final_review_consensus_threshold = v;
         }
         "workflow.max_final_review_restarts" => {
@@ -724,6 +731,9 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "daemon.rebase_timeout_seconds" => {
             config.daemon.rebase_timeout_seconds = parse_optional_u64(raw_value, key)?;
         }
+        "daemon.rebase_agent_backend" => {
+            config.daemon.rebase_agent_backend = parse_optional_rebase_agent_backend(raw_value)?;
+        }
         _ => {
             return Err(RalphError::Validation(format!(
                 "unsupported project config key: {key}"
@@ -915,6 +925,14 @@ fn parse_optional_string(raw: &str) -> Option<String> {
     } else {
         Some(raw.to_owned())
     }
+}
+
+fn parse_optional_rebase_agent_backend(raw: &str) -> Result<Option<String>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    parse_rebase_agent_backend(raw)?;
+    Ok(Some(raw.trim().to_owned()))
 }
 
 fn parse_optional_string_list(raw: &str) -> Result<Option<Vec<String>>> {

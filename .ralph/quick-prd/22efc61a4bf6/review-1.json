@@ -1,0 +1,41 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Auto-rebase Entry Conditions",
+      "feedback": "The current daemon flow skips PRs when GitHub reports `mergeable=CONFLICTING` before `execute_rebase` runs. If that skip remains, the rebase agent will never trigger for the main conflict case. The spec needs to explicitly change this gating logic."
+    },
+    {
+      "area": "Config Surface Completeness",
+      "feedback": "The file list is incomplete for a new daemon config key. You also need updates in `src/config/mod.rs` (effective daemon config merge), `src/cli/config.rs` (`config get/set/show` maps for global and project scopes), and tests that assert defaults/overrides. Without this, the new key will be partially wired."
+    },
+    {
+      "area": "Disable Sentinel Handling",
+      "feedback": "Using `daemon_rebase_agent_backend = \"none\"` conflicts with current backend validation (`claude|codex` specs only). The spec must define and implement explicit bypass logic for `none` in validation and resolution paths, not just runtime usage."
+    },
+    {
+      "area": "Backend Invocation Design",
+      "feedback": "Hardcoding `claude -p --model opus ...` bypasses configured backend command/args/env and contradicts the claim that the key accepts generic backend specs. Either scope the feature to Claude-only explicitly, or parse backend specs and resolve command/args from existing backend config machinery."
+    },
+    {
+      "area": "Conflict Detection Robustness",
+      "feedback": "Acceptance criteria mention 'exit code 1 with conflict markers', which is brittle (stderr text varies by git version/locale). Conflict classification should be based on repository state (`has_conflicts` and rebase-in-progress state), not message text."
+    },
+    {
+      "area": "Conflict File Parsing Edge Cases",
+      "feedback": "The spec assumes existing `git::conflicting_files()` is sufficient, but current porcelain parsing is fragile for quoted paths/renames/special characters. Either harden file discovery (`-z` parsing or `git diff --name-only --diff-filter=U`) or avoid path-sensitive instructions."
+    },
+    {
+      "area": "Rebase Continue Edge Cases",
+      "feedback": "The loop only models 'new conflicts or success'. Common states like empty/applied commits requiring `git rebase --skip`, hook failures, or commit-message/editor failures are not covered. The spec should define behavior for these outcomes."
+    },
+    {
+      "area": "Timeout/Process Lifecycle",
+      "feedback": "`run_command_with_timeout` uses piped stdout/stderr and only kills the direct child on timeout. Long/verbose agent output can block, and subprocesses may leak. For robustness, define process-group termination and non-blocking output strategy for agent invocations."
+    },
+    {
+      "area": "Testing Coverage",
+      "feedback": "Given project conventions, this should include conformance coverage in `src/validate/` (daemon tests), not only a new `tests/daemon_rebase_agent.rs`. Add validate tests for default behavior, `none` disable path, multi-conflict loops, and agent failure/timeout fallback."
+    }
+  ]
+}
