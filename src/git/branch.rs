@@ -134,7 +134,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     if remote_ref_exists(repo_root, &remote_branch)? {
         // Remote branch exists — force-reset local branch to match remote.
         // This discards any local-only diverged commits.
-        run_git(repo_root, &["checkout", "-B", &branch, &remote_branch]).map_err(|err| {
+        run_git(repo_root, &["checkout", "--force", "-B", &branch, &remote_branch]).map_err(|err| {
             RalphError::Orchestration(format!(
                 "sync_project_branch: git checkout -B {branch} {remote_branch} failed \
                  for issue {issue_number}: {err}"
@@ -155,7 +155,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
 
     run_git(
         repo_root,
-        &["checkout", "-B", &branch, &remote_base_branch],
+        &["checkout", "--force", "-B", &branch, &remote_base_branch],
     )
     .map_err(|err| {
         RalphError::Orchestration(format!(
