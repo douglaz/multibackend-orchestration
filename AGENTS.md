@@ -18,7 +18,6 @@ ralph has a conformance test suite under `src/validate/`. Run it against a built
 
 ```bash
 ./result/bin/ralph validate --bin ./result/bin/ralph           # full suite
-./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp  # filter by name
 ./result/bin/ralph validate --bin ./result/bin/ralph --list        # list all tests
 ```
 
@@ -26,7 +25,7 @@ ralph has a conformance test suite under `src/validate/`. Run it against a built
 
 ### Adding validate tests
 
-1. Create `src/validate/tests_<feature>.rs` following the pattern in `tests_commands.rs` or `tests_mcp.rs`
+1. Create `src/validate/tests_<feature>.rs` following the pattern in `tests_commands.rs`
 2. Export `pub fn tests() -> Vec<ConformanceTest>`
 3. Register in `src/validate/mod.rs`: add `mod tests_<feature>;` and `tests.extend(tests_<feature>::tests());`
 4. Each test takes `&RalphHarness` and returns `TestResult`, wrapped in `run_case(|| { ... })`
@@ -42,7 +41,6 @@ ralph has a conformance test suite under `src/validate/`. Run it against a built
 | `tests_qa` | QA phase, acceptance gates, config |
 | `tests_commands` | status, history, rollback, config get/set/show |
 | `tests_tail` | Tail events, JSON output, --last flag |
-| `tests_mcp` | MCP server protocol, all 9 tools, error handling |
 
 ## Architecture
 
@@ -52,7 +50,6 @@ src/
   cli/         # Clap command definitions and execute functions
   config/      # TOML config parsing and merging
   git/         # Git operations (commit, branch, tag)
-  mcp/         # MCP JSON-RPC server (protocol, transport, handlers, schema)
   prd/         # PRD pipeline (full + quick-prd)
   project/     # Project lifecycle, state, artifacts
   prompts/     # Embedded prompt templates
