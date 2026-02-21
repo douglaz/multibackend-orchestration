@@ -5,6 +5,9 @@ use std::time::Duration;
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
+use crate::daemon::rebase_agent::{
+    classify_rebase_failure, RebaseAgentBackend, RebaseFailureKind,
+};
 
 use crate::daemon::process;
 use crate::daemon::refine;
@@ -44,6 +47,8 @@ pub struct DaemonRuntimeConfig {
     pub max_rebases_per_cycle: u32,
     /// Per-attempt timeout (seconds) for rebase operations.
     pub rebase_timeout_seconds: u64,
+    /// Parsed backend config used for future AI-assisted rebase recovery.
+    pub rebase_agent_backend: RebaseAgentBackend,
     /// Workspace root (`.ralph/` directory).
     pub workspace_root: PathBuf,
 }
@@ -1259,15 +1264,28 @@ fn execute_rebase(
     )?;
 
     if !rebase_output.status.success() {
+        let failure_kind = classify_rebase_failure(
+            rebase_output.status.code().unwrap_or(-1),
+            &rebase_output.stderr,
+            worktree_path,
+        );
+
         // Abort the rebase to leave worktree clean
         let _ = std::process::Command::new("git")
             .args(["rebase", "--abort"])
             .current_dir(worktree_path)
             .output();
 
+        let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+        let message = match failure_kind {
+            RebaseFailureKind::Conflict => {
+                format!("git rebase failed with merge conflicts: {stderr}")
+            }
+            RebaseFailureKind::Other => format!("git rebase failed: {stderr}"),
+        };
+
         return Err(RalphError::Orchestration(format!(
-            "git rebase failed: {}",
-            String::from_utf8_lossy(&rebase_output.stderr).trim()
+            "{message}"
         )));
     }
 

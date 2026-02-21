@@ -91,6 +91,7 @@ pub struct ProjectDaemonOverrides {
     pub rebase_interval_seconds: Option<u64>,
     pub max_rebases_per_cycle: Option<u32>,
     pub rebase_timeout_seconds: Option<u64>,
+    pub rebase_agent_backend: Option<String>,
 }
 
 impl ProjectConfig {

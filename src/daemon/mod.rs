@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod github;
 pub mod process;
+pub mod rebase_agent;
 pub mod refine;
 pub mod runtime;
 pub mod worktree;
