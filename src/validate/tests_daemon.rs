@@ -184,6 +184,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: sync_project_branch_discards_local_commit,
         },
         ConformanceTest {
+            name: "daemon::sync_project_branch_force_updates_stale_base",
+            func: sync_project_branch_force_updates_stale_base,
+        },
+        ConformanceTest {
             name: "daemon::worktree_uses_origin_head_not_local_refs",
             func: worktree_uses_origin_head_not_local_refs,
         },
@@ -2657,6 +2661,7 @@ fn sync_project_branch_resets_to_remote(_h: &RalphHarness) -> TestResult {
     use crate::git::branch::sync_project_branch;
     run_case(|| {
         let (_tmp, _bare, clone) = setup_remote_clone();
+        let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
 
         // Push a project branch to remote
         git_run(&clone, &["checkout", "-b", "ralph/issue-42"]);
@@ -2673,10 +2678,7 @@ fn sync_project_branch_resets_to_remote(_h: &RalphHarness) -> TestResult {
         let local_sha = git_out(&clone, &["rev-parse", "HEAD"]);
         assert_ne!(remote_sha, local_sha);
 
-        // Switch away so sync can checkout
-        git_run(&clone, &["checkout", "-"]);
-
-        sync_project_branch(&clone, 42).expect("sync should succeed");
+        sync_project_branch(&clone, 42, &base_branch).expect("sync should succeed");
 
         let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
         assert_eq!(after_sha, remote_sha, "should reset to remote");
@@ -2692,13 +2694,19 @@ fn sync_project_branch_creates_from_origin_head(_h: &RalphHarness) -> TestResult
     use crate::git::branch::sync_project_branch;
     run_case(|| {
         let (_tmp, _bare, clone) = setup_remote_clone();
+        let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let origin_base_ref = format!("origin/{base_branch}");
 
-        let origin_head = git_out(&clone, &["rev-parse", "origin/HEAD"]);
+        let origin_base = git_out(&clone, &["rev-parse", &origin_base_ref]);
+        git_run(&clone, &["checkout", "-b", "scratch"]);
 
-        sync_project_branch(&clone, 99).expect("sync should succeed");
+        sync_project_branch(&clone, 99, &base_branch).expect("sync should succeed");
 
         let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
-        assert_eq!(after_sha, origin_head, "should create from origin/HEAD");
+        assert_eq!(
+            after_sha, origin_base,
+            "should create from origin/<base_branch>"
+        );
 
         let branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
         assert_eq!(branch, "ralph/issue-99");
@@ -2706,27 +2714,34 @@ fn sync_project_branch_creates_from_origin_head(_h: &RalphHarness) -> TestResult
 }
 
 /// Conformance: sync_project_branch produces an actionable error when
-/// origin/HEAD is missing, including issue number, branch name, and failed
+/// origin/<base_branch> is missing, including issue number, branch name, and failed
 /// git operation.
 fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResult {
     use crate::git::branch::sync_project_branch;
     run_case(|| {
         let (_tmp, bare, clone) = setup_remote_clone();
+        let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let origin_base_ref = format!("origin/{base_branch}");
+        git_run(&clone, &["checkout", "-b", "scratch"]);
 
-        // Delete origin/HEAD locally so it no longer resolves.
-        git_run(&clone, &["remote", "set-head", "origin", "-d"]);
-
-        // Point the bare remote's HEAD to a non-existent branch so that
-        // `git fetch origin` (inside sync_project_branch) won't re-create
-        // origin/HEAD.
+        // Delete remote base branch and point HEAD to a non-existent branch so
+        // fetch won't restore origin/<base_branch>.
         git_run(&bare, &["symbolic-ref", "HEAD", "refs/heads/nonexistent"]);
+        git_run(&bare, &["branch", "-D", &base_branch]);
+        git_run(
+            &clone,
+            &["update-ref", "-d", &format!("refs/remotes/{origin_base_ref}")],
+        );
 
-        let result = sync_project_branch(&clone, 7);
-        assert!(result.is_err(), "should fail without origin/HEAD");
+        let result = sync_project_branch(&clone, 7, &base_branch);
+        assert!(
+            result.is_err(),
+            "should fail without origin/<base_branch>"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("origin/HEAD"),
-            "error should mention origin/HEAD: {err}"
+            err.contains(&origin_base_ref),
+            "error should mention origin/<base_branch>: {err}"
         );
         assert!(
             err.contains("issue 7") || err.contains("issue-7"),
@@ -2737,7 +2752,7 @@ fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResul
             "error should mention branch: {err}"
         );
         assert!(
-            err.contains("git rev-parse --verify origin/HEAD"),
+            err.contains(&format!("git branch -f {base_branch} {origin_base_ref}")),
             "error should mention the failed git operation: {err}"
         );
     })
@@ -2749,6 +2764,7 @@ fn sync_project_branch_discards_local_commit(_h: &RalphHarness) -> TestResult {
     use crate::git::branch::sync_project_branch;
     run_case(|| {
         let (_tmp, _bare, clone) = setup_remote_clone();
+        let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
 
         // Push project branch
         git_run(&clone, &["checkout", "-b", "ralph/issue-10"]);
@@ -2763,15 +2779,53 @@ fn sync_project_branch_discards_local_commit(_h: &RalphHarness) -> TestResult {
         git_run(&clone, &["add", "-A"]);
         git_run(&clone, &["commit", "-m", "local only"]);
 
-        git_run(&clone, &["checkout", "-"]);
-
-        sync_project_branch(&clone, 10).expect("sync should succeed");
+        sync_project_branch(&clone, 10, &base_branch).expect("sync should succeed");
 
         let after_sha = git_out(&clone, &["rev-parse", "HEAD"]);
         assert_eq!(after_sha, remote_sha, "local commit should be discarded");
         assert!(
             !clone.join("local-artifact.txt").exists(),
             "local-only file should not exist"
+        );
+    })
+}
+
+/// Conformance: stale local base is force-updated to origin/<base_branch>
+/// before creating a parentless issue branch.
+fn sync_project_branch_force_updates_stale_base(_h: &RalphHarness) -> TestResult {
+    use crate::git::branch::sync_project_branch;
+    run_case(|| {
+        let (_tmp, _bare, clone) = setup_remote_clone();
+        let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+        let stale_base_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        fs::write(clone.join("remote-base-advance.txt"), "advance base\n").unwrap();
+        git_run(&clone, &["add", "-A"]);
+        git_run(&clone, &["commit", "-m", "advance base on remote"]);
+        git_run(&clone, &["push", "origin", &base_branch]);
+        let remote_base_sha = git_out(&clone, &["rev-parse", &format!("origin/{base_branch}")]);
+
+        git_run(&clone, &["reset", "--hard", &stale_base_sha]);
+        let local_base_before = git_out(&clone, &["rev-parse", &base_branch]);
+        assert_ne!(
+            local_base_before, remote_base_sha,
+            "local base should be stale before sync"
+        );
+
+        git_run(&clone, &["checkout", "-b", "scratch"]);
+        sync_project_branch(&clone, 555, &base_branch).expect("sync should succeed");
+
+        let local_base_after = git_out(&clone, &["rev-parse", &base_branch]);
+        let remote_base_after = git_out(&clone, &["rev-parse", &format!("origin/{base_branch}")]);
+        assert_eq!(
+            local_base_after, remote_base_after,
+            "local base should be force-updated to origin/<base_branch>"
+        );
+
+        let head_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_sha, remote_base_after,
+            "issue branch should start from refreshed remote base"
         );
     })
 }

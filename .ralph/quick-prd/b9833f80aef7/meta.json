@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\n\nFix two bugs causing daemon-dispatched tasks to branch from stale local `master`, resulting in PRs with guaranteed merge conflicts. The daemon never updates its local tracking branches after the initial clone, so new project branches are created from outdated code.\n\n## Requirements\n\n1. **Update local base branch after fetch**: Modify `sync_project_branch()` to force-update the local base branch (e.g., `master`) to match `origin/{base_branch}` after each fetch\n2. **Use remote-tracking refs for branch creation**: Modify `create_project_branch()` to branch from `origin/{base_branch}` instead of the local `{base_branch}` ref\n3. **Use configured base branch name**: Do not hardcode `\"master\"` — use `workspace.config.git.base_branch` throughout\n\n## Constraints\n\n- Both fixes are required (defense-in-depth strategy)\n- Must work with any base branch name (not just `master`)\n- Must not break existing parent project branch resolution logic\n\n## Acceptance Criteria\n\n- [ ] `sync_project_branch()` in `src/git/branch.rs` runs `git branch -f {base_branch} origin/{base_branch}` after fetching\n- [ ] `create_project_branch()` in `src/project/lifecycle.rs` uses `origin/{base_branch}` ref when creating new project branches (no parent)\n- [ ] Base branch name is read from config, not hardcoded\n- [ ] Existing parent project branching logic remains unchanged\n- [ ] Daemon-dispatched tasks create project branches from current remote HEAD\n\n## Files to Modify\n\n- `src/git/branch.rs:73-118` — `sync_project_branch()`\n- `src/project/lifecycle.rs:353-359` — `create_project_branch()`\n- `src/daemon/runtime.rs:566-584` — dispatch flow (may need to pass base branch name)",
+  "idea_hash": "b9833f80aef7",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-20T23:40:09Z",
+  "completed_at": "2026-02-20T23:49:19Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 102.540926833,
+  "review_times_secs": [
+    230.648267749
+  ],
+  "revision_times_secs": [
+    216.66287495
+  ]
+}

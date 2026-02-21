@@ -65,16 +65,18 @@ pub fn remote_ref_exists(workdir: &Path, remote_ref: &str) -> Result<bool> {
 /// Remote-first project branch sync for daemon-managed worktrees.
 ///
 /// 1. `git fetch origin`
-/// 2. If `origin/ralph/issue-<n>` exists: `git checkout -B ralph/issue-<n> origin/ralph/issue-<n>`
-/// 3. Else: `git checkout -b ralph/issue-<n> origin/HEAD`
-/// 4. Never creates project branches from local refs.
+/// 2. `git branch -f <base_branch> origin/<base_branch>`
+/// 3. If `origin/ralph/issue-<n>` exists: `git checkout -B ralph/issue-<n> origin/ralph/issue-<n>`
+/// 4. Else: `git checkout -B ralph/issue-<n> origin/<base_branch>`
+/// 5. Never creates project branches from local refs.
 ///
 /// This function is intended **only** for daemon-managed worktree flows.
-pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
+pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &str) -> Result<()> {
     ensure_git_repo(repo_root)?;
 
     let branch = format!("ralph/issue-{issue_number}");
     let remote_branch = format!("origin/ralph/issue-{issue_number}");
+    let remote_base_branch = format!("origin/{base_branch}");
 
     // Step 1: fetch origin
     run_git(repo_root, &["fetch", "origin"]).map_err(|err| {
@@ -84,7 +86,51 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
         ))
     })?;
 
-    // Step 2: check if remote project branch exists
+    // Step 2: force-sync local base branch to the remote-tracking base.
+    // When the current worktree is checked out on the base branch, `git branch -f`
+    // cannot move it. Detach first so the force-update can proceed.
+    let active_branch = current_branch(repo_root).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "sync_project_branch: failed to resolve current branch for issue {issue_number} \
+             (branch {branch}): {err}"
+        ))
+    })?;
+    if active_branch == base_branch {
+        run_git(repo_root, &["checkout", "--detach"]).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "sync_project_branch: git checkout --detach failed before base sync \
+                 for issue {issue_number} (base {base_branch}, project branch {branch}): {err}"
+            ))
+        })?;
+    }
+
+    let branch_force_result = run_git(
+        repo_root,
+        &["branch", "-f", base_branch, &remote_base_branch],
+    );
+    if let Err(branch_force_err) = branch_force_result {
+        let err_string = branch_force_err.to_string();
+        if err_string.contains("cannot force update the branch") {
+            let local_base_ref = format!("refs/heads/{base_branch}");
+            let remote_base_ref = format!("refs/remotes/{remote_base_branch}");
+            run_git(repo_root, &["update-ref", &local_base_ref, &remote_base_ref]).map_err(
+                |update_err| {
+                    RalphError::Orchestration(format!(
+                        "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
+                         for issue {issue_number} (project branch {branch}): {branch_force_err}; \
+                         fallback git update-ref {local_base_ref} {remote_base_ref} failed: {update_err}"
+                    ))
+                },
+            )?;
+        } else {
+            return Err(RalphError::Orchestration(format!(
+                "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
+                 for issue {issue_number} (project branch {branch}): {branch_force_err}"
+            )));
+        }
+    }
+
+    // Step 3: check if remote project branch exists
     if remote_ref_exists(repo_root, &remote_branch)? {
         // Remote branch exists — force-reset local branch to match remote.
         // This discards any local-only diverged commits.
@@ -97,19 +143,23 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32) -> Result<()> {
         return Ok(());
     }
 
-    // Step 3: remote project branch missing — create from origin/HEAD
-    if !remote_ref_exists(repo_root, "origin/HEAD")? {
+    // Step 4: remote project branch missing — create from origin/<base_branch>
+    if !remote_ref_exists(repo_root, &remote_base_branch)? {
         return Err(RalphError::Orchestration(format!(
-            "sync_project_branch: origin/HEAD is missing or invalid \
-             (failed: git rev-parse --verify origin/HEAD); \
+            "sync_project_branch: {remote_base_branch} is missing or invalid \
+             (failed: git rev-parse --verify {remote_base_branch}); \
              cannot create branch {branch} for issue {issue_number}. \
-             Ensure the remote has a default branch configured."
+             Ensure the remote base branch '{base_branch}' exists and is fetched."
         )));
     }
 
-    run_git(repo_root, &["checkout", "-B", &branch, "origin/HEAD"]).map_err(|err| {
+    run_git(
+        repo_root,
+        &["checkout", "-B", &branch, &remote_base_branch],
+    )
+    .map_err(|err| {
         RalphError::Orchestration(format!(
-            "sync_project_branch: git checkout -b {branch} origin/HEAD failed \
+            "sync_project_branch: git checkout -B {branch} {remote_base_branch} failed \
              for issue {issue_number}: {err}"
         ))
     })?;
@@ -277,6 +327,7 @@ mod tests {
     #[test]
     fn sync_project_branch_resets_to_remote_when_exists() {
         let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
 
         // Push a project branch to the remote
         git_ok(&clone_dir, &["checkout", "-b", "ralph/issue-42"]);
@@ -295,11 +346,8 @@ mod tests {
         let local_head = git_output(&clone_dir, &["rev-parse", "HEAD"]);
         assert_ne!(remote_head, local_head, "local should have diverged");
 
-        // Go back to default branch so sync can checkout
-        git_ok(&clone_dir, &["checkout", "-"]);
-
         // Sync should reset to remote
-        sync_project_branch(&clone_dir, 42).expect("sync should succeed");
+        sync_project_branch(&clone_dir, 42, &base_branch).expect("sync should succeed");
 
         let after_head = git_output(&clone_dir, &["rev-parse", "HEAD"]);
         assert_eq!(
@@ -315,17 +363,21 @@ mod tests {
     #[test]
     fn sync_project_branch_creates_from_origin_head_when_missing() {
         let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let origin_base_ref = format!("origin/{base_branch}");
 
-        // origin/HEAD should exist pointing to default branch
-        let origin_head = git_output(&clone_dir, &["rev-parse", "origin/HEAD"]);
+        // origin/<base_branch> should exist.
+        let origin_base = git_output(&clone_dir, &["rev-parse", &origin_base_ref]);
+        // Keep base branch unchecked out so `git branch -f` can move it.
+        git_ok(&clone_dir, &["checkout", "-b", "scratch"]);
 
         // No remote ralph/issue-99 exists
-        sync_project_branch(&clone_dir, 99).expect("sync should succeed");
+        sync_project_branch(&clone_dir, 99, &base_branch).expect("sync should succeed");
 
         let after_head = git_output(&clone_dir, &["rev-parse", "HEAD"]);
         assert_eq!(
-            after_head, origin_head,
-            "new branch should be created from origin/HEAD"
+            after_head, origin_base,
+            "new branch should be created from origin/<base_branch>"
         );
 
         let branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -334,26 +386,32 @@ mod tests {
 
     #[test]
     fn sync_project_branch_fails_when_origin_head_missing() {
-        let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let (_temp_dir, bare_dir, clone_dir) = init_test_repo_with_remote();
+        let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let origin_base_ref = format!("origin/{base_branch}");
+        git_ok(&clone_dir, &["checkout", "-b", "scratch"]);
 
-        // Delete origin/HEAD locally — simulates a remote that has no default
-        // branch configured. The fetch inside sync_project_branch will not
-        // restore it because we also remove the remote HEAD symref.
-        git_ok(&clone_dir, &["remote", "set-head", "origin", "-d"]);
-
-        // Also point the bare remote's HEAD to a non-existent branch so
-        // that `git fetch` won't re-create origin/HEAD.
+        // Delete remote base branch and point HEAD to a non-existent branch so
+        // fetch won't restore origin/<base_branch>.
         git_ok(
-            &_bare_dir,
+            &bare_dir,
             &["symbolic-ref", "HEAD", "refs/heads/nonexistent"],
         );
+        git_ok(&bare_dir, &["branch", "-D", &base_branch]);
+        git_ok(
+            &clone_dir,
+            &["update-ref", "-d", &format!("refs/remotes/{origin_base_ref}")],
+        );
 
-        let result = sync_project_branch(&clone_dir, 7);
-        assert!(result.is_err(), "should fail when origin/HEAD is missing");
+        let result = sync_project_branch(&clone_dir, 7, &base_branch);
+        assert!(
+            result.is_err(),
+            "should fail when origin/<base_branch> is missing"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("origin/HEAD"),
-            "error should mention origin/HEAD: {err_msg}"
+            err_msg.contains(&origin_base_ref),
+            "error should mention origin/<base_branch>: {err_msg}"
         );
         assert!(
             err_msg.contains("issue 7") || err_msg.contains("issue-7"),
@@ -364,7 +422,7 @@ mod tests {
             "error should mention branch name: {err_msg}"
         );
         assert!(
-            err_msg.contains("git rev-parse --verify origin/HEAD"),
+            err_msg.contains(&format!("git branch -f {base_branch} {origin_base_ref}")),
             "error should mention the failed git operation: {err_msg}"
         );
     }
@@ -372,6 +430,7 @@ mod tests {
     #[test]
     fn sync_project_branch_discards_local_only_commit() {
         let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
 
         // Push a project branch to the remote
         git_ok(&clone_dir, &["checkout", "-b", "ralph/issue-10"]);
@@ -392,11 +451,8 @@ mod tests {
         let local_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
         assert_ne!(remote_sha, local_sha);
 
-        // Switch away before sync
-        git_ok(&clone_dir, &["checkout", "-"]);
-
         // Sync should discard the local commit
-        sync_project_branch(&clone_dir, 10).expect("sync should succeed");
+        sync_project_branch(&clone_dir, 10, &base_branch).expect("sync should succeed");
 
         let after_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
         assert_eq!(
@@ -406,6 +462,85 @@ mod tests {
         assert!(
             !clone_dir.join("local-artifact.txt").exists(),
             "local-only file should not exist after sync"
+        );
+    }
+
+    #[test]
+    fn sync_project_branch_force_updates_local_base_branch() {
+        let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+        let stale_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
+        fs::write(clone_dir.join("remote-base.txt"), "remote base advance\n")
+            .expect("write remote base file");
+        git_ok(&clone_dir, &["add", "-A"]);
+        git_ok(&clone_dir, &["commit", "-m", "advance remote base"]);
+        git_ok(&clone_dir, &["push", "origin", &base_branch]);
+        let remote_base_sha = git_output(
+            &clone_dir,
+            &["rev-parse", &format!("origin/{base_branch}")],
+        );
+
+        git_ok(&clone_dir, &["reset", "--hard", &stale_sha]);
+        let local_base_before = git_output(&clone_dir, &["rev-parse", &base_branch]);
+        assert_ne!(
+            local_base_before, remote_base_sha,
+            "local base branch should be stale before sync"
+        );
+
+        git_ok(&clone_dir, &["checkout", "-b", "scratch"]);
+        sync_project_branch(&clone_dir, 500, &base_branch).expect("sync should succeed");
+
+        let local_base_after = git_output(&clone_dir, &["rev-parse", &base_branch]);
+        let remote_base_after = git_output(
+            &clone_dir,
+            &["rev-parse", &format!("origin/{base_branch}")],
+        );
+        assert_eq!(
+            local_base_after, remote_base_after,
+            "sync should force-update local base branch to remote base"
+        );
+    }
+
+    #[test]
+    fn sync_project_branch_force_updates_custom_base_branch() {
+        let (_temp_dir, _bare_dir, clone_dir) = init_test_repo_with_remote();
+        let custom_base = "main";
+
+        git_ok(&clone_dir, &["checkout", "-b", custom_base]);
+        fs::write(clone_dir.join("main-base-1.txt"), "main base 1\n").expect("write main base 1");
+        git_ok(&clone_dir, &["add", "-A"]);
+        git_ok(&clone_dir, &["commit", "-m", "main base commit 1"]);
+        git_ok(&clone_dir, &["push", "-u", "origin", custom_base]);
+
+        fs::write(clone_dir.join("main-base-2.txt"), "main base 2\n").expect("write main base 2");
+        git_ok(&clone_dir, &["add", "-A"]);
+        git_ok(&clone_dir, &["commit", "-m", "main base commit 2"]);
+        git_ok(&clone_dir, &["push", "origin", custom_base]);
+
+        let stale_main_sha = git_output(&clone_dir, &["rev-parse", "HEAD~1"]);
+        let remote_main_sha = git_output(&clone_dir, &["rev-parse", "origin/main"]);
+        git_ok(&clone_dir, &["reset", "--hard", &stale_main_sha]);
+        let local_main_before = git_output(&clone_dir, &["rev-parse", custom_base]);
+        assert_ne!(
+            local_main_before, remote_main_sha,
+            "local custom base should be stale before sync"
+        );
+
+        git_ok(&clone_dir, &["checkout", "-"]);
+        sync_project_branch(&clone_dir, 501, custom_base).expect("sync should succeed");
+
+        let local_main_after = git_output(&clone_dir, &["rev-parse", custom_base]);
+        let remote_main_after = git_output(&clone_dir, &["rev-parse", "origin/main"]);
+        assert_eq!(
+            local_main_after, remote_main_after,
+            "sync should force-update local custom base branch to origin/main"
+        );
+
+        let head_after = git_output(&clone_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_after, remote_main_after,
+            "new issue branch should be created from origin/main"
         );
     }
 }

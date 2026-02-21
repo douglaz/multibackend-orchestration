@@ -353,7 +353,7 @@ fn maybe_create_project_branch(
     let from_ref = if let Some(parent_id) = parent_project {
         resolve_branch_name(&workspace.config.git.branch_format, parent_id)
     } else {
-        workspace.config.git.base_branch.clone()
+        format!("origin/{}", workspace.config.git.base_branch)
     };
 
     create_branch(repo_root, &branch_name, &from_ref)?;

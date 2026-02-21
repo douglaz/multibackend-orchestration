@@ -43,6 +43,21 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn add_local_bare_remote(repo_root: &Path) {
+    let bare_dir = repo_root.join(".test-remote.git");
+    let bare_str = bare_dir.to_string_lossy().to_string();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", &bare_str])
+        .current_dir(repo_root)
+        .status()
+        .expect("init bare remote");
+    assert!(status.success(), "git init --bare failed");
+
+    git_ok(repo_root, &["remote", "add", "origin", &bare_str]);
+    git_ok(repo_root, &["push", "-u", "origin", "HEAD"]);
+}
+
 fn setup_project() -> (TempDir, std::path::PathBuf, String) {
     let temp = TempDir::new().expect("temp dir");
     let repo_root = temp.path();
@@ -54,6 +69,7 @@ fn setup_project() -> (TempDir, std::path::PathBuf, String) {
     fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
     git_ok(repo_root, &["add", "-A"]);
     git_ok(repo_root, &["commit", "-m", "initial"]);
+    add_local_bare_remote(repo_root);
 
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
@@ -110,6 +126,62 @@ fn stale_state_json_does_not_affect_checkpoint_position() {
     // No checkpoint commit → defaults to loop=1, planning despite state.json
     assert_eq!(state.current_loop, 1);
     assert_eq!(state.current_phase, Phase::Planning);
+}
+
+#[test]
+fn parentless_project_branch_uses_origin_base_ref() {
+    let temp = TempDir::new().expect("temp dir");
+    let repo_root = temp.path();
+
+    git_ok(repo_root, &["init"]);
+    git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+    git_ok(repo_root, &["config", "user.name", "Test User"]);
+
+    fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "initial"]);
+    add_local_bare_remote(repo_root);
+
+    let base_branch = git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let stale_local_sha = git_output(repo_root, &["rev-parse", "HEAD"]);
+
+    fs::write(repo_root.join("remote-base-change.txt"), "remote change\n").expect("write change");
+    git_ok(repo_root, &["add", "-A"]);
+    git_ok(repo_root, &["commit", "-m", "advance remote base"]);
+    git_ok(repo_root, &["push", "origin", &base_branch]);
+    let remote_base_sha = git_output(repo_root, &["rev-parse", &format!("origin/{base_branch}")]);
+
+    git_ok(repo_root, &["reset", "--hard", &stale_local_sha]);
+    let local_base_sha = git_output(repo_root, &["rev-parse", &base_branch]);
+    assert_ne!(
+        local_base_sha, remote_base_sha,
+        "local base should be stale before project creation"
+    );
+
+    let workspace_root = repo_root.join(".ralph");
+    let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
+    workspace.config.git.base_branch = base_branch.clone();
+    workspace.save_config().expect("save config");
+
+    let prompt_path = repo_root.join("PROMPT-2.md");
+    fs::write(&prompt_path, "# Build another demo\n").expect("write prompt");
+
+    create_project(
+        &workspace,
+        CreateProjectOptions {
+            id: "issue-2".to_owned(),
+            name: "Origin Base Parentless".to_owned(),
+            source: PromptSource::File(prompt_path),
+            starting_backend: None,
+        },
+    )
+    .expect("create project");
+
+    let project_branch_sha = git_output(repo_root, &["rev-parse", "ralph/issue-2"]);
+    assert_eq!(
+        project_branch_sha, remote_base_sha,
+        "parentless project branch should be created from origin/<base_branch>"
+    );
 }
 
 #[test]

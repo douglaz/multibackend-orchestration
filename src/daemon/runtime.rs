@@ -18,6 +18,7 @@ use crate::Result;
 pub struct DaemonRuntimeConfig {
     pub owner: String,
     pub repo: String,
+    pub base_branch: String,
     pub poll_seconds: u64,
     pub max_concurrent: u32,
     pub labels: Vec<String>,
@@ -566,8 +567,11 @@ async fn dispatch_task(
     // Remote-first project branch sync
     {
         let wt = wt_path.clone();
-        match spawn_blocking_op(move || crate::git::branch::sync_project_branch(&wt, issue_number))
-            .await
+        let base_branch = config.base_branch.clone();
+        match spawn_blocking_op(move || {
+            crate::git::branch::sync_project_branch(&wt, issue_number, &base_branch)
+        })
+        .await
         {
             Ok(()) => {
                 eprintln!(
