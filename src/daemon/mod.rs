@@ -8,6 +8,9 @@ pub mod worktree;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
 use crate::error::RalphError;
 use crate::Result;
 
@@ -21,6 +24,8 @@ pub struct ChildHandle {
     pub pid: u32,
     pub pgid: u32,
     pub child: tokio::process::Child,
+    pub watcher_cancel: CancellationToken,
+    pub watcher_handle: Option<JoinHandle<()>>,
     pub branch: String,
     pub log_file: PathBuf,
     pub last_rebase_at: Option<Instant>,
@@ -48,12 +53,18 @@ pub fn abort_task_by_labels(
     terminate_process_group_if_present(child_pid, child_pgid);
 
     // Swap label: ralph:in-progress -> ralph:failed
-    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:in-progress", "ralph:failed")
-        .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to update labels for abort of {owner}/{repo}#{issue_number}: {err}"
-            ))
-        })?;
+    github::swap_lifecycle_label(
+        owner,
+        repo,
+        issue_number,
+        "ralph:in-progress",
+        "ralph:failed",
+    )
+    .map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to update labels for abort of {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     Ok(())
 }

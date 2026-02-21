@@ -102,6 +102,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::runtime_no_diff_pr_path",
             func: runtime_no_diff_pr_path,
         },
+        ConformanceTest {
+            name: "daemon::runtime_artifact_comments_posted",
+            func: runtime_artifact_comments_posted,
+        },
         // --- Loop 4 Bootstrap + PR/Diff Hardening Tests ---
         ConformanceTest {
             name: "daemon::daemon_bootstrap_non_git_dir",
@@ -1202,7 +1206,6 @@ exit 1
     })
 }
 
-
 // =============================================================================
 // Loop 2 Runtime Tests
 // =============================================================================
@@ -1418,13 +1421,7 @@ exit 1
             let has_json = fs::read_dir(&daemon_dir)
                 .expect("read daemon dir")
                 .flatten()
-                .any(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("json")
-                });
+                .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"));
             assert!(!has_json, "no daemon JSON state files should be written");
         }
     })
@@ -1624,18 +1621,11 @@ fn runtime_single_iteration_mode(h: &RalphHarness) -> TestResult {
             let has_json = fs::read_dir(&daemon_dir)
                 .expect("read daemon dir")
                 .flatten()
-                .any(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("json")
-                });
+                .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"));
             assert!(!has_json, "daemon should not persist JSON lifecycle state");
         }
     })
 }
-
 
 /// Test the "no diff → no PR + idempotent note comment" path.
 ///
@@ -1808,6 +1798,194 @@ exit 1
     })
 }
 
+/// Conformance: daemon runtime watcher posts both quick-prd and final-prompt
+/// comments from child-produced artifacts.
+fn runtime_artifact_comments_posted(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "false",
+        ])
+        .expect("disable refinement");
+
+        let comment_log = dh.temp_dir.path().join("artifact_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("artifact_labels.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":121,"title":"artifact watcher","labels":[{"name":"ralph:ready"}],"body":"artifact body"}]"#;
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ -n "$MOCK_GH_ISSUES" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      view)
+        for arg in "$@"; do
+          if [ "$arg" = "comments" ]; then
+            if [ -f "{comment_log_str}" ]; then
+              cat "{comment_log_str}"
+            fi
+            exit 0
+          fi
+          if [ "$arg" = "labels" ]; then
+            printf '{{"labels":[{{"name":"ralph:in-progress"}}]}}'
+            exit 0
+          fi
+          if [ "$arg" = "title,body" ]; then
+            printf '{{"title":"artifact watcher","body":"artifact body"}}'
+            exit 0
+          fi
+        done
+        printf ''
+        exit 0
+        ;;
+      comment)
+        shift; shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s\n' "$2" >> "{comment_log_str}"
+              shift 2
+              ;;
+            --repo) shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        mkdir -p "$target_dir"
+        git init "$target_dir" --quiet 2>/dev/null
+        git -C "$target_dir" config user.email "mock@test"
+        git -C "$target_dir" config user.name "MockClone"
+        touch "$target_dir/.gitkeep"
+        git -C "$target_dir" add .gitkeep
+        git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        exit 0
+        ;;
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+  label)
+    [ "$2" = "create" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+
+        let ralph_script = r#"#!/bin/sh
+case "$1" in
+  auto)
+    mkdir -p .ralph/quick-prd/001-demo
+    printf 'Quick PRD content from watcher test\n' > .ralph/quick-prd/001-demo/SPEC.md
+    mkdir -p .ralph/projects/demo-proj
+    printf 'prompt signal\n' > .ralph/projects/demo-proj/prompt-original.md
+    printf 'Final prompt content from watcher test\n' > .ralph/projects/demo-proj/prompt.md
+    sleep 1
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"#;
+        let ralph_path = write_mock_ralph(&dh, ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let comments = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            comments.contains("<!-- ralph:task:acme-widgets-121:quick-prd -->"),
+            "expected quick-prd marker, comments:\n{comments}"
+        );
+        assert!(
+            comments.contains("### Quick PRD"),
+            "expected quick-prd header, comments:\n{comments}"
+        );
+        assert!(
+            comments.contains("Quick PRD content from watcher test"),
+            "expected quick-prd body content, comments:\n{comments}"
+        );
+
+        assert!(
+            comments.contains("<!-- ralph:task:acme-widgets-121:final-prompt -->"),
+            "expected final-prompt marker, comments:\n{comments}"
+        );
+        assert!(
+            comments.contains("### Final Prompt (after review)"),
+            "expected final-prompt header, comments:\n{comments}"
+        );
+        assert!(
+            comments.contains("Final prompt content from watcher test"),
+            "expected final-prompt body content, comments:\n{comments}"
+        );
+
+        assert_eq!(
+            comments
+                .matches("<!-- ralph:task:acme-widgets-121:quick-prd -->")
+                .count(),
+            1,
+            "quick-prd comment should be idempotent"
+        );
+        assert_eq!(
+            comments
+                .matches("<!-- ralph:task:acme-widgets-121:final-prompt -->")
+                .count(),
+            1,
+            "final-prompt comment should be idempotent"
+        );
+    })
+}
+
 fn daemon_bootstrap_non_git_dir(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let repo_root = h.temp_dir.path().join("bootstrap-non-git");
@@ -1899,7 +2077,6 @@ fn daemon_bootstrap_existing_repo_noop(h: &RalphHarness) -> TestResult {
         );
     })
 }
-
 
 fn daemon_has_diff_invalid_base_returns_false(_h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -2037,7 +2214,6 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
     })
 }
 
-
 /// Test that create_worktree recovers from stale git worktree metadata by
 /// pruning before `git worktree add`.
 fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResult {
@@ -2103,7 +2279,6 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
         );
     })
 }
-
 
 // =============================================================================
 // Loop 2 Data-Dir Provisioning and Multi-Repo Tests
@@ -2325,7 +2500,6 @@ fn daemon_status_multi_repo(h: &RalphHarness) -> TestResult {
     })
 }
 
-
 // =============================================================================
 // Test helpers
 // =============================================================================
@@ -2454,7 +2628,6 @@ esac
     })
 }
 
-
 fn git_stdout(repo_root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -2512,7 +2685,6 @@ fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
     write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_script())
 }
 
-
 fn enable_fast_daemon_refinement(h: &RalphHarness) -> crate::Result<()> {
     let refine_script = h.write_mock_script(
         "mock_refine_fast.sh",
@@ -2535,7 +2707,6 @@ fn enable_fast_daemon_refinement(h: &RalphHarness) -> crate::Result<()> {
     Ok(())
 }
 
-
 fn assert_invalid_verbose_flag_error(stderr: &str) {
     let lowered = stderr.to_lowercase();
     assert!(
@@ -2550,7 +2721,6 @@ fn assert_invalid_verbose_flag_error(stderr: &str) {
         "expected clap invalid-flag wording in stderr, got:\n{stderr}"
     );
 }
-
 
 fn combined_output(output: &std::process::Output) -> String {
     format!(
@@ -2730,14 +2900,15 @@ fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResul
         git_run(&bare, &["branch", "-D", &base_branch]);
         git_run(
             &clone,
-            &["update-ref", "-d", &format!("refs/remotes/{origin_base_ref}")],
+            &[
+                "update-ref",
+                "-d",
+                &format!("refs/remotes/{origin_base_ref}"),
+            ],
         );
 
         let result = sync_project_branch(&clone, 7, &base_branch);
-        assert!(
-            result.is_err(),
-            "should fail without origin/<base_branch>"
-        );
+        assert!(result.is_err(), "should fail without origin/<base_branch>");
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains(&origin_base_ref),
@@ -2906,13 +3077,7 @@ fn no_tasks_json_written_after_runtime(h: &RalphHarness) -> TestResult {
             let has_json = fs::read_dir(&daemon_dir)
                 .expect("read daemon dir")
                 .flatten()
-                .any(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("json")
-                });
+                .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"));
             assert!(
                 !has_json,
                 "daemon should not persist JSON lifecycle state in {}",

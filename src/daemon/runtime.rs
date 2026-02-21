@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
@@ -58,13 +61,362 @@ where
         .map_err(|err| RalphError::Orchestration(format!("blocking task join failure: {err}")))?
 }
 
-/// Re-trigger a failed task by claiming its GitHub issue via label swap:
-/// `ralph:failed` -> `ralph:ready`.
-pub fn retrigger_failed_task(
+const ARTIFACT_WATCH_POLL_SECONDS: u64 = 2;
+const GITHUB_COMMENT_LIMIT: usize = 65_536;
+const TRUNCATED_NOTE: &str = "\n\n[truncated]";
+
+#[derive(Default)]
+struct ArtifactWatcherState {
+    quick_prd_posted: bool,
+    final_prompt_posted: bool,
+}
+
+impl ArtifactWatcherState {
+    fn is_complete(&self) -> bool {
+        self.quick_prd_posted && self.final_prompt_posted
+    }
+}
+
+#[async_trait]
+trait ArtifactCommentClient: Send + Sync {
+    async fn marker_exists(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u32,
+        marker: &str,
+    ) -> Result<bool>;
+
+    async fn post_idempotent_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u32,
+        task_id: &str,
+        phase: &str,
+        body_text: &str,
+    ) -> Result<()>;
+}
+
+struct GitHubArtifactCommentClient;
+
+#[async_trait]
+impl ArtifactCommentClient for GitHubArtifactCommentClient {
+    async fn marker_exists(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u32,
+        marker: &str,
+    ) -> Result<bool> {
+        let owner = owner.to_owned();
+        let repo = repo.to_owned();
+        let marker = marker.to_owned();
+        spawn_blocking_op(move || {
+            github::comment_marker_exists(&owner, &repo, issue_number, &marker)
+        })
+        .await
+    }
+
+    async fn post_idempotent_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u32,
+        task_id: &str,
+        phase: &str,
+        body_text: &str,
+    ) -> Result<()> {
+        let owner = owner.to_owned();
+        let repo = repo.to_owned();
+        let task_id = task_id.to_owned();
+        let phase = phase.to_owned();
+        let body_text = body_text.to_owned();
+        spawn_blocking_op(move || {
+            github::post_idempotent_comment(
+                &owner,
+                &repo,
+                issue_number,
+                &task_id,
+                &phase,
+                &body_text,
+            )
+        })
+        .await
+    }
+}
+
+async fn post_artifact_comments(
+    owner: String,
+    repo: String,
+    issue_number: u32,
+    task_id: String,
+    worktree_path: PathBuf,
+    child_start_time: SystemTime,
+    watcher_cancel: CancellationToken,
+) {
+    let client = GitHubArtifactCommentClient;
+    post_artifact_comments_with_client(
+        &client,
+        &owner,
+        &repo,
+        issue_number,
+        &task_id,
+        &worktree_path,
+        child_start_time,
+        watcher_cancel,
+        Duration::from_secs(ARTIFACT_WATCH_POLL_SECONDS),
+    )
+    .await;
+}
+
+async fn post_artifact_comments_with_client(
+    client: &dyn ArtifactCommentClient,
     owner: &str,
     repo: &str,
     issue_number: u32,
-) -> Result<()> {
+    task_id: &str,
+    worktree_path: &Path,
+    child_start_time: SystemTime,
+    watcher_cancel: CancellationToken,
+    poll_interval: Duration,
+) {
+    let mut state = ArtifactWatcherState::default();
+    let mut cancelled = false;
+
+    loop {
+        sweep_artifact_comments(
+            client,
+            owner,
+            repo,
+            issue_number,
+            task_id,
+            worktree_path,
+            child_start_time,
+            &mut state,
+        )
+        .await;
+
+        if state.is_complete() {
+            break;
+        }
+
+        tokio::select! {
+            _ = watcher_cancel.cancelled() => {
+                cancelled = true;
+                break;
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+
+    if cancelled && !state.is_complete() {
+        sweep_artifact_comments(
+            client,
+            owner,
+            repo,
+            issue_number,
+            task_id,
+            worktree_path,
+            child_start_time,
+            &mut state,
+        )
+        .await;
+    }
+}
+
+async fn sweep_artifact_comments(
+    client: &dyn ArtifactCommentClient,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    task_id: &str,
+    worktree_path: &Path,
+    child_start_time: SystemTime,
+    state: &mut ArtifactWatcherState,
+) {
+    if !state.quick_prd_posted {
+        if let Some(content) = detect_quick_prd_artifact(worktree_path, child_start_time) {
+            state.quick_prd_posted = try_post_artifact_comment(
+                client,
+                owner,
+                repo,
+                issue_number,
+                task_id,
+                "quick-prd",
+                "### Quick PRD",
+                &content,
+            )
+            .await;
+        }
+    }
+
+    if !state.final_prompt_posted {
+        if let Some(content) = detect_final_prompt_artifact(worktree_path, child_start_time) {
+            state.final_prompt_posted = try_post_artifact_comment(
+                client,
+                owner,
+                repo,
+                issue_number,
+                task_id,
+                "final-prompt",
+                "### Final Prompt (after review)",
+                &content,
+            )
+            .await;
+        }
+    }
+}
+
+async fn try_post_artifact_comment(
+    client: &dyn ArtifactCommentClient,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    task_id: &str,
+    phase: &str,
+    header: &str,
+    content: &str,
+) -> bool {
+    let marker = format!("<!-- ralph:task:{task_id}:{phase} -->");
+    let available_body_chars = GITHUB_COMMENT_LIMIT
+        .saturating_sub(marker.chars().count())
+        .saturating_sub(1);
+    let formatted_body = format!("{header}\n\n{content}");
+    let truncated_body = truncate_for_github(&formatted_body, available_body_chars);
+
+    match client
+        .marker_exists(owner, repo, issue_number, &marker)
+        .await
+    {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("warning: failed to check artifact marker for {task_id}/{phase}: {err}");
+        }
+    }
+
+    if let Err(err) = client
+        .post_idempotent_comment(owner, repo, issue_number, task_id, phase, &truncated_body)
+        .await
+    {
+        eprintln!("warning: failed to post artifact comment for {task_id}/{phase}: {err}");
+        return false;
+    }
+
+    match client
+        .marker_exists(owner, repo, issue_number, &marker)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("warning: failed to verify artifact marker for {task_id}/{phase}: {err}");
+            false
+        }
+    }
+}
+
+fn detect_quick_prd_artifact(worktree_path: &Path, child_start_time: SystemTime) -> Option<String> {
+    let root = worktree_path.join(".ralph").join("quick-prd");
+    let mut candidates = Vec::new();
+    let entries = std::fs::read_dir(root).ok()?;
+
+    for entry in entries.flatten() {
+        let ty = match entry.file_type() {
+            Ok(ty) => ty,
+            Err(_) => continue,
+        };
+        if !ty.is_dir() {
+            continue;
+        }
+        let spec_path = entry.path().join("SPEC.md");
+        let modified = match std::fs::metadata(&spec_path).and_then(|meta| meta.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        if modified >= child_start_time {
+            candidates.push((spec_path, modified));
+        }
+    }
+
+    let path = newest_by_mtime(candidates)?;
+    read_nonempty_artifact(&path)
+}
+
+fn detect_final_prompt_artifact(
+    worktree_path: &Path,
+    child_start_time: SystemTime,
+) -> Option<String> {
+    let root = worktree_path.join(".ralph").join("projects");
+    let mut signals = Vec::new();
+    let entries = std::fs::read_dir(root).ok()?;
+
+    for entry in entries.flatten() {
+        let ty = match entry.file_type() {
+            Ok(ty) => ty,
+            Err(_) => continue,
+        };
+        if !ty.is_dir() {
+            continue;
+        }
+        let signal_path = entry.path().join("prompt-original.md");
+        let modified = match std::fs::metadata(&signal_path).and_then(|meta| meta.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        if modified >= child_start_time {
+            signals.push((signal_path, modified));
+        }
+    }
+
+    let signal_path = newest_by_mtime(signals)?;
+    let prompt_path = signal_path.parent()?.join("prompt.md");
+    read_nonempty_artifact(&prompt_path)
+}
+
+fn newest_by_mtime(candidates: Vec<(PathBuf, SystemTime)>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .max_by(|(path_a, time_a), (path_b, time_b)| {
+            match time_a
+                .partial_cmp(time_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+            {
+                std::cmp::Ordering::Equal => path_a.cmp(path_b),
+                ordering => ordering,
+            }
+        })
+        .map(|(path, _)| path)
+}
+
+fn truncate_for_github(body: &str, max_chars: usize) -> String {
+    if body.chars().count() <= max_chars {
+        return body.to_owned();
+    }
+
+    let note_chars = TRUNCATED_NOTE.chars().count();
+    if max_chars <= note_chars {
+        return TRUNCATED_NOTE.chars().take(max_chars).collect();
+    }
+
+    let keep_chars = max_chars - note_chars;
+    let mut truncated: String = body.chars().take(keep_chars).collect();
+    truncated.push_str(TRUNCATED_NOTE);
+    truncated
+}
+
+fn read_nonempty_artifact(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        None
+    } else {
+        Some(content)
+    }
+}
+
+/// Re-trigger a failed task by claiming its GitHub issue via label swap:
+/// `ralph:failed` -> `ralph:ready`.
+pub fn retrigger_failed_task(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
     // Verify current label state from GitHub
     let labels = github::fetch_issue_labels(owner, repo, issue_number)?;
     let lifecycle = github::classify_lifecycle_labels(&labels);
@@ -142,8 +494,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let verbose = config.verbose;
-        spawn_blocking_op(move || reconcile_in_progress_labels(&owner, &repo, verbose))
-            .await?;
+        spawn_blocking_op(move || reconcile_in_progress_labels(&owner, &repo, verbose)).await?;
     }
 
     // Phase 2: Main loop with in-memory child tracking
@@ -206,11 +557,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 ///
 /// Always queries `ralph:in-progress` directly rather than using configured
 /// poll labels, ensuring stale issues are caught regardless of label config.
-fn reconcile_in_progress_labels(
-    owner: &str,
-    repo: &str,
-    verbose: bool,
-) -> Result<()> {
+fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Result<()> {
     // Always query ralph:in-progress explicitly to catch all stale issues
     let reconcile_labels = vec!["ralph:in-progress".to_owned()];
     let (issues, _overflow) = github::poll_issues(owner, repo, &reconcile_labels)?;
@@ -536,10 +883,8 @@ async fn dispatch_task(
         if discovered.is_empty() {
             let wt = wt_path.clone();
             let tid = task_id.clone();
-            if let Ok(Some(project_id)) = spawn_blocking_op(move || {
-                discover_project_from_remote_branches(&wt, &tid)
-            })
-            .await
+            if let Ok(Some(project_id)) =
+                spawn_blocking_op(move || discover_project_from_remote_branches(&wt, &tid)).await
             {
                 discovered.push(project_id);
             }
@@ -597,9 +942,7 @@ async fn dispatch_task(
                 .await;
         match checkout_result {
             Ok(()) => {
-                eprintln!(
-                    "dispatch: checked out project branch {branch} for task {task_id}"
-                );
+                eprintln!("dispatch: checked out project branch {branch} for task {task_id}");
             }
             Err(err) => {
                 eprintln!(
@@ -616,9 +959,7 @@ async fn dispatch_task(
         {
             Ok(refined) => (refined.body, refined.title, refined.cleaned_body),
             Err(err) => {
-                eprintln!(
-                    "warning: refinement failed for task {task_id}, using raw idea: {err}"
-                );
+                eprintln!("warning: refinement failed for task {task_id}, using raw idea: {err}");
                 (raw_idea.to_owned(), None, None)
             }
         }
@@ -636,9 +977,7 @@ async fn dispatch_task(
         })
         .await
         {
-            eprintln!(
-                "warning: failed to update issue title for {task_id}: {err}"
-            );
+            eprintln!("warning: failed to update issue title for {task_id}: {err}");
         }
     }
 
@@ -647,14 +986,11 @@ async fn dispatch_task(
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let cb = cleaned_body.clone();
-        if let Err(err) = spawn_blocking_op(move || {
-            github::update_issue_body(&owner, &repo, issue_number, &cb)
-        })
-        .await
+        if let Err(err) =
+            spawn_blocking_op(move || github::update_issue_body(&owner, &repo, issue_number, &cb))
+                .await
         {
-            eprintln!(
-                "warning: failed to update issue body for {task_id}: {err}"
-            );
+            eprintln!("warning: failed to update issue body for {task_id}: {err}");
         }
     }
 
@@ -679,9 +1015,7 @@ async fn dispatch_task(
         })
         .await
         {
-            eprintln!(
-                "warning: failed to post refined-prompt comment for {task_id}: {err}"
-            );
+            eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
         }
     }
 
@@ -693,6 +1027,9 @@ async fn dispatch_task(
 
     // Determine branch name for the child handle
     let branch_name = format!("ralph/daemon/{task_id}");
+
+    // Ignore stale artifacts left from prior runs.
+    let child_start_time = SystemTime::now();
 
     // Spawn child process
     let spawned = {
@@ -715,12 +1052,29 @@ async fn dispatch_task(
         }
     };
 
+    let watcher_cancel = CancellationToken::new();
+    let watcher_handle = if !config.owner.is_empty() && !config.repo.is_empty() {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let tid = task_id.clone();
+        let wt = wt_path.clone();
+        let cancel = watcher_cancel.clone();
+        Some(tokio::spawn(async move {
+            post_artifact_comments(owner, repo, issue_number, tid, wt, child_start_time, cancel)
+                .await;
+        }))
+    } else {
+        None
+    };
+
     children.insert(
         issue_number,
         ChildHandle {
             pid: spawned.pid,
             pgid: spawned.pgid,
             child: spawned.child,
+            watcher_cancel,
+            watcher_handle,
             branch: branch_name,
             log_file: log_path,
             last_rebase_at: None,
@@ -752,10 +1106,7 @@ pub fn extract_original_title(raw_idea: &str) -> Option<String> {
 }
 
 /// Collect finished children and transition them to terminal states via labels.
-async fn collect_children(
-    config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
-) {
+async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u32, ChildHandle>) {
     let mut finished = Vec::new();
     let mut still_running = 0u32;
 
@@ -800,12 +1151,18 @@ async fn collect_children(
 
     for (issue_number, terminal_label) in finished {
         let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-        if terminal_label == "ralph:failed" {
-            if let Some(handle) = children.get(&issue_number) {
-                print_log_tail(&task_id, &handle.log_file);
+        let Some(mut handle) = children.remove(&issue_number) else {
+            continue;
+        };
+        handle.watcher_cancel.cancel();
+        if let Some(join_handle) = handle.watcher_handle.take() {
+            if let Err(err) = join_handle.await {
+                eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
             }
         }
-        children.remove(&issue_number);
+        if terminal_label == "ralph:failed" {
+            print_log_tail(&task_id, &handle.log_file);
+        }
         complete_task(config, issue_number, &task_id, terminal_label).await;
     }
 }
@@ -845,13 +1202,22 @@ async fn kill_aborted_children(
     }
 
     for issue_number in to_kill {
-        if let Some(handle) = children.remove(&issue_number) {
+        if let Some(mut handle) = children.remove(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
             crate::daemon::process::terminate_process_group_blocking(
                 handle.pgid,
                 Duration::from_secs(10),
             );
-            eprintln!("abort-check: killed {task_id} (pid={} pgid={})", handle.pid, handle.pgid);
+            handle.watcher_cancel.cancel();
+            if let Some(join_handle) = handle.watcher_handle.take() {
+                if let Err(err) = join_handle.await {
+                    eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
+                }
+            }
+            eprintln!(
+                "abort-check: killed {task_id} (pid={} pgid={})",
+                handle.pid, handle.pgid
+            );
         }
     }
 }
@@ -886,6 +1252,12 @@ async fn drain_all_children(
                 }
                 if let Err(err) = handle.child.wait().await {
                     eprintln!("warning: failed to wait child for {task_id}: {err}");
+                }
+                handle.watcher_cancel.cancel();
+                if let Some(join_handle) = handle.watcher_handle.take() {
+                    if let Err(err) = join_handle.await {
+                        eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
+                    }
                 }
             }
             complete_task(config, issue_number, &task_id, "ralph:failed").await;
@@ -965,7 +1337,9 @@ async fn cleanup_worktree_for_terminal_state(
     terminal_label: &str,
 ) {
     if should_cleanup_worktree(terminal_label) {
-        eprintln!("complete-task-terminal: cleaning worktree for {task_id} (label={terminal_label})");
+        eprintln!(
+            "complete-task-terminal: cleaning worktree for {task_id} (label={terminal_label})"
+        );
         cleanup_worktree(config, task_id).await;
         return;
     }
@@ -998,10 +1372,7 @@ async fn cleanup_worktree(config: &DaemonRuntimeConfig, task_id: &str) {
 /// Iterates active children in deterministic ascending issue_number order,
 /// capped at `max_rebases_per_cycle`. Each rebase attempt is bounded by
 /// `rebase_timeout_seconds`.
-async fn auto_rebase_phase(
-    config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
-) {
+async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<u32, ChildHandle>) {
     if !config.auto_rebase_enabled {
         eprintln!("auto-rebase: skipped (disabled by config)");
         return;
@@ -1015,7 +1386,11 @@ async fn auto_rebase_phase(
 
     for issue_number in &issue_numbers {
         let (branch, last_rebase_at, last_failure_sha) = match children.get(issue_number) {
-            Some(h) => (h.branch.clone(), h.last_rebase_at, h.last_rebase_failure_sha.clone()),
+            Some(h) => (
+                h.branch.clone(),
+                h.last_rebase_at,
+                h.last_rebase_failure_sha.clone(),
+            ),
             None => continue,
         };
 
@@ -1065,9 +1440,7 @@ async fn auto_rebase_phase(
         let pr_number = match github::extract_pr_number(&pr_url) {
             Some(n) => n,
             None => {
-                eprintln!(
-                    "auto-rebase: skip {task_id} — unparsable PR URL: {pr_url}"
-                );
+                eprintln!("auto-rebase: skip {task_id} — unparsable PR URL: {pr_url}");
                 continue;
             }
         };
@@ -1189,8 +1562,7 @@ async fn auto_rebase_phase(
                         "auto-rebase: skipping duplicate failure comment for {task_id} (head={head_sha})"
                     );
                 } else {
-                    let marker =
-                        format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
+                    let marker = format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
                     let body = format!(
                         "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {err_msg}"
                     );
@@ -1478,8 +1850,7 @@ async fn handle_pr_flow(
     let raw_idea = {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
-        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number))
-            .await
+        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number)).await
         {
             Ok((title, body)) => Some(compose_raw_idea(&title, body.as_deref())),
             Err(_) => None,
@@ -1523,11 +1894,14 @@ async fn handle_pr_flow(
     let refined_title = {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
-        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number))
-            .await
+        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number)).await
         {
             Ok((title, _)) => {
-                if title.is_empty() { None } else { Some(title) }
+                if title.is_empty() {
+                    None
+                } else {
+                    Some(title)
+                }
             }
             Err(_) => None,
         }
@@ -1600,9 +1974,20 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pr_body, build_pr_title, discover_latest_project_id, extract_issue_body,
-        extract_original_title, extract_project_ref, write_body_file,
+        build_pr_body, build_pr_title, detect_final_prompt_artifact, detect_quick_prd_artifact,
+        discover_latest_project_id, extract_issue_body, extract_original_title,
+        extract_project_ref, newest_by_mtime, post_artifact_comments_with_client,
+        sweep_artifact_comments, truncate_for_github, write_body_file, ArtifactCommentClient,
+        ArtifactWatcherState, TRUNCATED_NOTE,
     };
+    use crate::error::RalphError;
+    use crate::Result;
+    use async_trait::async_trait;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn extract_original_title_with_body() {
@@ -1756,6 +2141,428 @@ mod tests {
         assert_eq!(
             discover_latest_project_id(&worktree),
             Some("acme-project-b".to_owned())
+        );
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PostedComment {
+        phase: String,
+        marker: String,
+        body: String,
+    }
+
+    #[derive(Default)]
+    struct MockArtifactCommentState {
+        markers: HashSet<String>,
+        posted_comments: Vec<PostedComment>,
+        fail_post_attempts_remaining: usize,
+        post_attempts: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct MockArtifactCommentClient {
+        state: Arc<Mutex<MockArtifactCommentState>>,
+    }
+
+    impl MockArtifactCommentClient {
+        fn with_failures(fail_post_attempts: usize) -> Self {
+            let state = MockArtifactCommentState {
+                fail_post_attempts_remaining: fail_post_attempts,
+                ..MockArtifactCommentState::default()
+            };
+            Self {
+                state: Arc::new(Mutex::new(state)),
+            }
+        }
+
+        fn posted_comments(&self) -> Vec<PostedComment> {
+            self.state
+                .lock()
+                .expect("lock posted comments")
+                .posted_comments
+                .clone()
+        }
+
+        fn post_attempts(&self) -> usize {
+            self.state.lock().expect("lock post attempts").post_attempts
+        }
+    }
+
+    #[async_trait]
+    impl ArtifactCommentClient for MockArtifactCommentClient {
+        async fn marker_exists(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _issue_number: u32,
+            marker: &str,
+        ) -> Result<bool> {
+            Ok(self
+                .state
+                .lock()
+                .expect("lock marker exists")
+                .markers
+                .contains(marker))
+        }
+
+        async fn post_idempotent_comment(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _issue_number: u32,
+            task_id: &str,
+            phase: &str,
+            body_text: &str,
+        ) -> Result<()> {
+            let mut state = self.state.lock().expect("lock post");
+            state.post_attempts = state.post_attempts.saturating_add(1);
+            if state.fail_post_attempts_remaining > 0 {
+                state.fail_post_attempts_remaining -= 1;
+                return Err(RalphError::Orchestration(
+                    "mock transient post failure".to_owned(),
+                ));
+            }
+
+            let marker = format!("<!-- ralph:task:{task_id}:{phase} -->");
+            if state.markers.insert(marker.clone()) {
+                state.posted_comments.push(PostedComment {
+                    phase: phase.to_owned(),
+                    marker,
+                    body: body_text.to_owned(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    fn write_quick_prd(worktree_path: &std::path::Path, slug: &str, content: &str) -> PathBuf {
+        let spec_path = worktree_path
+            .join(".ralph")
+            .join("quick-prd")
+            .join(slug)
+            .join("SPEC.md");
+        std::fs::create_dir_all(spec_path.parent().expect("spec parent")).expect("create spec dir");
+        std::fs::write(&spec_path, content).expect("write spec");
+        spec_path
+    }
+
+    fn write_final_prompt(
+        worktree_path: &std::path::Path,
+        project_id: &str,
+        prompt_content: &str,
+    ) -> (PathBuf, PathBuf) {
+        let project_dir = worktree_path
+            .join(".ralph")
+            .join("projects")
+            .join(project_id);
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let signal = project_dir.join("prompt-original.md");
+        let prompt = project_dir.join("prompt.md");
+        std::fs::write(&signal, "reviewed").expect("write signal");
+        std::fs::write(&prompt, prompt_content).expect("write prompt");
+        (signal, prompt)
+    }
+
+    #[tokio::test]
+    async fn quick_prd_detection_posts_correct_marker_header_and_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "001-task", "Quick PRD body");
+
+        let client = MockArtifactCommentClient::default();
+        let mut state = ArtifactWatcherState::default();
+        sweep_artifact_comments(
+            &client,
+            "acme",
+            "widgets",
+            7,
+            "acme-widgets-7",
+            tmp.path(),
+            SystemTime::now() - Duration::from_secs(1),
+            &mut state,
+        )
+        .await;
+
+        let comments = client.posted_comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].phase, "quick-prd");
+        assert_eq!(
+            comments[0].marker,
+            "<!-- ralph:task:acme-widgets-7:quick-prd -->"
+        );
+        assert!(comments[0].body.starts_with("### Quick PRD"));
+        assert!(comments[0].body.contains("Quick PRD body"));
+        assert!(state.quick_prd_posted);
+    }
+
+    #[tokio::test]
+    async fn final_prompt_uses_prompt_original_signal_and_reads_prompt_md() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join(".ralph").join("projects").join("proj-a");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("prompt.md"), "Final prompt body only")
+            .expect("write prompt");
+
+        let client = MockArtifactCommentClient::default();
+        let mut state = ArtifactWatcherState::default();
+        let child_start = SystemTime::now() - Duration::from_secs(1);
+
+        sweep_artifact_comments(
+            &client,
+            "acme",
+            "widgets",
+            9,
+            "acme-widgets-9",
+            tmp.path(),
+            child_start,
+            &mut state,
+        )
+        .await;
+        assert!(
+            client.posted_comments().is_empty(),
+            "prompt.md without prompt-original.md signal must not post"
+        );
+
+        std::fs::write(project_dir.join("prompt-original.md"), "signal").expect("write signal");
+        sweep_artifact_comments(
+            &client,
+            "acme",
+            "widgets",
+            9,
+            "acme-widgets-9",
+            tmp.path(),
+            child_start,
+            &mut state,
+        )
+        .await;
+
+        let comments = client.posted_comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].phase, "final-prompt");
+        assert_eq!(
+            comments[0].marker,
+            "<!-- ralph:task:acme-widgets-9:final-prompt -->"
+        );
+        assert!(comments[0]
+            .body
+            .starts_with("### Final Prompt (after review)"));
+        assert!(comments[0].body.contains("Final prompt body only"));
+        assert!(state.final_prompt_posted);
+    }
+
+    #[tokio::test]
+    async fn stale_artifacts_older_than_child_start_are_ignored() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "001-old", "Old quick PRD");
+        write_final_prompt(tmp.path(), "proj-old", "Old prompt");
+        std::thread::sleep(Duration::from_millis(20));
+
+        let child_start = SystemTime::now();
+        assert_eq!(detect_quick_prd_artifact(tmp.path(), child_start), None);
+        assert_eq!(detect_final_prompt_artifact(tmp.path(), child_start), None);
+
+        let client = MockArtifactCommentClient::default();
+        let mut state = ArtifactWatcherState::default();
+        sweep_artifact_comments(
+            &client,
+            "acme",
+            "widgets",
+            11,
+            "acme-widgets-11",
+            tmp.path(),
+            child_start,
+            &mut state,
+        )
+        .await;
+        assert!(client.posted_comments().is_empty());
+    }
+
+    #[test]
+    fn multiple_spec_candidates_choose_newest_then_lexical_tiebreak() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "001", "Older");
+        std::thread::sleep(Duration::from_millis(10));
+        write_quick_prd(tmp.path(), "002", "Newer");
+
+        let detected =
+            detect_quick_prd_artifact(tmp.path(), SystemTime::now() - Duration::from_secs(1))
+                .expect("detect quick prd");
+        assert_eq!(detected, "Newer");
+
+        let t = UNIX_EPOCH + Duration::from_secs(1234);
+        let tied = newest_by_mtime(vec![
+            (PathBuf::from("alpha"), t),
+            (PathBuf::from("beta"), t),
+        ])
+        .expect("tied candidate");
+        assert_eq!(tied, PathBuf::from("beta"));
+    }
+
+    #[test]
+    fn truncate_for_github_appends_note_within_limit() {
+        let truncated = truncate_for_github("abcdefghijklmnopqrstuvwxyz", 16);
+        assert_eq!(truncated.chars().count(), 16);
+        assert!(truncated.ends_with(TRUNCATED_NOTE));
+    }
+
+    #[tokio::test]
+    async fn cancellation_triggers_final_sweep_without_missing_artifact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let client = MockArtifactCommentClient::default();
+        let child_start = SystemTime::now();
+        let cancel = CancellationToken::new();
+
+        let watch_client = client.clone();
+        let watch_cancel = cancel.clone();
+        let worktree_path = tmp.path().to_path_buf();
+        let watcher = tokio::spawn(async move {
+            post_artifact_comments_with_client(
+                &watch_client,
+                "acme",
+                "widgets",
+                15,
+                "acme-widgets-15",
+                &worktree_path,
+                child_start,
+                watch_cancel,
+                Duration::from_secs(30),
+            )
+            .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_quick_prd(tmp.path(), "boundary", "Boundary content");
+        cancel.cancel();
+        watcher.await.expect("watcher join");
+
+        let comments = client.posted_comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].phase, "quick-prd");
+    }
+
+    #[tokio::test]
+    async fn github_post_failure_retries_without_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "retry", "Retry quick prd");
+        let client = MockArtifactCommentClient::with_failures(1);
+        let cancel = CancellationToken::new();
+
+        let watch_client = client.clone();
+        let watch_cancel = cancel.clone();
+        let worktree_path = tmp.path().to_path_buf();
+        let watcher = tokio::spawn(async move {
+            post_artifact_comments_with_client(
+                &watch_client,
+                "acme",
+                "widgets",
+                21,
+                "acme-widgets-21",
+                &worktree_path,
+                SystemTime::now() - Duration::from_secs(1),
+                watch_cancel,
+                Duration::from_millis(20),
+            )
+            .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        cancel.cancel();
+        watcher.await.expect("watcher join");
+
+        let comments = client.posted_comments();
+        assert!(
+            client.post_attempts() >= 2,
+            "expected retry attempts after transient failure"
+        );
+        assert_eq!(
+            comments.iter().filter(|c| c.phase == "quick-prd").count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn single_watcher_run_posts_both_artifact_comments() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "combined", "Combined quick prd");
+        write_final_prompt(tmp.path(), "proj-combined", "Combined final prompt");
+        let client = MockArtifactCommentClient::default();
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            post_artifact_comments_with_client(
+                &client,
+                "acme",
+                "widgets",
+                33,
+                "acme-widgets-33",
+                tmp.path(),
+                SystemTime::now() - Duration::from_secs(1),
+                CancellationToken::new(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("watcher should complete after posting both artifacts");
+
+        let comments = client.posted_comments();
+        let phases: HashSet<String> = comments.into_iter().map(|c| c.phase).collect();
+        assert!(phases.contains("quick-prd"));
+        assert!(phases.contains("final-prompt"));
+        assert_eq!(phases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn watcher_idempotency_prevents_duplicate_comments_on_redispatch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_quick_prd(tmp.path(), "idempotent", "Idempotent quick");
+        write_final_prompt(tmp.path(), "proj-idempotent", "Idempotent final prompt");
+        let client = MockArtifactCommentClient::default();
+        let child_start = SystemTime::now() - Duration::from_secs(1);
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            post_artifact_comments_with_client(
+                &client,
+                "acme",
+                "widgets",
+                44,
+                "acme-widgets-44",
+                tmp.path(),
+                child_start,
+                CancellationToken::new(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("first watcher should complete");
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            post_artifact_comments_with_client(
+                &client,
+                "acme",
+                "widgets",
+                44,
+                "acme-widgets-44",
+                tmp.path(),
+                child_start,
+                CancellationToken::new(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("second watcher should complete");
+
+        let comments = client.posted_comments();
+        assert_eq!(
+            comments.iter().filter(|c| c.phase == "quick-prd").count(),
+            1
+        );
+        assert_eq!(
+            comments
+                .iter()
+                .filter(|c| c.phase == "final-prompt")
+                .count(),
+            1
         );
     }
 }
