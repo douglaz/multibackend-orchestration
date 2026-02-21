@@ -17,3 +17,6 @@
 # Ralph orchestration artifacts
 .ralph/**/*.log
 .ralph/quick-prd/
+
+# Backend side-effect artifacts (codex CLI writes these during prompt review)
+/SPEC.md
