@@ -135,13 +135,6 @@ fn loop_status_label(status: &crate::project::state::LoopStatus) -> &'static str
     }
 }
 
-fn verdict_label(verdict: &crate::project::state::CompletionVerdict) -> String {
-    match verdict {
-        crate::project::state::CompletionVerdict::Continue => "continue".to_owned(),
-        crate::project::state::CompletionVerdict::Complete => "complete".to_owned(),
-    }
-}
-
 fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
     match phase {
         crate::project::state::Phase::Planning => "planning",
@@ -151,20 +144,6 @@ fn phase_label(phase: &crate::project::state::Phase) -> &'static str {
         crate::project::state::Phase::Committing => "committing",
         crate::project::state::Phase::Completing => "completing",
         crate::project::state::Phase::FinalReview => "final_review",
-    }
-}
-
-enum HistoryEntry<'a> {
-    Feature(&'a crate::project::state::FeatureLoopState),
-    Completion(&'a crate::project::state::CompletionLoopState),
-}
-
-impl<'a> HistoryEntry<'a> {
-    fn loop_number(&self) -> u32 {
-        match self {
-            Self::Feature(loop_state) => loop_state.loop_number,
-            Self::Completion(completion) => completion.loop_number,
-        }
     }
 }
 

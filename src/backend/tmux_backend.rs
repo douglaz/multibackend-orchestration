@@ -418,7 +418,7 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         // Persist stdout and stderr to LogWriter (routed to `.ralph/tmp/logs`)
         // for both success and failure paths. This ensures tmux diagnostics are
         // always captured in tmp logs while keeping loop dirs artifact-free.
-        if let Some(writer) = log_writer.as_deref_mut() {
+        if let Some(writer) = log_writer.as_mut() {
             if !raw.stdout.is_empty() {
                 writer.write_bytes(&raw.stdout);
             }

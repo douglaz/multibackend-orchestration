@@ -178,6 +178,7 @@ async fn post_artifact_comments(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn post_artifact_comments_with_client(
     client: &dyn ArtifactCommentClient,
     owner: &str,
@@ -233,6 +234,7 @@ async fn post_artifact_comments_with_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sweep_artifact_comments(
     client: &dyn ArtifactCommentClient,
     owner: &str,
@@ -276,6 +278,7 @@ async fn sweep_artifact_comments(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_post_artifact_comment(
     client: &dyn ArtifactCommentClient,
     owner: &str,

@@ -279,15 +279,12 @@ pub fn resolve_rebase_conflicts(
     deadline: Instant,
 ) -> Result<()> {
     let backend = parse_rebase_agent_backend(agent_backend)?;
-    match backend {
-        RebaseAgentBackend::None => {
-            // Agent disabled — abort rebase and return error for existing fallback path
-            abort_rebase_if_in_progress(worktree_path, deadline);
-            return Err(RalphError::Orchestration(
-                "rebase agent backend is 'none'; agent resolution was skipped/disabled".to_owned(),
-            ));
-        }
-        _ => {}
+    if let RebaseAgentBackend::None = backend {
+        // Agent disabled — abort rebase and return error for existing fallback path
+        abort_rebase_if_in_progress(worktree_path, deadline);
+        return Err(RalphError::Orchestration(
+            "rebase agent backend is 'none'; agent resolution was skipped/disabled".to_owned(),
+        ));
     }
     resolve_rebase_conflicts_typed(worktree_path, rebase_target, &backend, deadline)
 }

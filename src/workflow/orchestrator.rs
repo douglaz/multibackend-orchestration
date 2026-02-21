@@ -1954,24 +1954,22 @@ impl Orchestrator {
                                         failed_backends.join(", ")
                                     ));
                                 }
+                            } else if effective.workflow.final_review_enabled {
+                                state.status = ProjectStatus::InProgress;
+                                state.current_phase = Phase::FinalReview;
+                                state.phase_iteration = 1;
+                                pending_phase_checkpoint =
+                                    Some((Phase::Completing, Phase::FinalReview));
+                                logs.push(format!(
+                                    "loop {loop_number}: completer returned COMPLETE; entering final review"
+                                ));
                             } else {
-                                if effective.workflow.final_review_enabled {
-                                    state.status = ProjectStatus::InProgress;
-                                    state.current_phase = Phase::FinalReview;
-                                    state.phase_iteration = 1;
-                                    pending_phase_checkpoint =
-                                        Some((Phase::Completing, Phase::FinalReview));
-                                    logs.push(format!(
-                                        "loop {loop_number}: completer returned COMPLETE; entering final review"
-                                    ));
-                                } else {
-                                    state.status = ProjectStatus::Completed;
-                                    state.current_phase = Phase::Completing;
-                                    state.phase_iteration = 1;
-                                    logs.push(format!(
-                                        "loop {loop_number}: completer returned COMPLETE; project finished"
-                                    ));
-                                }
+                                state.status = ProjectStatus::Completed;
+                                state.current_phase = Phase::Completing;
+                                state.phase_iteration = 1;
+                                logs.push(format!(
+                                    "loop {loop_number}: completer returned COMPLETE; project finished"
+                                ));
                             }
                         }
                         CompletionVerdict::Continue => {
@@ -4691,6 +4689,7 @@ struct ParseRetryResult<T> {
     session_id: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_parse_retries<T, F>(
     backend: Arc<dyn Backend>,
     registry: &BackendRegistry,

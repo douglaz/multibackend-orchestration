@@ -267,11 +267,7 @@ pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
     }
 
     // Escalate to SIGKILL
-    if let Err(err) = killpg(pgid, Signal::SIGKILL) {
-        if err == Errno::ESRCH {
-            return;
-        }
-    }
+    let _ = killpg(pgid, Signal::SIGKILL);
 }
 
 pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
