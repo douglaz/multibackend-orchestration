@@ -5,9 +5,7 @@ use std::time::Duration;
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
-use crate::daemon::rebase_agent::{
-    classify_rebase_failure, RebaseAgentBackend, RebaseFailureKind,
-};
+use crate::daemon::rebase_agent::{classify_rebase_failure, RebaseFailureKind};
 
 use crate::daemon::process;
 use crate::daemon::refine;
@@ -47,8 +45,10 @@ pub struct DaemonRuntimeConfig {
     pub max_rebases_per_cycle: u32,
     /// Per-attempt timeout (seconds) for rebase operations.
     pub rebase_timeout_seconds: u64,
-    /// Parsed backend config used for future AI-assisted rebase recovery.
-    pub rebase_agent_backend: RebaseAgentBackend,
+    /// Backend spec string for AI-assisted rebase conflict recovery.
+    /// Parsed internally by `resolve_rebase_conflicts`; supports "none",
+    /// "claude", "claude(<model>)".
+    pub rebase_agent_backend: String,
     /// Workspace root (`.ralph/` directory).
     pub workspace_root: PathBuf,
 }
@@ -1151,9 +1151,11 @@ async fn auto_rebase_phase(
             let target = rebase_target.clone();
             let br = branch.clone();
             let timeout_dur = timeout;
-            let backend = config.rebase_agent_backend.clone();
-            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend))
-                .await
+            let backend_str = config.rebase_agent_backend.clone();
+            spawn_blocking_op(move || {
+                execute_rebase(&wt, &target, &br, timeout_dur, &backend_str)
+            })
+            .await
         };
 
         // Clean up rebase worktree (best-effort)
@@ -1224,12 +1226,14 @@ async fn auto_rebase_phase(
 ///
 /// When rebase fails due to merge conflicts and an agent backend is configured,
 /// the conflict recovery agent is invoked to resolve conflicts iteratively.
+/// The `agent_backend` is a raw string spec ("none", "claude", "claude(<model>)")
+/// parsed internally by `resolve_rebase_conflicts`.
 fn execute_rebase(
     worktree_path: &Path,
     rebase_target: &str,
     branch: &str,
     timeout: Duration,
-    agent_backend: &RebaseAgentBackend,
+    agent_backend: &str,
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
 
@@ -1242,6 +1246,20 @@ fn execute_rebase(
             )));
         }
         Ok(deadline - now)
+    };
+
+    // Helper: bounded abort — abort rebase with timeout from shared deadline.
+    let bounded_abort = |wt: &Path| {
+        let abort_budget = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .unwrap_or(Duration::from_secs(10))
+            .max(Duration::from_secs(5));
+        let _ = process::run_command_with_timeout(
+            std::process::Command::new("git")
+                .args(["rebase", "--abort"])
+                .current_dir(wt),
+            abort_budget,
+        );
     };
 
     // Fetch
@@ -1278,40 +1296,31 @@ fn execute_rebase(
 
         match failure_kind {
             RebaseFailureKind::Conflict => {
-                // Attempt AI-assisted conflict resolution if backend is enabled
-                match agent_backend {
-                    RebaseAgentBackend::None => {
-                        // Disabled: abort and fail as before
-                        let _ = std::process::Command::new("git")
-                            .args(["rebase", "--abort"])
-                            .current_dir(worktree_path)
-                            .output();
-                        let stderr =
-                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
-                        return Err(RalphError::Orchestration(format!(
-                            "git rebase failed with merge conflicts: {stderr}"
-                        )));
-                    }
-                    _ => {
-                        eprintln!(
-                            "rebase-agent: conflict detected, invoking AI agent for resolution"
-                        );
-                        crate::daemon::rebase_agent::resolve_rebase_conflicts(
-                            worktree_path,
-                            rebase_target,
-                            agent_backend,
-                            deadline,
-                        )?;
-                        // Agent succeeded — fall through to push
-                    }
+                if agent_backend == "none" {
+                    // Disabled: abort with bounded timeout and fail as before
+                    bounded_abort(worktree_path);
+                    let stderr =
+                        String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                    return Err(RalphError::Orchestration(format!(
+                        "git rebase failed with merge conflicts: {stderr}"
+                    )));
                 }
+
+                eprintln!(
+                    "rebase-agent: conflict detected, invoking AI agent for resolution"
+                );
+                // resolve_rebase_conflicts handles abort-on-failure internally
+                crate::daemon::rebase_agent::resolve_rebase_conflicts(
+                    worktree_path,
+                    rebase_target,
+                    agent_backend,
+                    deadline,
+                )?;
+                // Agent succeeded — fall through to push
             }
             RebaseFailureKind::Other => {
-                // Non-conflict failure: abort and return error unchanged
-                let _ = std::process::Command::new("git")
-                    .args(["rebase", "--abort"])
-                    .current_dir(worktree_path)
-                    .output();
+                // Non-conflict failure: abort with bounded timeout and return error
+                bounded_abort(worktree_path);
                 let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
                 return Err(RalphError::Orchestration(format!(
                     "git rebase failed: {stderr}"

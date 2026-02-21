@@ -180,13 +180,20 @@ pub fn is_rebase_in_progress(worktree_path: &Path) -> bool {
     false
 }
 
-/// Abort a rebase in progress (best-effort).
-fn abort_rebase_if_in_progress(worktree_path: &Path) {
+/// Abort a rebase in progress, bounded by the given timeout budget.
+fn abort_rebase_if_in_progress(worktree_path: &Path, deadline: Instant) {
     if is_rebase_in_progress(worktree_path) {
-        let _ = std::process::Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(worktree_path)
-            .output();
+        let timeout = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::from_secs(10));
+        // Use at least 5 seconds for abort even if budget is nearly exhausted
+        let timeout = timeout.max(Duration::from_secs(5));
+        let _ = process::run_command_with_timeout(
+            std::process::Command::new("git")
+                .args(["rebase", "--abort"])
+                .current_dir(worktree_path),
+            timeout,
+        );
     }
 }
 
@@ -231,9 +238,35 @@ fn build_agent_command(
 
 /// Resolve rebase conflicts using an AI agent in a loop.
 ///
+/// Public entrypoint accepting a raw backend string (`agent_backend`). The
+/// string is parsed internally; invalid or unsupported values produce a clear
+/// `RalphError`. The special value `"none"` disables agent invocation and
+/// returns an error indicating no agent was attempted.
+///
 /// Each iteration: read conflicts, prompt agent, verify resolution, run `--continue`.
 /// If `--continue` introduces new conflicts, repeat. Shared deadline across all steps.
 pub fn resolve_rebase_conflicts(
+    worktree_path: &Path,
+    rebase_target: &str,
+    agent_backend: &str,
+    deadline: Instant,
+) -> Result<()> {
+    let backend = parse_rebase_agent_backend(agent_backend)?;
+    match backend {
+        RebaseAgentBackend::None => {
+            // Agent disabled — abort rebase and return error for existing fallback path
+            abort_rebase_if_in_progress(worktree_path, deadline);
+            return Err(RalphError::Orchestration(
+                "rebase agent backend is 'none'; conflict resolution skipped".to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    resolve_rebase_conflicts_typed(worktree_path, rebase_target, &backend, deadline)
+}
+
+/// Internal typed entrypoint for conflict resolution (backend already parsed).
+fn resolve_rebase_conflicts_typed(
     worktree_path: &Path,
     rebase_target: &str,
     agent_backend: &RebaseAgentBackend,
@@ -243,7 +276,7 @@ pub fn resolve_rebase_conflicts(
     match result {
         Ok(()) => Ok(()),
         Err(agent_err) => {
-            abort_rebase_if_in_progress(worktree_path);
+            abort_rebase_if_in_progress(worktree_path, deadline);
             Err(agent_err.into_ralph_error())
         }
     }
@@ -345,7 +378,11 @@ fn resolve_loop(
                 )?;
                 let new_conflicts =
                     git::has_conflicts_with_timeout(worktree_path, check_budget)
-                        .unwrap_or(false);
+                        .map_err(|e| {
+                            AgentError::SpawnFailed(format!(
+                                "post-continue conflict check failed: {e}"
+                            ))
+                        })?;
                 if new_conflicts {
                     eprintln!(
                         "rebase-agent: rebase --continue succeeded but new conflicts appeared, repeating loop"
@@ -364,7 +401,11 @@ fn resolve_loop(
                 )?;
                 let new_conflicts =
                     git::has_conflicts_with_timeout(worktree_path, check_budget)
-                        .unwrap_or(false);
+                        .map_err(|e| {
+                            AgentError::SpawnFailed(format!(
+                                "post-failure conflict check failed: {e}"
+                            ))
+                        })?;
                 if new_conflicts {
                     eprintln!(
                         "rebase-agent: rebase --continue produced new conflicts, repeating loop"
@@ -606,11 +647,49 @@ mod tests {
     // ---- Abort-on-failure test (loop 2) ----
 
     #[test]
-    fn resolve_with_none_backend_is_unreachable_but_disabled_path_works() {
-        // The None backend should never reach resolve_rebase_conflicts
-        // because runtime.rs gates on it. This test verifies the parse path.
-        let parsed = parse_rebase_agent_backend("none").unwrap();
-        assert_eq!(parsed, RebaseAgentBackend::None);
+    fn resolve_with_none_backend_returns_error_via_string_entrypoint() {
+        let repo = create_clean_repo();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result =
+            super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
+        assert!(result.is_err(), "none backend should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("none") && err.contains("skipped"),
+            "error should indicate none backend skipped resolution: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_with_invalid_backend_returns_clear_error() {
+        let repo = create_clean_repo();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = super::resolve_rebase_conflicts(
+            repo.path(),
+            "origin/main",
+            "codex(gpt-5)",
+            deadline,
+        );
+        assert!(result.is_err(), "unsupported backend should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported"),
+            "error should mention unsupported backend: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_with_empty_backend_returns_clear_error() {
+        let repo = create_clean_repo();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result =
+            super::resolve_rebase_conflicts(repo.path(), "origin/main", "  ", deadline);
+        assert!(result.is_err(), "empty backend should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot be empty"),
+            "error should mention empty backend: {err}"
+        );
     }
 
     // ---- Helpers ----

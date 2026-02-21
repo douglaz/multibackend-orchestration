@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use crate::config::resolve_daemon_config;
 use crate::daemon::bootstrap;
 use crate::daemon::github;
-use crate::daemon::rebase_agent::parse_rebase_agent_backend;
+use crate::daemon::rebase_agent;
 use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::DaemonLock;
@@ -161,12 +161,15 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         };
 
         let daemon_cfg = resolve_daemon_config(&workspace.config, project_config.as_ref());
-        let rebase_agent_backend =
-            parse_rebase_agent_backend(&daemon_cfg.rebase_agent_backend).map_err(|err| {
-                RalphError::Validation(format!(
-                    "invalid daemon rebase agent backend for {slug}: {err}"
-                ))
-            })?;
+        // Validate the backend string at startup so invalid config fails early.
+        // The raw string is stored and parsed again at invocation time by
+        // resolve_rebase_conflicts.
+        let rebase_agent_backend_str = daemon_cfg.rebase_agent_backend.clone();
+        rebase_agent::parse_rebase_agent_backend(&rebase_agent_backend_str).map_err(|err| {
+            RalphError::Validation(format!(
+                "invalid daemon rebase agent backend for {slug}: {err}"
+            ))
+        })?;
 
         if !deprecation_warned && daemon_cfg.repo.is_some() {
             eprintln!(
@@ -210,7 +213,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             rebase_interval_seconds: daemon_cfg.rebase_interval_seconds,
             max_rebases_per_cycle: daemon_cfg.max_rebases_per_cycle,
             rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
-            rebase_agent_backend,
+            rebase_agent_backend: rebase_agent_backend_str,
             workspace_root: workspace.root.clone(),
         };
 

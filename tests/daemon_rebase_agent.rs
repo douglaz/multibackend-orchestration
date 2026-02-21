@@ -3,6 +3,10 @@
 //! These tests create synthetic git repos with merge conflicts and use mock
 //! `claude` executables to exercise the resolve/continue cycle.
 //!
+//! All tests call the public string-based entrypoint
+//! `resolve_rebase_conflicts(path, target, backend_str, deadline)` which
+//! handles backend parsing internally.
+//!
 //! All tests acquire a shared mutex before mutating the process PATH, ensuring
 //! deterministic execution even under parallel test runners.
 
@@ -13,9 +17,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use ralph::daemon::rebase_agent::{
-    is_rebase_in_progress, resolve_rebase_conflicts, RebaseAgentBackend,
-};
+use ralph::daemon::rebase_agent::{is_rebase_in_progress, resolve_rebase_conflicts};
 use tempfile::TempDir;
 
 /// Global mutex to serialize tests that mutate the process PATH.
@@ -161,7 +163,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests — using string-based public entrypoint
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -177,13 +179,10 @@ fn successful_conflict_recovery() {
     );
     let mock_bin = write_mock_claude(&tmp, &script);
 
-    let backend = RebaseAgentBackend::Claude {
-        model: "opus".to_owned(),
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
 
     let result = with_mock_path(&mock_bin, || {
-        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
     assert!(result.is_ok(), "expected success, got: {:?}", result.err());
@@ -212,13 +211,10 @@ done
     );
     let mock_bin = write_mock_claude(&tmp, &script);
 
-    let backend = RebaseAgentBackend::Claude {
-        model: "opus".to_owned(),
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
 
     let result = with_mock_path(&mock_bin, || {
-        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
     assert!(result.is_ok(), "expected success, got: {:?}", result.err());
@@ -237,13 +233,10 @@ fn agent_non_zero_exit_aborts_rebase() {
     let script = "#!/bin/sh\nexit 1\n";
     let mock_bin = write_mock_claude(&tmp, script);
 
-    let backend = RebaseAgentBackend::Claude {
-        model: "opus".to_owned(),
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
 
     let result = with_mock_path(&mock_bin, || {
-        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
     assert!(result.is_err(), "expected error on non-zero agent exit");
@@ -267,13 +260,10 @@ fn agent_success_without_resolution_fails() {
     let script = "#!/bin/sh\nexit 0\n";
     let mock_bin = write_mock_claude(&tmp, script);
 
-    let backend = RebaseAgentBackend::Claude {
-        model: "opus".to_owned(),
-    };
     let deadline = Instant::now() + Duration::from_secs(30);
 
     let result = with_mock_path(&mock_bin, || {
-        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
     assert!(result.is_err(), "expected error when conflicts remain");
@@ -297,14 +287,11 @@ fn agent_timeout_fails() {
     let script = "#!/bin/sh\nsleep 60\n";
     let mock_bin = write_mock_claude(&tmp, script);
 
-    let backend = RebaseAgentBackend::Claude {
-        model: "opus".to_owned(),
-    };
     // Give only 2 seconds deadline (enough for git status but not for sleep 60)
     let deadline = Instant::now() + Duration::from_secs(2);
 
     let result = with_mock_path(&mock_bin, || {
-        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
     assert!(result.is_err(), "expected timeout error");
@@ -316,5 +303,73 @@ fn agent_timeout_fails() {
     assert!(
         !is_rebase_in_progress(repo),
         "rebase should be aborted after timeout"
+    );
+}
+
+#[test]
+fn none_backend_string_returns_error() {
+    let tmp = create_conflict_repo();
+    let repo = tmp.path();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let result = resolve_rebase_conflicts(repo, "master", "none", deadline);
+
+    assert!(result.is_err(), "none backend should return error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("none") && err.contains("skipped"),
+        "error should indicate agent was skipped: {err}"
+    );
+    // After none-backend, rebase should be aborted
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be aborted in none-backend path"
+    );
+}
+
+#[test]
+fn invalid_backend_string_returns_error() {
+    let tmp = create_conflict_repo();
+    let repo = tmp.path();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let result = resolve_rebase_conflicts(repo, "master", "codex(gpt-5)", deadline);
+
+    assert!(result.is_err(), "unsupported backend should return error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unsupported"),
+        "error should mention unsupported backend: {err}"
+    );
+}
+
+#[test]
+fn claude_shorthand_backend_string_works() {
+    let tmp = create_conflict_repo();
+    let repo = tmp.path();
+
+    // Mock claude that resolves the conflict
+    let script = format!(
+        "#!/bin/sh\necho 'resolved-content' > {}/conflict.txt\ngit -C {} add conflict.txt\n",
+        repo.display(),
+        repo.display(),
+    );
+    let mock_bin = write_mock_claude(&tmp, &script);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    // Use shorthand "claude" (no model parenthetical — should default to opus)
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", "claude", deadline)
+    });
+
+    assert!(
+        result.is_ok(),
+        "shorthand 'claude' backend should work, got: {:?}",
+        result.err()
+    );
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be complete"
     );
 }
