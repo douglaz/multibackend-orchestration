@@ -101,3 +101,62 @@ pub(crate) fn read_porcelain_status(workdir: &Path) -> Result<String> {
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
+
+/// Check if there are any unresolved merge conflicts, bounded by a timeout.
+pub fn has_conflicts_with_timeout(
+    workdir: &Path,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    ensure_git_repo(workdir)?;
+    let output = crate::daemon::process::run_command_with_timeout(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(workdir),
+        timeout,
+    )?;
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    for line in status.lines() {
+        let prefix = line.get(0..2).unwrap_or("");
+        if matches!(prefix, "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Returns the list of files with merge conflicts, bounded by a timeout.
+pub fn conflicting_files_with_timeout(
+    workdir: &Path,
+    timeout: std::time::Duration,
+) -> Result<Vec<String>> {
+    ensure_git_repo(workdir)?;
+    let output = crate::daemon::process::run_command_with_timeout(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(workdir),
+        timeout,
+    )?;
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    let mut conflicts = Vec::new();
+    for line in status.lines() {
+        let prefix = line.get(0..2).unwrap_or("");
+        if matches!(prefix, "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD") {
+            if let Some(file) = line.get(3..) {
+                conflicts.push(file.to_string());
+            }
+        }
+    }
+    Ok(conflicts)
+}

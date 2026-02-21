@@ -26,7 +26,11 @@ pub enum RebaseFailureKind {
 enum AgentError {
     Timeout(String),
     SpawnFailed(String),
-    AgentNonZero { exit_code: i32 },
+    AgentNonZero {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+    },
     UnresolvedConflicts,
     IterationCapReached,
     RebaseContinueFailed(String),
@@ -41,9 +45,21 @@ impl AgentError {
             AgentError::SpawnFailed(msg) => {
                 RalphError::Orchestration(format!("rebase agent spawn failed: {msg}"))
             }
-            AgentError::AgentNonZero { exit_code } => RalphError::Orchestration(format!(
-                "rebase agent exited with non-zero status: {exit_code}"
-            )),
+            AgentError::AgentNonZero {
+                exit_code,
+                stdout,
+                stderr,
+            } => {
+                let mut msg =
+                    format!("rebase agent exited with non-zero status: {exit_code}");
+                if !stderr.is_empty() {
+                    msg.push_str(&format!("\nstderr: {stderr}"));
+                }
+                if !stdout.is_empty() {
+                    msg.push_str(&format!("\nstdout: {stdout}"));
+                }
+                RalphError::Orchestration(msg)
+            }
             AgentError::UnresolvedConflicts => RalphError::Orchestration(
                 "rebase agent completed but conflicts remain unresolved".to_owned(),
             ),
@@ -245,51 +261,110 @@ fn resolve_loop(
             iteration + 1
         );
 
-        // Step 1: Read conflicting files
-        let files = git::conflicting_files(worktree_path).map_err(|e| {
-            AgentError::SpawnFailed(format!("failed to read conflicting files: {e}"))
-        })?;
+        // Step 1: Read conflicting files (with timeout)
+        let files_budget = remaining_budget(
+            deadline,
+            &format!("conflicting_files (iteration {})", iteration + 1),
+        )?;
+        let files = git::conflicting_files_with_timeout(worktree_path, files_budget)
+            .map_err(|e| {
+                AgentError::SpawnFailed(format!("failed to read conflicting files: {e}"))
+            })?;
 
         if files.is_empty() {
             // No conflicts — try rebase --continue directly
-            let budget =
-                remaining_budget(deadline, &format!("rebase --continue (iteration {})", iteration + 1))?;
-            return run_rebase_continue(worktree_path, budget, deadline);
+            let budget = remaining_budget(
+                deadline,
+                &format!("rebase --continue (iteration {})", iteration + 1),
+            )?;
+            run_rebase_continue(worktree_path, budget)?;
+
+            // Verify rebase is actually complete
+            if !is_rebase_in_progress(worktree_path) {
+                return Ok(());
+            }
+            // Rebase still in progress — continue looping
+            eprintln!("rebase-agent: rebase --continue succeeded but rebase still in progress, continuing");
+            continue;
         }
 
         // Step 2: Build prompt
         let prompt = build_agent_prompt(rebase_target, &files);
 
         // Step 3: Invoke agent
-        let agent_budget =
-            remaining_budget(deadline, &format!("agent invocation (iteration {})", iteration + 1))?;
+        let agent_budget = remaining_budget(
+            deadline,
+            &format!("agent invocation (iteration {})", iteration + 1),
+        )?;
         let mut cmd = build_agent_command(worktree_path, agent_backend, &prompt);
         let output = process::run_command_with_timeout(&mut cmd, agent_budget)
             .map_err(|e| AgentError::SpawnFailed(format!("{e}")))?;
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
-            return Err(AgentError::AgentNonZero { exit_code: code });
+            return Err(AgentError::AgentNonZero {
+                exit_code: code,
+                stdout: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
         }
 
-        // Step 4: Verify conflicts cleared
-        let still_has_conflicts = git::has_conflicts(worktree_path).map_err(|e| {
-            AgentError::SpawnFailed(format!("failed to check conflicts after agent: {e}"))
-        })?;
+        // Step 4: Verify conflicts cleared (with timeout)
+        let verify_budget = remaining_budget(
+            deadline,
+            &format!("has_conflicts check (iteration {})", iteration + 1),
+        )?;
+        let still_has_conflicts =
+            git::has_conflicts_with_timeout(worktree_path, verify_budget).map_err(
+                |e| {
+                    AgentError::SpawnFailed(format!(
+                        "failed to check conflicts after agent: {e}"
+                    ))
+                },
+            )?;
 
         if still_has_conflicts {
             return Err(AgentError::UnresolvedConflicts);
         }
 
         // Step 5: Run git rebase --continue
-        let continue_budget =
-            remaining_budget(deadline, &format!("rebase --continue (iteration {})", iteration + 1))?;
-        match run_rebase_continue(worktree_path, continue_budget, deadline) {
-            Ok(()) => return Ok(()),
+        let continue_budget = remaining_budget(
+            deadline,
+            &format!("rebase --continue (iteration {})", iteration + 1),
+        )?;
+        match run_rebase_continue(worktree_path, continue_budget) {
+            Ok(()) => {
+                // Verify rebase is actually complete
+                if !is_rebase_in_progress(worktree_path) {
+                    return Ok(());
+                }
+                // Rebase still in progress (more commits) — check for new conflicts
+                let check_budget = remaining_budget(
+                    deadline,
+                    &format!("post-continue conflict check (iteration {})", iteration + 1),
+                )?;
+                let new_conflicts =
+                    git::has_conflicts_with_timeout(worktree_path, check_budget)
+                        .unwrap_or(false);
+                if new_conflicts {
+                    eprintln!(
+                        "rebase-agent: rebase --continue succeeded but new conflicts appeared, repeating loop"
+                    );
+                    continue;
+                }
+                // No conflicts but rebase still in progress — continue looping
+                eprintln!("rebase-agent: rebase --continue succeeded, rebase still in progress, continuing");
+                continue;
+            }
             Err(AgentError::RebaseContinueFailed(_)) => {
                 // Check if new conflicts appeared (multi-commit rebase)
+                let check_budget = remaining_budget(
+                    deadline,
+                    &format!("post-failure conflict check (iteration {})", iteration + 1),
+                )?;
                 let new_conflicts =
-                    git::has_conflicts(worktree_path).unwrap_or(false);
+                    git::has_conflicts_with_timeout(worktree_path, check_budget)
+                        .unwrap_or(false);
                 if new_conflicts {
                     eprintln!(
                         "rebase-agent: rebase --continue produced new conflicts, repeating loop"
@@ -309,10 +384,13 @@ fn resolve_loop(
 }
 
 /// Run `git rebase --continue` and check the result.
+///
+/// Returns `Ok(())` if the command exits successfully. The caller is
+/// responsible for checking `is_rebase_in_progress()` and
+/// `has_conflicts_with_timeout()` to decide whether to loop again.
 fn run_rebase_continue(
     worktree_path: &Path,
     budget: Duration,
-    _deadline: Instant,
 ) -> std::result::Result<(), AgentError> {
     let output = process::run_command_with_timeout(
         std::process::Command::new("git")
@@ -324,19 +402,6 @@ fn run_rebase_continue(
     .map_err(|e| AgentError::SpawnFailed(format!("rebase --continue: {e}")))?;
 
     if output.status.success() {
-        // Check if rebase is still in progress (more commits to apply)
-        if is_rebase_in_progress(worktree_path) {
-            // There may be more conflicts from subsequent commits
-            let has_conflicts = git::has_conflicts(worktree_path).unwrap_or(false);
-            if has_conflicts {
-                return Err(AgentError::RebaseContinueFailed(
-                    "new conflicts after successful continue".to_owned(),
-                ));
-            }
-            // Rebase still in progress but no conflicts — keep going
-            // We return success here; the caller can re-enter the loop
-            // if needed, but typically rebase --continue will fully finish.
-        }
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();

@@ -2,17 +2,24 @@
 //!
 //! These tests create synthetic git repos with merge conflicts and use mock
 //! `claude` executables to exercise the resolve/continue cycle.
+//!
+//! All tests acquire a shared mutex before mutating the process PATH, ensuring
+//! deterministic execution even under parallel test runners.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ralph::daemon::rebase_agent::{
-    resolve_rebase_conflicts, RebaseAgentBackend,
+    is_rebase_in_progress, resolve_rebase_conflicts, RebaseAgentBackend,
 };
 use tempfile::TempDir;
+
+/// Global mutex to serialize tests that mutate the process PATH.
+static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -122,8 +129,9 @@ fn create_multi_commit_conflict_repo() -> TempDir {
     tmp
 }
 
-/// Write a mock `claude` script and set PATH so it's found.
-fn write_mock_claude(tmp: &TempDir, script_content: &str) -> String {
+/// Write a mock `claude` script to a per-test bin directory inside the tempdir.
+/// Returns the bin directory path.
+fn write_mock_claude(tmp: &TempDir, script_content: &str) -> PathBuf {
     let bin_dir = tmp.path().join("mock-bin");
     fs::create_dir_all(&bin_dir).expect("create mock-bin dir");
     let claude_path = bin_dir.join("claude");
@@ -134,15 +142,22 @@ fn write_mock_claude(tmp: &TempDir, script_content: &str) -> String {
     perms.set_mode(0o755);
     fs::set_permissions(&claude_path, perms).expect("set permissions");
 
-    // Prepend to PATH
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.display(), current_path);
-    std::env::set_var("PATH", &new_path);
-    current_path
+    bin_dir
 }
 
-fn restore_path(original: &str) {
-    std::env::set_var("PATH", original);
+/// Run a closure with the mock bin directory prepended to PATH.
+/// Acquires the global PATH_MUTEX for safety and restores PATH on exit.
+fn with_mock_path<F, R>(mock_bin_dir: &Path, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", mock_bin_dir.display(), original_path);
+    std::env::set_var("PATH", &new_path);
+    let result = f();
+    std::env::set_var("PATH", &original_path);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -160,16 +175,22 @@ fn successful_conflict_recovery() {
         repo.display(),
         repo.display(),
     );
-    let old_path = write_mock_claude(&tmp, &script);
+    let mock_bin = write_mock_claude(&tmp, &script);
 
     let backend = RebaseAgentBackend::Claude {
         model: "opus".to_owned(),
     };
     let deadline = Instant::now() + Duration::from_secs(30);
-    let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
-    restore_path(&old_path);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+    });
 
     assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be fully complete after successful recovery"
+    );
 }
 
 #[test]
@@ -189,16 +210,22 @@ done
 "#,
         repo = repo.display(),
     );
-    let old_path = write_mock_claude(&tmp, &script);
+    let mock_bin = write_mock_claude(&tmp, &script);
 
     let backend = RebaseAgentBackend::Claude {
         model: "opus".to_owned(),
     };
     let deadline = Instant::now() + Duration::from_secs(30);
-    let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
-    restore_path(&old_path);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+    });
 
     assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be fully complete after multi-commit recovery"
+    );
 }
 
 #[test]
@@ -208,20 +235,26 @@ fn agent_non_zero_exit_aborts_rebase() {
 
     // Mock claude that exits with code 1
     let script = "#!/bin/sh\nexit 1\n";
-    let old_path = write_mock_claude(&tmp, script);
+    let mock_bin = write_mock_claude(&tmp, script);
 
     let backend = RebaseAgentBackend::Claude {
         model: "opus".to_owned(),
     };
     let deadline = Instant::now() + Duration::from_secs(30);
-    let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
-    restore_path(&old_path);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+    });
 
     assert!(result.is_err(), "expected error on non-zero agent exit");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("non-zero"),
         "error should mention non-zero exit: {err}"
+    );
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be aborted after agent failure"
     );
 }
 
@@ -232,20 +265,26 @@ fn agent_success_without_resolution_fails() {
 
     // Mock claude that exits 0 but doesn't actually resolve anything
     let script = "#!/bin/sh\nexit 0\n";
-    let old_path = write_mock_claude(&tmp, script);
+    let mock_bin = write_mock_claude(&tmp, script);
 
     let backend = RebaseAgentBackend::Claude {
         model: "opus".to_owned(),
     };
     let deadline = Instant::now() + Duration::from_secs(30);
-    let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
-    restore_path(&old_path);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+    });
 
     assert!(result.is_err(), "expected error when conflicts remain");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("conflicts remain unresolved"),
         "error should mention unresolved conflicts: {err}"
+    );
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be aborted after unresolved conflicts"
     );
 }
 
@@ -256,20 +295,26 @@ fn agent_timeout_fails() {
 
     // Mock claude that sleeps longer than the deadline
     let script = "#!/bin/sh\nsleep 60\n";
-    let old_path = write_mock_claude(&tmp, script);
+    let mock_bin = write_mock_claude(&tmp, script);
 
     let backend = RebaseAgentBackend::Claude {
         model: "opus".to_owned(),
     };
-    // Give only 1 second deadline
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
-    restore_path(&old_path);
+    // Give only 2 seconds deadline (enough for git status but not for sleep 60)
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", &backend, deadline)
+    });
 
     assert!(result.is_err(), "expected timeout error");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("timed out") || err.contains("timeout"),
         "error should mention timeout: {err}"
+    );
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be aborted after timeout"
     );
 }

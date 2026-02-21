@@ -1,13 +1,18 @@
 use std::fs;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;
 
 use crate::daemon::rebase_agent::{
-    build_agent_prompt, is_rebase_in_progress, parse_rebase_agent_backend,
-    resolve_rebase_conflicts, RebaseAgentBackend,
+    build_agent_prompt, classify_rebase_failure, is_rebase_in_progress,
+    parse_rebase_agent_backend, resolve_rebase_conflicts, RebaseAgentBackend,
+    RebaseFailureKind,
 };
 use crate::validate::harness::RalphHarness;
+
+/// Mutex to serialize tests that mutate the process PATH.
+static PATH_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -28,8 +33,12 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: agent_enabled_recovery_prompt_contract,
         },
         ConformanceTest {
-            name: "daemon_rebase::agent_disabled_fallback_path",
-            func: agent_disabled_fallback_path,
+            name: "daemon_rebase::agent_enabled_recovery_resolves_conflict",
+            func: agent_enabled_recovery_resolves_conflict,
+        },
+        ConformanceTest {
+            name: "daemon_rebase::agent_disabled_fallback_aborts_conflict",
+            func: agent_disabled_fallback_aborts_conflict,
         },
         ConformanceTest {
             name: "daemon_rebase::agent_failure_aborts_rebase",
@@ -127,18 +136,136 @@ fn agent_enabled_recovery_prompt_contract(_h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verify that "none" backend means agent is not invoked (disabled path).
-fn agent_disabled_fallback_path(_h: &RalphHarness) -> TestResult {
+/// Agent-enabled recovery: create a real conflict, use mock claude to resolve it,
+/// verify the rebase completes successfully and no longer in progress.
+fn agent_enabled_recovery_resolves_conflict(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let parsed = parse_rebase_agent_backend("none").expect("parse none");
-        assert_eq!(
-            parsed,
-            RebaseAgentBackend::None,
-            "none should parse to RebaseAgentBackend::None"
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let repo = tmp.path();
+
+        // Set up repo with conflict
+        run_git_in(repo, &["init"]);
+        run_git_in(repo, &["config", "user.email", "test@example.com"]);
+        run_git_in(repo, &["config", "user.name", "Test User"]);
+
+        fs::write(repo.join("conflict.txt"), "base\n").expect("write base");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "base"]);
+
+        fs::write(repo.join("conflict.txt"), "master\n").expect("write master");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "master diverges"]);
+
+        run_git_in(repo, &["checkout", "-b", "feature", "HEAD~1"]);
+        fs::write(repo.join("conflict.txt"), "feature\n").expect("write feature");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "feature diverges"]);
+
+        // Start rebase (will conflict)
+        let output = std::process::Command::new("git")
+            .args(["rebase", "master"])
+            .current_dir(repo)
+            .output()
+            .expect("run git rebase");
+        assert!(!output.status.success(), "expected rebase conflict");
+        assert!(is_rebase_in_progress(repo), "rebase should be in progress");
+
+        // Create mock claude that actually resolves the conflict
+        let bin_dir = tmp.path().join("mock-bin");
+        fs::create_dir_all(&bin_dir).expect("create mock-bin");
+        let claude_path = bin_dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\necho 'resolved' > {}/conflict.txt\ngit -C {} add conflict.txt\n",
+            repo.display(),
+            repo.display(),
         );
-        // When backend is None, runtime.rs should skip the agent and use
-        // the existing abort/fail path. We verify the parse here; the
-        // runtime integration is tested by execute_rebase behavior.
+        fs::write(&claude_path, &script).expect("write mock claude");
+        let mut perms = fs::metadata(&claude_path).expect("meta").permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&claude_path, perms).expect("set perms");
+
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+
+        let backend = RebaseAgentBackend::Claude {
+            model: "opus".to_owned(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let result = resolve_rebase_conflicts(repo, "master", &backend, deadline);
+
+        std::env::set_var("PATH", &old_path);
+
+        assert!(
+            result.is_ok(),
+            "agent-enabled recovery should succeed: {:?}",
+            result.err()
+        );
+        assert!(
+            !is_rebase_in_progress(repo),
+            "rebase should be complete after agent-enabled recovery"
+        );
+    })
+}
+
+/// Agent-disabled (backend=none) fallback: create a real conflict, verify that
+/// classify_rebase_failure correctly identifies the conflict, and confirm that
+/// the None backend means the caller should abort without invoking an agent.
+fn agent_disabled_fallback_aborts_conflict(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let repo = tmp.path();
+
+        // Set up repo with conflict
+        run_git_in(repo, &["init"]);
+        run_git_in(repo, &["config", "user.email", "test@example.com"]);
+        run_git_in(repo, &["config", "user.name", "Test User"]);
+
+        fs::write(repo.join("conflict.txt"), "base\n").expect("write base");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "base"]);
+
+        fs::write(repo.join("conflict.txt"), "master\n").expect("write master");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "master diverges"]);
+
+        run_git_in(repo, &["checkout", "-b", "feature", "HEAD~1"]);
+        fs::write(repo.join("conflict.txt"), "feature\n").expect("write feature");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "feature diverges"]);
+
+        // Start rebase (will conflict)
+        let output = std::process::Command::new("git")
+            .args(["rebase", "master"])
+            .current_dir(repo)
+            .output()
+            .expect("run git rebase");
+        assert!(!output.status.success(), "expected rebase conflict");
+
+        // Verify conflict classification
+        let exit_code = output.status.code().unwrap_or(-1);
+        let kind = classify_rebase_failure(exit_code, &output.stderr, repo);
+        assert_eq!(
+            kind,
+            RebaseFailureKind::Conflict,
+            "should classify as conflict"
+        );
+
+        // With None backend, runtime should NOT invoke agent — just abort
+        let backend = parse_rebase_agent_backend("none").expect("parse none");
+        assert_eq!(backend, RebaseAgentBackend::None);
+
+        // Simulate what runtime.rs does for None backend: abort and fail
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(repo)
+            .output();
+
+        assert!(
+            !is_rebase_in_progress(repo),
+            "rebase should be aborted in none-backend fallback path"
+        );
     })
 }
 
@@ -189,6 +316,7 @@ fn agent_failure_aborts_rebase(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old_path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
 
@@ -201,6 +329,11 @@ fn agent_failure_aborts_rebase(_h: &RalphHarness) -> TestResult {
         std::env::set_var("PATH", &old_path);
 
         assert!(result.is_err(), "agent failure should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-zero"),
+            "error should mention non-zero exit: {err}"
+        );
         // After failure, rebase should be aborted
         assert!(
             !is_rebase_in_progress(repo),
