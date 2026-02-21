@@ -512,6 +512,7 @@ mod tests {
     #[test]
     fn sync_project_branch_discards_local_only_checkpoint_and_position_reverts() {
         let (_temp, _remote, work) = init_repo_with_remote();
+        let base_branch = "master".to_owned();
 
         let remote_checkpoint =
             build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
@@ -533,7 +534,8 @@ mod tests {
             "local-ahead position should reflect unpushed checkpoint"
         );
 
-        sync_project_branch(&work, 42).expect("sync should discard local-only checkpoint");
+        sync_project_branch(&work, 42, &base_branch)
+            .expect("sync should discard local-only checkpoint");
         let head_after_sync = git_output(&work, &["rev-parse", "HEAD"]);
         assert_eq!(
             head_after_sync, remote_head,

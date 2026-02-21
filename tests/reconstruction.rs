@@ -41,6 +41,21 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn add_local_bare_remote(repo_root: &Path) {
+    let bare_dir = repo_root.join(".test-remote.git");
+    let bare_str = bare_dir.to_string_lossy().to_string();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", &bare_str])
+        .current_dir(repo_root)
+        .status()
+        .expect("init bare remote");
+    assert!(status.success(), "git init --bare failed");
+
+    git_ok(repo_root, &["remote", "add", "origin", &bare_str]);
+    git_ok(repo_root, &["push", "-u", "origin", "HEAD"]);
+}
+
 fn setup_project() -> (TempDir, std::path::PathBuf, String) {
     let temp = TempDir::new().expect("temp dir");
     let repo_root = temp.path();
@@ -52,6 +67,7 @@ fn setup_project() -> (TempDir, std::path::PathBuf, String) {
     fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
     git_ok(repo_root, &["add", "-A"]);
     git_ok(repo_root, &["commit", "-m", "initial"]);
+    add_local_bare_remote(repo_root);
 
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");

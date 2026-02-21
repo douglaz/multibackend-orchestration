@@ -188,6 +188,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         let runtime_config = DaemonRuntimeConfig {
             owner,
             repo: repo_name,
+            base_branch: workspace.config.git.base_branch.clone(),
             poll_seconds,
             max_concurrent,
             labels,

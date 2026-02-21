@@ -127,12 +127,54 @@ fn parse_inner(ctr: &CallToolResult) -> Value {
     serde_json::from_str(text).expect("inner text should be valid JSON")
 }
 
+fn run_git(repo: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .expect("git command should execute");
+    assert!(status.success(), "git command failed: git {}", args.join(" "));
+}
+
+fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command should execute");
+    assert!(output.status.success(), "git command failed: git {}", args.join(" "));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn add_local_bare_remote(repo_root: &std::path::Path) {
+    let bare_dir = repo_root.join(".test-remote.git");
+    let bare_str = bare_dir.to_string_lossy().to_string();
+    let status = std::process::Command::new("git")
+        .args(["init", "--bare", &bare_str])
+        .current_dir(repo_root)
+        .status()
+        .expect("git init --bare should execute");
+    assert!(status.success(), "git init --bare failed");
+    run_git(repo_root, &["remote", "add", "origin", &bare_str]);
+    run_git(repo_root, &["push", "-u", "origin", "HEAD"]);
+}
+
 /// Create a minimal workspace with one project.
 fn create_test_workspace() -> (TempDir, std::path::PathBuf) {
     let temp = TempDir::new().expect("temp dir");
     let workspace_root = temp.path().join(".ralph");
 
-    let workspace = Workspace::init(&workspace_root).expect("init workspace");
+    run_git(temp.path(), &["init"]);
+    run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+    run_git(temp.path(), &["config", "user.name", "Test User"]);
+    fs::write(temp.path().join(".gitkeep"), "").expect("write .gitkeep");
+    run_git(temp.path(), &["add", ".gitkeep"]);
+    run_git(temp.path(), &["commit", "-m", "initial"]);
+    add_local_bare_remote(temp.path());
+
+    let mut workspace = Workspace::init(&workspace_root).expect("init workspace");
+    workspace.config.git.base_branch = git_output(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.save_config().expect("save workspace config");
 
     let prompt_path = temp.path().join("prompt.md");
     fs::write(&prompt_path, "# Test Prompt\nBuild a test feature.").expect("write prompt");
