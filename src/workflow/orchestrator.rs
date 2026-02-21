@@ -4666,108 +4666,21 @@ fn log_parse_retry_token_metrics(
     session_reused: bool,
     normalized: &crate::backend::output_normalizer::NormalizedOutput,
 ) {
-    match (
-        normalized.tokens_in,
-        normalized.tokens_out,
-        normalized.cached_in,
-    ) {
-        (Some(tokens_in), Some(tokens_out), Some(cached_in)) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tokens_in,
-            tokens_out = tokens_out,
-            cached_in = cached_in,
-            "parse-retry normalization metrics"
-        ),
-        (Some(tokens_in), Some(tokens_out), None) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tokens_in,
-            tokens_out = tokens_out,
-            cached_in = tracing::field::Empty,
-            "parse-retry normalization metrics"
-        ),
-        (Some(tokens_in), None, Some(cached_in)) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tokens_in,
-            tokens_out = tracing::field::Empty,
-            cached_in = cached_in,
-            "parse-retry normalization metrics"
-        ),
-        (Some(tokens_in), None, None) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tokens_in,
-            tokens_out = tracing::field::Empty,
-            cached_in = tracing::field::Empty,
-            "parse-retry normalization metrics"
-        ),
-        (None, Some(tokens_out), Some(cached_in)) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tracing::field::Empty,
-            tokens_out = tokens_out,
-            cached_in = cached_in,
-            "parse-retry normalization metrics"
-        ),
-        (None, Some(tokens_out), None) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tracing::field::Empty,
-            tokens_out = tokens_out,
-            cached_in = tracing::field::Empty,
-            "parse-retry normalization metrics"
-        ),
-        (None, None, Some(cached_in)) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tracing::field::Empty,
-            tokens_out = tracing::field::Empty,
-            cached_in = cached_in,
-            "parse-retry normalization metrics"
-        ),
-        (None, None, None) => info!(
-            role = role,
-            phase = phase,
-            loop_number = loop_number,
-            attempt = attempt,
-            backend = backend,
-            session_reused = session_reused,
-            tokens_in = tracing::field::Empty,
-            tokens_out = tracing::field::Empty,
-            cached_in = tracing::field::Empty,
-            "parse-retry normalization metrics"
-        ),
-    }
+    info!(
+        role = role,
+        phase = phase,
+        loop_number = loop_number,
+        attempt = attempt,
+        backend = backend,
+        session_reused = session_reused,
+        tokens_in = normalized.tokens_in.unwrap_or(0),
+        tokens_out = normalized.tokens_out.unwrap_or(0),
+        cached_in = normalized.cached_in.unwrap_or(0),
+        tokens_in_present = normalized.tokens_in.is_some(),
+        tokens_out_present = normalized.tokens_out.is_some(),
+        cached_in_present = normalized.cached_in.is_some(),
+        "parse-retry normalization metrics"
+    );
 }
 
 /// Result from `execute_with_parse_retries` that includes the parsed value
@@ -5302,6 +5215,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::Once;
 
     use async_trait::async_trait;
     use tempfile::tempdir;
@@ -5333,6 +5247,13 @@ mod tests {
             session_name: "ralph".to_owned(),
             window_keep_seconds: 0,
         }
+    }
+
+    fn ensure_test_tracing_subscriber() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Registry::default());
+        });
     }
 
     #[test]
@@ -6524,36 +6445,33 @@ mod tests {
     struct ParseRetryMetricsEvent {
         attempt: u8,
         session_reused: bool,
-        tokens_in_seen: bool,
-        tokens_out_seen: bool,
-        cached_in_seen: bool,
+        tokens_in: u64,
+        tokens_out: u64,
+        cached_in: u64,
+        tokens_in_present: bool,
+        tokens_out_present: bool,
+        cached_in_present: bool,
     }
 
     #[derive(Default)]
     struct MetricsVisitor {
         attempt: Option<u8>,
         session_reused: Option<bool>,
-        tokens_in_seen: bool,
-        tokens_out_seen: bool,
-        cached_in_seen: bool,
-    }
-
-    impl MetricsVisitor {
-        fn mark_token_field(&mut self, name: &str) {
-            match name {
-                "tokens_in" => self.tokens_in_seen = true,
-                "tokens_out" => self.tokens_out_seen = true,
-                "cached_in" => self.cached_in_seen = true,
-                _ => {}
-            }
-        }
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        cached_in: Option<u64>,
+        tokens_in_present: Option<bool>,
+        tokens_out_present: Option<bool>,
+        cached_in_present: Option<bool>,
     }
 
     impl Visit for MetricsVisitor {
         fn record_u64(&mut self, field: &Field, value: u64) {
             match field.name() {
                 "attempt" => self.attempt = Some(value as u8),
-                "tokens_in" | "tokens_out" | "cached_in" => self.mark_token_field(field.name()),
+                "tokens_in" => self.tokens_in = Some(value),
+                "tokens_out" => self.tokens_out = Some(value),
+                "cached_in" => self.cached_in = Some(value),
                 _ => {}
             }
         }
@@ -6561,14 +6479,20 @@ mod tests {
         fn record_i64(&mut self, field: &Field, value: i64) {
             match field.name() {
                 "attempt" => self.attempt = u8::try_from(value).ok(),
-                "tokens_in" | "tokens_out" | "cached_in" => self.mark_token_field(field.name()),
+                "tokens_in" => self.tokens_in = u64::try_from(value).ok(),
+                "tokens_out" => self.tokens_out = u64::try_from(value).ok(),
+                "cached_in" => self.cached_in = u64::try_from(value).ok(),
                 _ => {}
             }
         }
 
         fn record_bool(&mut self, field: &Field, value: bool) {
-            if field.name() == "session_reused" {
-                self.session_reused = Some(value);
+            match field.name() {
+                "session_reused" => self.session_reused = Some(value),
+                "tokens_in_present" => self.tokens_in_present = Some(value),
+                "tokens_out_present" => self.tokens_out_present = Some(value),
+                "cached_in_present" => self.cached_in_present = Some(value),
+                _ => {}
             }
         }
 
@@ -6577,7 +6501,7 @@ mod tests {
         }
 
         fn record_debug(&mut self, field: &Field, _value: &dyn std::fmt::Debug) {
-            self.mark_token_field(field.name());
+            let _ = field;
         }
     }
 
@@ -6601,9 +6525,12 @@ mod tests {
                     .push(ParseRetryMetricsEvent {
                         attempt,
                         session_reused,
-                        tokens_in_seen: visitor.tokens_in_seen,
-                        tokens_out_seen: visitor.tokens_out_seen,
-                        cached_in_seen: visitor.cached_in_seen,
+                        tokens_in: visitor.tokens_in.unwrap_or(0),
+                        tokens_out: visitor.tokens_out.unwrap_or(0),
+                        cached_in: visitor.cached_in.unwrap_or(0),
+                        tokens_in_present: visitor.tokens_in_present.unwrap_or(false),
+                        tokens_out_present: visitor.tokens_out_present.unwrap_or(false),
+                        cached_in_present: visitor.cached_in_present.unwrap_or(false),
                     });
             }
         }
@@ -6611,6 +6538,7 @@ mod tests {
 
     #[test]
     fn parse_retry_attempts_are_three_without_session() {
+        ensure_test_tracing_subscriber();
         let temp = tempdir().expect("temp dir");
         let backend = SequencedBackend::new(
             "mock-retry-backend",
@@ -6665,6 +6593,7 @@ mod tests {
 
     #[test]
     fn parse_retry_attempts_four_with_session_followup_and_token_metrics() {
+        ensure_test_tracing_subscriber();
         let temp = tempdir().expect("temp dir");
         let backend = SequencedBackend::new(
             "claude-mock",
@@ -6689,6 +6618,7 @@ mod tests {
             .expect("runtime");
 
         let result = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             runtime.block_on(execute_with_parse_retries(
                 backend,
                 &registry,
@@ -6738,14 +6668,22 @@ mod tests {
         );
 
         assert!(
-            events[0].tokens_in_seen && events[0].tokens_out_seen && events[0].cached_in_seen,
-            "attempt 1 should log all token fields when structured usage is present"
+            events[0].tokens_in_present && events[0].tokens_out_present && events[0].cached_in_present,
+            "attempt 1 should mark all token fields present when structured usage is present"
         );
+        assert_eq!(events[0].tokens_in, 11);
+        assert_eq!(events[0].tokens_out, 22);
+        assert_eq!(events[0].cached_in, 33);
         for event in events.iter().skip(1) {
             assert!(
-                !event.tokens_in_seen && !event.tokens_out_seen && !event.cached_in_seen,
-                "token fields should be omitted (Empty) when usage data is unavailable"
+                !event.tokens_in_present
+                    && !event.tokens_out_present
+                    && !event.cached_in_present,
+                "attempts without usage should report all token fields absent"
             );
+            assert_eq!(event.tokens_in, 0);
+            assert_eq!(event.tokens_out, 0);
+            assert_eq!(event.cached_in, 0);
         }
     }
 

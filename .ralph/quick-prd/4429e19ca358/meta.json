@@ -1,0 +1,17 @@
+{
+  "idea": "## Summary\n\nFix the intermittent failure of `workflow::orchestrator::tests::parse_retry_attempts_four_with_session_followup_and_token_metrics` that occurs in `nix build` (musl cross-compilation, sandboxed environment) but passes in local `cargo test`.\n\n## Failure Details\n\nThe test fails with:\n```\nassertion `left == right` failed: expected one token-metrics log event per normalization call\n  left: 1\n right: 4\n```\n\nThe `MetricsCaptureLayer` tracing subscriber only captures 1 event instead of the expected 4 during the parse retry loop.\n\n## Reproduction Context\n\n- **Fails**: `nix build` (musl target, sandboxed, release mode)\n- **Passes**: `nix develop -c cargo test` (debug mode)\n- **Passes**: `nix develop -c cargo test --release` (release mode, glibc)\n\n## Root Cause Hypothesis\n\nThe `tracing::subscriber::with_default()` thread-local subscriber may behave differently under the musl libc implementation in the nix sandbox. Alternatively, there could be a timing issue with the `tokio::runtime::Builder::new_current_thread()` runtime and the `tracing` event dispatch when compiled against musl.\n\n## Code Locations\n\n- Test: `src/workflow/orchestrator.rs` ~ line 6641\n- Tracing layer: `MetricsCaptureLayer` ~ line 6559\n- Function under test: `execute_with_parse_retries` ~ line 4755\n\n## Acceptance Criteria\n\n- [ ] Test passes consistently in `nix build` environment (musl target)\n- [ ] Test continues to pass in local `cargo test` (debug and release modes)\n- [ ] All 4 token-metrics events are captured correctly across all build configurations\n- [ ] No regressions in other tests in the `workflow::orchestrator::tests` module",
+  "idea_hash": "4429e19ca358",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-21T01:54:25Z",
+  "completed_at": "2026-02-21T02:09:54Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 443.651437401,
+  "review_times_secs": [
+    251.008739725
+  ],
+  "revision_times_secs": [
+    234.97207857
+  ]
+}

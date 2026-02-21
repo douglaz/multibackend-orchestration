@@ -1,0 +1,25 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Root Cause Accuracy",
+      "feedback": "The spec over-asserts a musl/TLS-specific cause. This flake is reproducible on glibc with parallel tests (`cargo test workflow::orchestrator::tests::parse_retry_attempts_`) and disappears with `--test-threads=1`, so the problem statement should be reframed as parallel test/callsite-interest interaction, not musl-only behavior."
+    },
+    {
+      "area": "Behavioral Consistency",
+      "feedback": "Recommended Option A changes production log schema/semantics (`Empty` omitted fields -> `0` plus `*_present` booleans). That conflicts with the acceptance criterion \"No change to production-path tracing output format or semantics\". The spec must either explicitly accept a breaking logging change or require a fix that preserves current output."
+    },
+    {
+      "area": "Feasibility / Residual Flake Risk",
+      "feedback": "Collapsing to a single callsite is not proven sufficient. If that single callsite is first registered when no scoped subscriber is active, the same cache behavior could drop all events (0/4). The spec needs a concrete mitigation for callsite cache state under parallel execution, not just callsite consolidation."
+    },
+    {
+      "area": "Testing Coverage",
+      "feedback": "Coverage is incomplete for the actual failure mode. Add explicit parallel-interference tests/commands (at minimum running both parse-retry tests together with default test threads, repeated) in addition to nix build. Current plan focuses on one test and may miss the interaction causing the flake."
+    },
+    {
+      "area": "Spec Clarity",
+      "feedback": "Option A2 is under-specified: reading token fields from span context in `on_event` requires explicit scope/span lookup logic and is non-trivial. The spec should either detail that implementation path or remove A2 to avoid ambiguity."
+    }
+  ]
+}
