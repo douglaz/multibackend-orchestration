@@ -1,0 +1,33 @@
+{
+  "approved": false,
+  "issues": [
+    {
+      "area": "Quick PRD detection race",
+      "feedback": "In `ralph auto`, `SPEC.md` is removed right after project creation. A 2-second poll loop can miss it entirely, so this does not reliably meet 'post immediately after generation'. Use a durable signal/path or a guaranteed final scan before teardown."
+    },
+    {
+      "area": "Artifact disambiguation and stale files",
+      "feedback": "The spec assumes a single match for `.ralph/quick-prd/*/SPEC.md` and `.ralph/projects/*/prompt-original.md`, but `.ralph` is preserved across retries. Stale artifacts can cause wrong or old content to be posted. Add per-run scoping (timestamp/mtime/run-id/known project path)."
+    },
+    {
+      "area": "Prompt review completion signal",
+      "feedback": "Using `prompt-original.md` as the trigger is not completion-safe. It is written before prompt overwrite and before review artifact write; failures in between can produce incorrect 'Final Prompt' comments. Trigger on a post-review completion signal (e.g., `prompt-review.md` or equivalent)."
+    },
+    {
+      "area": "Child lifecycle integration",
+      "feedback": "Watcher cleanup is only described for `collect_children`, but children are also removed in abort/force-kill paths. Missing cancellation/join there can leak watcher tasks and race with worktree cleanup."
+    },
+    {
+      "area": "Acceptance criteria clarity",
+      "feedback": "'Immediately' is not defined in a testable way. Add explicit timing/ordering guarantees (for example, before terminal completion handling or within a bounded latency) and define expected behavior when artifacts already exist on retry."
+    },
+    {
+      "area": "Testing completeness",
+      "feedback": "The plan is missing validate conformance coverage and key scenarios: `--skip-prompt-review`, `run --project` retry path (no quick-prd generation), stale pre-existing artifacts, and ordering/timing assertions proving comments are not deferred to pipeline end."
+    },
+    {
+      "area": "Large comment handling",
+      "feedback": "Posting full `SPEC.md`/`prompt.md` may exceed GitHub issue comment limits; current posting helper is best-effort and may silently fail to satisfy acceptance criteria. Specify truncation/chunking/failure behavior."
+    }
+  ]
+}
