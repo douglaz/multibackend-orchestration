@@ -30,6 +30,7 @@ reviewer = "opus"
 qa = "opus"
 completer = "opus"
 acceptance_qa = "opus"
+final_reviewer = "opus"
 reformatter = "sonnet"
 
 [backends.codex]
@@ -50,6 +51,7 @@ reviewer = "gpt-5.3-codex-high"
 qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 acceptance_qa = "gpt-5.3-codex-xhigh"
+final_reviewer = "gpt-5.3-codex-high"
 reformatter = "gpt-5.3-codex-medium"
 
 [workflow]
@@ -62,6 +64,12 @@ prompt_review_enabled = true
 prompt_review_backend = "codex(gpt-5.3-codex-xhigh)"
 qa_enabled = false
 max_qa_iterations = 3
+final_review_enabled = true
+final_review_backends = ["claude", "codex"]
+final_review_arbiter_backend = "claude"
+final_review_min_reviewers = 2
+final_review_consensus_threshold = 1.0
+max_final_review_restarts = 3
 
 [templates]
 planner = "templates/spec.md"
@@ -70,6 +78,10 @@ reviewer = "templates/review.md"
 prompt_reviewer = "templates/prompt_reviewer.md"
 completer = "templates/completion.md"
 qa = "templates/qa.md"
+final_reviewer = "templates/final_reviewer.md"
+planner_position = "templates/planner_position.md"
+vote = "templates/vote.md"
+arbiter = "templates/arbiter.md"
 
 [git]
 auto_branch = true
