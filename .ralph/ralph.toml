@@ -51,7 +51,7 @@ reviewer = "gpt-5.3-codex-high"
 qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 acceptance_qa = "gpt-5.3-codex-xhigh"
-final_reviewer = "gpt-5.3-codex-high"
+final_reviewer = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
 
 [workflow]
