@@ -16,3 +16,4 @@
 
 # Ralph orchestration artifacts
 .ralph/**/*.log
+.ralph/quick-prd/

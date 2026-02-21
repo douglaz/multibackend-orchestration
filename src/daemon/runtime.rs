@@ -337,12 +337,13 @@ fn detect_quick_prd_artifact(worktree_path: &Path, child_start_time: SystemTime)
         if !ty.is_dir() {
             continue;
         }
-        let spec_path = entry.path().join("SPEC.md");
-        let modified = match std::fs::metadata(&spec_path).and_then(|meta| meta.modified()) {
+        let meta_path = entry.path().join("meta.json");
+        let modified = match std::fs::metadata(&meta_path).and_then(|meta| meta.modified()) {
             Ok(modified) => modified,
             Err(_) => continue,
         };
         if modified >= child_start_time {
+            let spec_path = entry.path().join("SPEC.md");
             candidates.push((spec_path, modified));
         }
     }
@@ -2316,13 +2317,14 @@ mod tests {
     }
 
     fn write_quick_prd(worktree_path: &std::path::Path, slug: &str, content: &str) -> PathBuf {
-        let spec_path = worktree_path
+        let cache_dir = worktree_path
             .join(".ralph")
             .join("quick-prd")
-            .join(slug)
-            .join("SPEC.md");
-        std::fs::create_dir_all(spec_path.parent().expect("spec parent")).expect("create spec dir");
+            .join(slug);
+        std::fs::create_dir_all(&cache_dir).expect("create spec dir");
+        let spec_path = cache_dir.join("SPEC.md");
         std::fs::write(&spec_path, content).expect("write spec");
+        std::fs::write(cache_dir.join("meta.json"), "{}").expect("write meta");
         spec_path
     }
 

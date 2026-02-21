@@ -230,7 +230,6 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
 
     println!();
     println!("Creating project...");
-    let spec_path = quick_prd_result.spec_path.clone();
     create_project(
         &workspace,
         CreateProjectOptions {
@@ -240,11 +239,6 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
             starting_backend: backend.clone(),
         },
     )?;
-    // Remove the SPEC.md file now that it's been copied into the project's prompt.md.
-    // This prevents the orchestrator from rejecting the run due to uncommitted files.
-    if spec_path.exists() {
-        let _ = std::fs::remove_file(&spec_path);
-    }
     println!("  project id: {project_id}");
     println!("  project created");
 

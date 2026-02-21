@@ -1910,6 +1910,7 @@ case "$1" in
   auto)
     mkdir -p .ralph/quick-prd/001-demo
     printf 'Quick PRD content from watcher test\n' > .ralph/quick-prd/001-demo/SPEC.md
+    printf '{}' > .ralph/quick-prd/001-demo/meta.json
     mkdir -p .ralph/projects/demo-proj
     printf 'prompt signal\n' > .ralph/projects/demo-proj/prompt-original.md
     printf 'Final prompt content from watcher test\n' > .ralph/projects/demo-proj/prompt.md
