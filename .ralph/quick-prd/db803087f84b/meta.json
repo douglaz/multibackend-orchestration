@@ -1,0 +1,17 @@
+{
+  "idea": "Remove the incomplete MCP (Model Context Protocol) server implementation that adds maintenance burden without providing meaningful value.\n\n## What needs to be done\n\nRemove all MCP-related code from the codebase:\n- Delete `src/mcp/` module and all files within it\n- Remove MCP-related CLI subcommands (e.g., `ralph mcp`)\n- Delete MCP handler tests in `tests/mcp_handlers.rs`\n- Remove MCP-related imports, registrations, and wiring from `src/main.rs`, `src/cli/`, and `src/lib.rs`\n- Clean up MCP-related dependencies in `Cargo.toml` if they become unused after removal\n\n## Acceptance Criteria\n\n- [ ] All MCP code is removed\n- [ ] `nix build` passes (release build + conformance tests)\n- [ ] No dead code warnings related to MCP leftovers\n- [ ] No remaining references to MCP in source code (except possibly changelog/docs)",
+  "idea_hash": "db803087f84b",
+  "writer_backend": "claude",
+  "reviewer_backend": "codex",
+  "started_at": "2026-02-21T03:05:43Z",
+  "completed_at": "2026-02-21T03:12:05Z",
+  "revision_count": 1,
+  "approved": false,
+  "draft_time_secs": 136.782824112,
+  "review_times_secs": [
+    149.031455136
+  ],
+  "revision_times_secs": [
+    96.926333304
+  ]
+}
