@@ -56,6 +56,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon_rebase::post_continue_error_propagation",
             func: post_continue_error_propagation,
         },
+        ConformanceTest {
+            name: "daemon_rebase::normalized_none_backend_disabled",
+            func: normalized_none_backend_disabled,
+        },
+        ConformanceTest {
+            name: "daemon_rebase::conflict_failure_attempted_message",
+            func: conflict_failure_attempted_message,
+        },
+        ConformanceTest {
+            name: "daemon_rebase::timeout_bounded_classification_path",
+            func: timeout_bounded_classification_path,
+        },
     ]
 }
 
@@ -388,8 +400,8 @@ fn string_entrypoint_none_skips_resolution(_h: &RalphHarness) -> TestResult {
         assert!(result.is_err(), "none backend should return error");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("none") && err.contains("skipped"),
-            "error should indicate skipped resolution: {err}"
+            err.contains("none") && err.contains("skipped/disabled"),
+            "error should indicate skipped/disabled resolution: {err}"
         );
     })
 }
@@ -458,6 +470,164 @@ fn post_continue_error_propagation(_h: &RalphHarness) -> TestResult {
         assert!(
             err.contains("timeout"),
             "error should propagate timeout from conflict check: {err}"
+        );
+    })
+}
+
+/// Verify that trimmed " none " backend is treated as disabled, just like "none".
+fn normalized_none_backend_disabled(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let repo = tmp.path();
+        run_git_in(repo, &["init"]);
+        run_git_in(repo, &["config", "user.email", "test@example.com"]);
+        run_git_in(repo, &["config", "user.name", "Test User"]);
+        fs::write(repo.join("f.txt"), "init\n").expect("write");
+        run_git_in(repo, &["add", "."]);
+        run_git_in(repo, &["commit", "-m", "init"]);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Use " none " with whitespace — should be trimmed and treated as disabled
+        let result = resolve_rebase_conflicts(repo, "origin/main", " none ", deadline);
+        assert!(result.is_err(), "trimmed none backend should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("skipped/disabled"),
+            "error should indicate skipped/disabled for trimmed none: {err}"
+        );
+
+        // Also verify parse_rebase_agent_backend handles trimming
+        let parsed = parse_rebase_agent_backend(" none ").expect("parse trimmed none");
+        assert_eq!(parsed, RebaseAgentBackend::None);
+    })
+}
+
+/// Verify that agent-attempted failures include "agent resolution was attempted" wording.
+fn conflict_failure_attempted_message(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let repo = tmp.path();
+
+        // Set up repo with conflict
+        run_git_in(repo, &["init"]);
+        run_git_in(repo, &["config", "user.email", "test@example.com"]);
+        run_git_in(repo, &["config", "user.name", "Test User"]);
+
+        fs::write(repo.join("conflict.txt"), "base\n").expect("write base");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "base"]);
+
+        fs::write(repo.join("conflict.txt"), "master\n").expect("write master");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "master diverges"]);
+
+        run_git_in(repo, &["checkout", "-b", "feature", "HEAD~1"]);
+        fs::write(repo.join("conflict.txt"), "feature\n").expect("write feature");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "feature diverges"]);
+
+        // Start rebase (will conflict)
+        let output = std::process::Command::new("git")
+            .args(["rebase", "master"])
+            .current_dir(repo)
+            .output()
+            .expect("run git rebase");
+        assert!(!output.status.success(), "expected rebase conflict");
+
+        // Create mock claude that exits non-zero
+        let bin_dir = tmp.path().join("mock-bin");
+        fs::create_dir_all(&bin_dir).expect("create mock-bin");
+        let claude_path = bin_dir.join("claude");
+        fs::write(&claude_path, "#!/bin/sh\nexit 1\n").expect("write mock claude");
+        let mut perms = fs::metadata(&claude_path).expect("meta").permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&claude_path, perms).expect("set perms");
+
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline);
+
+        std::env::set_var("PATH", &old_path);
+
+        assert!(result.is_err(), "agent failure should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("agent resolution was attempted"),
+            "agent failure error should say 'agent resolution was attempted': {err}"
+        );
+    })
+}
+
+/// Verify that the timeout-bounded classification path works: an expired deadline
+/// before conflict classification should produce a timeout error, not hang.
+fn timeout_bounded_classification_path(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Verify that classify_rebase_failure_pure works without I/O
+        use crate::daemon::rebase_agent::classify_rebase_failure_pure;
+
+        let conflict = classify_rebase_failure_pure(1, b"CONFLICT (content): Merge conflict");
+        assert_eq!(conflict, RebaseFailureKind::Conflict);
+
+        let other = classify_rebase_failure_pure(2, b"CONFLICT (content): Merge conflict");
+        assert_eq!(other, RebaseFailureKind::Other);
+
+        let no_indicator = classify_rebase_failure_pure(1, b"fatal: something else");
+        assert_eq!(no_indicator, RebaseFailureKind::Other);
+
+        // Verify that resolve_rebase_conflicts with expired deadline produces timeout
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        let repo = tmp.path();
+        run_git_in(repo, &["init"]);
+        run_git_in(repo, &["config", "user.email", "test@example.com"]);
+        run_git_in(repo, &["config", "user.name", "Test User"]);
+
+        fs::write(repo.join("conflict.txt"), "base\n").expect("write base");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("conflict.txt"), "master\n").expect("write master");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "master diverges"]);
+        run_git_in(repo, &["checkout", "-b", "feature", "HEAD~1"]);
+        fs::write(repo.join("conflict.txt"), "feature\n").expect("write feature");
+        run_git_in(repo, &["add", "conflict.txt"]);
+        run_git_in(repo, &["commit", "-m", "feature diverges"]);
+
+        let output = std::process::Command::new("git")
+            .args(["rebase", "master"])
+            .current_dir(repo)
+            .output()
+            .expect("run git rebase");
+        assert!(!output.status.success(), "expected rebase conflict");
+
+        // Expired deadline triggers timeout in resolve path
+        let expired_deadline = Instant::now() - Duration::from_secs(1);
+
+        let bin_dir = tmp.path().join("mock-bin");
+        fs::create_dir_all(&bin_dir).expect("create mock-bin");
+        let claude_path = bin_dir.join("claude");
+        fs::write(&claude_path, "#!/bin/sh\nexit 0\n").expect("write mock claude");
+        let mut perms = fs::metadata(&claude_path).expect("meta").permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        fs::set_permissions(&claude_path, perms).expect("set perms");
+
+        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+
+        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", expired_deadline);
+
+        std::env::set_var("PATH", &old_path);
+
+        assert!(result.is_err(), "expired deadline should cause error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timeout"),
+            "error should propagate timeout: {err}"
         );
     })
 }

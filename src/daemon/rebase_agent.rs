@@ -40,18 +40,23 @@ impl AgentError {
     fn into_ralph_error(self) -> RalphError {
         match self {
             AgentError::Timeout(msg) => {
-                RalphError::Orchestration(format!("rebase agent timeout: {msg}"))
+                RalphError::Orchestration(format!(
+                    "rebase agent timeout (agent resolution was attempted): {msg}"
+                ))
             }
             AgentError::SpawnFailed(msg) => {
-                RalphError::Orchestration(format!("rebase agent spawn failed: {msg}"))
+                RalphError::Orchestration(format!(
+                    "rebase agent spawn failed (agent resolution was attempted): {msg}"
+                ))
             }
             AgentError::AgentNonZero {
                 exit_code,
                 stdout,
                 stderr,
             } => {
-                let mut msg =
-                    format!("rebase agent exited with non-zero status: {exit_code}");
+                let mut msg = format!(
+                    "rebase agent exited with non-zero status (agent resolution was attempted): {exit_code}"
+                );
                 if !stderr.is_empty() {
                     msg.push_str(&format!("\nstderr: {stderr}"));
                 }
@@ -61,13 +66,15 @@ impl AgentError {
                 RalphError::Orchestration(msg)
             }
             AgentError::UnresolvedConflicts => RalphError::Orchestration(
-                "rebase agent completed but conflicts remain unresolved".to_owned(),
+                "rebase agent completed but conflicts remain unresolved (agent resolution was attempted)".to_owned(),
             ),
             AgentError::IterationCapReached => RalphError::Orchestration(format!(
-                "rebase agent iteration cap reached ({MAX_ITERATIONS} iterations)"
+                "rebase agent iteration cap reached ({MAX_ITERATIONS} iterations) (agent resolution was attempted)"
             )),
             AgentError::RebaseContinueFailed(msg) => {
-                RalphError::Orchestration(format!("git rebase --continue failed: {msg}"))
+                RalphError::Orchestration(format!(
+                    "git rebase --continue failed (agent resolution was attempted): {msg}"
+                ))
             }
         }
     }
@@ -110,11 +117,13 @@ pub fn parse_rebase_agent_backend(raw: &str) -> Result<RebaseAgentBackend> {
     )))
 }
 
-pub fn classify_rebase_failure(
-    exit_code: i32,
-    stderr: &[u8],
-    worktree_path: &Path,
-) -> RebaseFailureKind {
+/// Pure criteria check: does exit code + stderr indicate a likely conflict?
+///
+/// This is unit-testable without I/O — it only inspects the exit code and
+/// stderr content. The caller must separately verify with an I/O-based
+/// conflict probe (e.g. `git::has_conflicts_with_timeout`) before treating
+/// the failure as a confirmed conflict.
+pub fn classify_rebase_failure_pure(exit_code: i32, stderr: &[u8]) -> RebaseFailureKind {
     if exit_code != 1 {
         return RebaseFailureKind::Other;
     }
@@ -123,7 +132,25 @@ pub fn classify_rebase_failure(
     let has_conflict_indicator =
         stderr_text.contains("CONFLICT") || stderr_text.contains("could not apply");
 
-    if !has_conflict_indicator {
+    if has_conflict_indicator {
+        RebaseFailureKind::Conflict
+    } else {
+        RebaseFailureKind::Other
+    }
+}
+
+/// Full conflict classification: pure criteria + I/O conflict probe.
+///
+/// Combines `classify_rebase_failure_pure` (exit code + stderr markers) with
+/// an unbounded `git::has_conflicts` check. For deadline-bounded contexts,
+/// callers should use `classify_rebase_failure_pure` followed by a separate
+/// `git::has_conflicts_with_timeout` call.
+pub fn classify_rebase_failure(
+    exit_code: i32,
+    stderr: &[u8],
+    worktree_path: &Path,
+) -> RebaseFailureKind {
+    if classify_rebase_failure_pure(exit_code, stderr) != RebaseFailureKind::Conflict {
         return RebaseFailureKind::Other;
     }
 
@@ -257,7 +284,7 @@ pub fn resolve_rebase_conflicts(
             // Agent disabled — abort rebase and return error for existing fallback path
             abort_rebase_if_in_progress(worktree_path, deadline);
             return Err(RalphError::Orchestration(
-                "rebase agent backend is 'none'; conflict resolution skipped".to_owned(),
+                "rebase agent backend is 'none'; agent resolution was skipped/disabled".to_owned(),
             ));
         }
         _ => {}
@@ -460,9 +487,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        build_agent_prompt, classify_rebase_failure, is_rebase_in_progress,
-        parse_rebase_agent_backend, remaining_budget, RebaseAgentBackend, RebaseFailureKind,
-        MAX_ITERATIONS,
+        build_agent_prompt, classify_rebase_failure, classify_rebase_failure_pure,
+        is_rebase_in_progress, parse_rebase_agent_backend, remaining_budget,
+        RebaseAgentBackend, RebaseFailureKind, MAX_ITERATIONS,
     };
 
     // ---- Backend parsing tests (from loop 1) ----
@@ -655,7 +682,7 @@ mod tests {
         assert!(result.is_err(), "none backend should return error");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("none") && err.contains("skipped"),
+            err.contains("none") && err.contains("skipped/disabled"),
             "error should indicate none backend skipped resolution: {err}"
         );
     }
@@ -689,6 +716,136 @@ mod tests {
         assert!(
             err.contains("cannot be empty"),
             "error should mention empty backend: {err}"
+        );
+    }
+
+    // ---- Pure classifier tests (loop 6) ----
+
+    #[test]
+    fn classify_pure_conflict_exit_code_1_with_conflict_marker() {
+        let kind = classify_rebase_failure_pure(1, b"CONFLICT (content): Merge conflict");
+        assert_eq!(kind, RebaseFailureKind::Conflict);
+    }
+
+    #[test]
+    fn classify_pure_conflict_exit_code_1_with_could_not_apply() {
+        let kind = classify_rebase_failure_pure(1, b"error: could not apply abc1234");
+        assert_eq!(kind, RebaseFailureKind::Conflict);
+    }
+
+    #[test]
+    fn classify_pure_non_conflict_exit_code_not_1() {
+        let kind = classify_rebase_failure_pure(2, b"CONFLICT (content): Merge conflict");
+        assert_eq!(kind, RebaseFailureKind::Other);
+    }
+
+    #[test]
+    fn classify_pure_non_conflict_no_indicator() {
+        let kind = classify_rebase_failure_pure(1, b"fatal: unrelated failure");
+        assert_eq!(kind, RebaseFailureKind::Other);
+    }
+
+    // ---- Normalized "none" backend parsing (loop 6) ----
+
+    #[test]
+    fn parse_rebase_agent_backend_trimmed_none() {
+        let parsed = parse_rebase_agent_backend(" none ").expect("parse trimmed none");
+        assert_eq!(parsed, RebaseAgentBackend::None);
+    }
+
+    #[test]
+    fn resolve_with_trimmed_none_backend_returns_skipped_error() {
+        let repo = create_clean_repo();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result =
+            super::resolve_rebase_conflicts(repo.path(), "origin/main", " none ", deadline);
+        assert!(result.is_err(), "trimmed none backend should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("skipped/disabled"),
+            "error should indicate agent was skipped/disabled: {err}"
+        );
+    }
+
+    // ---- Timeout-bounded classification behavior (loop 6) ----
+
+    #[test]
+    fn remaining_budget_expired_message_contains_timeout() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let result = remaining_budget(deadline, "classification");
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("timeout"),
+            "expired budget error should mention timeout: {err}"
+        );
+    }
+
+    // ---- Attempted/skipped error message wording (loop 6) ----
+
+    #[test]
+    fn none_backend_error_says_skipped_disabled() {
+        let repo = create_clean_repo();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result =
+            super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("skipped/disabled"),
+            "disabled-path error should say 'skipped/disabled': {err}"
+        );
+    }
+
+    #[test]
+    fn agent_error_messages_say_attempted() {
+        use super::AgentError;
+
+        let timeout_err = AgentError::Timeout("test".to_owned()).into_ralph_error();
+        assert!(
+            timeout_err.to_string().contains("agent resolution was attempted"),
+            "timeout error should say attempted: {}",
+            timeout_err
+        );
+
+        let spawn_err = AgentError::SpawnFailed("test".to_owned()).into_ralph_error();
+        assert!(
+            spawn_err.to_string().contains("agent resolution was attempted"),
+            "spawn error should say attempted: {}",
+            spawn_err
+        );
+
+        let nonzero_err = AgentError::AgentNonZero {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+        .into_ralph_error();
+        assert!(
+            nonzero_err.to_string().contains("agent resolution was attempted"),
+            "non-zero error should say attempted: {}",
+            nonzero_err
+        );
+
+        let unresolved_err = AgentError::UnresolvedConflicts.into_ralph_error();
+        assert!(
+            unresolved_err.to_string().contains("agent resolution was attempted"),
+            "unresolved error should say attempted: {}",
+            unresolved_err
+        );
+
+        let cap_err = AgentError::IterationCapReached.into_ralph_error();
+        assert!(
+            cap_err.to_string().contains("agent resolution was attempted"),
+            "iteration cap error should say attempted: {}",
+            cap_err
+        );
+
+        let continue_err =
+            AgentError::RebaseContinueFailed("test".to_owned()).into_ralph_error();
+        assert!(
+            continue_err.to_string().contains("agent resolution was attempted"),
+            "continue-failed error should say attempted: {}",
+            continue_err
         );
     }
 

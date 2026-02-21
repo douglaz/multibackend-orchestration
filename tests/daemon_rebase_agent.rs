@@ -317,8 +317,8 @@ fn none_backend_string_returns_error() {
     assert!(result.is_err(), "none backend should return error");
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("none") && err.contains("skipped"),
-        "error should indicate agent was skipped: {err}"
+        err.contains("none") && err.contains("skipped/disabled"),
+        "error should indicate agent was skipped/disabled: {err}"
     );
     // After none-backend, rebase should be aborted
     assert!(
@@ -371,5 +371,49 @@ fn claude_shorthand_backend_string_works() {
     assert!(
         !is_rebase_in_progress(repo),
         "rebase should be complete"
+    );
+}
+
+#[test]
+fn normalized_trimmed_none_backend_returns_skipped_error() {
+    let tmp = create_conflict_repo();
+    let repo = tmp.path();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    // Use " none " with extra whitespace — should be trimmed and treated as disabled
+    let result = resolve_rebase_conflicts(repo, "master", " none ", deadline);
+
+    assert!(result.is_err(), "trimmed none backend should return error");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("skipped/disabled"),
+        "error should indicate agent was skipped/disabled: {err}"
+    );
+    assert!(
+        !is_rebase_in_progress(repo),
+        "rebase should be aborted in trimmed none-backend path"
+    );
+}
+
+#[test]
+fn agent_attempted_error_includes_attempted_wording() {
+    let tmp = create_conflict_repo();
+    let repo = tmp.path();
+
+    // Mock claude that exits non-zero
+    let script = "#!/bin/sh\nexit 1\n";
+    let mock_bin = write_mock_claude(&tmp, script);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    let result = with_mock_path(&mock_bin, || {
+        resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
+    });
+
+    assert!(result.is_err(), "expected error on non-zero agent exit");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("agent resolution was attempted"),
+        "agent-attempted error should contain 'agent resolution was attempted': {err}"
     );
 }

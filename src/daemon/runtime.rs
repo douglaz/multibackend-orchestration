@@ -5,7 +5,10 @@ use std::time::Duration;
 use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
-use crate::daemon::rebase_agent::{classify_rebase_failure, RebaseFailureKind};
+use crate::daemon::rebase_agent::{
+    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend,
+    RebaseFailureKind,
+};
 
 use crate::daemon::process;
 use crate::daemon::refine;
@@ -1237,6 +1240,9 @@ fn execute_rebase(
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
 
+    // Parse backend once at the top so all branches use the typed enum.
+    let parsed_backend = parse_rebase_agent_backend(agent_backend)?;
+
     // Helper: remaining time or error if expired.
     let remaining = |label: &str| -> Result<Duration> {
         let now = std::time::Instant::now();
@@ -1288,35 +1294,51 @@ fn execute_rebase(
     )?;
 
     if !rebase_output.status.success() {
-        let failure_kind = classify_rebase_failure(
+        // Step 1: Pure criteria check (no I/O, unit-testable)
+        let pure_kind = classify_rebase_failure_pure(
             rebase_output.status.code().unwrap_or(-1),
             &rebase_output.stderr,
-            worktree_path,
         );
+
+        // Step 2: If pure check says conflict, verify with timeout-bounded I/O probe
+        let failure_kind = if pure_kind == RebaseFailureKind::Conflict {
+            // Compute remaining budget before the I/O probe; fail immediately
+            // if no time remains.
+            let classify_budget = remaining("conflict classification")?;
+            match crate::git::has_conflicts_with_timeout(worktree_path, classify_budget) {
+                Ok(true) => RebaseFailureKind::Conflict,
+                _ => RebaseFailureKind::Other,
+            }
+        } else {
+            RebaseFailureKind::Other
+        };
 
         match failure_kind {
             RebaseFailureKind::Conflict => {
-                if agent_backend == "none" {
-                    // Disabled: abort with bounded timeout and fail as before
-                    bounded_abort(worktree_path);
-                    let stderr =
-                        String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
-                    return Err(RalphError::Orchestration(format!(
-                        "git rebase failed with merge conflicts: {stderr}"
-                    )));
+                match parsed_backend {
+                    RebaseAgentBackend::None => {
+                        // Disabled: abort with bounded timeout and fail as before
+                        bounded_abort(worktree_path);
+                        let stderr =
+                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                        return Err(RalphError::Orchestration(format!(
+                            "git rebase failed with merge conflicts (agent resolution was skipped/disabled): {stderr}"
+                        )));
+                    }
+                    RebaseAgentBackend::Claude { .. } => {
+                        eprintln!(
+                            "rebase-agent: conflict detected, invoking AI agent for resolution"
+                        );
+                        // resolve_rebase_conflicts handles abort-on-failure internally
+                        crate::daemon::rebase_agent::resolve_rebase_conflicts(
+                            worktree_path,
+                            rebase_target,
+                            agent_backend,
+                            deadline,
+                        )?;
+                        // Agent succeeded — fall through to push
+                    }
                 }
-
-                eprintln!(
-                    "rebase-agent: conflict detected, invoking AI agent for resolution"
-                );
-                // resolve_rebase_conflicts handles abort-on-failure internally
-                crate::daemon::rebase_agent::resolve_rebase_conflicts(
-                    worktree_path,
-                    rebase_target,
-                    agent_backend,
-                    deadline,
-                )?;
-                // Agent succeeded — fall through to push
             }
             RebaseFailureKind::Other => {
                 // Non-conflict failure: abort with bounded timeout and return error
