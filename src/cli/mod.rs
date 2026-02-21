@@ -33,7 +33,6 @@ pub struct Cli {
 pub enum Commands {
     Init(InitArgs),
     Project(ProjectArgs),
-    Mcp(McpArgs),
     Run(RunArgs),
     Prd(prd::PrdArgs),
     QuickPrd(quick_prd::QuickPrdArgs),
@@ -99,17 +98,6 @@ pub struct ProjectShowArgs {
 #[derive(Debug, Args)]
 pub struct ProjectDeleteArgs {
     pub project_id: String,
-}
-
-#[derive(Debug, Args)]
-pub struct McpArgs {
-    #[command(subcommand)]
-    pub command: McpCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpCommand {
-    Serve,
 }
 
 #[derive(Debug, Args)]
@@ -287,9 +275,6 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init(args) => init::execute(args),
         Commands::Project(args) => project::execute(args),
-        Commands::Mcp(args) => match args.command {
-            McpCommand::Serve => crate::mcp::serve().await,
-        },
         Commands::Run(args) => run::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
         Commands::QuickPrd(args) => quick_prd::execute(args).await,
@@ -308,7 +293,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use super::{Cli, Commands, McpCommand};
+    use super::{Cli, Commands};
 
     #[test]
     fn parses_run_with_tmux_flag() {
@@ -341,16 +326,6 @@ mod tests {
 
         assert_eq!(args.tmux, None);
         assert_eq!(args.no_tmux, None);
-    }
-
-    #[test]
-    fn parses_mcp_serve_command() {
-        let cli = Cli::parse_from(["ralph", "mcp", "serve"]);
-        let Commands::Mcp(args) = cli.command else {
-            panic!("expected mcp command");
-        };
-
-        assert!(matches!(args.command, McpCommand::Serve));
     }
 
     #[test]

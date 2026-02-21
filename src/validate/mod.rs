@@ -17,7 +17,6 @@ mod tests_daemon;
 mod tests_e2e_conformance;
 mod tests_final_review;
 mod tests_init;
-mod tests_mcp;
 mod tests_prd;
 mod tests_project;
 mod tests_prompt_review;
@@ -86,7 +85,6 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
 fn register_tests() -> Vec<ConformanceTest> {
     let mut tests = Vec::new();
     tests.extend(tests_init::tests());
-    tests.extend(tests_mcp::tests());
     tests.extend(tests_project::tests());
     tests.extend(tests_run::tests());
     tests.extend(tests_prompt_review::tests());
