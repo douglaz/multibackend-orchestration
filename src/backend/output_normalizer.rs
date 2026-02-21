@@ -280,9 +280,7 @@ fn extract_text_from_content(content: &Value) -> Option<String> {
     }
 
     let mut parts = Vec::new();
-    let Some(items) = content.as_array() else {
-        return None;
-    };
+    let items = content.as_array()?;
 
     for item in items {
         if let Some(text) = item.as_str() {

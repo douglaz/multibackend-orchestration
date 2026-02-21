@@ -8,8 +8,6 @@ pub mod tmux_backend;
 pub use mock::MockBackend;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,9 +36,8 @@ pub trait Backend: Send + Sync {
     async fn execute_with_log(
         &self,
         prompt: &str,
-        mut log_writer: Option<&mut LogWriter>,
+        _log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
-        let _ = log_writer.as_deref_mut();
         self.execute(prompt).await
     }
     async fn health_check(&self) -> Result<()>;
@@ -538,7 +535,7 @@ impl CliBackend {
                     let bytes = chunk.as_ref();
                     captured_stdout.extend_from_slice(bytes);
                     *stdout_last_activity.lock().await = Instant::now();
-                    if let Some(writer) = log_writer.as_deref_mut() {
+                    if let Some(writer) = log_writer.as_mut() {
                         writer.write_bytes(bytes);
                     }
                     stdout_activity_notify.notify_one();
@@ -620,7 +617,7 @@ impl CliBackend {
             ExecutionOutcome::TimedOut => {
                 self.kill_and_reap_child(&mut child).await;
                 let _ = self.collect_stderr(stderr_handle).await;
-                if let Some(writer) = log_writer.as_deref_mut() {
+                if let Some(writer) = log_writer.as_mut() {
                     writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
                 }
                 let idle_secs = last_activity.lock().await.elapsed().as_secs();

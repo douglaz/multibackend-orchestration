@@ -498,7 +498,7 @@ fn version_long_flag(h: &RalphHarness) -> TestResult {
             version_part
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_ascii_digit()),
+                .is_some_and(|c| c.is_ascii_digit()),
             "expected semver version after 'ralph ', got: {stdout}"
         );
     })

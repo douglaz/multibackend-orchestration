@@ -827,22 +827,15 @@ fn first_h1(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use chrono::{DateTime, Utc};
-    use tempfile::tempdir;
 
     use super::{
-        collect_state_events, completion_verdict_label, create_phase_change_event, event_output,
+        completion_verdict_label, create_phase_change_event, event_output,
         filename_ts_to_datetime, first_h1, normalize_event_time, phase_label, sort_events,
         split_frontmatter, PhaseSnapshot, TailEvent, TailEventKind, EVENT_ORDER_ARTIFACT,
         EVENT_ORDER_GIT, EVENT_ORDER_STATE,
     };
-    use crate::project::state::{
-        CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState, CompletionVerdict,
-        FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType, Phase,
-        ProjectState, ProjectStatus,
-    };
+    use crate::project::state::{CompletionVerdict, Phase};
 
     fn parse_utc(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)
@@ -897,62 +890,6 @@ mod tests {
                 tag: Some("demo/1".to_owned()),
             },
         }
-    }
-
-    fn demo_project_state() -> ProjectState {
-        let mut state = ProjectState::new("demo", "Demo Project", "hash", None);
-        state.current_loop = 2;
-        state.current_phase = Phase::Completing;
-        state.phase_iteration = 1;
-        state.status = ProjectStatus::InProgress;
-
-        state.loops.push(FeatureLoopState {
-            loop_number: 1,
-            slug: "feature-a".to_owned(),
-            feature_name: "Feature A".to_owned(),
-            loop_type: LoopType::Feature,
-            status: LoopStatus::Completed,
-            backends: FeatureLoopBackends {
-                planner: "planner-a".to_owned(),
-                implementer: "impl-a".to_owned(),
-                reviewer: "reviewer-a".to_owned(),
-                qa: "qa-a".to_owned(),
-            },
-            artifacts: FeatureLoopArtifacts {
-                spec: "loops/001-feature-a/spec.md".to_owned(),
-                impl_notes: Some("loops/001-feature-a/impl-notes.md".to_owned()),
-                reviews: Vec::new(),
-                approval: Some("loops/001-feature-a/review-approved.md".to_owned()),
-                qa_results: Vec::new(),
-                pending_qa_feedback: None,
-            },
-            commit: Some("abc123".to_owned()),
-            started_at: parse_utc("2026-02-06T21:00:00Z"),
-            completed_at: Some(parse_utc("2026-02-06T21:05:00Z")),
-        });
-
-        state.completion_attempts.push(CompletionLoopState {
-            loop_number: 2,
-            slug: "completion".to_owned(),
-            loop_type: LoopType::Completion,
-            status: LoopStatus::Completed,
-            backends: CompletionLoopBackends {
-                planner: "planner-a".to_owned(),
-                completer: "completer-a".to_owned(),
-            },
-            artifacts: CompletionLoopArtifacts {
-                termination_request: "loops/002-completion/termination-request.md".to_owned(),
-                verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),
-                acceptance_results: Vec::new(),
-                acceptance_result: None,
-                acceptance_passed: None,
-            },
-            verdict: Some(CompletionVerdict::Continue),
-            started_at: parse_utc("2026-02-06T21:06:00Z"),
-            completed_at: Some(parse_utc("2026-02-06T21:07:00Z")),
-        });
-
-        state
     }
 
     #[test]

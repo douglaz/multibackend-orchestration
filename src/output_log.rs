@@ -432,7 +432,7 @@ mod tests {
     /// 1. First `execute_with_timeout_retries` call (attempt=1, success)
     /// 2. Parse fails → reformatter call via `execute_with_timeout_retries` (attempt=2)
     /// 3. Reformatter fails → format-reminder call (attempt=3)
-    /// All go through the same LogWriter, so attempt numbers are continuous.
+    ///    All go through the same LogWriter, so attempt numbers are continuous.
     #[test]
     fn parse_retry_path_attempt_numbering() {
         let temp = tempdir().expect("tempdir");

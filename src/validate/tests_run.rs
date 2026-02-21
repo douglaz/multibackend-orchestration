@@ -257,7 +257,7 @@ fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
+                    .is_some_and(|n| n.contains("agent-output-") && n.ends_with(".log"))
             })
             .collect();
         assert!(
@@ -850,7 +850,7 @@ fn tmux_enabled_no_loop_dir_logs(h: &RalphHarness) -> TestResult {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.contains("agent-output-") && n.ends_with(".log"))
+                    .is_some_and(|n| n.contains("agent-output-") && n.ends_with(".log"))
             })
             .collect();
         assert!(

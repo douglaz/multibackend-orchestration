@@ -666,7 +666,7 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         // "backend=codex", proving the Codex backend actually executed.
         let state = h.load_state(project_id).expect("load_state failed");
         assert!(
-            state["loops"].as_array().map_or(true, |a| a.is_empty()),
+            state["loops"].as_array().is_none_or(|a| a.is_empty()),
             "loops array should be empty when planner timed out: {:?}",
             state["loops"]
         );

@@ -116,7 +116,7 @@ fn explicit_ask_max_preempts_preset(h: &RalphHarness) -> TestResult {
     })
 }
 
-fn setup_prd_mock(h: &RalphHarness) -> () {
+fn setup_prd_mock(h: &RalphHarness) {
     h.init_workspace().expect("init_workspace failed");
     let script = h
         .write_mock_script("prd-mock.sh", &prd_mock_script())
