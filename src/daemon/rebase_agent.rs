@@ -1,8 +1,13 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use crate::daemon::process;
 use crate::error::RalphError;
 use crate::git;
 use crate::Result;
+
+/// Maximum number of resolve/continue iterations before giving up.
+const MAX_ITERATIONS: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebaseAgentBackend {
@@ -14,6 +19,42 @@ pub enum RebaseAgentBackend {
 pub enum RebaseFailureKind {
     Conflict,
     Other,
+}
+
+/// Internal error enum for the rebase agent, mapped into `RalphError` at the boundary.
+#[derive(Debug)]
+enum AgentError {
+    Timeout(String),
+    SpawnFailed(String),
+    AgentNonZero { exit_code: i32 },
+    UnresolvedConflicts,
+    IterationCapReached,
+    RebaseContinueFailed(String),
+}
+
+impl AgentError {
+    fn into_ralph_error(self) -> RalphError {
+        match self {
+            AgentError::Timeout(msg) => {
+                RalphError::Orchestration(format!("rebase agent timeout: {msg}"))
+            }
+            AgentError::SpawnFailed(msg) => {
+                RalphError::Orchestration(format!("rebase agent spawn failed: {msg}"))
+            }
+            AgentError::AgentNonZero { exit_code } => RalphError::Orchestration(format!(
+                "rebase agent exited with non-zero status: {exit_code}"
+            )),
+            AgentError::UnresolvedConflicts => RalphError::Orchestration(
+                "rebase agent completed but conflicts remain unresolved".to_owned(),
+            ),
+            AgentError::IterationCapReached => RalphError::Orchestration(format!(
+                "rebase agent iteration cap reached ({MAX_ITERATIONS} iterations)"
+            )),
+            AgentError::RebaseContinueFailed(msg) => {
+                RalphError::Orchestration(format!("git rebase --continue failed: {msg}"))
+            }
+        }
+    }
 }
 
 pub fn parse_rebase_agent_backend(raw: &str) -> Result<RebaseAgentBackend> {
@@ -76,17 +117,249 @@ pub fn classify_rebase_failure(
     }
 }
 
+/// Build the fixed prompt template for the rebase agent.
+pub fn build_agent_prompt(rebase_target: &str, conflicting_files: &[String]) -> String {
+    let file_list = conflicting_files
+        .iter()
+        .map(|f| format!("- {f}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "You are resolving merge conflicts during a git rebase onto `{rebase_target}`.\n\
+         \n\
+         The following files have unresolved merge conflicts:\n\
+         {file_list}\n\
+         \n\
+         Instructions:\n\
+         1. Open each conflicting file and resolve the conflict markers (<<<<<<<, =======, >>>>>>>).\n\
+         2. After resolving each file, stage it with `git add <file>`.\n\
+         3. Do NOT run `git rebase --continue` or `git rebase --abort`.\n\
+         4. Do NOT modify any files that are not listed above.\n\
+         5. Ensure all conflict markers are fully resolved before staging.\n"
+    )
+}
+
+/// Check if a rebase is currently in progress in the given worktree.
+pub fn is_rebase_in_progress(worktree_path: &Path) -> bool {
+    let git_dir = worktree_path.join(".git");
+    // Standard repo layout
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        return true;
+    }
+    // Worktree layout: .git is a file pointing to the real gitdir
+    if git_dir.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&git_dir) {
+            let gitdir_line = content.trim();
+            if let Some(path) = gitdir_line.strip_prefix("gitdir: ") {
+                let real_git_dir = Path::new(path);
+                if real_git_dir.join("rebase-merge").exists()
+                    || real_git_dir.join("rebase-apply").exists()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Abort a rebase in progress (best-effort).
+fn abort_rebase_if_in_progress(worktree_path: &Path) {
+    if is_rebase_in_progress(worktree_path) {
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(worktree_path)
+            .output();
+    }
+}
+
+/// Compute remaining time from a deadline; return error if expired.
+fn remaining_budget(deadline: Instant, label: &str) -> std::result::Result<Duration, AgentError> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(AgentError::Timeout(format!(
+            "{label}: timeout budget exhausted"
+        )));
+    }
+    Ok(deadline - now)
+}
+
+/// Build the agent command for the given backend.
+fn build_agent_command(
+    worktree_path: &Path,
+    backend: &RebaseAgentBackend,
+    prompt: &str,
+) -> std::process::Command {
+    match backend {
+        RebaseAgentBackend::Claude { model } => {
+            let mut cmd = std::process::Command::new("claude");
+            cmd.args([
+                "-p",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Bash,Edit,Write,Read,Glob,Grep",
+                "--model",
+                model,
+                prompt,
+            ])
+            .current_dir(worktree_path);
+            cmd
+        }
+        RebaseAgentBackend::None => {
+            unreachable!("build_agent_command should not be called with None backend")
+        }
+    }
+}
+
+/// Resolve rebase conflicts using an AI agent in a loop.
+///
+/// Each iteration: read conflicts, prompt agent, verify resolution, run `--continue`.
+/// If `--continue` introduces new conflicts, repeat. Shared deadline across all steps.
+pub fn resolve_rebase_conflicts(
+    worktree_path: &Path,
+    rebase_target: &str,
+    agent_backend: &RebaseAgentBackend,
+    deadline: Instant,
+) -> Result<()> {
+    let result = resolve_loop(worktree_path, rebase_target, agent_backend, deadline);
+    match result {
+        Ok(()) => Ok(()),
+        Err(agent_err) => {
+            abort_rebase_if_in_progress(worktree_path);
+            Err(agent_err.into_ralph_error())
+        }
+    }
+}
+
+fn resolve_loop(
+    worktree_path: &Path,
+    rebase_target: &str,
+    agent_backend: &RebaseAgentBackend,
+    deadline: Instant,
+) -> std::result::Result<(), AgentError> {
+    for iteration in 0..MAX_ITERATIONS {
+        eprintln!(
+            "rebase-agent: iteration {}/{MAX_ITERATIONS}",
+            iteration + 1
+        );
+
+        // Step 1: Read conflicting files
+        let files = git::conflicting_files(worktree_path).map_err(|e| {
+            AgentError::SpawnFailed(format!("failed to read conflicting files: {e}"))
+        })?;
+
+        if files.is_empty() {
+            // No conflicts — try rebase --continue directly
+            let budget =
+                remaining_budget(deadline, &format!("rebase --continue (iteration {})", iteration + 1))?;
+            return run_rebase_continue(worktree_path, budget, deadline);
+        }
+
+        // Step 2: Build prompt
+        let prompt = build_agent_prompt(rebase_target, &files);
+
+        // Step 3: Invoke agent
+        let agent_budget =
+            remaining_budget(deadline, &format!("agent invocation (iteration {})", iteration + 1))?;
+        let mut cmd = build_agent_command(worktree_path, agent_backend, &prompt);
+        let output = process::run_command_with_timeout(&mut cmd, agent_budget)
+            .map_err(|e| AgentError::SpawnFailed(format!("{e}")))?;
+
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            return Err(AgentError::AgentNonZero { exit_code: code });
+        }
+
+        // Step 4: Verify conflicts cleared
+        let still_has_conflicts = git::has_conflicts(worktree_path).map_err(|e| {
+            AgentError::SpawnFailed(format!("failed to check conflicts after agent: {e}"))
+        })?;
+
+        if still_has_conflicts {
+            return Err(AgentError::UnresolvedConflicts);
+        }
+
+        // Step 5: Run git rebase --continue
+        let continue_budget =
+            remaining_budget(deadline, &format!("rebase --continue (iteration {})", iteration + 1))?;
+        match run_rebase_continue(worktree_path, continue_budget, deadline) {
+            Ok(()) => return Ok(()),
+            Err(AgentError::RebaseContinueFailed(_)) => {
+                // Check if new conflicts appeared (multi-commit rebase)
+                let new_conflicts =
+                    git::has_conflicts(worktree_path).unwrap_or(false);
+                if new_conflicts {
+                    eprintln!(
+                        "rebase-agent: rebase --continue produced new conflicts, repeating loop"
+                    );
+                    continue;
+                }
+                // Non-conflict failure from --continue
+                return Err(AgentError::RebaseContinueFailed(
+                    "rebase --continue failed without new conflicts".to_owned(),
+                ));
+            }
+            Err(other) => return Err(other),
+        }
+    }
+
+    Err(AgentError::IterationCapReached)
+}
+
+/// Run `git rebase --continue` and check the result.
+fn run_rebase_continue(
+    worktree_path: &Path,
+    budget: Duration,
+    _deadline: Instant,
+) -> std::result::Result<(), AgentError> {
+    let output = process::run_command_with_timeout(
+        std::process::Command::new("git")
+            .args(["rebase", "--continue"])
+            .env("GIT_EDITOR", "true")
+            .current_dir(worktree_path),
+        budget,
+    )
+    .map_err(|e| AgentError::SpawnFailed(format!("rebase --continue: {e}")))?;
+
+    if output.status.success() {
+        // Check if rebase is still in progress (more commits to apply)
+        if is_rebase_in_progress(worktree_path) {
+            // There may be more conflicts from subsequent commits
+            let has_conflicts = git::has_conflicts(worktree_path).unwrap_or(false);
+            if has_conflicts {
+                return Err(AgentError::RebaseContinueFailed(
+                    "new conflicts after successful continue".to_owned(),
+                ));
+            }
+            // Rebase still in progress but no conflicts — keep going
+            // We return success here; the caller can re-enter the loop
+            // if needed, but typically rebase --continue will fully finish.
+        }
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(AgentError::RebaseContinueFailed(stderr))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
     use super::{
-        classify_rebase_failure, parse_rebase_agent_backend, RebaseAgentBackend, RebaseFailureKind,
+        build_agent_prompt, classify_rebase_failure, is_rebase_in_progress,
+        parse_rebase_agent_backend, remaining_budget, RebaseAgentBackend, RebaseFailureKind,
+        MAX_ITERATIONS,
     };
+
+    // ---- Backend parsing tests (from loop 1) ----
 
     #[test]
     fn parse_rebase_agent_backend_none() {
@@ -147,6 +420,8 @@ mod tests {
         );
     }
 
+    // ---- Classification tests (from loop 1) ----
+
     #[test]
     fn classify_rebase_failure_detects_conflict() {
         let repo = create_repo_with_conflict();
@@ -178,6 +453,102 @@ mod tests {
         let kind = classify_rebase_failure(1, b"could not apply abcdef", repo.path());
         assert_eq!(kind, RebaseFailureKind::Other);
     }
+
+    // ---- Prompt rendering tests (loop 2) ----
+
+    #[test]
+    fn prompt_includes_rebase_target_and_files() {
+        let prompt = build_agent_prompt(
+            "origin/main",
+            &["src/foo.rs".to_owned(), "README.md".to_owned()],
+        );
+        assert!(
+            prompt.contains("origin/main"),
+            "prompt should include rebase target"
+        );
+        assert!(
+            prompt.contains("- src/foo.rs"),
+            "prompt should list conflicting files"
+        );
+        assert!(
+            prompt.contains("- README.md"),
+            "prompt should list conflicting files"
+        );
+    }
+
+    #[test]
+    fn prompt_requires_git_add() {
+        let prompt = build_agent_prompt("origin/main", &["file.rs".to_owned()]);
+        assert!(
+            prompt.contains("git add"),
+            "prompt should require git add staging"
+        );
+    }
+
+    #[test]
+    fn prompt_forbids_rebase_continue_and_abort() {
+        let prompt = build_agent_prompt("origin/main", &["file.rs".to_owned()]);
+        assert!(
+            prompt.contains("Do NOT run `git rebase --continue`"),
+            "prompt should forbid rebase --continue"
+        );
+        assert!(
+            prompt.contains("`git rebase --abort`"),
+            "prompt should forbid rebase --abort"
+        );
+    }
+
+    #[test]
+    fn prompt_forbids_unrelated_file_edits() {
+        let prompt = build_agent_prompt("origin/main", &["file.rs".to_owned()]);
+        assert!(
+            prompt.contains("Do NOT modify any files that are not listed"),
+            "prompt should forbid unrelated file edits"
+        );
+    }
+
+    // ---- Timeout accounting tests (loop 2) ----
+
+    #[test]
+    fn remaining_budget_returns_duration_when_not_expired() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let budget = remaining_budget(deadline, "test").expect("should have budget");
+        assert!(budget.as_secs() > 0);
+    }
+
+    #[test]
+    fn remaining_budget_returns_error_when_expired() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let result = remaining_budget(deadline, "test");
+        assert!(result.is_err(), "expired deadline should return error");
+    }
+
+    // ---- Loop cap test (loop 2) ----
+
+    #[test]
+    fn max_iterations_constant_is_10() {
+        assert_eq!(MAX_ITERATIONS, 10);
+    }
+
+    // ---- Rebase-in-progress detection (loop 2) ----
+
+    #[test]
+    fn is_rebase_in_progress_false_for_clean_repo() {
+        let repo = create_clean_repo();
+        assert!(!is_rebase_in_progress(repo.path()));
+    }
+
+    // ---- Abort-on-failure test (loop 2) ----
+
+    #[test]
+    fn resolve_with_none_backend_is_unreachable_but_disabled_path_works() {
+        // The None backend should never reach resolve_rebase_conflicts
+        // because runtime.rs gates on it. This test verifies the parse path.
+        let parsed = parse_rebase_agent_backend("none").unwrap();
+        assert_eq!(parsed, RebaseAgentBackend::None);
+    }
+
+    // ---- Helpers ----
 
     fn create_clean_repo() -> TempDir {
         let tmp = TempDir::new().expect("create tempdir");

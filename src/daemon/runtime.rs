@@ -1151,7 +1151,9 @@ async fn auto_rebase_phase(
             let target = rebase_target.clone();
             let br = branch.clone();
             let timeout_dur = timeout;
-            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur)).await
+            let backend = config.rebase_agent_backend.clone();
+            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend))
+                .await
         };
 
         // Clean up rebase worktree (best-effort)
@@ -1219,11 +1221,15 @@ async fn auto_rebase_phase(
 /// All three steps share a single `timeout` budget. Time consumed by earlier
 /// steps is subtracted from the budget available for later steps, so the
 /// total wall-clock time stays bounded to roughly `timeout`.
+///
+/// When rebase fails due to merge conflicts and an agent backend is configured,
+/// the conflict recovery agent is invoked to resolve conflicts iteratively.
 fn execute_rebase(
     worktree_path: &Path,
     rebase_target: &str,
     branch: &str,
     timeout: Duration,
+    agent_backend: &RebaseAgentBackend,
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
 
@@ -1270,23 +1276,48 @@ fn execute_rebase(
             worktree_path,
         );
 
-        // Abort the rebase to leave worktree clean
-        let _ = std::process::Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(worktree_path)
-            .output();
-
-        let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
-        let message = match failure_kind {
+        match failure_kind {
             RebaseFailureKind::Conflict => {
-                format!("git rebase failed with merge conflicts: {stderr}")
+                // Attempt AI-assisted conflict resolution if backend is enabled
+                match agent_backend {
+                    RebaseAgentBackend::None => {
+                        // Disabled: abort and fail as before
+                        let _ = std::process::Command::new("git")
+                            .args(["rebase", "--abort"])
+                            .current_dir(worktree_path)
+                            .output();
+                        let stderr =
+                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                        return Err(RalphError::Orchestration(format!(
+                            "git rebase failed with merge conflicts: {stderr}"
+                        )));
+                    }
+                    _ => {
+                        eprintln!(
+                            "rebase-agent: conflict detected, invoking AI agent for resolution"
+                        );
+                        crate::daemon::rebase_agent::resolve_rebase_conflicts(
+                            worktree_path,
+                            rebase_target,
+                            agent_backend,
+                            deadline,
+                        )?;
+                        // Agent succeeded — fall through to push
+                    }
+                }
             }
-            RebaseFailureKind::Other => format!("git rebase failed: {stderr}"),
-        };
-
-        return Err(RalphError::Orchestration(format!(
-            "{message}"
-        )));
+            RebaseFailureKind::Other => {
+                // Non-conflict failure: abort and return error unchanged
+                let _ = std::process::Command::new("git")
+                    .args(["rebase", "--abort"])
+                    .current_dir(worktree_path)
+                    .output();
+                let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                return Err(RalphError::Orchestration(format!(
+                    "git rebase failed: {stderr}"
+                )));
+            }
+        }
     }
 
     // Push with --force-with-lease (also under remaining budget)
