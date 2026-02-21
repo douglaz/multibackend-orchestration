@@ -10,7 +10,6 @@ It coordinates planner, implementer, QA, reviewer, and completer phases across A
 - Multi-backend support with role-specific backend overrides.
 - Prompt review gate before first loop (configurable and skippable).
 - First-class project state, history, artifact tailing, and rollback.
-- MCP server mode with 9 tools for external orchestration clients.
 - Built-in conformance validation suite (`ralph validate`).
 
 ## Build
@@ -71,7 +70,6 @@ Built binary:
 - `ralph prd`
 - `ralph quick-prd`
 - `ralph auto`
-- `ralph mcp serve`
 - `ralph validate`
 
 ## Backend Specs
@@ -117,31 +115,10 @@ Run the conformance suite against a built binary:
 
 ```bash
 ./result/bin/ralph validate --bin ./result/bin/ralph
-./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp
 ./result/bin/ralph validate --bin ./result/bin/ralph --list
 ```
 
 Every new feature or CLI command should add coverage in `src/validate/`.
-
-## MCP Mode
-
-Start the MCP server over stdio:
-
-```bash
-./result/bin/ralph mcp serve
-```
-
-MCP tools:
-
-- `project_new`
-- `project_list`
-- `project_show`
-- `run`
-- `status`
-- `history`
-- `tail`
-- `quick_prd`
-- `config_show`
 
 ## Workspace Layout
 

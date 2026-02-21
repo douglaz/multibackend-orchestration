@@ -20,9 +20,7 @@ The validate E2E conformance tests run the compiled `ralph` binary in isolated t
    `nix develop -c cargo test`
 3. Build release binary:
    `nix build -L`
-4. Run validate sanity subset:
-   `./result/bin/ralph validate --bin ./result/bin/ralph --filter mcp`
-5. Run full conformance suite:
+4. Run full conformance suite:
    `./result/bin/ralph validate --bin ./result/bin/ralph`
 
 ## Troubleshooting
