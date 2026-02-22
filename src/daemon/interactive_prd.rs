@@ -375,7 +375,10 @@ fn advance_issue(
             let bot_login = get_or_fetch_bot_login(bot_login_cache)?;
             transition_awaiting_answers_to_awaiting_feedback(config, issue, &mut state, &bot_login)
         }
-        PrdWorkflowState::AwaitingFeedback => Ok(()),
+        PrdWorkflowState::AwaitingFeedback => {
+            let bot_login = get_or_fetch_bot_login(bot_login_cache)?;
+            transition_awaiting_feedback(config, issue, &mut state, &bot_login)
+        }
         PrdWorkflowState::Done | PrdWorkflowState::Failed => Ok(()),
     }
 }
@@ -591,6 +594,266 @@ fn do_awaiting_answers_to_awaiting_feedback(
     state.last_advanced_at = Some(Utc::now());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AwaitingFeedback transition (approval path + revision loop)
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_REVISION_PROMPT: &str = r#"You are a senior software engineer revising an engineering specification based on user feedback.
+
+**Current Spec:**
+{{spec}}
+
+**User Feedback:**
+{{feedback}}
+
+**Task:**
+Address each piece of feedback and produce an updated specification. You MUST preserve the same 6 required section headings:
+## Summary, ## Acceptance Criteria, ## Technical Approach, ## Files & Modules, ## Testing Strategy, ## Out of Scope
+"#;
+
+/// Execute the AwaitingFeedback transition:
+/// - If approval detected (label or comment), transition to Done.
+/// - If new non-approval feedback exists, generate a revised draft.
+/// - If no new feedback and no approval, no-op.
+fn transition_awaiting_feedback(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+    bot_login: &str,
+) -> Result<()> {
+    let issue_number = issue.number;
+    if config.verbose {
+        eprintln!(
+            "prd: transition AwaitingFeedback for {}/{}#{issue_number}",
+            config.owner, config.repo
+        );
+    }
+
+    let result = do_awaiting_feedback(config, issue, state, bot_login);
+    finish_transition(config, state, result)
+}
+
+fn do_awaiting_feedback(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+    bot_login: &str,
+) -> Result<()> {
+    let issue_number = issue.number;
+    let owner = &config.owner;
+    let repo = &config.repo;
+
+    // Fetch current labels and comments
+    let labels = github::fetch_issue_labels(owner, repo, issue_number).map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
+
+    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
+
+    // Check approval by label
+    if labels.iter().any(|l| l == "ralph:prd-approved") {
+        return do_approval_transition(config, state, issue_number);
+    }
+
+    // Find new unprocessed non-bot comments
+    let new_comments = find_new_feedback_comments(
+        &comments,
+        bot_login,
+        state.last_processed_comment_id,
+    );
+
+    if new_comments.is_empty() {
+        // No new feedback and no approval signal — no-op
+        return Ok(());
+    }
+
+    // Check if any new comment is an approval
+    let has_approval = new_comments.iter().any(|c| detect_approval(&c.body));
+    let has_non_approval = new_comments.iter().any(|c| !detect_approval(&c.body));
+
+    // If approval is present (and no conflicting non-approval feedback), transition to Done
+    if has_approval && !has_non_approval {
+        // Update last_processed_comment_id to the latest comment
+        let last_id = new_comments.last().map(|c| c.id);
+        if let Some(id) = last_id {
+            state.last_processed_comment_id = Some(id);
+        }
+        return do_approval_transition(config, state, issue_number);
+    }
+
+    // Aggregate feedback text for revision
+    let aggregated_feedback: String = new_comments
+        .iter()
+        .map(|c| format!("**@{}:**\n{}", c.author_login, c.body))
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+
+    // Update cursor to latest comment
+    let last_id = new_comments.last().map(|c| c.id);
+
+    // Generate revised draft
+    let current_draft = state
+        .latest_draft_body
+        .as_deref()
+        .unwrap_or("(no previous draft)");
+
+    let revised_spec = generate_revision_from_feedback_with_timeout(
+        config,
+        current_draft,
+        &aggregated_feedback,
+    )?;
+
+    // Post new draft comment with incremented marker
+    let next_revision = state.draft_revision + 1;
+    let marker = prd_marker(issue_number, "draft", next_revision);
+    let draft_comment_body = format!(
+        "## Draft Engineering Specification (Revision {next_revision})\n\n{revised_spec}\n\n\
+         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
+    );
+    let comment_id =
+        github::post_comment_with_marker(owner, repo, issue_number, &marker, &draft_comment_body)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to post revision comment for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
+
+    // Update state fields
+    state.draft_revision = next_revision;
+    state.latest_draft_comment_id = comment_id;
+    state.latest_draft_body = Some(revised_spec);
+    if let Some(id) = last_id {
+        state.last_processed_comment_id = Some(id);
+    }
+    state.last_advanced_at = Some(Utc::now());
+
+    Ok(())
+}
+
+/// Transition to Done: post approval marker, swap labels, persist terminal state.
+fn do_approval_transition(
+    config: &PrdPollConfig,
+    state: &mut InteractivePrdState,
+    issue_number: u32,
+) -> Result<()> {
+    let owner = &config.owner;
+    let repo = &config.repo;
+
+    // Post idempotent status-approved marker referencing latest draft
+    let marker = prd_marker(issue_number, "status-approved", state.draft_revision);
+    let approval_body = format!(
+        "## PRD Approved\n\n\
+         Draft revision {} has been approved.\n\n\
+         *The interactive PRD workflow is now complete.*",
+        state.draft_revision
+    );
+    let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &approval_body);
+
+    // Swap labels: remove ralph:prd-active, add ralph:prd-done
+    // Keep ralph:prd-approved if already present
+    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active");
+    let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done");
+
+    // Persist terminal Done state
+    state.state = PrdWorkflowState::Done;
+    state.last_advanced_at = Some(Utc::now());
+
+    Ok(())
+}
+
+/// Find all new non-bot comments after `last_processed_comment_id`.
+fn find_new_feedback_comments<'a>(
+    comments: &'a [github::IssueComment],
+    bot_login: &str,
+    last_processed_comment_id: Option<u64>,
+) -> Vec<&'a github::IssueComment> {
+    comments
+        .iter()
+        .filter(|comment| {
+            if comment.author_login == bot_login {
+                return false;
+            }
+            if let Some(last) = last_processed_comment_id {
+                if comment.id <= last {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect()
+}
+
+/// Generate a revised draft from current draft + aggregated feedback.
+fn generate_revision_from_feedback_with_timeout(
+    config: &PrdPollConfig,
+    current_draft: &str,
+    aggregated_feedback: &str,
+) -> Result<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
+    let writer = create_backend(&config.writer_backend, &config.global_config)?;
+    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+
+    // Build feedback revision prompt
+    let revision_prompt = render_prompt(
+        FEEDBACK_REVISION_PROMPT,
+        &[
+            ("{{spec}}", current_draft),
+            ("{{feedback}}", aggregated_feedback),
+        ],
+    );
+
+    let mut current_spec = run_draft_with_section_retry_sync(&writer, &revision_prompt, deadline)?;
+
+    // Run reviewer/section validation loop (same as initial draft generation)
+    let idea_context = format!(
+        "Revision based on user feedback:\n{aggregated_feedback}"
+    );
+    for _iteration in 1..=config.max_revisions {
+        let review_prompt = render_prompt(
+            REVIEW_PROMPT,
+            &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
+        );
+        let feedback =
+            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "review/retry failed during feedback revision: {err}"
+                ))
+            })?;
+
+        if feedback.approved || feedback.issues.is_empty() {
+            return Ok(current_spec);
+        }
+
+        let formatted_issues = format_issues(&feedback.issues);
+        let rev_prompt = render_prompt(
+            REVISION_PROMPT,
+            &[
+                ("{{idea}}", &idea_context),
+                ("{{spec}}", &current_spec),
+                ("{{issues}}", &formatted_issues),
+            ],
+        );
+        let revised = run_backend_sync(&writer, &rev_prompt, deadline)?;
+        let (cleaned, missing) = check_spec_sections(&revised);
+        if missing.len() < REQUIRED_SPEC_SECTION_COUNT {
+            current_spec = cleaned;
+        }
+    }
+
+    Ok(current_spec)
+}
+
+/// Public helper to create a `status-approved` marker.
+pub fn prd_status_approved_marker(issue_number: u32, draft_revision: u32) -> String {
+    prd_marker(issue_number, "status-approved", draft_revision)
 }
 
 fn finish_transition(
@@ -926,8 +1189,9 @@ mod tests {
 
     use super::{
         apply_transition_result, detect_approval, extract_questions_text,
-        find_first_answer_comment, prd_marker, render_answer_to_draft_prompt, InteractivePrdState,
-        PrdWorkflowState, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        find_first_answer_comment, find_new_feedback_comments, prd_marker,
+        prd_status_approved_marker, render_answer_to_draft_prompt, InteractivePrdState,
+        PrdWorkflowState, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
     };
     use crate::daemon::github::IssueComment;
     use crate::error::RalphError;
@@ -1168,5 +1432,95 @@ mod tests {
             body: body.to_owned(),
             created_at: ts(created_at),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests for AwaitingFeedback transition helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_new_feedback_comments_filters_bot_and_old() {
+        let comments = vec![
+            test_comment(100, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(101, "alice", "old comment", "2026-01-01T00:00:20Z"),
+            test_comment(102, "bob", "new feedback", "2026-01-01T00:00:30Z"),
+            test_comment(103, "ralph-bot", "bot reply", "2026-01-01T00:00:35Z"),
+            test_comment(104, "carol", "more feedback", "2026-01-01T00:00:40Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(101));
+        assert_eq!(new.len(), 2);
+        assert_eq!(new[0].id, 102);
+        assert_eq!(new[1].id, 104);
+    }
+
+    #[test]
+    fn find_new_feedback_comments_returns_all_non_bot_when_no_cursor() {
+        let comments = vec![
+            test_comment(50, "ralph-bot", "draft", "2026-01-01T00:00:10Z"),
+            test_comment(51, "alice", "feedback 1", "2026-01-01T00:00:20Z"),
+            test_comment(52, "bob", "feedback 2", "2026-01-01T00:00:30Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None);
+        assert_eq!(new.len(), 2);
+        assert_eq!(new[0].id, 51);
+        assert_eq!(new[1].id, 52);
+    }
+
+    #[test]
+    fn find_new_feedback_comments_returns_empty_when_all_bot() {
+        let comments = vec![
+            test_comment(60, "ralph-bot", "draft", "2026-01-01T00:00:10Z"),
+            test_comment(61, "ralph-bot", "followup", "2026-01-01T00:00:20Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None);
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn find_new_feedback_comments_returns_empty_when_all_processed() {
+        let comments = vec![
+            test_comment(70, "alice", "old", "2026-01-01T00:00:10Z"),
+            test_comment(71, "bob", "also old", "2026-01-01T00:00:20Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(71));
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn status_approved_marker_format() {
+        assert_eq!(
+            prd_status_approved_marker(42, 3),
+            "<!-- ralph:prd:42:status-approved-v3 -->"
+        );
+    }
+
+    #[test]
+    fn feedback_revision_prompt_contains_placeholders() {
+        assert!(FEEDBACK_REVISION_PROMPT.contains("{{spec}}"));
+        assert!(FEEDBACK_REVISION_PROMPT.contains("{{feedback}}"));
+        assert!(FEEDBACK_REVISION_PROMPT.contains("## Summary"));
+    }
+
+    #[test]
+    fn detect_approval_plain_feedback_returns_false() {
+        assert!(!detect_approval("Please add more detail to the testing section."));
+        assert!(!detect_approval("The acceptance criteria are incomplete."));
+        assert!(!detect_approval("Can you add error handling?"));
+    }
+
+    #[test]
+    fn detect_approval_approval_with_feedback_returns_true() {
+        assert!(detect_approval("Looks good! Ship it when ready."));
+        assert!(detect_approval("I've reviewed the spec. Approved."));
+    }
+
+    #[test]
+    fn detect_approval_question_about_lgtm_still_matches() {
+        // Per spec: `\blgtm\b` matches standalone "lgtm" even in questions
+        assert!(detect_approval("is this lgtm?"));
     }
 }
