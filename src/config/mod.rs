@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::parse_backend_spec;
 use crate::error::RalphError;
+use crate::project::artifacts::slugify_backend;
 use crate::Result;
 use tracing::warn;
 
@@ -606,13 +607,14 @@ fn validate_final_review_config(
 }
 
 fn normalize_backend_specs(global: &GlobalConfig, specs: &[String]) -> Result<Vec<String>> {
-    normalize_backend_specs_labeled(global, specs, "final review backend")
+    normalize_backend_specs_labeled(global, specs, "final review backend", false)
 }
 
 fn normalize_backend_specs_labeled(
     global: &GlobalConfig,
     specs: &[String],
     label: &str,
+    reject_duplicates: bool,
 ) -> Result<Vec<String>> {
     let mut normalized = Vec::new();
     let mut seen = HashSet::new();
@@ -620,9 +622,23 @@ fn normalize_backend_specs_labeled(
     for spec in specs {
         let canonical = canonicalize_backend_spec(spec)?;
         validate_backend_spec(global, &canonical, label, ValidationSurface::PanelList)?;
-        if seen.insert(canonical.clone()) {
-            normalized.push(canonical);
+        // Derive a resolution key that collapses optional/required variants
+        // (e.g. `claude` and `?claude`) to the same target.
+        let parsed = parse_backend_spec(&canonical)?;
+        let resolution_key = match &parsed.model {
+            Some(model) => format!("{}({model})", parsed.name),
+            None => parsed.name.clone(),
+        };
+        if !seen.insert(resolution_key.clone()) {
+            if reject_duplicates {
+                return Err(RalphError::Validation(format!(
+                    "duplicate resolved {label} spec after canonicalization: {resolution_key}"
+                )));
+            }
+            // Silently deduplicate for surfaces that allow it
+            continue;
         }
+        normalized.push(canonical);
     }
 
     Ok(normalized)
@@ -667,28 +683,17 @@ fn validate_completion_panel_config(
         )));
     }
 
+    // normalize_backend_specs_labeled with reject_duplicates=true rejects duplicate
+    // resolved specs (including optional/required variants collapsing to the same target).
     let normalized = normalize_backend_specs_labeled(
         global,
         &workflow.completion_backends,
         "completion backend",
+        true,
     )?;
 
-    // Check for duplicate resolved specs after canonicalization
-    let mut seen_canonical = HashSet::new();
-    for spec in &normalized {
-        let parsed = parse_backend_spec(spec)?;
-        let canonical_key = match &parsed.model {
-            Some(model) => format!("{}({model})", parsed.name),
-            None => parsed.name.clone(),
-        };
-        if !seen_canonical.insert(canonical_key.clone()) {
-            return Err(RalphError::Validation(format!(
-                "duplicate resolved completer spec after canonicalization: {canonical_key}"
-            )));
-        }
-    }
-
-    // Check for per-backend verdict filename collisions
+    // Check for per-backend verdict filename collisions using the same
+    // slugification logic as ArtifactKind::CompleterVerdictBackend.
     let mut seen_filenames = HashSet::new();
     for spec in &normalized {
         let filename = completion_verdict_filename(spec);
@@ -703,18 +708,10 @@ fn validate_completion_panel_config(
 }
 
 /// Generate the deterministic verdict filename for a completion backend spec.
+/// Uses the same `slugify_backend` logic as `ArtifactKind::CompleterVerdictBackend`
+/// to ensure collision detection matches actual artifact naming.
 fn completion_verdict_filename(spec: &str) -> String {
-    let slugified: String = spec
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("completer-verdict-{slugified}.md")
+    format!("completer-verdict-{}.md", slugify_backend(spec))
 }
 
 fn canonicalize_backend_spec(spec: &str) -> Result<String> {
@@ -1537,5 +1534,130 @@ mod tests {
             super::validate_final_review_config(&effective.global, &effective.workflow)
                 .expect("validation should succeed");
         assert!(validation.arbiter_overlaps_reviewer_family);
+    }
+
+    // --- Completion panel config validation tests ---
+
+    #[test]
+    fn completion_panel_rejects_empty_backends() {
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_backends = vec![];
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("empty completion_backends should fail");
+        assert!(err.to_string().contains("completion_backends must not be empty"));
+    }
+
+    #[test]
+    fn completion_panel_rejects_min_completers_zero() {
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_min_completers = 0;
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("min_completers=0 should fail");
+        assert!(err.to_string().contains("completion_min_completers must be >= 1"));
+    }
+
+    #[test]
+    fn completion_panel_rejects_threshold_out_of_range() {
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_consensus_threshold = 0.0;
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("threshold=0.0 should fail");
+        assert!(err.to_string().contains("completion_consensus_threshold must be > 0.0"));
+
+        let mut global2 = GlobalConfig::default();
+        global2.workflow.completion_consensus_threshold = 1.5;
+
+        let err2 = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global2,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("threshold=1.5 should fail");
+        assert!(err2.to_string().contains("completion_consensus_threshold must be > 0.0"));
+    }
+
+    #[test]
+    fn completion_panel_rejects_duplicate_specs_after_canonicalization() {
+        let mut global = GlobalConfig::default();
+        // `claude` and `?claude` collapse to the same resolved target
+        global.workflow.completion_backends =
+            vec!["claude".to_owned(), "?claude".to_owned()];
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("duplicate resolved specs should fail");
+        assert!(
+            err.to_string().contains("duplicate resolved completion backend spec"),
+            "error should mention duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn completion_panel_accepts_valid_partial_threshold() {
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_backends =
+            vec!["claude".to_owned(), "codex".to_owned()];
+        global.workflow.completion_min_completers = 1;
+        global.workflow.completion_consensus_threshold = 0.5;
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("valid partial threshold should resolve");
+        assert_eq!(effective.workflow.completion_consensus_threshold, 0.5);
+        assert_eq!(effective.workflow.completion_min_completers, 1);
+    }
+
+    #[test]
+    fn completion_verdict_filename_matches_artifact_slug() {
+        // Verify that the config validation slug matches the artifact writer slug.
+        // Both use slugify_backend which trims leading/trailing dashes.
+        use crate::project::artifacts::slugify_backend;
+
+        let filename = super::completion_verdict_filename("claude(opus-v2)");
+        let artifact_slug = slugify_backend("claude(opus-v2)");
+        assert_eq!(artifact_slug, "claude-opus-v2");
+        assert_eq!(
+            filename,
+            format!("completer-verdict-{artifact_slug}.md"),
+            "config collision check must produce same filename as artifact writer"
+        );
+        assert_eq!(filename, "completer-verdict-claude-opus-v2.md");
+
+        // Also check a simple backend name
+        let simple = super::completion_verdict_filename("claude");
+        assert_eq!(simple, "completer-verdict-claude.md");
     }
 }

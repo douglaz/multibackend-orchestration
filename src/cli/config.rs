@@ -139,6 +139,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
                     "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
                     "max_final_review_restarts": effective.workflow.max_final_review_restarts,
+                    "completion_backends": effective.workflow.completion_backends,
+                    "completion_min_completers": effective.workflow.completion_min_completers,
+                    "completion_consensus_threshold": effective.workflow.completion_consensus_threshold,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -233,6 +236,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
                     "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
                     "max_final_review_restarts": effective.workflow.max_final_review_restarts,
+                    "completion_backends": effective.workflow.completion_backends,
+                    "completion_min_completers": effective.workflow.completion_min_completers,
+                    "completion_consensus_threshold": effective.workflow.completion_consensus_threshold,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -477,6 +483,18 @@ fn set_global_value(
         "workflow.max_final_review_restarts" => {
             config.workflow.max_final_review_restarts = parse_u32(raw_value, key)?;
         }
+        "workflow.completion_backends" => {
+            config.workflow.completion_backends = parse_string_list(raw_value)?;
+        }
+        "workflow.completion_min_completers" => {
+            config.workflow.completion_min_completers = parse_u32(raw_value, key)?;
+        }
+        "workflow.completion_consensus_threshold" => {
+            let v: f64 = raw_value
+                .parse()
+                .map_err(|_| RalphError::Validation(format!("key '{key}' expects float value")))?;
+            config.workflow.completion_consensus_threshold = v;
+        }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_bool(raw_value, key)?;
         }
@@ -673,6 +691,22 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.max_final_review_restarts" => {
             config.workflow.max_final_review_restarts = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.completion_backends" => {
+            config.workflow.completion_backends = parse_optional_string_list(raw_value)?;
+        }
+        "workflow.completion_min_completers" => {
+            config.workflow.completion_min_completers = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.completion_consensus_threshold" => {
+            if raw_value == "null" {
+                config.workflow.completion_consensus_threshold = None;
+            } else {
+                let v: f64 = raw_value.parse().map_err(|_| {
+                    RalphError::Validation(format!("key '{key}' expects float value"))
+                })?;
+                config.workflow.completion_consensus_threshold = Some(v);
+            }
         }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_optional_bool(raw_value, key)?;

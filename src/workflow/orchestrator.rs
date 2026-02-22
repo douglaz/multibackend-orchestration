@@ -518,18 +518,14 @@ impl Orchestrator {
                                 &role_overrides,
                             )?;
                             // Resolve effective completers from the panel config.
-                            // Falls back to the single completer from assign_completion_backends
-                            // if resolve_completion_panel cannot be satisfied.
-                            let effective_completers = match registry
+                            // Optional backends are skipped inside resolve_completion_panel;
+                            // required-backend failures and min-completer violations propagate.
+                            let effective_completers = registry
                                 .resolve_completion_panel(
                                     &effective.workflow.completion_backends,
                                     effective.workflow.completion_min_completers,
                                 )
-                                .await
-                            {
-                                Ok(resolved) => resolved,
-                                Err(_) => base_backends.completers.clone(),
-                            };
+                                .await?;
                             let completion_backends = CompletionLoopBackends::new(
                                 base_backends.planner.clone(),
                                 effective_completers,
@@ -1737,9 +1733,12 @@ impl Orchestrator {
                     // Compute consensus with inclusive thresholds
                     let consensus_threshold = effective.workflow.completion_consensus_threshold;
                     let min_completers = effective.workflow.completion_min_completers;
-                    let consensus_reached = complete_votes >= min_completers
-                        && total_completers > 0
-                        && (complete_votes as f64 / total_completers as f64) >= consensus_threshold;
+                    let consensus_reached = compute_completion_consensus(
+                        complete_votes,
+                        total_completers,
+                        min_completers,
+                        consensus_threshold,
+                    );
                     let panel_verdict = if consensus_reached {
                         CompletionVerdict::Complete
                     } else {
@@ -5215,6 +5214,24 @@ async fn execute_with_timeout_retries(
     ))
 }
 
+/// Evaluate whether a completion panel has reached consensus.
+///
+/// Consensus requires both:
+/// - `complete_votes >= min_completers` (enough completers agree)
+/// - `complete_votes / total_completers >= consensus_threshold` (ratio meets threshold)
+///
+/// The threshold comparison is inclusive (>=).
+fn compute_completion_consensus(
+    complete_votes: u32,
+    total_completers: u32,
+    min_completers: u32,
+    consensus_threshold: f64,
+) -> bool {
+    complete_votes >= min_completers
+        && total_completers > 0
+        && (complete_votes as f64 / total_completers as f64) >= consensus_threshold
+}
+
 /// Compute the bootstrap hash for session reuse identity verification.
 #[allow(dead_code)]
 ///
@@ -6996,5 +7013,65 @@ mod tests {
         let hash = super::compute_bootstrap_hash("qa", "codex", "ph", "s", "t");
         assert!(!hash.is_empty());
         assert_eq!(hash.len(), 64, "sha256 hex output should be 64 chars");
+    }
+
+    // --- Completion panel consensus math tests ---
+
+    #[test]
+    fn consensus_unanimity_all_complete() {
+        // 2/2 complete, min=2, threshold=1.0 → true
+        assert!(super::compute_completion_consensus(2, 2, 2, 1.0));
+    }
+
+    #[test]
+    fn consensus_unanimity_one_missing() {
+        // 1/2 complete, min=2, threshold=1.0 → false (ratio 0.5 < 1.0)
+        assert!(!super::compute_completion_consensus(1, 2, 2, 1.0));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_half() {
+        // 1/2 complete, min=1, threshold=0.5 → true (1 >= 1, 0.5 >= 0.5)
+        assert!(super::compute_completion_consensus(1, 2, 1, 0.5));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_two_thirds() {
+        // 2/3 complete, min=1, threshold=0.67 → false (0.666... < 0.67)
+        assert!(!super::compute_completion_consensus(2, 3, 1, 0.67));
+        // 2/3 complete, min=1, threshold=0.66 → true (0.666... >= 0.66)
+        assert!(super::compute_completion_consensus(2, 3, 1, 0.66));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_three_quarters() {
+        // 3/4 complete, min=1, threshold=0.75 → true (0.75 >= 0.75, inclusive)
+        assert!(super::compute_completion_consensus(3, 4, 1, 0.75));
+        // 2/4 complete, min=1, threshold=0.75 → false (0.5 < 0.75)
+        assert!(!super::compute_completion_consensus(2, 4, 1, 0.75));
+    }
+
+    #[test]
+    fn consensus_insufficient_min_completers() {
+        // 1/2 complete, min=2, threshold=0.5 → false (1 < min=2)
+        assert!(!super::compute_completion_consensus(1, 2, 2, 0.5));
+    }
+
+    #[test]
+    fn consensus_zero_total_completers() {
+        // 0/0 → false (total is 0)
+        assert!(!super::compute_completion_consensus(0, 0, 1, 1.0));
+    }
+
+    #[test]
+    fn consensus_single_completer_complete() {
+        // 1/1 complete, min=1, threshold=1.0 → true
+        assert!(super::compute_completion_consensus(1, 1, 1, 1.0));
+    }
+
+    #[test]
+    fn consensus_single_completer_continue() {
+        // 0/1 complete, min=1, threshold=1.0 → false
+        assert!(!super::compute_completion_consensus(0, 1, 1, 1.0));
     }
 }

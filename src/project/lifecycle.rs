@@ -265,10 +265,28 @@ fn reconstruct_project_state_internal(
     let mut loop_dirs = collect_loop_directories(project_dir)?;
     loop_dirs.sort_by_key(|(number, _, _)| *number);
 
+    // Load project config to obtain completion consensus parameters for
+    // reconstruction.  Fall back to defaults if the config file is absent or
+    // unparseable (e.g. during the very first loop before config exists).
+    let project_config = ProjectConfig::load(&project_dir.join("config.toml")).ok();
+    let completion_min_completers = project_config
+        .as_ref()
+        .and_then(|c| c.workflow.completion_min_completers)
+        .unwrap_or(2);
+    let completion_consensus_threshold = project_config
+        .as_ref()
+        .and_then(|c| c.workflow.completion_consensus_threshold)
+        .unwrap_or(1.0);
+
     for (loop_number, loop_slug, loop_path) in loop_dirs {
         let artifacts = collect_loop_artifacts(project_dir, &loop_path)?;
         if loop_slug == "completion" {
-            let completion = reconstruct_completion_attempt(loop_number, artifacts);
+            let completion = reconstruct_completion_attempt(
+                loop_number,
+                artifacts,
+                completion_min_completers,
+                completion_consensus_threshold,
+            );
             state.completion_attempts.push(completion);
         } else {
             let feature = reconstruct_feature_loop(
@@ -638,6 +656,8 @@ fn reconstruct_feature_loop(
 fn reconstruct_completion_attempt(
     loop_number: u32,
     artifacts: Vec<ArtifactEntry>,
+    min_completers: u32,
+    consensus_threshold: f64,
 ) -> CompletionLoopState {
     let now = Utc::now();
     let started_at = artifacts
@@ -668,7 +688,7 @@ fn reconstruct_completion_attempt(
     {
         // New per-backend verdict layout: extract completers from each verdict artifact.
         let mut completers = Vec::new();
-        let mut all_complete = true;
+        let mut complete_votes: u32 = 0;
         let mut any_verdict = false;
         let mut latest_verdict: Option<&ArtifactEntry> = None;
         for v in &per_backend_verdicts {
@@ -680,8 +700,8 @@ fn reconstruct_completion_attempt(
             completers.push(backend);
             if let Some(pv) = parse_completion_verdict(&v.body) {
                 any_verdict = true;
-                if pv != CompletionVerdict::Complete {
-                    all_complete = false;
+                if pv == CompletionVerdict::Complete {
+                    complete_votes += 1;
                 }
             }
             latest_verdict = Some(match latest_verdict {
@@ -690,10 +710,18 @@ fn reconstruct_completion_attempt(
                 None => v,
             });
         }
-        let verdict = if any_verdict && all_complete {
-            Some(CompletionVerdict::Complete)
-        } else if any_verdict {
-            Some(CompletionVerdict::Continue)
+        // Apply the same consensus formula as the runtime orchestrator:
+        // complete_votes >= min_completers AND ratio >= threshold.
+        let total = per_backend_verdicts.len() as u32;
+        let verdict = if any_verdict {
+            let consensus_reached = complete_votes >= min_completers
+                && total > 0
+                && (complete_votes as f64 / total as f64) >= consensus_threshold;
+            if consensus_reached {
+                Some(CompletionVerdict::Complete)
+            } else {
+                Some(CompletionVerdict::Continue)
+            }
         } else {
             None
         };

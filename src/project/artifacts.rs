@@ -9,7 +9,7 @@ pub const ARTIFACT_TIMESTAMP_LEN: usize = 14;
 
 /// Sanitize a backend spec for use in filenames by replacing path-unsafe characters.
 /// e.g. `claude(model/v2)` → `claude-model-v2`
-fn slugify_backend(spec: &str) -> String {
+pub(crate) fn slugify_backend(spec: &str) -> String {
     let s: String = spec
         .chars()
         .map(|c| {
