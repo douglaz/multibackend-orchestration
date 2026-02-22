@@ -1329,6 +1329,97 @@ pub fn post_comment_with_marker_metadata(
     Ok(find_comment_with_marker(owner, repo, issue_number, marker)?)
 }
 
+/// Find a comment with the given marker string authored by the specified bot login.
+///
+/// Bot-scoped lookup: only matches comments where `author_login == bot_login`
+/// AND the body contains the marker string.  User-authored comments with the
+/// same marker text are ignored, preventing marker spoofing.
+pub fn find_bot_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    let comments = fetch_issue_comments(owner, repo, issue_number)?;
+    Ok(comments
+        .into_iter()
+        .find(|c| c.author_login == bot_login && c.body.contains(marker)))
+}
+
+/// Post a comment on an issue with a marker prefix, using bot-scoped idempotency.
+///
+/// Only considers existing bot-authored comments when checking for duplicate
+/// markers.  User-authored spoof markers are ignored.  Returns `Some(id)` of
+/// the posted (or existing bot) comment.
+pub fn post_bot_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<u64>> {
+    let meta =
+        post_bot_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text, bot_login)?;
+    Ok(meta.map(|c| c.id))
+}
+
+/// Post a comment on an issue with a marker prefix and return full structured
+/// metadata, using bot-scoped idempotency.
+///
+/// Only considers existing bot-authored comments when checking for duplicate
+/// markers.  User-authored spoof markers are ignored.
+pub fn post_bot_comment_with_marker_metadata(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    if let Some(existing) =
+        find_bot_comment_with_marker(owner, repo, issue_number, marker, bot_login)?
+    {
+        return Ok(Some(existing));
+    }
+
+    let full_body = format!("{marker}\n{body_text}");
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            &full_body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to post bot marker comment on {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue comment (bot-scoped) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    // Fetch back to get the full metadata of the newly posted comment.
+    Ok(find_bot_comment_with_marker(
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )?)
+}
+
 /// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
 pub fn ensure_prd_labels_best_effort(owner: &str, repo: &str) {
     use crate::daemon::interactive_prd::PRD_LABELS;
