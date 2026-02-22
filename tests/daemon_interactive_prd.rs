@@ -2356,6 +2356,165 @@ esac; exit 0
     );
 }
 
+// ---------------------------------------------------------------------------
+// Terminal save-failure recovery: failure path
+// ---------------------------------------------------------------------------
+
+/// When state save fails during the Failed transition (triggered by retry
+/// exhaustion), the issue must remain poll-visible (ralph:prd-active label
+/// not removed) so a subsequent daemon tick can retry.
+///
+/// This mirrors `terminal_save_failure_approval_path_keeps_issue_retryable`
+/// but targets the failure-exhaustion path instead.
+#[test]
+fn terminal_save_failure_failed_path_keeps_issue_retryable() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    // Seed state with error_count=2 in AwaitingFeedback.  The gh mock will
+    // return comments that trigger a revision attempt, and the revision
+    // backend will produce an incomplete spec (missing sections) to force
+    // an error on this tick.  error_count goes from 2→3, triggering
+    // transition_to_failed.  We then make the state dir read-only so the
+    // save inside transition_to_failed fails.
+    let state_dir = h.temp_dir.path().join("acme/widgets/.ralph/interactive-prd");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let state_path = state_dir.join("155.json");
+    let seed = serde_json::json!({
+        "issue_number": 155,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1550,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1552,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1551,
+        "error_count": 2,
+        "last_error": "previous error",
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let label_log = h.temp_dir.path().join("save_fail_failed_label.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    // gh mock: returns feedback comment to trigger revision, but the backend
+    // produces an error (empty output) which will cause section validation to
+    // fail, pushing error_count to 3.
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":155,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1550,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1551,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":1552,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:155:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1553,"author":{{"login":"alice"}},"body":"Please revise the summary.","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) echo "$@" >> "$LLOG"; exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Backend that returns empty output (triggers section validation failure)
+    let fail_backend = h
+        .write_mock_script("prd_fail_backend.sh", "#!/bin/sh\necho ''\n")
+        .expect("write fail backend");
+    h.setup_mock_backends_stable(&fail_backend)
+        .expect("setup fail backends");
+
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Make state directory read-only to force save failure in transition_to_failed
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o444);
+        std::fs::set_permissions(&state_dir, perms).expect("set read-only");
+    }
+
+    // Run one tick — backend error pushes error_count to 3, transition_to_failed
+    // tries to save but fails, state should remain non-terminal
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start");
+
+    // Restore write permissions for cleanup
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&state_dir, perms).expect("restore permissions");
+    }
+
+    // State file should still exist with pre-transition content because save failed
+    let state_raw = fs::read_to_string(&state_path).expect("state should still exist");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state");
+
+    // The state should NOT be Failed (save failed, so terminal state not persisted)
+    assert_ne!(
+        state.state,
+        PrdWorkflowState::Failed,
+        "state should not be Failed when save fails in transition_to_failed"
+    );
+    // The issue should still be retryable
+    assert!(
+        state.state == PrdWorkflowState::AwaitingFeedback,
+        "issue should remain in AwaitingFeedback: state={:?}",
+        state.state,
+    );
+}
+
 /// Resolve the absolute path to the `ralph` binary for integration tests.
 ///
 /// Uses a multi-layout strategy that works across Cargo, Nix, and cross-compile

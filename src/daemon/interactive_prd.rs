@@ -412,7 +412,7 @@ fn transition_pending_to_awaiting_answers(
 
     let result = get_or_fetch_bot_login(bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
-    finish_transition(config, state, result)
+    finish_transition(config, state, result, bot_login_cache)
 }
 
 fn do_pending_to_awaiting(
@@ -554,7 +554,7 @@ fn transition_awaiting_answers_to_awaiting_feedback(
 
     let result = get_or_fetch_bot_login(bot_login_cache)
         .and_then(|bot_login| do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login));
-    finish_transition(config, state, result)
+    finish_transition(config, state, result, bot_login_cache)
 }
 
 fn do_awaiting_answers_to_awaiting_feedback(
@@ -679,7 +679,7 @@ fn transition_awaiting_feedback(
 
     let result = get_or_fetch_bot_login(bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
-    finish_transition(config, state, result)
+    finish_transition(config, state, result, bot_login_cache)
 }
 
 fn do_awaiting_feedback(
@@ -849,10 +849,19 @@ fn do_approval_transition(
 
     // Save is the critical durability point.  If this fails, we must NOT
     // proceed to remove ralph:prd-active — the issue must stay visible.
-    // The error will be routed through retry accounting by finish_transition.
+    // We save INSIDE do_approval_transition so the label removal only
+    // happens after durable state persistence succeeds.
+    if let Err(save_err) = state.save(&config.data_dir) {
+        // Revert in-memory state so the caller sees a non-terminal failure
+        // that can be routed through retry accounting.
+        state.state = PrdWorkflowState::AwaitingFeedback;
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "failed to persist Done state for {owner}/{repo}#{issue_number}: {save_err}"
+        )));
+    }
 
-    // Now remove ralph:prd-active (issue will be polled via ralph:prd-done or
-    // terminal state file going forward).
+    // Save succeeded — now safe to remove ralph:prd-active (issue will be
+    // polled via ralph:prd-done or terminal state file going forward).
     github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
         |err| {
             RalphError::InteractivePrdFailed(format!(
@@ -983,11 +992,13 @@ fn finish_transition(
     config: &PrdPollConfig,
     state: &mut InteractivePrdState,
     result: Result<()>,
+    bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
     let should_fail = apply_transition_result(state, &result);
 
     if should_fail {
-        transition_to_failed(config, state)?;
+        let bot_login = bot_login_cache.as_deref();
+        transition_to_failed(config, state, bot_login)?;
     } else {
         // Attempt to save state.  If save fails, route the failure through
         // retry accounting so that terminal transitions are not silently lost
@@ -995,9 +1006,8 @@ fn finish_transition(
         if let Err(save_err) = state.save(&config.data_dir) {
             // If the transition itself succeeded but save failed, we need to
             // revert any terminal state so the issue remains retryable.
-            // For Done transitions: the state was already set to Done by
-            // do_approval_transition but the save didn't persist it, so the
-            // issue will be re-polled via ralph:prd-active label on next tick.
+            // For Done transitions: do_approval_transition already saved and
+            // reverted on failure, so state may already be AwaitingFeedback.
             // Revert the in-memory state to its pre-terminal value so retry
             // accounting sees it as a non-terminal error.
             let was_terminal = state.is_terminal();
@@ -1016,7 +1026,8 @@ fn finish_transition(
 
             if state.error_count >= 3 {
                 // Save failure exhaustion — transition to Failed
-                transition_to_failed(config, state)?;
+                let bot_login = bot_login_cache.as_deref();
+                transition_to_failed(config, state, bot_login)?;
             } else {
                 // Best-effort persist the error count so retry accounting
                 // survives daemon restart even when save is flaky.
@@ -1343,13 +1354,21 @@ fn run_backend_sync(
 /// removing `ralph:prd-active`/`ralph:prd`, ensuring the issue remains
 /// poll-visible if the save fails.  If save fails, labels are left intact
 /// so the issue can be retried on the next daemon tick.
-fn transition_to_failed(config: &PrdPollConfig, state: &mut InteractivePrdState) -> Result<()> {
+///
+/// When `bot_login` is available, uses bot-scoped marker posting so that
+/// user-spoofed failure markers cannot suppress the real status comment.
+/// Falls back to generic posting when bot identity is unavailable.
+fn transition_to_failed(
+    config: &PrdPollConfig,
+    state: &mut InteractivePrdState,
+    bot_login: Option<&str>,
+) -> Result<()> {
     let owner = &config.owner;
     let repo = &config.repo;
     let issue_number = state.issue_number;
 
-    // Post error comment marker (best-effort, uses generic non-bot-scoped
-    // since bot identity may be unavailable when we reach this path).
+    // Post error comment marker (best-effort).
+    // Bot-scoped when bot identity is available; generic fallback otherwise.
     let marker = format!("<!-- ralph:prd:{issue_number}:status-failed -->");
     let error_body = format!(
         "## PRD Workflow Failed\n\n\
@@ -1360,7 +1379,18 @@ fn transition_to_failed(config: &PrdPollConfig, state: &mut InteractivePrdState)
         state.last_error.as_deref().unwrap_or("unknown")
     );
 
-    let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &error_body);
+    if let Some(login) = bot_login {
+        let _ = github::post_bot_comment_with_marker(
+            owner,
+            repo,
+            issue_number,
+            &marker,
+            &error_body,
+            login,
+        );
+    } else {
+        let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &error_body);
+    }
 
     // Add ralph:prd-failed BEFORE removing ralph:prd-active (boundary-safe ordering).
     let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-failed");

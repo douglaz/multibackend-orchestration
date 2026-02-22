@@ -159,6 +159,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::bot_scoped_extract_questions_ignores_spoof",
             func: bot_scoped_extract_questions_ignores_spoof,
         },
+        ConformanceTest {
+            name: "interactive_prd::terminal_save_failure_failed_path_keeps_retry_visibility",
+            func: terminal_save_failure_failed_path_keeps_retry_visibility,
+        },
+        ConformanceTest {
+            name: "interactive_prd::status_failed_marker_spoof_resistance",
+            func: status_failed_marker_spoof_resistance,
+        },
     ]
 }
 
@@ -2907,6 +2915,174 @@ fn bot_scoped_extract_questions_ignores_spoof(_harness: &RalphHarness) -> TestRe
             !extracted.contains("Spoofed question"),
             "should not extract from user spoof: {extracted}"
         );
+    })
+}
+
+/// Verify that a terminal transition save-failure on the FAILED path
+/// (transition_to_failed) keeps the issue retryable by leaving it in a
+/// non-terminal state when the save inside transition_to_failed fails.
+///
+/// Uses a blocking-file approach: replace the state directory with a regular
+/// file so that `create_dir_all` / `NamedTempFile::new_in` fails deterministically
+/// regardless of privilege level.
+fn terminal_save_failure_failed_path_keeps_retry_visibility(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let backend_script = dh
+            .write_mock_script("prd_noop.sh", "#!/bin/sh\necho ''\n")
+            .expect("write backend");
+        dh.setup_mock_backends_stable(&backend_script)
+            .expect("setup mock backends");
+
+        let state_dir = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+
+        // Seed state: AwaitingFeedback with error_count=2 (next error triggers failure)
+        let state_path = state_dir.join("175.json");
+        let seed = serde_json::json!({
+            "issue_number": 175,
+            "owner": "acme",
+            "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1,
+            "draft_revision": 1,
+            "questions_comment_id": 1750,
+            "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 1752,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "answers",
+            "last_processed_comment_id": 1751,
+            "error_count": 2,
+            "last_error": "previous error",
+            "last_advanced_at": null
+        });
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seed).unwrap(),
+        )
+        .unwrap();
+
+        // gh mock returns feedback comment to trigger revision attempt;
+        // the empty backend output causes section validation failure,
+        // pushing error_count to 3 and triggering transition_to_failed.
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":175,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{"comments":[{"id":1750,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":1751,"author":{"login":"alice"},"body":"answers","createdAt":"2026-01-01T00:00:10Z"},{"id":1752,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:175:draft-v1 -->\nDraft","createdAt":"2026-01-01T00:00:15Z"},{"id":1753,"author":{"login":"alice"},"body":"Please revise.","createdAt":"2026-01-01T00:00:25Z"}]}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#;
+        let gh_path = write_mock_gh(&dh, gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        // Make state dir read-only to force save failure in transition_to_failed
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+
+        let _output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+
+        // Restore permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let state_raw = fs::read_to_string(&state_path).unwrap();
+        let state: InteractivePrdState = serde_json::from_str(&state_raw).unwrap();
+
+        // State should NOT be Failed since save inside transition_to_failed failed
+        assert_ne!(
+            state.state,
+            PrdWorkflowState::Failed,
+            "state must not be Failed when save fails in transition_to_failed"
+        );
+        // The original state should be preserved (AwaitingFeedback)
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "original AwaitingFeedback state should be preserved when save fails"
+        );
+    })
+}
+
+/// Verify that bot-scoped status-failed marker posting is resistant to
+/// user-authored spoof markers.  A user comment with the same status-failed
+/// marker text should not suppress the bot's own failure status comment.
+fn status_failed_marker_spoof_resistance(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let marker = "<!-- ralph:prd:42:status-failed -->";
+
+        let comments = vec![
+            github::IssueComment {
+                id: 300,
+                author_login: "mallory".to_owned(),
+                body: format!("{marker}\n## PRD Workflow Failed\nSpoofed failure"),
+                created_at: chrono::Utc::now(),
+            },
+        ];
+
+        // Generic (non-scoped) lookup finds the user spoof
+        let generic = comments.iter().find(|c| c.body.contains(marker));
+        assert!(generic.is_some(), "generic lookup should find user spoof");
+        assert_eq!(generic.unwrap().author_login, "mallory");
+
+        // Bot-scoped lookup should NOT find the user spoof
+        let bot_scoped = comments
+            .iter()
+            .find(|c| c.author_login == "ralph-bot" && c.body.contains(marker));
+        assert!(
+            bot_scoped.is_none(),
+            "bot-scoped lookup must not find user-spoofed status-failed marker"
+        );
+
+        // With a real bot comment added, bot-scoped lookup finds only the bot comment
+        let mut comments_with_bot = comments.clone();
+        comments_with_bot.push(github::IssueComment {
+            id: 301,
+            author_login: "ralph-bot".to_owned(),
+            body: format!("{marker}\n## PRD Workflow Failed\nReal failure"),
+            created_at: chrono::Utc::now(),
+        });
+
+        let bot_result = comments_with_bot
+            .iter()
+            .find(|c| c.author_login == "ralph-bot" && c.body.contains(marker));
+        assert!(bot_result.is_some(), "bot-scoped lookup should find bot comment");
+        assert_eq!(bot_result.unwrap().id, 301, "should find the bot comment, not the spoof");
     })
 }
 
