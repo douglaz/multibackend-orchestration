@@ -87,6 +87,12 @@ pub struct EffectiveDaemonConfig {
     pub max_rebases_per_cycle: u32,
     pub rebase_timeout_seconds: u64,
     pub rebase_agent_backend: String,
+    pub prd_enabled: bool,
+    pub prd_question_backends: Vec<String>,
+    pub prd_writer_backend: String,
+    pub prd_reviewer_backend: String,
+    pub prd_max_revisions: u32,
+    pub prd_backend_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +113,7 @@ pub fn resolve_effective_config(
 ) -> Result<EffectiveConfig> {
     let project_ref = project.as_ref();
     let daemon = resolve_daemon_config(&global, project_ref);
+    validate_interactive_prd_workspace_config(&global)?;
 
     let starting_backend = if let Some(override_backend) = run_overrides.starting_backend {
         override_backend.to_owned()
@@ -368,6 +375,12 @@ pub fn resolve_daemon_config(
         rebase_agent_backend: daemon_overrides
             .and_then(|cfg| cfg.rebase_agent_backend.clone())
             .unwrap_or_else(|| global.workspace.daemon_rebase_agent_backend.clone()),
+        prd_enabled: global.workspace.daemon_prd_enabled,
+        prd_question_backends: global.workspace.daemon_prd_question_backends.clone(),
+        prd_writer_backend: global.workspace.daemon_prd_writer_backend.clone(),
+        prd_reviewer_backend: global.workspace.daemon_prd_reviewer_backend.clone(),
+        prd_max_revisions: global.workspace.daemon_prd_max_revisions,
+        prd_backend_timeout_secs: global.workspace.daemon_prd_backend_timeout_secs,
     }
 }
 
@@ -402,6 +415,37 @@ fn validate_backend_spec(global: &GlobalConfig, backend_spec: &str, label: &str)
             "unknown backend configured as {label}: {backend_spec}"
         )));
     }
+    Ok(())
+}
+
+fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Result<()> {
+    let workspace = &global.workspace;
+    if workspace.daemon_prd_question_backends.len() != 2 {
+        return Err(RalphError::Validation(format!(
+            "workspace.daemon_prd_question_backends must contain exactly 2 backend specs, got {}",
+            workspace.daemon_prd_question_backends.len()
+        )));
+    }
+
+    for (index, backend_spec) in workspace.daemon_prd_question_backends.iter().enumerate() {
+        validate_backend_spec(
+            global,
+            backend_spec,
+            &format!("workspace.daemon_prd_question_backends[{index}]"),
+        )?;
+    }
+
+    validate_backend_spec(
+        global,
+        &workspace.daemon_prd_writer_backend,
+        "workspace.daemon_prd_writer_backend",
+    )?;
+    validate_backend_spec(
+        global,
+        &workspace.daemon_prd_reviewer_backend,
+        "workspace.daemon_prd_reviewer_backend",
+    )?;
+
     Ok(())
 }
 
@@ -687,6 +731,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_effective_config_rejects_invalid_prd_question_backend_count() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_prd_question_backends = vec!["claude".to_owned()];
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("invalid PRD backend count should fail");
+
+        assert!(error.to_string().contains(
+            "workspace.daemon_prd_question_backends must contain exactly 2 backend specs"
+        ));
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_invalid_prd_backend_specs() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_prd_question_backends = vec![
+            "claude(opus)".to_owned(),
+            "codex(gpt-5.3-codex-high)".to_owned(),
+        ];
+        global.workspace.daemon_prd_writer_backend = "unknown(model)".to_owned();
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("invalid writer backend should fail");
+
+        assert!(error
+            .to_string()
+            .contains("unknown backend configured as workspace.daemon_prd_writer_backend"));
+    }
+
+    #[test]
     fn resolve_daemon_config_applies_project_overrides_over_workspace_defaults() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_poll_seconds = 60;
@@ -700,6 +786,15 @@ mod tests {
         global.workspace.daemon_max_rebases_per_cycle = 3;
         global.workspace.daemon_rebase_timeout_seconds = 120;
         global.workspace.daemon_rebase_agent_backend = "claude(opus)".to_owned();
+        global.workspace.daemon_prd_enabled = true;
+        global.workspace.daemon_prd_question_backends = vec![
+            "claude(opus)".to_owned(),
+            "codex(gpt-5.3-codex-high)".to_owned(),
+        ];
+        global.workspace.daemon_prd_writer_backend = "claude".to_owned();
+        global.workspace.daemon_prd_reviewer_backend = "codex".to_owned();
+        global.workspace.daemon_prd_max_revisions = 3;
+        global.workspace.daemon_prd_backend_timeout_secs = 120;
 
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
@@ -730,6 +825,18 @@ mod tests {
         assert_eq!(effective.max_rebases_per_cycle, 5);
         assert_eq!(effective.rebase_timeout_seconds, 240);
         assert_eq!(effective.rebase_agent_backend, "none");
+        assert!(effective.prd_enabled);
+        assert_eq!(
+            effective.prd_question_backends,
+            vec![
+                "claude(opus)".to_owned(),
+                "codex(gpt-5.3-codex-high)".to_owned()
+            ]
+        );
+        assert_eq!(effective.prd_writer_backend, "claude");
+        assert_eq!(effective.prd_reviewer_backend, "codex");
+        assert_eq!(effective.prd_max_revisions, 3);
+        assert_eq!(effective.prd_backend_timeout_secs, 120);
 
         let no_project = resolve_daemon_config(&global, None);
         assert_eq!(no_project.poll_seconds, 60);
@@ -743,6 +850,18 @@ mod tests {
         assert_eq!(no_project.max_rebases_per_cycle, 3);
         assert_eq!(no_project.rebase_timeout_seconds, 120);
         assert_eq!(no_project.rebase_agent_backend, "claude(opus)");
+        assert!(no_project.prd_enabled);
+        assert_eq!(
+            no_project.prd_question_backends,
+            vec![
+                "claude(opus)".to_owned(),
+                "codex(gpt-5.3-codex-high)".to_owned()
+            ]
+        );
+        assert_eq!(no_project.prd_writer_backend, "claude");
+        assert_eq!(no_project.prd_reviewer_backend, "codex");
+        assert_eq!(no_project.prd_max_revisions, 3);
+        assert_eq!(no_project.prd_backend_timeout_secs, 120);
     }
 
     #[test]

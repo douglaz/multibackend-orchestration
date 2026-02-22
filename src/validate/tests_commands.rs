@@ -285,9 +285,7 @@ fn rollback_resets_phase(h: &RalphHarness) -> TestResult {
         // With checkpoint-based state derivation, the rollback removes loop
         // artifacts but checkpoint commits on the remote may still influence
         // reconstruction.  Verify the no-checkpoint baseline tuple.
-        let loops = state["loops"]
-            .as_array()
-            .expect("loops should be an array");
+        let loops = state["loops"].as_array().expect("loops should be an array");
         assert!(
             loops.is_empty(),
             "expected no loops after rollback to 0, got {}",
@@ -557,8 +555,12 @@ fn exit_code_project_not_found(h: &RalphHarness) -> TestResult {
 fn no_checkpoint_status_defaults(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
-        h.create_project("nochk-status", "No Checkpoint Status", "No checkpoint status prompt")
-            .expect("create_project failed");
+        h.create_project(
+            "nochk-status",
+            "No Checkpoint Status",
+            "No checkpoint status prompt",
+        )
+        .expect("create_project failed");
 
         // No `ralph run` — no checkpoint commits exist.
         let output = h.ralph(["status"]).expect("ralph status should execute");
@@ -585,8 +587,12 @@ fn no_checkpoint_status_defaults(h: &RalphHarness) -> TestResult {
 fn no_checkpoint_history_defaults(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
-        h.create_project("nochk-history", "No Checkpoint History", "No checkpoint history prompt")
-            .expect("create_project failed");
+        h.create_project(
+            "nochk-history",
+            "No Checkpoint History",
+            "No checkpoint history prompt",
+        )
+        .expect("create_project failed");
 
         // No `ralph run` — no checkpoint commits exist.
         let output = h.ralph(["history"]).expect("ralph history should execute");

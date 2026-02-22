@@ -103,10 +103,7 @@ pub(crate) fn read_porcelain_status(workdir: &Path) -> Result<String> {
 }
 
 /// Check if there are any unresolved merge conflicts, bounded by a timeout.
-pub fn has_conflicts_with_timeout(
-    workdir: &Path,
-    timeout: std::time::Duration,
-) -> Result<bool> {
+pub fn has_conflicts_with_timeout(workdir: &Path, timeout: std::time::Duration) -> Result<bool> {
     ensure_git_repo(workdir)?;
     let output = crate::daemon::process::run_command_with_timeout(
         Command::new("git")

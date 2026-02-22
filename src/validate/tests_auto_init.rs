@@ -2,9 +2,7 @@ use std::fs;
 
 use super::*;
 
-use crate::validate::assertions::{
-    assert_dir_exists, assert_exit_code, assert_file_exists,
-};
+use crate::validate::assertions::{assert_dir_exists, assert_exit_code, assert_file_exists};
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::auto_mock_script;
 

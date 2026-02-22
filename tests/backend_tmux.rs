@@ -912,13 +912,7 @@ async fn tmux_backend_success_does_not_write_loop_dir_log_artifact() {
         Duration::from_secs(5),
         BTreeMap::new(),
     );
-    let backend = TmuxBackend::new(
-        cli,
-        "log-test-session".to_owned(),
-        runner,
-        0,
-        shared_ctx,
-    );
+    let backend = TmuxBackend::new(cli, "log-test-session".to_owned(), runner, 0, shared_ctx);
 
     let watcher = spawn_file_watcher("log-test-session", "hello from tmux", 0);
     let result = backend.execute("test prompt").await;
@@ -938,10 +932,7 @@ async fn tmux_backend_success_does_not_write_loop_dir_log_artifact() {
     assert!(
         entries.is_empty(),
         "tmux backend must NOT write agent-output-*.log to loop dir; found: {:?}",
-        entries
-            .iter()
-            .map(|e| e.file_name())
-            .collect::<Vec<_>>()
+        entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 }
 
@@ -971,13 +962,7 @@ async fn tmux_backend_failure_does_not_write_loop_dir_log_artifact() {
         Duration::from_secs(5),
         BTreeMap::new(),
     );
-    let backend = TmuxBackend::new(
-        cli,
-        "log-fail-session".to_owned(),
-        runner,
-        0,
-        shared_ctx,
-    );
+    let backend = TmuxBackend::new(cli, "log-fail-session".to_owned(), runner, 0, shared_ctx);
 
     let watcher = spawn_file_watcher("log-fail-session", "error output", 1);
     let result = backend.execute("test prompt").await;
@@ -997,9 +982,6 @@ async fn tmux_backend_failure_does_not_write_loop_dir_log_artifact() {
     assert!(
         entries.is_empty(),
         "tmux backend must NOT write agent-output-*.log to loop dir on failure; found: {:?}",
-        entries
-            .iter()
-            .map(|e| e.file_name())
-            .collect::<Vec<_>>()
+        entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
     );
 }

@@ -564,7 +564,6 @@ fn extract_logged_body(log_content: &str) -> Option<String> {
     Some(tail[..end].to_owned())
 }
 
-
 fn run_case<F>(f: F) -> TestResult
 where
     F: FnOnce(),

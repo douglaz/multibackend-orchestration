@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 use super::*;
 
 use crate::daemon::rebase_agent::{
-    build_agent_prompt, classify_rebase_failure, is_rebase_in_progress,
-    parse_rebase_agent_backend, resolve_rebase_conflicts, RebaseAgentBackend,
-    RebaseFailureKind,
+    build_agent_prompt, classify_rebase_failure, is_rebase_in_progress, parse_rebase_agent_backend,
+    resolve_rebase_conflicts, RebaseAgentBackend, RebaseFailureKind,
 };
 use crate::validate::harness::RalphHarness;
 

@@ -244,15 +244,14 @@ fn reconstruct_project_state_internal(
     state.prompt_hash = baseline_prompt_hash.clone();
     state.prompt_hash_at_loop_start = baseline_prompt_hash;
 
-    let (checkpoint_loop, checkpoint_phase, checkpoint_commits) =
-        match (repo_root, branch) {
-            (Some(root), Some(branch_name)) if is_git_repo(root) => {
-                let (loop_number, phase) = derive_position(root, branch_name)?;
-                let commits = list_ralph_commits(root, branch_name)?;
-                (loop_number, phase, commits)
-            }
-            _ => (1, Phase::Planning, Vec::new()),
-        };
+    let (checkpoint_loop, checkpoint_phase, checkpoint_commits) = match (repo_root, branch) {
+        (Some(root), Some(branch_name)) if is_git_repo(root) => {
+            let (loop_number, phase) = derive_position(root, branch_name)?;
+            let commits = list_ralph_commits(root, branch_name)?;
+            (loop_number, phase, commits)
+        }
+        _ => (1, Phase::Planning, Vec::new()),
+    };
 
     let mut commit_by_loop: HashMap<u32, String> = HashMap::new();
     for commit in &checkpoint_commits {
@@ -282,7 +281,8 @@ fn reconstruct_project_state_internal(
         }
     }
 
-    state.prompt_review_completed = state_has_prompt_review(project_dir) || state.last_loop_number() > 0;
+    state.prompt_review_completed =
+        state_has_prompt_review(project_dir) || state.last_loop_number() > 0;
 
     // Position is always derived from checkpoint commits (no artifact-based
     // fallback).  When no checkpoint exists, derive_position defaults to
@@ -301,7 +301,11 @@ fn reconstruct_project_state_internal(
     // "committing -> planning" transition proves the loop completed.  Also
     // skip in non-git contexts where checkpoint_commits is empty.
     if !checkpoint_commits.is_empty() && checkpoint_phase != Phase::Planning {
-        if let Some(current) = state.loops.iter_mut().find(|l| l.loop_number == checkpoint_loop) {
+        if let Some(current) = state
+            .loops
+            .iter_mut()
+            .find(|l| l.loop_number == checkpoint_loop)
+        {
             if current.status == LoopStatus::Completed {
                 current.status = LoopStatus::InProgress;
             }
@@ -493,7 +497,9 @@ fn reconstruct_feature_loop(
 
     let spec = latest_artifact(&artifacts, |artifact| artifact.base_name == "spec.md");
     let impl_notes = latest_artifact(&artifacts, |artifact| artifact.base_name == "impl-notes.md");
-    let approval = latest_artifact(&artifacts, |artifact| artifact.base_name == "review-approved.md");
+    let approval = latest_artifact(&artifacts, |artifact| {
+        artifact.base_name == "review-approved.md"
+    });
 
     let mut review_feedback: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
     let mut impl_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
@@ -521,9 +527,7 @@ fn reconstruct_feature_loop(
             continue;
         }
 
-        if let Some(iteration) =
-            parse_iteration(&artifact.base_name, "impl-qa-response-", ".md")
-        {
+        if let Some(iteration) = parse_iteration(&artifact.base_name, "impl-qa-response-", ".md") {
             qa_responses.insert(iteration, artifact);
         }
     }
@@ -545,7 +549,9 @@ fn reconstruct_feature_loop(
             iteration: *iteration,
             passed: *passed,
             report: report.rel_path.clone(),
-            implementer_response: qa_responses.get(iteration).map(|entry| entry.rel_path.clone()),
+            implementer_response: qa_responses
+                .get(iteration)
+                .map(|entry| entry.rel_path.clone()),
         });
     }
 
@@ -629,7 +635,10 @@ fn reconstruct_feature_loop(
     }
 }
 
-fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry>) -> CompletionLoopState {
+fn reconstruct_completion_attempt(
+    loop_number: u32,
+    artifacts: Vec<ArtifactEntry>,
+) -> CompletionLoopState {
     let now = Utc::now();
     let started_at = artifacts
         .iter()
@@ -637,12 +646,18 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
         .min()
         .unwrap_or(now);
 
-    let termination = latest_artifact(&artifacts, |artifact| artifact.base_name == "termination-request.md");
-    let verdict = latest_artifact(&artifacts, |artifact| artifact.base_name == "completer-verdict.md");
+    let termination = latest_artifact(&artifacts, |artifact| {
+        artifact.base_name == "termination-request.md"
+    });
+    let verdict = latest_artifact(&artifacts, |artifact| {
+        artifact.base_name == "completer-verdict.md"
+    });
 
     let mut acceptance_results = Vec::new();
     for artifact in &artifacts {
-        if artifact.base_name.starts_with("acceptance-pass") || artifact.base_name == "acceptance-pass.md" {
+        if artifact.base_name.starts_with("acceptance-pass")
+            || artifact.base_name == "acceptance-pass.md"
+        {
             acceptance_results.push(AcceptanceQaResult {
                 backend: artifact
                     .frontmatter
@@ -655,7 +670,9 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
             continue;
         }
 
-        if artifact.base_name.starts_with("acceptance-fail") || artifact.base_name == "acceptance-fail.md" {
+        if artifact.base_name.starts_with("acceptance-fail")
+            || artifact.base_name == "acceptance-fail.md"
+        {
             acceptance_results.push(AcceptanceQaResult {
                 backend: artifact
                     .frontmatter
@@ -673,9 +690,7 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
     // Apply acceptance gate: if the completer said COMPLETE but any acceptance
     // result failed, the effective verdict is CONTINUE.
     let completion_verdict = match completion_verdict {
-        Some(CompletionVerdict::Complete)
-            if acceptance_results.iter().any(|r| !r.passed) =>
-        {
+        Some(CompletionVerdict::Complete) if acceptance_results.iter().any(|r| !r.passed) => {
             Some(CompletionVerdict::Continue)
         }
         other => other,
@@ -703,7 +718,9 @@ fn reconstruct_completion_attempt(loop_number: u32, artifacts: Vec<ArtifactEntry
         artifacts: CompletionLoopArtifacts {
             termination_request: termination
                 .map(|artifact| artifact.rel_path.clone())
-                .unwrap_or_else(|| format!("loops/{loop_number:03}-completion/termination-request.md")),
+                .unwrap_or_else(|| {
+                    format!("loops/{loop_number:03}-completion/termination-request.md")
+                }),
             verdict: verdict.map(|artifact| artifact.rel_path.clone()),
             acceptance_results,
             acceptance_result: None,
@@ -733,7 +750,13 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
         Phase::Implementing => {
             if let Some(pending) = &feature_loop.artifacts.pending_qa_feedback {
                 return parse_iteration_from_path(pending, "qa-")
-                    .or_else(|| feature_loop.artifacts.qa_results.last().map(|qa| qa.iteration))
+                    .or_else(|| {
+                        feature_loop
+                            .artifacts
+                            .qa_results
+                            .last()
+                            .map(|qa| qa.iteration)
+                    })
                     .unwrap_or(1);
             }
 

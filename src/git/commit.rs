@@ -163,10 +163,7 @@ pub fn commit_and_push_phase_transition(
     }
     run_git(repo_root, &commit_args)?;
 
-    run_git(
-        repo_root,
-        &["push", "origin", &format!("HEAD:{branch}")],
-    )?;
+    run_git(repo_root, &["push", "origin", &format!("HEAD:{branch}")])?;
 
     Ok(())
 }
@@ -181,13 +178,7 @@ pub fn count_phase_transition_checkpoints(
     let needle = format!("chore({project_id}): checkpoint {from_phase} -> {to_phase}");
     let log = run_git(
         workdir,
-        &[
-            "log",
-            "--format=%s",
-            "--fixed-strings",
-            "--grep",
-            &needle,
-        ],
+        &["log", "--format=%s", "--fixed-strings", "--grep", &needle],
     )?;
 
     if log.trim().is_empty() {
@@ -328,7 +319,9 @@ mod tests {
 
     use tempfile::{tempdir, TempDir};
 
-    use super::{commit_and_push_phase_transition, commit_feature_loop, count_phase_transition_checkpoints};
+    use super::{
+        commit_and_push_phase_transition, commit_feature_loop, count_phase_transition_checkpoints,
+    };
     use crate::git::branch::sync_project_branch;
     use crate::git::ralph_commit::{build_ralph_commit_message, derive_position};
     use crate::project::state::Phase;

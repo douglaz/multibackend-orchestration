@@ -236,15 +236,11 @@ fn agent_output_artifacts(h: &RalphHarness) -> TestResult {
             "expected at least one agent-output log in tmp/logs; found: {log_files:?}"
         );
         assert!(
-            log_files
-                .iter()
-                .any(|name| name.contains("-implementer")),
+            log_files.iter().any(|name| name.contains("-implementer")),
             "expected implementer log in tmp/logs; found: {log_files:?}"
         );
         assert!(
-            log_files
-                .iter()
-                .any(|name| name.contains("-reviewer")),
+            log_files.iter().any(|name| name.contains("-reviewer")),
             "expected reviewer log in tmp/logs; found: {log_files:?}"
         );
 

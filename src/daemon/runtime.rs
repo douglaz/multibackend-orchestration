@@ -9,8 +9,7 @@ use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
 use crate::daemon::rebase_agent::{
-    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend,
-    RebaseFailureKind,
+    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend, RebaseFailureKind,
 };
 
 use crate::daemon::process;
@@ -1532,10 +1531,8 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
             let br = branch.clone();
             let timeout_dur = timeout;
             let backend_str = config.rebase_agent_backend.clone();
-            spawn_blocking_op(move || {
-                execute_rebase(&wt, &target, &br, timeout_dur, &backend_str)
-            })
-            .await
+            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend_str))
+                .await
         };
 
         // Clean up rebase worktree (best-effort)
@@ -1695,8 +1692,9 @@ fn execute_rebase(
                     RebaseAgentBackend::None => {
                         // Disabled: abort with bounded timeout and fail as before
                         bounded_abort(worktree_path);
-                        let stderr =
-                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                        let stderr = String::from_utf8_lossy(&rebase_output.stderr)
+                            .trim()
+                            .to_owned();
                         return Err(RalphError::Orchestration(format!(
                             "git rebase failed with merge conflicts (agent resolution was skipped/disabled): {stderr}"
                         )));
@@ -1719,7 +1717,9 @@ fn execute_rebase(
             RebaseFailureKind::Other => {
                 // Non-conflict failure: abort with bounded timeout and return error
                 bounded_abort(worktree_path);
-                let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                let stderr = String::from_utf8_lossy(&rebase_output.stderr)
+                    .trim()
+                    .to_owned();
                 return Err(RalphError::Orchestration(format!(
                     "git rebase failed: {stderr}"
                 )));
@@ -2320,10 +2320,7 @@ mod tests {
     }
 
     fn write_quick_prd(worktree_path: &std::path::Path, slug: &str, content: &str) -> PathBuf {
-        let cache_dir = worktree_path
-            .join(".ralph")
-            .join("quick-prd")
-            .join(slug);
+        let cache_dir = worktree_path.join(".ralph").join("quick-prd").join(slug);
         std::fs::create_dir_all(&cache_dir).expect("create spec dir");
         let spec_path = cache_dir.join("SPEC.md");
         std::fs::write(&spec_path, content).expect("write spec");

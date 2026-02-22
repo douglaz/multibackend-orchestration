@@ -308,12 +308,8 @@ fn stable_mock_with_modeled_backend(h: &RalphHarness) -> TestResult {
             .expect("failed to write mock script");
         h.setup_mock_backends_stable(&script)
             .expect("setup_mock_backends_stable failed");
-        h.create_project(
-            "issue-708",
-            "Stable Model Test",
-            "Stable model test prompt",
-        )
-        .expect("create_project failed");
+        h.create_project("issue-708", "Stable Model Test", "Stable model test prompt")
+            .expect("create_project failed");
 
         // Run a full loop — this invokes backends with modeled specs
         // (e.g. claude(opus) for planner) which inject --model flags.

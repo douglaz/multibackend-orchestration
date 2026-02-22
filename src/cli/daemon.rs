@@ -301,10 +301,7 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
 
         if !found_any {
             println!("DAEMON ISSUES");
-            println!(
-                "{:<20} {:<8} {:<30}",
-                "REPO", "ISSUE", "LIFECYCLE LABELS"
-            );
+            println!("{:<20} {:<8} {:<30}", "REPO", "ISSUE", "LIFECYCLE LABELS");
             found_any = true;
         }
 
@@ -329,15 +326,12 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
 /// Abort: kill child (if running locally) and swap label to `ralph:failed`.
 fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
-        RalphError::Validation(format!(
-            "invalid issue number: {}",
-            args.issue_number
-        ))
+        RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
 
-    let slug = args.repo.ok_or_else(|| {
-        RalphError::Validation("--repo is required for abort".to_owned())
-    })?;
+    let slug = args
+        .repo
+        .ok_or_else(|| RalphError::Validation("--repo is required for abort".to_owned()))?;
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
     // Verify the issue is currently in-progress
@@ -360,15 +354,12 @@ fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
 
 fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
-        RalphError::Validation(format!(
-            "invalid issue number: {}",
-            args.issue_number
-        ))
+        RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
 
-    let slug = args.repo.ok_or_else(|| {
-        RalphError::Validation("--repo is required for retrigger".to_owned())
-    })?;
+    let slug = args
+        .repo
+        .ok_or_else(|| RalphError::Validation("--repo is required for retrigger".to_owned()))?;
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
     retrigger_failed_task(&owner, &repo_name, issue_number)?;

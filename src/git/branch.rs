@@ -134,7 +134,11 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     if remote_ref_exists(repo_root, &remote_branch)? {
         // Remote branch exists — force-reset local branch to match remote.
         // This discards any local-only diverged commits.
-        run_git(repo_root, &["checkout", "--force", "-B", &branch, &remote_branch]).map_err(|err| {
+        run_git(
+            repo_root,
+            &["checkout", "--force", "-B", &branch, &remote_branch],
+        )
+        .map_err(|err| {
             RalphError::Orchestration(format!(
                 "sync_project_branch: git checkout -B {branch} {remote_branch} failed \
                  for issue {issue_number}: {err}"
@@ -400,7 +404,11 @@ mod tests {
         git_ok(&bare_dir, &["branch", "-D", &base_branch]);
         git_ok(
             &clone_dir,
-            &["update-ref", "-d", &format!("refs/remotes/{origin_base_ref}")],
+            &[
+                "update-ref",
+                "-d",
+                &format!("refs/remotes/{origin_base_ref}"),
+            ],
         );
 
         let result = sync_project_branch(&clone_dir, 7, &base_branch);
@@ -476,10 +484,8 @@ mod tests {
         git_ok(&clone_dir, &["add", "-A"]);
         git_ok(&clone_dir, &["commit", "-m", "advance remote base"]);
         git_ok(&clone_dir, &["push", "origin", &base_branch]);
-        let remote_base_sha = git_output(
-            &clone_dir,
-            &["rev-parse", &format!("origin/{base_branch}")],
-        );
+        let remote_base_sha =
+            git_output(&clone_dir, &["rev-parse", &format!("origin/{base_branch}")]);
 
         git_ok(&clone_dir, &["reset", "--hard", &stale_sha]);
         let local_base_before = git_output(&clone_dir, &["rev-parse", &base_branch]);
@@ -492,10 +498,8 @@ mod tests {
         sync_project_branch(&clone_dir, 500, &base_branch).expect("sync should succeed");
 
         let local_base_after = git_output(&clone_dir, &["rev-parse", &base_branch]);
-        let remote_base_after = git_output(
-            &clone_dir,
-            &["rev-parse", &format!("origin/{base_branch}")],
-        );
+        let remote_base_after =
+            git_output(&clone_dir, &["rev-parse", &format!("origin/{base_branch}")]);
         assert_eq!(
             local_base_after, remote_base_after,
             "sync should force-update local base branch to remote base"

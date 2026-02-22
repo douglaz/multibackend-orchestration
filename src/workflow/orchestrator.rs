@@ -19,8 +19,7 @@ use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
-    reset_and_clean_working_tree, rev_parse,
-    stage_implementation_changes,
+    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::{is_git_repo, run_git};
@@ -3079,7 +3078,8 @@ async fn run_final_review_phase(
     let planner_backend_name = completion.backends.planner.clone();
 
     let reviewers = normalize_final_review_backends(&effective.workflow.final_review_backends)?;
-    let arbiter_backend = canonicalize_backend_spec(&effective.workflow.final_review_arbiter_backend)?;
+    let arbiter_backend =
+        canonicalize_backend_spec(&effective.workflow.final_review_arbiter_backend)?;
     let snapshot = FinalReviewConfigSnapshot {
         reviewers: reviewers.clone(),
         arbiter_backend: arbiter_backend.clone(),
@@ -3352,11 +3352,7 @@ async fn run_final_review_phase(
 
     let mut arbiter_accepted = BTreeSet::new();
     if !consensus.disputed.is_empty() {
-        let disputed_set = consensus
-            .disputed
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let disputed_set = consensus.disputed.iter().cloned().collect::<BTreeSet<_>>();
         let disputed_ids = disputed_set.iter().map(String::as_str).collect::<Vec<_>>();
         let disputed_prompt = build_arbiter_prompt(
             effective,
@@ -3372,7 +3368,8 @@ async fn run_final_review_phase(
             let raw = read_project_relative_file(project_dir, &rel)?;
             parse_arbiter_output(&raw, &disputed_ids)?
         } else {
-            let arbiter_backend_impl = registry.get_or_create_for_role(&arbiter_backend, "arbiter")?;
+            let arbiter_backend_impl =
+                registry.get_or_create_for_role(&arbiter_backend, "arbiter")?;
             registry
                 .set_tmux_context(TmuxExecutionContext {
                     loop_number: Some(loop_number),
@@ -3399,7 +3396,9 @@ async fn run_final_review_phase(
                 None,
                 |raw| parse_arbiter_output(raw, &disputed_ids),
                 &expected_format_template_for("arbiter", None),
-                registry.timeout_for_role(&arbiter_backend, "arbiter").as_secs(),
+                registry
+                    .timeout_for_role(&arbiter_backend, "arbiter")
+                    .as_secs(),
                 &mut arbiter_log,
                 None,
                 repo_root_ref,
@@ -3522,7 +3521,11 @@ fn final_review_restart_count_from_artifacts(project_dir: &Path) -> u32 {
     };
     let mut count = 0u32;
     for loop_entry in loop_entries.flatten() {
-        if !loop_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !loop_entry
+            .file_type()
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
         let Ok(files) = fs::read_dir(loop_entry.path()) else {
@@ -3909,7 +3912,10 @@ fn build_planner_position_prompt(
         opposite_backend,
     );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("proposed_amendments".to_owned(), proposed_amendments.to_owned());
+    vars.insert(
+        "proposed_amendments".to_owned(),
+        proposed_amendments.to_owned(),
+    );
     render_template_with_fallback(
         &effective.templates.planner_position,
         &vars,
@@ -3931,7 +3937,10 @@ fn build_vote_prompt(
         "final_reviewer",
         "planner",
     );
-    vars.insert("proposed_amendments".to_owned(), proposed_amendments.to_owned());
+    vars.insert(
+        "proposed_amendments".to_owned(),
+        proposed_amendments.to_owned(),
+    );
     vars.insert("planner_positions".to_owned(), planner_positions.to_owned());
     render_template_with_fallback(&effective.templates.vote, &vars, default_vote_template())
 }
@@ -3957,7 +3966,11 @@ fn build_arbiter_prompt(
     );
     vars.insert("planner_positions".to_owned(), planner_positions.to_owned());
     vars.insert("reviewer_votes".to_owned(), reviewer_votes.to_owned());
-    render_template_with_fallback(&effective.templates.arbiter, &vars, default_arbiter_template())
+    render_template_with_fallback(
+        &effective.templates.arbiter,
+        &vars,
+        default_arbiter_template(),
+    )
 }
 
 fn write_acceptance_backend_artifact(artifact_path: &Path, backend: &str) -> Result<PathBuf> {
@@ -4386,7 +4399,15 @@ fn checkpoint_phase_transition(
     }
 
     let branch = crate::git::branch::resolve_branch_name(branch_format, project_id);
-    commit_and_push_phase_transition(repo_root, project_id, loop_number, from_phase, to_phase, &branch, sign_commits)
+    commit_and_push_phase_transition(
+        repo_root,
+        project_id,
+        loop_number,
+        from_phase,
+        to_phase,
+        &branch,
+        sign_commits,
+    )
 }
 
 fn phase_label(phase: &Phase) -> &'static str {
@@ -6667,7 +6688,9 @@ mod tests {
         );
 
         assert!(
-            events[0].tokens_in_present && events[0].tokens_out_present && events[0].cached_in_present,
+            events[0].tokens_in_present
+                && events[0].tokens_out_present
+                && events[0].cached_in_present,
             "attempt 1 should mark all token fields present when structured usage is present"
         );
         assert_eq!(events[0].tokens_in, 11);
@@ -6675,9 +6698,7 @@ mod tests {
         assert_eq!(events[0].cached_in, 33);
         for event in events.iter().skip(1) {
             assert!(
-                !event.tokens_in_present
-                    && !event.tokens_out_present
-                    && !event.cached_in_present,
+                !event.tokens_in_present && !event.tokens_out_present && !event.cached_in_present,
                 "attempts without usage should report all token fields absent"
             );
             assert_eq!(event.tokens_in, 0);

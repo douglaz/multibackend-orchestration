@@ -313,18 +313,15 @@ fn resolve_loop(
     deadline: Instant,
 ) -> std::result::Result<(), AgentError> {
     for iteration in 0..MAX_ITERATIONS {
-        eprintln!(
-            "rebase-agent: iteration {}/{MAX_ITERATIONS}",
-            iteration + 1
-        );
+        eprintln!("rebase-agent: iteration {}/{MAX_ITERATIONS}", iteration + 1);
 
         // Step 1: Read conflicting files (with timeout)
         let files_budget = remaining_budget(
             deadline,
             &format!("conflicting_files (iteration {})", iteration + 1),
         )?;
-        let files = git::conflicting_files_with_timeout(worktree_path, files_budget)
-            .map_err(|e| {
+        let files =
+            git::conflicting_files_with_timeout(worktree_path, files_budget).map_err(|e| {
                 AgentError::SpawnFailed(format!("failed to read conflicting files: {e}"))
             })?;
 
@@ -371,14 +368,10 @@ fn resolve_loop(
             deadline,
             &format!("has_conflicts check (iteration {})", iteration + 1),
         )?;
-        let still_has_conflicts =
-            git::has_conflicts_with_timeout(worktree_path, verify_budget).map_err(
-                |e| {
-                    AgentError::SpawnFailed(format!(
-                        "failed to check conflicts after agent: {e}"
-                    ))
-                },
-            )?;
+        let still_has_conflicts = git::has_conflicts_with_timeout(worktree_path, verify_budget)
+            .map_err(|e| {
+                AgentError::SpawnFailed(format!("failed to check conflicts after agent: {e}"))
+            })?;
 
         if still_has_conflicts {
             return Err(AgentError::UnresolvedConflicts);
@@ -400,13 +393,10 @@ fn resolve_loop(
                     deadline,
                     &format!("post-continue conflict check (iteration {})", iteration + 1),
                 )?;
-                let new_conflicts =
-                    git::has_conflicts_with_timeout(worktree_path, check_budget)
-                        .map_err(|e| {
-                            AgentError::SpawnFailed(format!(
-                                "post-continue conflict check failed: {e}"
-                            ))
-                        })?;
+                let new_conflicts = git::has_conflicts_with_timeout(worktree_path, check_budget)
+                    .map_err(|e| {
+                        AgentError::SpawnFailed(format!("post-continue conflict check failed: {e}"))
+                    })?;
                 if new_conflicts {
                     eprintln!(
                         "rebase-agent: rebase --continue succeeded but new conflicts appeared, repeating loop"
@@ -423,13 +413,10 @@ fn resolve_loop(
                     deadline,
                     &format!("post-failure conflict check (iteration {})", iteration + 1),
                 )?;
-                let new_conflicts =
-                    git::has_conflicts_with_timeout(worktree_path, check_budget)
-                        .map_err(|e| {
-                            AgentError::SpawnFailed(format!(
-                                "post-failure conflict check failed: {e}"
-                            ))
-                        })?;
+                let new_conflicts = git::has_conflicts_with_timeout(worktree_path, check_budget)
+                    .map_err(|e| {
+                        AgentError::SpawnFailed(format!("post-failure conflict check failed: {e}"))
+                    })?;
                 if new_conflicts {
                     eprintln!(
                         "rebase-agent: rebase --continue produced new conflicts, repeating loop"
@@ -485,8 +472,8 @@ mod tests {
 
     use super::{
         build_agent_prompt, classify_rebase_failure, classify_rebase_failure_pure,
-        is_rebase_in_progress, parse_rebase_agent_backend, remaining_budget,
-        RebaseAgentBackend, RebaseFailureKind, MAX_ITERATIONS,
+        is_rebase_in_progress, parse_rebase_agent_backend, remaining_budget, RebaseAgentBackend,
+        RebaseFailureKind, MAX_ITERATIONS,
     };
 
     // ---- Backend parsing tests (from loop 1) ----
@@ -674,8 +661,7 @@ mod tests {
     fn resolve_with_none_backend_returns_error_via_string_entrypoint() {
         let repo = create_clean_repo();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let result =
-            super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
+        let result = super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
         assert!(result.is_err(), "none backend should return error");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -688,12 +674,8 @@ mod tests {
     fn resolve_with_invalid_backend_returns_clear_error() {
         let repo = create_clean_repo();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let result = super::resolve_rebase_conflicts(
-            repo.path(),
-            "origin/main",
-            "codex(gpt-5)",
-            deadline,
-        );
+        let result =
+            super::resolve_rebase_conflicts(repo.path(), "origin/main", "codex(gpt-5)", deadline);
         assert!(result.is_err(), "unsupported backend should return error");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -706,8 +688,7 @@ mod tests {
     fn resolve_with_empty_backend_returns_clear_error() {
         let repo = create_clean_repo();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let result =
-            super::resolve_rebase_conflicts(repo.path(), "origin/main", "  ", deadline);
+        let result = super::resolve_rebase_conflicts(repo.path(), "origin/main", "  ", deadline);
         assert!(result.is_err(), "empty backend should return error");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -784,8 +765,7 @@ mod tests {
     fn none_backend_error_says_skipped_disabled() {
         let repo = create_clean_repo();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let result =
-            super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
+        let result = super::resolve_rebase_conflicts(repo.path(), "origin/main", "none", deadline);
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("skipped/disabled"),
@@ -799,14 +779,18 @@ mod tests {
 
         let timeout_err = AgentError::Timeout("test".to_owned()).into_ralph_error();
         assert!(
-            timeout_err.to_string().contains("agent resolution was attempted"),
+            timeout_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "timeout error should say attempted: {}",
             timeout_err
         );
 
         let spawn_err = AgentError::SpawnFailed("test".to_owned()).into_ralph_error();
         assert!(
-            spawn_err.to_string().contains("agent resolution was attempted"),
+            spawn_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "spawn error should say attempted: {}",
             spawn_err
         );
@@ -818,29 +802,36 @@ mod tests {
         }
         .into_ralph_error();
         assert!(
-            nonzero_err.to_string().contains("agent resolution was attempted"),
+            nonzero_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "non-zero error should say attempted: {}",
             nonzero_err
         );
 
         let unresolved_err = AgentError::UnresolvedConflicts.into_ralph_error();
         assert!(
-            unresolved_err.to_string().contains("agent resolution was attempted"),
+            unresolved_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "unresolved error should say attempted: {}",
             unresolved_err
         );
 
         let cap_err = AgentError::IterationCapReached.into_ralph_error();
         assert!(
-            cap_err.to_string().contains("agent resolution was attempted"),
+            cap_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "iteration cap error should say attempted: {}",
             cap_err
         );
 
-        let continue_err =
-            AgentError::RebaseContinueFailed("test".to_owned()).into_ralph_error();
+        let continue_err = AgentError::RebaseContinueFailed("test".to_owned()).into_ralph_error();
         assert!(
-            continue_err.to_string().contains("agent resolution was attempted"),
+            continue_err
+                .to_string()
+                .contains("agent resolution was attempted"),
             "continue-failed error should say attempted: {}",
             continue_err
         );

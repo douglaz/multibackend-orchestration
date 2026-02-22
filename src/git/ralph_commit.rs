@@ -81,11 +81,8 @@ fn resolve_checkpoint_ref(repo_root: &Path, branch: &str) -> Result<Option<Strin
     )?
     .success();
 
-    let local_exists = run_git_status(
-        repo_root,
-        &["rev-parse", "--verify", "--quiet", branch],
-    )?
-    .success();
+    let local_exists =
+        run_git_status(repo_root, &["rev-parse", "--verify", "--quiet", branch])?.success();
 
     match (remote_exists, local_exists) {
         (false, false) => Ok(None),
@@ -133,7 +130,11 @@ pub fn parse_last_ralph_commit(repo_root: &Path, branch: &str) -> Result<Option<
 
     let log = run_git(
         repo_root,
-        &["log", checkpoint_ref.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
+        &[
+            "log",
+            checkpoint_ref.as_str(),
+            "--format=%H%x1f%s%x1f%b%x1e",
+        ],
     )?;
 
     for record in log.split('\x1e').filter(|entry| !entry.trim().is_empty()) {
@@ -174,7 +175,11 @@ pub fn list_ralph_commits(repo_root: &Path, branch: &str) -> Result<Vec<RalphCom
 
     let log = run_git(
         repo_root,
-        &["log", checkpoint_ref.as_str(), "--format=%H%x1f%s%x1f%b%x1e"],
+        &[
+            "log",
+            checkpoint_ref.as_str(),
+            "--format=%H%x1f%s%x1f%b%x1e",
+        ],
     )?;
 
     let mut commits = Vec::new();
@@ -604,13 +609,11 @@ mod tests {
         let (_temp, repo) = init_repo_with_remote();
 
         // Push loop-1 and loop-2 checkpoints to remote.
-        let msg1 =
-            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        let msg1 = build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
         commit_empty_with_message(&repo, &msg1);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 
-        let msg2 =
-            build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
+        let msg2 = build_ralph_commit_message("issue-42", 2, Phase::Implementing, Phase::Reviewing);
         commit_empty_with_message(&repo, &msg2);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 
@@ -619,7 +622,10 @@ mod tests {
 
         let (loop_number, phase) =
             derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
-        assert_eq!(loop_number, 2, "should read remote checkpoint when local is behind");
+        assert_eq!(
+            loop_number, 2,
+            "should read remote checkpoint when local is behind"
+        );
         assert_eq!(phase, Phase::Reviewing);
     }
 
@@ -651,7 +657,11 @@ mod tests {
         let (loop_number, phase) =
             derive_position(&repo, "ralph/issue-42").expect("derive_position should succeed");
         assert_eq!(loop_number, 2, "should read local checkpoint when diverged");
-        assert_eq!(phase, Phase::QA, "should prefer local diverged checkpoint over remote");
+        assert_eq!(
+            phase,
+            Phase::QA,
+            "should prefer local diverged checkpoint over remote"
+        );
     }
 
     /// When neither local nor remote branch exists, derive_position should
@@ -664,7 +674,11 @@ mod tests {
         let (loop_number, phase) =
             derive_position(&repo, "ralph/issue-999").expect("derive_position should succeed");
         assert_eq!(loop_number, 1, "no-ref default loop should be 1");
-        assert_eq!(phase, Phase::Planning, "no-ref default phase should be planning");
+        assert_eq!(
+            phase,
+            Phase::Planning,
+            "no-ref default phase should be planning"
+        );
     }
 
     /// When only remote branch exists (local not checked out),
@@ -674,8 +688,7 @@ mod tests {
         let (_temp, repo) = init_repo_with_remote();
 
         // Push a checkpoint on ralph/issue-42.
-        let msg =
-            build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
+        let msg = build_ralph_commit_message("issue-42", 1, Phase::Planning, Phase::Implementing);
         commit_empty_with_message(&repo, &msg);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/issue-42"]);
 

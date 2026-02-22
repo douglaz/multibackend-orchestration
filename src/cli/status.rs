@@ -1,5 +1,5 @@
-use std::fs;
 use std::collections::{BTreeSet, HashSet};
+use std::fs;
 use std::path::Path;
 
 use crate::cli::StatusArgs;
@@ -7,11 +7,11 @@ use crate::config::{resolve_effective_config, RunWorkflowOverrides};
 use crate::daemon::github::{classify_lifecycle_labels, fetch_issue_labels};
 use crate::git::commit::count_phase_transition_checkpoints;
 use crate::git::is_git_repo;
-use crate::project::load_project_config_if_exists;
 use crate::project::artifacts::resolve_artifact_path_by_suffix;
 use crate::project::lifecycle::{
     parse_github_repo_slug, parse_issue_number, project_git_context, reconstruct_project_state,
 };
+use crate::project::load_project_config_if_exists;
 use crate::project::state::ProjectStatus;
 use crate::workflow::parser::{
     parse_final_reviewer_output, parse_planner_position_output, parse_vote_output,
@@ -184,7 +184,10 @@ fn project_status_label(status: &crate::project::state::ProjectStatus) -> &'stat
     }
 }
 
-fn derive_project_status_from_labels(workspace: &Workspace, project_id: &str) -> Option<ProjectStatus> {
+fn derive_project_status_from_labels(
+    workspace: &Workspace,
+    project_id: &str,
+) -> Option<ProjectStatus> {
     let issue_number = parse_issue_number(project_id)?;
     let git_context = project_git_context(workspace, project_id)?;
     let (owner, repo) = parse_github_repo_slug(&git_context.repo_root)?;

@@ -949,12 +949,7 @@ pub fn swap_lifecycle_label(
 }
 
 /// Add a label with retry-on-conflict/transient-failure behavior.
-pub fn add_label_with_retry(
-    owner: &str,
-    repo: &str,
-    issue_number: u32,
-    label: &str,
-) -> Result<()> {
+pub fn add_label_with_retry(owner: &str, repo: &str, issue_number: u32, label: &str) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     for attempt in 0..LABEL_RETRY_MAX {
         let output = Command::new("gh")
@@ -1053,11 +1048,7 @@ pub fn remove_label_with_retry(
 }
 
 /// Fetch the current lifecycle labels for an issue from GitHub.
-pub fn fetch_issue_labels(
-    owner: &str,
-    repo: &str,
-    issue_number: u32,
-) -> Result<Vec<String>> {
+pub fn fetch_issue_labels(owner: &str, repo: &str, issue_number: u32) -> Result<Vec<String>> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -1071,9 +1062,7 @@ pub fn fetch_issue_labels(
         ])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to run gh issue view for labels: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to run gh issue view for labels: {err}"))
         })?;
 
     if !output.status.success() {
@@ -1085,7 +1074,9 @@ pub fn fetch_issue_labels(
 
     let raw = String::from_utf8_lossy(&output.stdout);
     let parsed: RawIssueLabels = serde_json::from_str(raw.trim()).map_err(|err| {
-        RalphError::Orchestration(format!("failed to parse gh issue view labels output: {err}"))
+        RalphError::Orchestration(format!(
+            "failed to parse gh issue view labels output: {err}"
+        ))
     })?;
     Ok(parsed.labels.into_iter().map(|l| l.name).collect())
 }

@@ -89,12 +89,7 @@ impl LogWriter {
     /// after a single warning.
     ///
     /// `log_dir` should point to `.ralph/tmp/logs`.
-    pub fn open(
-        log_dir: &Path,
-        project_id: &str,
-        loop_number: Option<u32>,
-        role: &str,
-    ) -> Self {
+    pub fn open(log_dir: &Path, project_id: &str, loop_number: Option<u32>, role: &str) -> Self {
         let path = log_path_for_role(log_dir, project_id, loop_number, role);
         let file = match Self::try_open(&path) {
             Ok(f) => Some(f),
@@ -181,20 +176,14 @@ mod tests {
     fn derives_loop_scoped_log_path() {
         let log_dir = Path::new("/tmp/logs");
         let path = log_path_for_role(log_dir, "issue-42", Some(7), "implementer");
-        assert_eq!(
-            path,
-            Path::new("/tmp/logs/issue-42-007-implementer.log")
-        );
+        assert_eq!(path, Path::new("/tmp/logs/issue-42-007-implementer.log"));
     }
 
     #[test]
     fn derives_prompt_reviewer_log_path_when_loop_is_none() {
         let log_dir = Path::new("/tmp/logs");
         let path = log_path_for_role(log_dir, "issue-42", None, "prompt-reviewer");
-        assert_eq!(
-            path,
-            Path::new("/tmp/logs/issue-42-prompt-reviewer.log")
-        );
+        assert_eq!(path, Path::new("/tmp/logs/issue-42-prompt-reviewer.log"));
     }
 
     #[test]
@@ -203,14 +192,8 @@ mod tests {
         let loop_zero = log_path_for_role(log_dir, "issue-1", Some(0), "planner");
         let loop_max = log_path_for_role(log_dir, "issue-1", Some(999), "planner");
 
-        assert_eq!(
-            loop_zero,
-            Path::new("/tmp/logs/issue-1-000-planner.log")
-        );
-        assert_eq!(
-            loop_max,
-            Path::new("/tmp/logs/issue-1-999-planner.log")
-        );
+        assert_eq!(loop_zero, Path::new("/tmp/logs/issue-1-000-planner.log"));
+        assert_eq!(loop_max, Path::new("/tmp/logs/issue-1-999-planner.log"));
     }
 
     #[test]
@@ -218,7 +201,10 @@ mod tests {
         let log_dir = Path::new("/tmp/logs");
         let path_a = log_path_for_role(log_dir, "issue-1", Some(1), "planner");
         let path_b = log_path_for_role(log_dir, "issue-2", Some(1), "planner");
-        assert_ne!(path_a, path_b, "different projects should produce different paths");
+        assert_ne!(
+            path_a, path_b,
+            "different projects should produce different paths"
+        );
     }
 
     #[test]
@@ -347,9 +333,13 @@ mod tests {
             w.write_str("second run\n");
         }
 
-        let content =
-            fs::read_to_string(log_path_for_role(log_dir, "issue-1", Some(1), "implementer"))
-                .expect("read log");
+        let content = fs::read_to_string(log_path_for_role(
+            log_dir,
+            "issue-1",
+            Some(1),
+            "implementer",
+        ))
+        .expect("read log");
         assert!(content.contains("first run"));
         assert!(content.contains("second run"));
     }
@@ -370,7 +360,12 @@ mod tests {
     fn log_writer_disabled_on_bad_path_continues_silently() {
         // Open a writer against a path that can't be opened (device file as dir).
         // /dev/null is not a directory, so creating a file under it will fail.
-        let writer = LogWriter::open(Path::new("/dev/null/nonexistent"), "issue-1", Some(1), "planner");
+        let writer = LogWriter::open(
+            Path::new("/dev/null/nonexistent"),
+            "issue-1",
+            Some(1),
+            "planner",
+        );
         assert!(!writer.is_active());
     }
 
