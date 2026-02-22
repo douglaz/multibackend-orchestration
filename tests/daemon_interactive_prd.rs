@@ -3,6 +3,7 @@
 //! These tests exercise state persistence, label conflict behavior, and
 //! idempotent restart handling without requiring live GitHub API access.
 
+use chrono;
 use ralph::daemon::interactive_prd::{
     detect_approval, has_prd_label, prd_marker, prd_status_failed_marker, InteractivePrdState,
     PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
@@ -1239,11 +1240,37 @@ EOF
     let label_log = h.temp_dir.path().join("e2e_label.log");
     let label_log_str = label_log.to_string_lossy().into_owned();
 
+    // Use runtime-relative timestamps so the test is time-agnostic.
+    // Tick 1 questions get a timestamp slightly in the past, tick 2 answer
+    // is after that, tick 3 draft and approval are after that.
+    // The daemon fetches comment metadata to get questions_posted_at, and
+    // all mock timestamps are relative to a fixed base that's always "recent".
+    // Compute runtime-relative timestamps — all mock times will be relative to "now"
+    let base_ts = chrono::Utc::now();
+    // Questions comment: base - 30s (always in the past)
+    let ts_questions = (base_ts - chrono::Duration::seconds(30))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Answer comment: base - 10s (after questions)
+    let ts_answer = (base_ts - chrono::Duration::seconds(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Draft comment: base - 5s (after answer)
+    let ts_draft = (base_ts - chrono::Duration::seconds(5))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Approval comment: base - 1s (after draft)
+    let ts_approval = (base_ts - chrono::Duration::seconds(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
     let gh_script = format!(
         r#"#!/bin/sh
 TICK_FILE="{tick_file_str}"
 COMMENT_LOG="{comment_log_str}"
 LABEL_LOG="{label_log_str}"
+
+# Runtime-relative timestamps
+TS_QUESTIONS="{ts_questions}"
+TS_ANSWER="{ts_answer}"
+TS_DRAFT="{ts_draft}"
+TS_APPROVAL="{ts_approval}"
 
 # Read tick number (default 1)
 if [ -f "$TICK_FILE" ]; then
@@ -1286,16 +1313,16 @@ case "$1" in
           if [ "$TICK" = "1" ]; then
             # No comments yet (or just the questions we posted)
             if [ -f "$COMMENT_LOG" ]; then
-              printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQuestions","createdAt":"2026-01-01T00:00:05Z"}}]}}'
+              printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQuestions","createdAt":"%s"}}]}}' "$TS_QUESTIONS"
             else
               printf '{{"comments":[]}}'
             fi
           elif [ "$TICK" = "2" ]; then
             # Questions posted, user answered
-            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\n## Clarifying Questions\\n1. What API?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST with retries.","createdAt":"2026-01-01T00:00:15Z"}}]}}'
+            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\n## Clarifying Questions\\n1. What API?","createdAt":"%s"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST with retries.","createdAt":"%s"}}]}}' "$TS_QUESTIONS" "$TS_ANSWER"
           elif [ "$TICK" = "3" ]; then
             # Draft posted, user approves
-            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQ","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST.","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1003,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:20Z"}},{{"id":1004,"author":{{"login":"alice"}},"body":"LGTM, ship it!","createdAt":"2026-01-01T00:00:30Z"}}]}}'
+            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQ","createdAt":"%s"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST.","createdAt":"%s"}},{{"id":1003,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:draft-v1 -->\\nDraft","createdAt":"%s"}},{{"id":1004,"author":{{"login":"alice"}},"body":"LGTM, ship it!","createdAt":"%s"}}]}}' "$TS_QUESTIONS" "$TS_ANSWER" "$TS_DRAFT" "$TS_APPROVAL"
           fi
           exit 0
         fi

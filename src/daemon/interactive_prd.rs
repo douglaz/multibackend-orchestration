@@ -444,31 +444,12 @@ fn do_pending_to_awaiting(
         let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:ready");
     }
 
-    // 3. Generate questions with timeout
-    let issue_text = format!(
-        "{}\n\n{}",
-        issue.title,
-        issue.body.as_deref().unwrap_or_default()
-    );
-
-    let questions = generate_questions_with_timeout(config, &issue_text)?;
-
-    // 4. Post questions comment with idempotent marker
+    // 3. Check if questions marker already exists (idempotent restart/retry).
+    //    If it does, skip question generation entirely to avoid unnecessary
+    //    backend calls and reduce failure surface during restart recovery.
     let next_revision = state.question_revision + 1;
     let marker = prd_marker(issue_number, "questions", next_revision);
 
-    let comment_body = format!(
-        "## Clarifying Questions\n\n\
-         Before generating the engineering specification, I need some clarification. \
-         Please answer the following questions in a reply to this comment:\n\n\
-         {questions}\n\n\
-         *Reply to this comment with your answers and I'll generate a draft spec.*"
-    );
-
-    // Check if marker already exists to hydrate questions_posted_at from the
-    // existing comment's created_at (restart-safe). This avoids using
-    // Utc::now() which would skip valid user answers posted between the
-    // original comment time and the restart.
     let existing_marker_comment =
         github::find_comment_with_marker(owner, repo, issue_number, &marker).map_err(|err| {
             RalphError::InteractivePrdFailed(format!(
@@ -477,11 +458,32 @@ fn do_pending_to_awaiting(
         })?;
 
     let (comment_id, questions_posted_at) = if let Some(existing) = existing_marker_comment {
-        // Marker already exists — hydrate timestamp from real comment time
+        // Marker already exists — hydrate timestamp from real comment time,
+        // skip question generation entirely.
         (Some(existing.id), existing.created_at)
     } else {
-        // Post new comment
-        let id = github::post_comment_with_marker(
+        // Generate questions with timeout
+        let issue_text = format!(
+            "{}\n\n{}",
+            issue.title,
+            issue.body.as_deref().unwrap_or_default()
+        );
+
+        let questions = generate_questions_with_timeout(config, &issue_text)?;
+
+        // Post questions comment with idempotent marker
+        let comment_body = format!(
+            "## Clarifying Questions\n\n\
+             Before generating the engineering specification, I need some clarification. \
+             Please answer the following questions in a reply to this comment:\n\n\
+             {questions}\n\n\
+             *Reply to this comment with your answers and I'll generate a draft spec.*"
+        );
+
+        // Post and fetch back metadata to use the actual GitHub `created_at`
+        // timestamp rather than local wall clock. This ensures answer-gating
+        // compares against the real comment time consistently.
+        let posted_meta = github::post_comment_with_marker_metadata(
             owner,
             repo,
             issue_number,
@@ -493,7 +495,11 @@ fn do_pending_to_awaiting(
                 "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
             ))
         })?;
-        (id, Utc::now())
+
+        match posted_meta {
+            Some(meta) => (Some(meta.id), meta.created_at),
+            None => (None, Utc::now()),
+        }
     };
 
     // 5. Update and persist state

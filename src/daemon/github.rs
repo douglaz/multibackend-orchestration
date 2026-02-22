@@ -1281,8 +1281,22 @@ pub fn post_comment_with_marker(
     marker: &str,
     body_text: &str,
 ) -> Result<Option<u64>> {
+    let meta = post_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text)?;
+    Ok(meta.map(|c| c.id))
+}
+
+/// Post a comment on an issue with a marker prefix and return full structured
+/// metadata (id, created_at, etc.). If a comment with the same marker already
+/// exists, skip posting and return the existing comment's metadata.
+pub fn post_comment_with_marker_metadata(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+) -> Result<Option<IssueComment>> {
     if let Some(existing) = find_comment_with_marker(owner, repo, issue_number, marker)? {
-        return Ok(Some(existing.id));
+        return Ok(Some(existing));
     }
 
     let full_body = format!("{marker}\n{body_text}");
@@ -1311,12 +1325,8 @@ pub fn post_comment_with_marker(
         )));
     }
 
-    // Fetch back to get the ID of the newly posted comment.
-    if let Some(comment) = find_comment_with_marker(owner, repo, issue_number, marker)? {
-        Ok(Some(comment.id))
-    } else {
-        Ok(None)
-    }
+    // Fetch back to get the full metadata of the newly posted comment.
+    Ok(find_comment_with_marker(owner, repo, issue_number, marker)?)
 }
 
 /// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
