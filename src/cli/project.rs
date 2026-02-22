@@ -150,8 +150,9 @@ pub fn execute(args: ProjectArgs) -> Result<()> {
             } else if let Some(attempt) = state.current_completion_attempt() {
                 println!("Current Completion Attempt: loop {}", attempt.loop_number);
                 println!(
-                    "Current Backends: planner={}, completer={}",
-                    attempt.backends.planner, attempt.backends.completer
+                    "Current Backends: planner={}, completers=[{}]",
+                    attempt.backends.planner,
+                    attempt.backends.completers.join(", ")
                 );
             }
             Ok(())

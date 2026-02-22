@@ -32,8 +32,8 @@ use crate::project::artifacts::{
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
-    AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
-    ProjectStatus, QaExchange, ReviewExchange,
+    AcceptanceQaResult, CompletionLoopBackends, CompletionVerdict, FeatureLoopState, LoopStatus,
+    Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
 use crate::prompts::template_introspection::{load_template_source, template_uses_var};
 use crate::prompts::templates::{
@@ -512,11 +512,28 @@ impl Orchestrator {
                         }
                         PlannerDecision::CompletionRequest { body } => {
                             info!(loop = loop_number, "planner requested project completion");
-                            let completion_backends = registry.assign_completion_backends(
+                            let base_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
                                 &role_overrides,
                             )?;
+                            // Resolve effective completers from the panel config.
+                            // Falls back to the single completer from assign_completion_backends
+                            // if resolve_completion_panel cannot be satisfied.
+                            let effective_completers = match registry
+                                .resolve_completion_panel(
+                                    &effective.workflow.completion_backends,
+                                    effective.workflow.completion_min_completers,
+                                )
+                                .await
+                            {
+                                Ok(resolved) => resolved,
+                                Err(_) => base_backends.completers.clone(),
+                            };
+                            let completion_backends = CompletionLoopBackends::new(
+                                base_backends.planner.clone(),
+                                effective_completers,
+                            );
                             let termination_path = write_artifact(
                                 &project_dir,
                                 ArtifactWriteInput {
@@ -1601,7 +1618,7 @@ impl Orchestrator {
                     let (
                         loop_number,
                         planner_backend_name,
-                        completer_backend_name,
+                        effective_completers,
                         termination_rel,
                     ) = {
                         let completion = state.current_completion_attempt().ok_or_else(|| {
@@ -1614,89 +1631,130 @@ impl Orchestrator {
                         (
                             completion.loop_number,
                             completion.backends.planner.clone(),
-                            completion.backends.completer.clone(),
+                            completion.backends.completers.clone(),
                             completion.artifacts.termination_request.clone(),
                         )
                     };
 
-                    let completer_backend =
-                        registry.get_or_create_for_role(&completer_backend_name, "completer")?;
-
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
 
-                    let completer_prompt = build_completer_prompt(
-                        &effective,
-                        &state,
-                        &prompt_content,
-                        completer_backend.name(),
-                        &planner_backend_name,
-                        &termination_content,
-                        &project_dir,
-                    )?;
+                    // Run all effective completers, collect verdicts
+                    let mut complete_votes: u32 = 0;
+                    let total_completers = effective_completers.len() as u32;
+                    let mut last_verdict_rel: Option<String> = None;
 
-                    // Session reuse: exercise role policy for completer (will warn+skip for v1)
-                    let _completer_session_id = resolve_session_for_role(
-                        &effective,
-                        &mut state,
-                        "completer",
-                        &completer_backend_name,
-                        loop_number,
-                        "", // completer has no bootstrap hash
-                    );
+                    for completer_backend_name in &effective_completers {
+                        let completer_backend =
+                            registry.get_or_create_for_role(completer_backend_name, "completer")?;
 
-                    registry
-                        .set_tmux_context(TmuxExecutionContext {
-                            loop_number: Some(loop_number),
-                            role: Some("completer".to_owned()),
-                            loop_dir: Some(
-                                project_dir
-                                    .join("loops")
-                                    .join(format!("{loop_number:03}-completion")),
-                            ),
-                            session_id: None, // always None: completer not supported for v1 reuse
-                        })
-                        .await;
+                        let completer_prompt = build_completer_prompt(
+                            &effective,
+                            &state,
+                            &prompt_content,
+                            completer_backend.name(),
+                            &planner_backend_name,
+                            &termination_content,
+                            &project_dir,
+                        )?;
+
+                        // Session reuse: exercise role policy for completer (will warn+skip for v1)
+                        let _completer_session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "completer",
+                            completer_backend_name,
+                            loop_number,
+                            "", // completer has no bootstrap hash
+                        );
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("completer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-completion")),
+                                ),
+                                session_id: None,
+                            })
+                            .await;
+
+                        info!(
+                            loop = loop_number,
+                            backend = completer_backend.name(),
+                            "invoking completer..."
+                        );
+                        let mut completer_log =
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
+                        let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
+                            completer_backend,
+                            &registry,
+                            "completer",
+                            "completing",
+                            loop_number,
+                            &completer_prompt,
+                            None,
+                            parse_completer_output,
+                            &expected_format_template_for("completer", None),
+                            registry.timeout_for_role(completer_backend_name, "completer").as_secs(),
+                            &mut completer_log,
+                            None,
+                            repo_root_ref,
+                        )
+                        .await?;
+                        let completer_decision = _retry_result.parsed;
+                        debug!(loop = loop_number, backend = completer_backend_name, "completer responded");
+
+                        // Write per-backend verdict artifact
+                        let verdict_kind = if effective_completers.len() == 1 {
+                            ArtifactKind::CompleterVerdict
+                        } else {
+                            ArtifactKind::CompleterVerdictBackend {
+                                backend: completer_backend_name.clone(),
+                            }
+                        };
+                        let verdict_path = write_artifact(
+                            &project_dir,
+                            ArtifactWriteInput {
+                                project_id: &state.project_id,
+                                loop_number,
+                                loop_slug: "completion",
+                                backend: completer_backend_name,
+                                role: "completer",
+                                kind: verdict_kind,
+                                body: &completer_decision.body,
+                            },
+                        )?;
+                        last_verdict_rel = Some(artifact_relative_path(&project_dir, &verdict_path));
+
+                        if completer_decision.verdict == CompletionVerdict::Complete {
+                            complete_votes += 1;
+                        }
+                    }
+
+                    // Compute consensus with inclusive thresholds
+                    let consensus_threshold = effective.workflow.completion_consensus_threshold;
+                    let min_completers = effective.workflow.completion_min_completers;
+                    let consensus_reached = complete_votes >= min_completers
+                        && total_completers > 0
+                        && (complete_votes as f64 / total_completers as f64) >= consensus_threshold;
+                    let panel_verdict = if consensus_reached {
+                        CompletionVerdict::Complete
+                    } else {
+                        CompletionVerdict::Continue
+                    };
 
                     info!(
                         loop = loop_number,
-                        backend = completer_backend.name(),
-                        "invoking completer..."
+                        complete_votes = complete_votes,
+                        total = total_completers,
+                        threshold = consensus_threshold,
+                        min = min_completers,
+                        verdict = ?panel_verdict,
+                        "completion panel consensus computed"
                     );
-                    let mut completer_log =
-                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
-                    let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
-                        completer_backend,
-                        &registry,
-                        "completer",
-                        "completing",
-                        loop_number,
-                        &completer_prompt,
-                        None,
-                        parse_completer_output,
-                        &expected_format_template_for("completer", None),
-                        registry.timeout_for_role(&completer_backend_name, "completer").as_secs(),
-                        &mut completer_log,
-                        None,
-                        repo_root_ref,
-                    )
-                    .await?;
-                    let completer_decision = _retry_result.parsed;
-                    debug!(loop = loop_number, "completer responded");
-
-                    let verdict_path = write_artifact(
-                        &project_dir,
-                        ArtifactWriteInput {
-                            project_id: &state.project_id,
-                            loop_number,
-                            loop_slug: "completion",
-                            backend: &completer_backend_name,
-                            role: "completer",
-                            kind: ArtifactKind::CompleterVerdict,
-                            body: &completer_decision.body,
-                        },
-                    )?;
-                    let verdict_rel = artifact_relative_path(&project_dir, &verdict_path);
 
                     {
                         let completion =
@@ -1706,13 +1764,13 @@ impl Orchestrator {
                                         .to_owned(),
                                 )
                             })?;
-                        completion.artifacts.verdict = Some(verdict_rel);
-                        completion.verdict = Some(completer_decision.verdict.clone());
+                        completion.artifacts.verdict = last_verdict_rel;
+                        completion.verdict = Some(panel_verdict.clone());
                         completion.status = LoopStatus::Completed;
                         completion.completed_at = Some(Utc::now());
                     }
 
-                    match completer_decision.verdict {
+                    match panel_verdict {
                         CompletionVerdict::Complete => {
                             if effective.workflow.qa_enabled {
                                 let acceptance_backends = ["claude", "codex"]

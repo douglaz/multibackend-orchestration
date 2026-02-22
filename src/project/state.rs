@@ -172,10 +172,46 @@ pub struct CompletionLoopState {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CompletionLoopBackends {
     pub planner: String,
-    pub completer: String,
+    pub completers: Vec<String>,
+}
+
+impl CompletionLoopBackends {
+    pub fn new(planner: String, completers: Vec<String>) -> Self {
+        Self {
+            planner,
+            completers,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CompletionLoopBackends {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            planner: String,
+            #[serde(default)]
+            completers: Vec<String>,
+            #[serde(default)]
+            completer: Option<String>,
+        }
+        let mut raw = Raw::deserialize(deserializer)?;
+        // Promote legacy single `completer` field into `completers` vec.
+        if raw.completers.is_empty() {
+            if let Some(legacy) = raw.completer.take() {
+                raw.completers.push(legacy);
+            }
+        }
+        Ok(CompletionLoopBackends {
+            planner: raw.planner,
+            completers: raw.completers,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -649,9 +649,67 @@ fn reconstruct_completion_attempt(
     let termination = latest_artifact(&artifacts, |artifact| {
         artifact.base_name == "termination-request.md"
     });
-    let verdict = latest_artifact(&artifacts, |artifact| {
+
+    // Collect per-backend verdict artifacts (new panel layout).
+    let per_backend_verdicts: Vec<&ArtifactEntry> = artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.base_name.starts_with("completer-verdict-") && artifact.base_name != "completer-verdict.md"
+        })
+        .collect();
+
+    // Legacy single verdict artifact.
+    let legacy_verdict = latest_artifact(&artifacts, |artifact| {
         artifact.base_name == "completer-verdict.md"
     });
+
+    // Determine completers and effective verdict.
+    let (completers, effective_verdict_artifact, panel_verdict) = if !per_backend_verdicts.is_empty()
+    {
+        // New per-backend verdict layout: extract completers from each verdict artifact.
+        let mut completers = Vec::new();
+        let mut all_complete = true;
+        let mut any_verdict = false;
+        let mut latest_verdict: Option<&ArtifactEntry> = None;
+        for v in &per_backend_verdicts {
+            let backend = v
+                .frontmatter
+                .get("backend")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            completers.push(backend);
+            if let Some(pv) = parse_completion_verdict(&v.body) {
+                any_verdict = true;
+                if pv != CompletionVerdict::Complete {
+                    all_complete = false;
+                }
+            }
+            latest_verdict = Some(match latest_verdict {
+                Some(prev) if v.observed_at > prev.observed_at => v,
+                Some(prev) => prev,
+                None => v,
+            });
+        }
+        let verdict = if any_verdict && all_complete {
+            Some(CompletionVerdict::Complete)
+        } else if any_verdict {
+            Some(CompletionVerdict::Continue)
+        } else {
+            None
+        };
+        (completers, latest_verdict, verdict)
+    } else if let Some(single) = legacy_verdict {
+        // Legacy single-verdict layout: map to single completer.
+        let backend = single
+            .frontmatter
+            .get("backend")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let verdict = parse_completion_verdict(&single.body);
+        (vec![backend], Some(single), verdict)
+    } else {
+        (Vec::new(), None, None)
+    };
 
     let mut acceptance_results = Vec::new();
     for artifact in &artifacts {
@@ -685,48 +743,43 @@ fn reconstruct_completion_attempt(
         }
     }
 
-    let completion_verdict = verdict.and_then(|artifact| parse_completion_verdict(&artifact.body));
-
-    // Apply acceptance gate: if the completer said COMPLETE but any acceptance
+    // Apply acceptance gate: if the panel said COMPLETE but any acceptance
     // result failed, the effective verdict is CONTINUE.
-    let completion_verdict = match completion_verdict {
+    let panel_verdict = match panel_verdict {
         Some(CompletionVerdict::Complete) if acceptance_results.iter().any(|r| !r.passed) => {
             Some(CompletionVerdict::Continue)
         }
         other => other,
     };
 
-    let completed_at = verdict.map(|artifact| artifact.observed_at);
+    let completed_at = effective_verdict_artifact.map(|artifact| artifact.observed_at);
+
+    let planner_backend = termination
+        .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
+        .unwrap_or_else(|| "unknown".to_owned());
 
     CompletionLoopState {
         loop_number,
         slug: "completion".to_owned(),
         loop_type: LoopType::Completion,
-        status: if completion_verdict.is_some() {
+        status: if panel_verdict.is_some() {
             LoopStatus::Completed
         } else {
             LoopStatus::InProgress
         },
-        backends: CompletionLoopBackends {
-            planner: termination
-                .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-                .unwrap_or_else(|| "unknown".to_owned()),
-            completer: verdict
-                .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-                .unwrap_or_else(|| "unknown".to_owned()),
-        },
+        backends: CompletionLoopBackends::new(planner_backend, completers),
         artifacts: CompletionLoopArtifacts {
             termination_request: termination
                 .map(|artifact| artifact.rel_path.clone())
                 .unwrap_or_else(|| {
                     format!("loops/{loop_number:03}-completion/termination-request.md")
                 }),
-            verdict: verdict.map(|artifact| artifact.rel_path.clone()),
+            verdict: effective_verdict_artifact.map(|artifact| artifact.rel_path.clone()),
             acceptance_results,
             acceptance_result: None,
             acceptance_passed: None,
         },
-        verdict: completion_verdict,
+        verdict: panel_verdict,
         started_at,
         completed_at,
     }

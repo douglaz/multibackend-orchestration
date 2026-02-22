@@ -51,6 +51,9 @@ pub struct EffectiveWorkflowConfig {
     pub final_review_min_reviewers: u32,
     pub final_review_consensus_threshold: f64,
     pub max_final_review_restarts: u32,
+    pub completion_backends: Vec<String>,
+    pub completion_min_completers: u32,
+    pub completion_consensus_threshold: f64,
     pub qa_enabled: bool,
     pub max_qa_iterations: u32,
     pub max_review_iterations: u32,
@@ -253,6 +256,15 @@ pub fn resolve_effective_config(
         max_final_review_restarts: project_ref
             .and_then(|p| p.workflow.max_final_review_restarts)
             .unwrap_or(global.workflow.max_final_review_restarts),
+        completion_backends: project_ref
+            .and_then(|p| p.workflow.completion_backends.clone())
+            .unwrap_or_else(|| global.workflow.completion_backends.clone()),
+        completion_min_completers: project_ref
+            .and_then(|p| p.workflow.completion_min_completers)
+            .unwrap_or(global.workflow.completion_min_completers),
+        completion_consensus_threshold: project_ref
+            .and_then(|p| p.workflow.completion_consensus_threshold)
+            .unwrap_or(global.workflow.completion_consensus_threshold),
         qa_enabled: project_ref
             .and_then(|p| p.workflow.qa_enabled)
             .unwrap_or(global.workflow.qa_enabled),
@@ -313,6 +325,8 @@ pub fn resolve_effective_config(
             "final review arbiter backend family overlaps configured reviewer families"
         );
     }
+
+    validate_completion_panel_config(&global, &workflow)?;
 
     let templates = EffectiveTemplateConfig {
         planner: resolve_template_path(
@@ -592,17 +606,20 @@ fn validate_final_review_config(
 }
 
 fn normalize_backend_specs(global: &GlobalConfig, specs: &[String]) -> Result<Vec<String>> {
+    normalize_backend_specs_labeled(global, specs, "final review backend")
+}
+
+fn normalize_backend_specs_labeled(
+    global: &GlobalConfig,
+    specs: &[String],
+    label: &str,
+) -> Result<Vec<String>> {
     let mut normalized = Vec::new();
     let mut seen = HashSet::new();
 
     for spec in specs {
         let canonical = canonicalize_backend_spec(spec)?;
-        validate_backend_spec(
-            global,
-            &canonical,
-            "final review backend",
-            ValidationSurface::PanelList,
-        )?;
+        validate_backend_spec(global, &canonical, label, ValidationSurface::PanelList)?;
         if seen.insert(canonical.clone()) {
             normalized.push(canonical);
         }
@@ -621,6 +638,83 @@ fn unique_backend_families(specs: &[String]) -> Result<Vec<String>> {
         }
     }
     Ok(families)
+}
+
+fn validate_completion_panel_config(
+    global: &GlobalConfig,
+    workflow: &EffectiveWorkflowConfig,
+) -> Result<()> {
+    if workflow.completion_backends.is_empty() {
+        return Err(RalphError::Validation(
+            "completion_backends must not be empty".to_owned(),
+        ));
+    }
+
+    if workflow.completion_min_completers < 1 {
+        return Err(RalphError::Validation(format!(
+            "completion_min_completers must be >= 1, got {}",
+            workflow.completion_min_completers
+        )));
+    }
+
+    if !workflow.completion_consensus_threshold.is_finite()
+        || workflow.completion_consensus_threshold <= 0.0
+        || workflow.completion_consensus_threshold > 1.0
+    {
+        return Err(RalphError::Validation(format!(
+            "completion_consensus_threshold must be > 0.0 and <= 1.0, got {}",
+            workflow.completion_consensus_threshold
+        )));
+    }
+
+    let normalized = normalize_backend_specs_labeled(
+        global,
+        &workflow.completion_backends,
+        "completion backend",
+    )?;
+
+    // Check for duplicate resolved specs after canonicalization
+    let mut seen_canonical = HashSet::new();
+    for spec in &normalized {
+        let parsed = parse_backend_spec(spec)?;
+        let canonical_key = match &parsed.model {
+            Some(model) => format!("{}({model})", parsed.name),
+            None => parsed.name.clone(),
+        };
+        if !seen_canonical.insert(canonical_key.clone()) {
+            return Err(RalphError::Validation(format!(
+                "duplicate resolved completer spec after canonicalization: {canonical_key}"
+            )));
+        }
+    }
+
+    // Check for per-backend verdict filename collisions
+    let mut seen_filenames = HashSet::new();
+    for spec in &normalized {
+        let filename = completion_verdict_filename(spec);
+        if !seen_filenames.insert(filename.clone()) {
+            return Err(RalphError::Validation(format!(
+                "completion verdict filename collision for spec '{spec}': {filename}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate the deterministic verdict filename for a completion backend spec.
+fn completion_verdict_filename(spec: &str) -> String {
+    let slugified: String = spec
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("completer-verdict-{slugified}.md")
 }
 
 fn canonicalize_backend_spec(spec: &str) -> Result<String> {

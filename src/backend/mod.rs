@@ -1014,10 +1014,61 @@ impl BackendRegistry {
             .clone()
             .unwrap_or(alternating_completer);
 
-        Ok(CompletionLoopBackends {
-            planner: self.resolve_backend_for_role(&planner, "planner"),
-            completer: self.resolve_backend_for_role(&completer, "completer"),
-        })
+        Ok(CompletionLoopBackends::new(
+            self.resolve_backend_for_role(&planner, "planner"),
+            vec![self.resolve_backend_for_role(&completer, "completer")],
+        ))
+    }
+
+    /// Resolve the effective completers for a completion panel from the configured
+    /// `completion_backends` list. Optional backends (`?backend`) that are unavailable
+    /// are skipped with a warning. Required backends that are unavailable cause an error.
+    /// Returns the list of resolved backend specs for use as completers.
+    pub async fn resolve_completion_panel(
+        &mut self,
+        completion_backends: &[String],
+        min_completers: u32,
+    ) -> Result<Vec<String>> {
+        let mut effective = Vec::new();
+
+        for spec_str in completion_backends {
+            let parsed = parse_backend_spec(spec_str)?;
+            let resolved = self.resolve_backend_for_role(spec_str, "completer");
+            let available = match self
+                .backend_available_for_spec(&resolved, Some("completer"))
+                .await
+            {
+                Ok(v) => v,
+                Err(_) if parsed.optional => false,
+                Err(e) => return Err(e),
+            };
+
+            if !available {
+                if parsed.optional {
+                    warn!(
+                        backend = spec_str,
+                        "optional completion backend unavailable, skipping"
+                    );
+                    continue;
+                } else {
+                    return Err(RalphError::BackendUnavailable {
+                        backend: spec_str.to_owned(),
+                    });
+                }
+            }
+
+            effective.push(resolved);
+        }
+
+        if (effective.len() as u32) < min_completers {
+            return Err(RalphError::Validation(format!(
+                "only {} effective completers available but completion_min_completers requires {}",
+                effective.len(),
+                min_completers
+            )));
+        }
+
+        Ok(effective)
     }
 
     /// Collect model-injected backend specs configured for all roles across

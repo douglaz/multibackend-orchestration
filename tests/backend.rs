@@ -417,13 +417,13 @@ fn test_assign_completion_backends() {
         .assign_completion_backends(1, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completers[0], "codex(gpt-5.3-codex-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
-    assert_eq!(backends.completer, "claude(opus)");
+    assert_eq!(backends.completers[0], "claude(opus)");
 }
 
 #[test]
@@ -435,13 +435,13 @@ fn test_assign_completion_backends_no_models() {
         .assign_completion_backends(1, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "claude");
-    assert_eq!(backends.completer, "codex");
+    assert_eq!(backends.completers[0], "codex");
 
     let backends = registry
         .assign_completion_backends(2, "claude", &no_role_overrides())
         .unwrap();
     assert_eq!(backends.planner, "codex");
-    assert_eq!(backends.completer, "claude");
+    assert_eq!(backends.completers[0], "claude");
 }
 
 #[test]
@@ -453,13 +453,13 @@ fn test_assign_completion_backends_with_model_spec_start() {
         .assign_completion_backends(1, "claude(opus)", &no_role_overrides())
         .expect("loop 1 should resolve");
     assert_eq!(backends.planner, "claude(opus)");
-    assert_eq!(backends.completer, "codex(gpt-5.3-codex-xhigh)");
+    assert_eq!(backends.completers[0], "codex(gpt-5.3-codex-xhigh)");
 
     let backends = registry
         .assign_completion_backends(2, "claude(opus)", &no_role_overrides())
         .expect("loop 2 should resolve");
     assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
-    assert_eq!(backends.completer, "claude(opus)");
+    assert_eq!(backends.completers[0], "claude(opus)");
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn test_assign_completion_backends_with_all_role_overrides() {
         .assign_completion_backends(1, "claude", &role_overrides)
         .expect("overridden completion backends should resolve");
     assert_eq!(backends.planner, "codex(gpt-5.3-codex)");
-    assert_eq!(backends.completer, "claude(opus)");
+    assert_eq!(backends.completers[0], "claude(opus)");
 }
 
 #[test]
@@ -497,7 +497,7 @@ fn test_assign_completion_backends_with_partial_role_overrides() {
         .assign_completion_backends(2, "claude", &role_overrides)
         .expect("mixed completion backends should resolve");
     assert_eq!(backends.planner, "claude(sonnet)");
-    assert_eq!(backends.completer, "claude(opus)");
+    assert_eq!(backends.completers[0], "claude(opus)");
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +618,7 @@ fn test_completion_alternation_sequence() {
             "Loop {loop_num} planner mismatch"
         );
         assert_eq!(
-            backends.completer, exp_completer,
+            backends.completers[0], exp_completer,
             "Loop {loop_num} completer mismatch"
         );
     }
@@ -645,7 +645,7 @@ fn test_completion_alternation_sequence_no_models() {
             "Loop {loop_num} planner mismatch"
         );
         assert_eq!(
-            backends.completer, exp_completer,
+            backends.completers[0], exp_completer,
             "Loop {loop_num} completer mismatch"
         );
     }

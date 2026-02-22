@@ -357,6 +357,12 @@ pub struct WorkflowConfig {
     pub final_review_consensus_threshold: f64,
     #[serde(default = "default_max_final_review_restarts")]
     pub max_final_review_restarts: u32,
+    #[serde(default = "default_completion_backends")]
+    pub completion_backends: Vec<String>,
+    #[serde(default = "default_completion_min_completers")]
+    pub completion_min_completers: u32,
+    #[serde(default = "default_completion_consensus_threshold")]
+    pub completion_consensus_threshold: f64,
     #[serde(default = "default_qa_enabled")]
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
@@ -604,6 +610,9 @@ impl Default for WorkflowConfig {
             final_review_min_reviewers: default_final_review_min_reviewers(),
             final_review_consensus_threshold: default_final_review_consensus_threshold(),
             max_final_review_restarts: default_max_final_review_restarts(),
+            completion_backends: default_completion_backends(),
+            completion_min_completers: default_completion_min_completers(),
+            completion_consensus_threshold: default_completion_consensus_threshold(),
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
             planner_state_in_prompt: PlannerStateInPrompt::default(),
@@ -936,6 +945,22 @@ fn default_final_review_consensus_threshold() -> f64 {
 
 fn default_max_final_review_restarts() -> u32 {
     3
+}
+
+fn default_completion_backends() -> Vec<String> {
+    vec![
+        "claude".to_owned(),
+        "codex".to_owned(),
+        "?gemini".to_owned(),
+    ]
+}
+
+fn default_completion_min_completers() -> u32 {
+    2
+}
+
+fn default_completion_consensus_threshold() -> f64 {
+    1.0
 }
 
 fn default_prompt_review_enabled() -> bool {
