@@ -590,10 +590,20 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 /// Builds a `PrdPollConfig` from the runtime config and delegates to
 /// `interactive_prd::poll_and_advance_prd` in a blocking task.
 async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
+    // data_dir must be the root above owner/repo so that state_path()
+    // constructs {data_dir}/{owner}/{repo}/.ralph/interactive-prd/{issue}.json
+    // without duplicating the owner/repo segment already present in repo_root.
+    let data_dir = config
+        .repo_root
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| config.repo_root.clone());
+
     let prd_config = PrdPollConfig {
         owner: config.owner.clone(),
         repo: config.repo.clone(),
-        data_dir: config.repo_root.clone(),
+        data_dir,
         prd_enabled: config.prd_enabled,
         question_backends: config.prd_question_backends.clone(),
         writer_backend: config.prd_writer_backend.clone(),

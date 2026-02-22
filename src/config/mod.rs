@@ -418,7 +418,7 @@ fn validate_backend_spec(global: &GlobalConfig, backend_spec: &str, label: &str)
     Ok(())
 }
 
-fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Result<()> {
+pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Result<()> {
     let workspace = &global.workspace;
     if workspace.daemon_prd_question_backends.len() != 2 {
         return Err(RalphError::Validation(format!(

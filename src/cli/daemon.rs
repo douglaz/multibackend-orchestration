@@ -174,6 +174,16 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             ))
         })?;
 
+        // Validate PRD backend config at startup so invalid specs fail fast.
+        if daemon_cfg.prd_enabled {
+            crate::config::validate_interactive_prd_workspace_config(&workspace.config)
+                .map_err(|err| {
+                    RalphError::Validation(format!(
+                        "invalid PRD config for {slug}: {err}"
+                    ))
+                })?;
+        }
+
         if !deprecation_warned && daemon_cfg.repo.is_some() {
             eprintln!(
                 "warning: daemon.repo config key is ignored by `daemon start`; use --repo flag instead"

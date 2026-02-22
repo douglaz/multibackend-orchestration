@@ -292,11 +292,19 @@ Rules:
 /// This function is called once per daemon poll tick when `prd_enabled` is true.
 /// It runs synchronously (blocking) because the daemon wraps it in
 /// `spawn_blocking`.
+///
+/// Enforces the spec invariant "at most one state transition per issue per tick"
+/// by deduplicating issue numbers across both poll passes.
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
+    let mut processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
     let labels = vec!["ralph:prd".to_owned()];
     let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
 
     for issue in &issues {
+        if !processed.insert(issue.number) {
+            continue;
+        }
         if let Err(err) = advance_issue(config, issue) {
             eprintln!(
                 "prd: failed to advance {}/{}#{}: {err}",
@@ -311,6 +319,9 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
         github::poll_issues(&config.owner, &config.repo, &active_labels)?;
 
     for issue in &active_issues {
+        if !processed.insert(issue.number) {
+            continue; // already advanced in the ralph:prd pass
+        }
         if let Err(err) = advance_issue(config, issue) {
             eprintln!(
                 "prd: failed to advance active {}/{}#{}: {err}",
@@ -410,13 +421,23 @@ fn do_pending_to_awaiting(
     let owner = &config.owner;
     let repo = &config.repo;
 
-    // 1. Swap labels: remove ralph:prd, add ralph:prd-active
-    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:prd", "ralph:prd-active")
-        .map_err(|err| {
-            RalphError::InteractivePrdFailed(format!(
-                "label swap failed for {owner}/{repo}#{issue_number}: {err}"
-            ))
-        })?;
+    // 1. Swap labels idempotently: only remove ralph:prd if still present,
+    //    only add ralph:prd-active if not already present. This prevents
+    //    failures on retry when labels were already swapped in a prior attempt.
+    let has_prd = issue.labels.iter().any(|l| l == "ralph:prd");
+    let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
+
+    if has_prd {
+        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+    }
+    if !has_active {
+        github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active")
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
+    }
 
     // 2. Remove ralph:ready if present (prevent dual workflow ownership)
     if issue.labels.iter().any(|l| l == "ralph:ready") {
