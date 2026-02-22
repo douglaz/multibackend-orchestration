@@ -1592,6 +1592,448 @@ esac; exit 0
     assert_eq!(state.draft_revision, 1, "no revision should have happened");
 }
 
+// ---------------------------------------------------------------------------
+// Bot-login retry exhaustion in AwaitingAnswers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn awaiting_answers_bot_login_failure_exhaustion_transitions_to_failed() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/120.json");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
+
+    let seed = serde_json::json!({
+        "issue_number": 120,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingAnswers",
+        "question_revision": 1,
+        "draft_revision": 0,
+        "questions_comment_id": 1200,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": null,
+        "latest_draft_body": null,
+        "user_answers": null,
+        "last_processed_comment_id": null,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let label_log = h.temp_dir.path().join("bot_login_aa_label.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    // gh mock: `gh api user` always fails; everything else works normally
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":120,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1200,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1201,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:20Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api)
+    if [ "$2" = "user" ]; then
+      echo "gh: error resolving authenticated user" >&2
+      exit 1
+    fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Run 3 ticks — each should fail due to bot-login error
+    for tick in 1..=3 {
+        let _output = h
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            )
+            .expect("daemon start");
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+                .unwrap_or_else(|e| panic!("parse state after tick {tick}: {e}"));
+
+        if tick < 3 {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::AwaitingAnswers,
+                "tick {tick}: should remain AwaitingAnswers"
+            );
+            assert_eq!(
+                state.error_count, tick as u32,
+                "tick {tick}: error_count should be {tick}"
+            );
+            assert!(
+                state.last_error.is_some(),
+                "tick {tick}: last_error should be set"
+            );
+        } else {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::Failed,
+                "tick 3: should be Failed after bot-login exhaustion"
+            );
+            assert!(state.is_terminal());
+            assert!(state.error_count >= 3);
+        }
+    }
+
+    // Verify ralph:prd-failed label was applied
+    let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("ralph:prd-failed"),
+        "ralph:prd-failed label should be added: {label_raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bot-login retry exhaustion in AwaitingFeedback
+// ---------------------------------------------------------------------------
+
+#[test]
+fn awaiting_feedback_bot_login_failure_exhaustion_transitions_to_failed() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/130.json");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
+
+    let seed = serde_json::json!({
+        "issue_number": 130,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1300,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1302,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1301,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let label_log = h.temp_dir.path().join("bot_login_af_label.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    // gh mock: `gh api user` always fails
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":130,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1300,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1301,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":1302,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1303,"author":{{"login":"alice"}},"body":"fix the testing section","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api)
+    if [ "$2" = "user" ]; then
+      echo "gh: error resolving authenticated user" >&2
+      exit 1
+    fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Run 3 ticks — each should fail due to bot-login error
+    for tick in 1..=3 {
+        let _output = h
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            )
+            .expect("daemon start");
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+                .unwrap_or_else(|e| panic!("parse state after tick {tick}: {e}"));
+
+        if tick < 3 {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::AwaitingFeedback,
+                "tick {tick}: should remain AwaitingFeedback"
+            );
+            assert_eq!(
+                state.error_count, tick as u32,
+                "tick {tick}: error_count should be {tick}"
+            );
+            assert!(
+                state.last_error.is_some(),
+                "tick {tick}: last_error should be set"
+            );
+        } else {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::Failed,
+                "tick 3: should be Failed after bot-login exhaustion"
+            );
+            assert!(state.is_terminal());
+            assert!(state.error_count >= 3);
+        }
+    }
+
+    // Verify ralph:prd-failed label was applied
+    let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("ralph:prd-failed"),
+        "ralph:prd-failed label should be added: {label_raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Approval label-swap partial-failure recovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_label_swap_partial_failure_keeps_state_nonterminal() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/140.json");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
+
+    let seed = serde_json::json!({
+        "issue_number": 140,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1400,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1402,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1401,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let comment_log = h.temp_dir.path().join("partial_label_comment.log");
+    let comment_log_str = comment_log.to_string_lossy().into_owned();
+    let label_log = h.temp_dir.path().join("partial_label_labels.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    // gh mock: `issue comment` succeeds (approval comment can be posted) but
+    // `issue edit --add-label ralph:prd-done` always fails (simulating partial
+    // label failure). The issue retains ralph:prd-active so it remains poll-visible.
+    let gh_script = format!(
+        r#"#!/bin/sh
+CLOG="{comment_log_str}"
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":140,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1400,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1401,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":1402,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:140:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1403,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body) printf '%s' "$2" >> "$CLOG"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        exit 0 ;;
+      edit)
+        # Fail on add-label ralph:prd-done (the first label op in boundary-safe order)
+        for arg in "$@"; do
+          case "$arg" in
+            *ralph:prd-done*)
+              echo "gh: error adding label ralph:prd-done" >&2
+              exit 1 ;;
+          esac
+        done
+        echo "$@" >> "$LLOG"
+        exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Run 1 tick — label add fails, state should NOT be Done
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start");
+
+    let state: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+            .expect("parse state");
+
+    // State must remain AwaitingFeedback (not Done) since label add failed
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::AwaitingFeedback,
+        "state should remain AwaitingFeedback on partial label failure"
+    );
+    assert!(
+        state.error_count >= 1,
+        "error_count should be incremented: {}",
+        state.error_count
+    );
+    assert!(
+        state.last_error.is_some(),
+        "last_error should be set on label failure"
+    );
+    // Done is NOT persisted — approval comment was posted (idempotent) but
+    // ralph:prd-active is still present so the issue remains poll-visible.
+}
+
 fn ralph_bin_absolute() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_ralph") {
         return PathBuf::from(p);

@@ -372,12 +372,15 @@ fn advance_issue(
             transition_pending_to_awaiting_answers(config, issue, &mut state)
         }
         PrdWorkflowState::AwaitingAnswers => {
-            let bot_login = get_or_fetch_bot_login(bot_login_cache)?;
-            transition_awaiting_answers_to_awaiting_feedback(config, issue, &mut state, &bot_login)
+            transition_awaiting_answers_to_awaiting_feedback(
+                config,
+                issue,
+                &mut state,
+                bot_login_cache,
+            )
         }
         PrdWorkflowState::AwaitingFeedback => {
-            let bot_login = get_or_fetch_bot_login(bot_login_cache)?;
-            transition_awaiting_feedback(config, issue, &mut state, &bot_login)
+            transition_awaiting_feedback(config, issue, &mut state, bot_login_cache)
         }
         PrdWorkflowState::Done | PrdWorkflowState::Failed => Ok(()),
     }
@@ -533,7 +536,7 @@ fn transition_awaiting_answers_to_awaiting_feedback(
     config: &PrdPollConfig,
     issue: &GhIssue,
     state: &mut InteractivePrdState,
-    bot_login: &str,
+    bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
     let issue_number = issue.number;
     if config.verbose {
@@ -543,7 +546,8 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         );
     }
 
-    let result = do_awaiting_answers_to_awaiting_feedback(config, issue, state, bot_login);
+    let result = get_or_fetch_bot_login(bot_login_cache)
+        .and_then(|bot_login| do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login));
     finish_transition(config, state, result)
 }
 
@@ -650,7 +654,7 @@ fn transition_awaiting_feedback(
     config: &PrdPollConfig,
     issue: &GhIssue,
     state: &mut InteractivePrdState,
-    bot_login: &str,
+    bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
     let issue_number = issue.number;
     if config.verbose {
@@ -660,7 +664,8 @@ fn transition_awaiting_feedback(
         );
     }
 
-    let result = do_awaiting_feedback(config, issue, state, bot_login);
+    let result = get_or_fetch_bot_login(bot_login_cache)
+        .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
     finish_transition(config, state, result)
 }
 
@@ -795,8 +800,15 @@ fn do_approval_transition(
             ))
         })?;
 
-    // Swap labels: remove ralph:prd-active, add ralph:prd-done
-    // Keep ralph:prd-approved if already present
+    // Swap labels in boundary-safe order: add ralph:prd-done first, remove
+    // ralph:prd-active second.  This ensures that on partial failure the issue
+    // still has ralph:prd-active (poll-visible) so retry semantics continue.
+    // Keep ralph:prd-approved if already present.
+    github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done").map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
     github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
         |err| {
             RalphError::InteractivePrdFailed(format!(
@@ -804,11 +816,6 @@ fn do_approval_transition(
             ))
         },
     )?;
-    github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done").map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
 
     // Persist terminal Done state
     state.state = PrdWorkflowState::Done;
