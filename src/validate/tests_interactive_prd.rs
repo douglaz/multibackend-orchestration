@@ -93,6 +93,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::approval_path_github_failure_increments_error",
             func: approval_path_github_failure_increments_error,
         },
+        ConformanceTest {
+            name: "interactive_prd::approval_failure_exhaustion_transitions_to_failed",
+            func: approval_failure_exhaustion_transitions_to_failed,
+        },
     ]
 }
 
@@ -1544,6 +1548,130 @@ esac; exit 0
             state.state,
             PrdWorkflowState::AwaitingFeedback,
             "state should remain AwaitingFeedback for retry"
+        );
+    })
+}
+
+/// Multi-tick test: approval comment exists, approval action fails on each tick.
+/// After 3 failures the state transitions to Failed with `ralph:prd-failed`.
+fn approval_failure_exhaustion_transitions_to_failed(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/45.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 45, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 450, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 452,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 451,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("exhaustion_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let comment_log = dh.temp_dir.path().join("exhaustion_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        // gh returns an approval comment (id 453 with "LGTM") but always fails
+        // on `issue comment` (posting the status-approved marker).
+        let gh_script = format!(
+            r#"#!/bin/sh
+CLOG="{comment_log_str}"
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":45,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":450,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":451,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":452,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":453,"author":{{"login":"u"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment)
+        # Always fail when posting — simulates persistent GitHub outage
+        echo "gh: error posting comment" >&2
+        exit 1
+        ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        // Run 3 daemon ticks — each should fail the approval transition
+        for tick in 1..=3 {
+            let _output = dh
+                .daemon_env(
+                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                )
+                .unwrap();
+
+            let state: InteractivePrdState =
+                serde_json::from_str(&fs::read_to_string(&state_path).unwrap())
+                    .unwrap_or_else(|e| panic!("parse state after tick {tick}: {e}"));
+
+            if tick < 3 {
+                // First two ticks: error_count should increment, state stays AwaitingFeedback
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::AwaitingFeedback,
+                    "tick {tick}: should remain AwaitingFeedback"
+                );
+                assert_eq!(
+                    state.error_count, tick as u32,
+                    "tick {tick}: error_count should be {tick}"
+                );
+                assert!(
+                    state.last_error.is_some(),
+                    "tick {tick}: last_error should be set"
+                );
+                // Cursor must NOT have advanced (approval comments remain visible)
+                assert_eq!(
+                    state.last_processed_comment_id,
+                    Some(451),
+                    "tick {tick}: last_processed_comment_id should not advance on failure"
+                );
+            } else {
+                // Third tick: threshold reached, should transition to Failed
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Failed,
+                    "tick 3: should be Failed after exhaustion"
+                );
+                assert!(state.is_terminal(), "tick 3: Failed should be terminal");
+                assert!(state.error_count >= 3, "tick 3: error_count should be >= 3");
+            }
+        }
+
+        // Verify ralph:prd-failed label was applied
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("ralph:prd-failed"),
+            "ralph:prd-failed label should be added after exhaustion: {label_raw}"
         );
     })
 }

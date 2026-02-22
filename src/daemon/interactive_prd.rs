@@ -680,12 +680,16 @@ fn do_awaiting_feedback(
 
     // If any new comment passes approval detection, transition to Done
     if has_approval {
-        // Update last_processed_comment_id to the latest comment
+        // Perform approval transition first — only advance cursor on success
+        // so that if this fails, the approval comments remain "new" on the
+        // next tick and can be retried (reaching failure threshold if needed).
+        do_approval_transition(config, state, issue_number)?;
+        // Advance cursor only after successful approval transition
         let last_id = new_comments.last().map(|c| c.id);
         if let Some(id) = last_id {
             state.last_processed_comment_id = Some(id);
         }
-        return do_approval_transition(config, state, issue_number);
+        return Ok(());
     }
 
     // Aggregate feedback text for revision
