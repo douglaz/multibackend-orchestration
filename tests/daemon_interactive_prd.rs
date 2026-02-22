@@ -1161,6 +1161,410 @@ exit 0
     );
 }
 
+// ---------------------------------------------------------------------------
+// Multi-tick end-to-end: Pending -> AwaitingAnswers -> AwaitingFeedback -> Done
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_tick_pending_to_done_end_to_end() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    // Mock backend: produces questions for tick 1, draft for tick 2, reviewer approves
+    let backend_script = h
+        .write_mock_script(
+            "prd_e2e_backend.sh",
+            r#"#!/bin/sh
+INPUT="$(cat)"
+if echo "$INPUT" | grep -q "reviewing an engineering specification"; then
+  cat <<'EOF'
+```json
+{"approved": true, "issues": []}
+```
+EOF
+  exit 0
+fi
+
+if echo "$INPUT" | grep -q "merge and deduplicate"; then
+  printf '1. What API?\n2. What errors?\n3. What scope?\n'
+  exit 0
+fi
+
+if echo "$INPUT" | grep -q "engineering specification analyst"; then
+  printf '1. What API?\n2. What errors?\n'
+  exit 0
+fi
+
+cat <<'EOF'
+## Summary
+E2E draft spec.
+
+## Acceptance Criteria
+- [ ] End-to-end flow works.
+
+## Technical Approach
+Multi-tick daemon approach.
+
+## Files & Modules
+- src/daemon/interactive_prd.rs
+
+## Testing Strategy
+- E2E integration test.
+
+## Out of Scope
+- webhooks
+EOF
+"#,
+        )
+        .expect("write backend script");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    // State file path
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme")
+        .join("widgets")
+        .join(".ralph")
+        .join("interactive-prd")
+        .join("100.json");
+
+    // Track which tick we're on via a counter file
+    let tick_file = h.temp_dir.path().join("e2e_tick.txt");
+    let tick_file_str = tick_file.to_string_lossy().into_owned();
+    let comment_log = h.temp_dir.path().join("e2e_comment.log");
+    let comment_log_str = comment_log.to_string_lossy().into_owned();
+    let label_log = h.temp_dir.path().join("e2e_label.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+TICK_FILE="{tick_file_str}"
+COMMENT_LOG="{comment_log_str}"
+LABEL_LOG="{label_log_str}"
+
+# Read tick number (default 1)
+if [ -f "$TICK_FILE" ]; then
+  TICK=$(cat "$TICK_FILE")
+else
+  TICK=1
+fi
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+          esac
+        done
+        if [ "$TICK" = "1" ] && [ "$has_prd" = "1" ]; then
+          printf '[{{"number":100,"title":"E2E PRD","labels":[{{"name":"ralph:prd"}}],"body":"Build a multi-tick flow."}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[{{"number":100,"title":"E2E PRD","labels":[{{"name":"ralph:prd-active"}}],"body":"Build a multi-tick flow."}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          if [ "$TICK" = "1" ]; then
+            # No comments yet (or just the questions we posted)
+            if [ -f "$COMMENT_LOG" ]; then
+              printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQuestions","createdAt":"2026-01-01T00:00:05Z"}}]}}'
+            else
+              printf '{{"comments":[]}}'
+            fi
+          elif [ "$TICK" = "2" ]; then
+            # Questions posted, user answered
+            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\n## Clarifying Questions\\n1. What API?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST with retries.","createdAt":"2026-01-01T00:00:15Z"}}]}}'
+          elif [ "$TICK" = "3" ]; then
+            # Draft posted, user approves
+            printf '{{"comments":[{{"id":1001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:questions-v1 -->\\nQ","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1002,"author":{{"login":"alice"}},"body":"Use REST.","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1003,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:100:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:20Z"}},{{"id":1004,"author":{{"login":"alice"}},"body":"LGTM, ship it!","createdAt":"2026-01-01T00:00:30Z"}}]}}'
+          fi
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'
+          exit 0
+        fi
+        exit 0
+        ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s\n' "$2" >> "$COMMENT_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "$LABEL_LOG"
+        exit 0
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label) exit 0 ;;
+esac
+exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Tick 1: Pending -> AwaitingAnswers
+    fs::write(&tick_file, "1").expect("write tick 1");
+    let output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("tick 1");
+    assert_exit_code(&output, 0);
+
+    let state_raw = fs::read_to_string(&state_path).expect("state after tick 1");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse tick 1");
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::AwaitingAnswers,
+        "after tick 1: should be AwaitingAnswers"
+    );
+    assert_eq!(state.question_revision, 1);
+
+    // Tick 2: AwaitingAnswers -> AwaitingFeedback
+    fs::write(&tick_file, "2").expect("write tick 2");
+    let output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("tick 2");
+    assert_exit_code(&output, 0);
+
+    let state_raw = fs::read_to_string(&state_path).expect("state after tick 2");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse tick 2");
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::AwaitingFeedback,
+        "after tick 2: should be AwaitingFeedback"
+    );
+    assert_eq!(state.draft_revision, 1);
+    assert!(state.latest_draft_body.is_some());
+
+    // Tick 3: AwaitingFeedback -> Done (approval)
+    fs::write(&tick_file, "3").expect("write tick 3");
+    let output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("tick 3");
+    assert_exit_code(&output, 0);
+
+    let state_raw = fs::read_to_string(&state_path).expect("state after tick 3");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse tick 3");
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::Done,
+        "after tick 3: should be Done"
+    );
+    assert!(state.is_terminal());
+
+    // Verify approval was posted
+    let comment_body = fs::read_to_string(&comment_log).unwrap_or_default();
+    assert!(
+        comment_body.contains("<!-- ralph:prd:100:status-approved-v1 -->"),
+        "approval marker should be posted: {comment_body}"
+    );
+
+    // Verify labels
+    let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("ralph:prd-done"),
+        "ralph:prd-done should be added: {label_raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pre-draft comment exclusion regression test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pre_draft_comments_excluded_from_feedback_in_awaiting_feedback() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    // Backend not needed — no revision should be triggered
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme")
+        .join("widgets")
+        .join(".ralph")
+        .join("interactive-prd")
+        .join("110.json");
+    fs::create_dir_all(state_path.parent().expect("parent"))
+        .expect("create state dir");
+
+    // Seed: AwaitingFeedback, draft at id=1103, cursor at id=1100
+    // There's a user comment (1102) that's pre-draft but post-cursor
+    let seed = serde_json::json!({
+        "issue_number": 110,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1100,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1103,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1100,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    // gh returns comments with pre-draft user comment (id 1102) that has
+    // approval text — this should be IGNORED because it's pre-draft
+    let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":110,"title":"Pre-draft test","labels":[{"name":"ralph:prd-active"}],"body":"Test."}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{"comments":[{"id":1100,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":1101,"author":{"login":"alice"},"body":"answers","createdAt":"2026-01-01T00:00:10Z"},{"id":1102,"author":{"login":"alice"},"body":"LGTM, approved!","createdAt":"2026-01-01T00:00:12Z"},{"id":1103,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:110:draft-v1 -->\nDraft","createdAt":"2026-01-01T00:00:15Z"}]}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#;
+    let gh_path = h.write_mock_script("gh", gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    let output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start");
+    assert_exit_code(&output, 0);
+
+    let state_raw = fs::read_to_string(&state_path).expect("state should exist");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state");
+
+    // The pre-draft "LGTM, approved!" comment should NOT have triggered Done.
+    // State should remain AwaitingFeedback because no post-draft comments exist.
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::AwaitingFeedback,
+        "pre-draft approval comment should be ignored; state should remain AwaitingFeedback"
+    );
+    assert_eq!(state.draft_revision, 1, "no revision should have happened");
+}
+
 fn ralph_bin_absolute() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_ralph") {
         return PathBuf::from(p);

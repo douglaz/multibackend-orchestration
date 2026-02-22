@@ -465,19 +465,42 @@ fn do_pending_to_awaiting(
          *Reply to this comment with your answers and I'll generate a draft spec.*"
     );
 
-    let comment_id =
-        github::post_comment_with_marker(owner, repo, issue_number, &marker, &comment_body)
-            .map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            })?;
+    // Check if marker already exists to hydrate questions_posted_at from the
+    // existing comment's created_at (restart-safe). This avoids using
+    // Utc::now() which would skip valid user answers posted between the
+    // original comment time and the restart.
+    let existing_marker_comment =
+        github::find_comment_with_marker(owner, repo, issue_number, &marker).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    let (comment_id, questions_posted_at) = if let Some(existing) = existing_marker_comment {
+        // Marker already exists — hydrate timestamp from real comment time
+        (Some(existing.id), existing.created_at)
+    } else {
+        // Post new comment
+        let id = github::post_comment_with_marker(
+            owner,
+            repo,
+            issue_number,
+            &marker,
+            &comment_body,
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
+        (id, Utc::now())
+    };
 
     // 5. Update and persist state
     state.state = PrdWorkflowState::AwaitingAnswers;
     state.question_revision = next_revision;
     state.questions_comment_id = comment_id;
-    state.questions_posted_at = Some(Utc::now());
+    state.questions_posted_at = Some(questions_posted_at);
     state.last_advanced_at = Some(Utc::now());
 
     Ok(())
@@ -663,11 +686,12 @@ fn do_awaiting_feedback(
         return do_approval_transition(config, state, issue_number);
     }
 
-    // Find new unprocessed non-bot comments
+    // Find new unprocessed non-bot comments (post-draft boundary)
     let new_comments = find_new_feedback_comments(
         &comments,
         bot_login,
         state.last_processed_comment_id,
+        state.latest_draft_comment_id,
     );
 
     if new_comments.is_empty() {
@@ -787,20 +811,33 @@ fn do_approval_transition(
     Ok(())
 }
 
-/// Find all new non-bot comments after `last_processed_comment_id`.
+/// Find all new non-bot comments after both `last_processed_comment_id` and
+/// `latest_draft_comment_id` (the draft boundary).
+///
+/// In the `AwaitingFeedback` state, only comments posted after the latest draft
+/// should be considered for approval detection or revision aggregation.
+/// Pre-draft comments are ignored even if they were previously unprocessed.
 fn find_new_feedback_comments<'a>(
     comments: &'a [github::IssueComment],
     bot_login: &str,
     last_processed_comment_id: Option<u64>,
+    latest_draft_comment_id: Option<u64>,
 ) -> Vec<&'a github::IssueComment> {
+    // The effective boundary is the maximum of last_processed_comment_id and
+    // latest_draft_comment_id. This ensures pre-draft comments are always excluded.
+    let boundary = match (last_processed_comment_id, latest_draft_comment_id) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+
     comments
         .iter()
         .filter(|comment| {
             if comment.author_login == bot_login {
                 return false;
             }
-            if let Some(last) = last_processed_comment_id {
-                if comment.id <= last {
+            if let Some(bound) = boundary {
+                if comment.id <= bound {
                     return false;
                 }
             }
@@ -1466,7 +1503,7 @@ mod tests {
             test_comment(104, "carol", "more feedback", "2026-01-01T00:00:40Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(101));
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(101), None);
         assert_eq!(new.len(), 2);
         assert_eq!(new[0].id, 102);
         assert_eq!(new[1].id, 104);
@@ -1480,7 +1517,7 @@ mod tests {
             test_comment(52, "bob", "feedback 2", "2026-01-01T00:00:30Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", None);
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, None);
         assert_eq!(new.len(), 2);
         assert_eq!(new[0].id, 51);
         assert_eq!(new[1].id, 52);
@@ -1493,7 +1530,7 @@ mod tests {
             test_comment(61, "ralph-bot", "followup", "2026-01-01T00:00:20Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", None);
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, None);
         assert!(new.is_empty());
     }
 
@@ -1504,8 +1541,43 @@ mod tests {
             test_comment(71, "bob", "also old", "2026-01-01T00:00:20Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(71));
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(71), None);
         assert!(new.is_empty());
+    }
+
+    #[test]
+    fn find_new_feedback_comments_respects_draft_boundary() {
+        // Pre-draft user comments should be excluded even if unprocessed
+        let comments = vec![
+            test_comment(200, "ralph-bot", "questions", "2026-01-01T00:00:05Z"),
+            test_comment(201, "alice", "answers", "2026-01-01T00:00:10Z"),
+            test_comment(202, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            // Pre-draft user comment (id 203 < draft id 204) — should be excluded
+            test_comment(203, "bob", "pre-draft feedback", "2026-01-01T00:00:20Z"),
+            test_comment(204, "ralph-bot", "draft-v2", "2026-01-01T00:00:25Z"),
+            // Post-draft comments — should be included
+            test_comment(205, "carol", "post-draft feedback", "2026-01-01T00:00:30Z"),
+        ];
+
+        // last_processed_comment_id=201, latest_draft_comment_id=204
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(201), Some(204));
+        assert_eq!(new.len(), 1, "only post-draft comments should be included");
+        assert_eq!(new[0].id, 205);
+    }
+
+    #[test]
+    fn find_new_feedback_comments_draft_boundary_takes_precedence_over_cursor() {
+        // Even if cursor is behind the draft, draft boundary should win
+        let comments = vec![
+            test_comment(300, "alice", "old feedback", "2026-01-01T00:00:10Z"),
+            test_comment(301, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(302, "bob", "new feedback", "2026-01-01T00:00:20Z"),
+        ];
+
+        // cursor=299 (behind everything), draft=301
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(299), Some(301));
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].id, 302, "only post-draft feedback should be visible");
     }
 
     #[test]
@@ -1556,7 +1628,7 @@ mod tests {
             test_comment(203, "alice", "LGTM, ship it!", "2026-01-01T00:00:35Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(201));
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(201), Some(200));
         assert_eq!(new.len(), 2, "should find 2 new non-bot comments");
 
         let has_approval = new.iter().any(|c| detect_approval(&c.body));
@@ -1578,7 +1650,7 @@ mod tests {
             test_comment(303, "carol", "Add more acceptance criteria.", "2026-01-01T00:00:35Z"),
         ];
 
-        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(301));
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(301), Some(300));
         assert_eq!(new.len(), 2);
 
         let has_approval = new.iter().any(|c| detect_approval(&c.body));
@@ -1586,5 +1658,158 @@ mod tests {
             !has_approval,
             "has_approval should be false when no comment passes detect_approval()"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Transition decision-path unit tests
+    // -----------------------------------------------------------------------
+
+    /// Pending pickup: a new InteractivePrdState starts as Pending, non-terminal.
+    #[test]
+    fn transition_path_pending_pickup_starts_non_terminal() {
+        let state = InteractivePrdState::new("acme", "widgets", 42);
+        assert_eq!(state.state, PrdWorkflowState::Pending);
+        assert!(!state.is_terminal());
+        assert_eq!(state.question_revision, 0);
+        assert_eq!(state.draft_revision, 0);
+        assert!(state.questions_comment_id.is_none());
+        assert!(state.questions_posted_at.is_none());
+    }
+
+    /// Pending -> AwaitingAnswers: idempotent marker reuse should not post a
+    /// duplicate. Verified by checking that when the marker already exists,
+    /// `find_comment_with_marker` would return Some.
+    #[test]
+    fn transition_path_pending_idempotent_marker_reuse() {
+        let marker = prd_marker(42, "questions", 1);
+        let comments = vec![test_comment(
+            500,
+            "ralph-bot",
+            &format!("{marker}\n## Clarifying Questions\n1. Q?"),
+            "2026-01-15T10:00:00Z",
+        )];
+        // Simulates find_comment_with_marker behavior: check that marker is in body
+        let found = comments.iter().find(|c| c.body.contains(&marker));
+        assert!(found.is_some(), "existing marker should be found");
+        assert_eq!(found.unwrap().id, 500);
+        assert_eq!(
+            found.unwrap().created_at,
+            ts("2026-01-15T10:00:00Z"),
+            "should hydrate created_at from existing comment"
+        );
+    }
+
+    /// AwaitingAnswers: first valid user comment after questions_posted_at is selected.
+    #[test]
+    fn transition_path_awaiting_answers_selects_first_valid_answer() {
+        let comments = vec![
+            test_comment(600, "ralph-bot", "questions", "2026-01-01T00:00:05Z"),
+            // Pre-questions comment (should be skipped)
+            test_comment(601, "alice", "early comment", "2026-01-01T00:00:03Z"),
+            // Post-questions answers
+            test_comment(602, "bob", "first answer", "2026-01-01T00:00:10Z"),
+            test_comment(603, "carol", "second answer", "2026-01-01T00:00:15Z"),
+        ];
+
+        let answer = find_first_answer_comment(
+            &comments,
+            ts("2026-01-01T00:00:05Z"),
+            "ralph-bot",
+            None,
+        );
+        assert!(answer.is_some(), "should find an answer");
+        assert_eq!(answer.unwrap().id, 602, "should select first valid answer");
+    }
+
+    /// AwaitingFeedback approval path: at least one approval comment triggers Done.
+    #[test]
+    fn transition_path_awaiting_feedback_approval() {
+        let comments = vec![
+            test_comment(700, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(701, "alice", "Approved!", "2026-01-01T00:00:25Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, Some(700));
+        assert_eq!(new.len(), 1);
+        assert!(detect_approval(&new[0].body), "should detect approval");
+    }
+
+    /// AwaitingFeedback revision path: non-approval feedback triggers revision.
+    #[test]
+    fn transition_path_awaiting_feedback_revision() {
+        let comments = vec![
+            test_comment(800, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(801, "alice", "Please add error handling.", "2026-01-01T00:00:25Z"),
+            test_comment(802, "bob", "Also fix the testing section.", "2026-01-01T00:00:30Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, Some(800));
+        assert_eq!(new.len(), 2, "should find 2 feedback comments");
+        assert!(
+            !new.iter().any(|c| detect_approval(&c.body)),
+            "no approval should be detected"
+        );
+    }
+
+    /// Retry exhaustion: error_count reaches 3 and triggers Failed.
+    #[test]
+    fn transition_path_retry_exhaustion_triggers_failed() {
+        let mut state = InteractivePrdState::new("acme", "widgets", 42);
+        state.state = PrdWorkflowState::AwaitingFeedback;
+
+        let err = Err(RalphError::InteractivePrdFailed("persistent error".to_owned()));
+
+        // First error
+        assert!(!apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 1);
+        assert_eq!(state.state, PrdWorkflowState::AwaitingFeedback);
+
+        // Second error
+        assert!(!apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 2);
+
+        // Third error — should trigger failure
+        assert!(apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 3);
+        // Note: the caller (finish_transition) actually sets state to Failed;
+        // apply_transition_result just signals via the return value.
+    }
+
+    /// Pre-draft comments must be ignored for approval detection.
+    #[test]
+    fn pre_draft_comments_ignored_for_approval_detection() {
+        let comments = vec![
+            test_comment(400, "alice", "Approved!", "2026-01-01T00:00:05Z"),
+            test_comment(401, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(402, "bob", "Please fix typo.", "2026-01-01T00:00:25Z"),
+        ];
+
+        // Draft boundary at 401: only comments after 401 are visible
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, Some(401));
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].id, 402);
+        assert!(
+            !detect_approval(&new[0].body),
+            "pre-draft approval should not be visible"
+        );
+    }
+
+    /// Pre-draft comments must be ignored for revision aggregation.
+    #[test]
+    fn pre_draft_comments_ignored_for_revision_aggregation() {
+        let comments = vec![
+            test_comment(500, "alice", "old feedback from before draft", "2026-01-01T00:00:05Z"),
+            test_comment(501, "bob", "more old feedback", "2026-01-01T00:00:08Z"),
+            test_comment(502, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(503, "carol", "new feedback", "2026-01-01T00:00:25Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", None, Some(502));
+        assert_eq!(
+            new.len(),
+            1,
+            "only post-draft comments should be aggregated for revision"
+        );
+        assert_eq!(new[0].author_login, "carol");
     }
 }

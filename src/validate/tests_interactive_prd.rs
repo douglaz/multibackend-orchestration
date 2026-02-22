@@ -97,6 +97,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::approval_failure_exhaustion_transitions_to_failed",
             func: approval_failure_exhaustion_transitions_to_failed,
         },
+        ConformanceTest {
+            name: "interactive_prd::draft_boundary_filtering_excludes_pre_draft_approval",
+            func: draft_boundary_filtering_excludes_pre_draft_approval,
+        },
+        ConformanceTest {
+            name: "interactive_prd::restart_continuity_marker_timestamp_hydration",
+            func: restart_continuity_marker_timestamp_hydration,
+        },
+        ConformanceTest {
+            name: "interactive_prd::draft_boundary_filtering_excludes_pre_draft_revision",
+            func: draft_boundary_filtering_excludes_pre_draft_revision,
+        },
     ]
 }
 
@@ -1672,6 +1684,263 @@ esac; exit 0
         assert!(
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed label should be added after exhaustion: {label_raw}"
+        );
+    })
+}
+
+/// Verify that pre-draft user comments with approval text are excluded from
+/// feedback processing in AwaitingFeedback. Only post-draft comments should
+/// be considered for approval detection.
+fn draft_boundary_filtering_excludes_pre_draft_approval(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/60.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        // Seed: AwaitingFeedback with draft at id=603, cursor at id=600
+        let seed = serde_json::json!({
+            "issue_number": 60, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 600, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 603,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 600,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        // Pre-draft comment (id 602) has "LGTM" but should be ignored
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":60,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{"comments":[{"id":600,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":601,"author":{"login":"alice"},"body":"answers","createdAt":"2026-01-01T00:00:10Z"},{"id":602,"author":{"login":"alice"},"body":"LGTM, approved!","createdAt":"2026-01-01T00:00:12Z"},{"id":603,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:60:draft-v1 -->\nDraft","createdAt":"2026-01-01T00:00:15Z"}]}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#;
+        let gh_path = write_mock_gh(&dh, gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "pre-draft approval should be ignored; state should remain AwaitingFeedback"
+        );
+        assert_eq!(state.draft_revision, 1, "no revision should have occurred");
+    })
+}
+
+/// Verify that pre-draft user feedback comments are excluded from revision
+/// aggregation. Only post-draft comments trigger the revision loop.
+fn draft_boundary_filtering_excludes_pre_draft_revision(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/61.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 61, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 610, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 613,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 610,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        // Pre-draft non-approval feedback (id 612) should be ignored
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":61,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{"comments":[{"id":610,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":611,"author":{"login":"alice"},"body":"answers","createdAt":"2026-01-01T00:00:10Z"},{"id":612,"author":{"login":"bob"},"body":"Please fix the testing section.","createdAt":"2026-01-01T00:00:12Z"},{"id":613,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:61:draft-v1 -->\nDraft","createdAt":"2026-01-01T00:00:15Z"}]}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#;
+        let gh_path = write_mock_gh(&dh, gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "pre-draft feedback should be ignored; no revision triggered"
+        );
+        assert_eq!(state.draft_revision, 1, "draft_revision should remain 1");
+    })
+}
+
+/// Verify restart continuity: when questions-v{n} marker already exists on
+/// the issue, the daemon hydrates `questions_posted_at` from the existing
+/// comment's `created_at` rather than using `Utc::now()`. This ensures that
+/// user answers posted between the original question time and the restart are
+/// not skipped.
+fn restart_continuity_marker_timestamp_hydration(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        // Backend for question generation (should NOT be called since marker exists)
+        let backend_script = dh
+            .write_mock_script(
+                "prd_restart_q.sh",
+                r#"#!/bin/sh
+cat >/dev/null
+printf '1. Q1?\n2. Q2?\n'
+"#,
+            )
+            .unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        // No persisted state — simulating a fresh start that picks up an issue
+        // where the questions marker was already posted by a prior instance.
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/70.json");
+
+        let label_log = dh.temp_dir.path().join("restart_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        // The marker comment already exists with created_at = 2026-01-10T12:00:00Z
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":70,"title":"Restart test","labels":[{{"name":"ralph:prd"}}],"body":"Test restart."}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":7001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:70:questions-v1 -->\\n## Clarifying Questions\\n1. Q1?","createdAt":"2026-01-10T12:00:00Z"}}]}}'
+          exit 0
+        fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(state.state, PrdWorkflowState::AwaitingAnswers);
+        assert_eq!(state.question_revision, 1);
+        assert_eq!(state.questions_comment_id, Some(7001));
+
+        // The key assertion: questions_posted_at should be the existing
+        // comment's created_at (2026-01-10T12:00:00Z), NOT Utc::now()
+        let qpa = state
+            .questions_posted_at
+            .expect("questions_posted_at should be set");
+        let expected =
+            chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+                .expect("parse")
+                .with_timezone(&chrono::Utc);
+        assert_eq!(
+            qpa, expected,
+            "questions_posted_at should be hydrated from existing marker comment's created_at, \
+             got {qpa} but expected {expected}"
         );
     })
 }
