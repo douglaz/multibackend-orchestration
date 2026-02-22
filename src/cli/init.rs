@@ -9,8 +9,8 @@ use crate::error::RalphError;
 use crate::prompts::templates::{
     default_arbiter_template, default_completer_template, default_final_reviewer_template,
     default_implementer_template, default_planner_position_template, default_planner_template,
-    default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
-    default_vote_template,
+    default_prompt_review_validator_template, default_prompt_reviewer_template,
+    default_qa_template, default_reviewer_template, default_vote_template,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -22,6 +22,10 @@ pub(crate) const TEMPLATE_FILES: &[(&str, TemplateContentFn)] = &[
     ("implementation.md", default_implementer_template),
     ("review.md", default_reviewer_template),
     ("prompt_reviewer.md", default_prompt_reviewer_template),
+    (
+        "prompt_review_validator.md",
+        default_prompt_review_validator_template,
+    ),
     ("completion.md", default_completer_template),
     ("qa.md", default_qa_template),
     ("final_reviewer.md", default_final_reviewer_template),
@@ -245,8 +249,8 @@ mod tests {
     use crate::prompts::templates::{
         default_arbiter_template, default_completer_template, default_final_reviewer_template,
         default_implementer_template, default_planner_position_template, default_planner_template,
-        default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
-        default_vote_template,
+        default_prompt_review_validator_template, default_prompt_reviewer_template,
+        default_qa_template, default_reviewer_template, default_vote_template,
     };
 
     #[test]
@@ -275,6 +279,11 @@ mod tests {
             std::fs::read_to_string(templates_dir.join("prompt_reviewer.md"))
                 .expect("read prompt reviewer template"),
             default_prompt_reviewer_template()
+        );
+        assert_eq!(
+            std::fs::read_to_string(templates_dir.join("prompt_review_validator.md"))
+                .expect("read prompt review validator template"),
+            default_prompt_review_validator_template()
         );
         assert_eq!(
             std::fs::read_to_string(templates_dir.join("completion.md"))

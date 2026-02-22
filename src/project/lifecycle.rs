@@ -681,7 +681,8 @@ fn reconstruct_completion_attempt(
     let per_backend_verdicts: Vec<&ArtifactEntry> = artifacts
         .iter()
         .filter(|artifact| {
-            artifact.base_name.starts_with("completer-verdict-") && artifact.base_name != "completer-verdict.md"
+            artifact.base_name.starts_with("completer-verdict-")
+                && artifact.base_name != "completer-verdict.md"
         })
         .collect();
 
@@ -691,60 +692,60 @@ fn reconstruct_completion_attempt(
     });
 
     // Determine completers and effective verdict.
-    let (completers, effective_verdict_artifact, panel_verdict) = if !per_backend_verdicts.is_empty()
-    {
-        // New per-backend verdict layout: extract completers from each verdict artifact.
-        let mut completers = Vec::new();
-        let mut complete_votes: u32 = 0;
-        let mut any_verdict = false;
-        let mut latest_verdict: Option<&ArtifactEntry> = None;
-        for v in &per_backend_verdicts {
-            let backend = v
+    let (completers, effective_verdict_artifact, panel_verdict) =
+        if !per_backend_verdicts.is_empty() {
+            // New per-backend verdict layout: extract completers from each verdict artifact.
+            let mut completers = Vec::new();
+            let mut complete_votes: u32 = 0;
+            let mut any_verdict = false;
+            let mut latest_verdict: Option<&ArtifactEntry> = None;
+            for v in &per_backend_verdicts {
+                let backend = v
+                    .frontmatter
+                    .get("backend")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned());
+                completers.push(backend);
+                if let Some(pv) = parse_completion_verdict(&v.body) {
+                    any_verdict = true;
+                    if pv == CompletionVerdict::Complete {
+                        complete_votes += 1;
+                    }
+                }
+                latest_verdict = Some(match latest_verdict {
+                    Some(prev) if v.observed_at > prev.observed_at => v,
+                    Some(prev) => prev,
+                    None => v,
+                });
+            }
+            // Apply the same consensus formula as the runtime orchestrator:
+            // complete_votes >= min_completers AND ratio >= threshold.
+            let total = per_backend_verdicts.len() as u32;
+            let verdict = if any_verdict {
+                let consensus_reached = complete_votes >= min_completers
+                    && total > 0
+                    && (complete_votes as f64 / total as f64) >= consensus_threshold;
+                if consensus_reached {
+                    Some(CompletionVerdict::Complete)
+                } else {
+                    Some(CompletionVerdict::Continue)
+                }
+            } else {
+                None
+            };
+            (completers, latest_verdict, verdict)
+        } else if let Some(single) = legacy_verdict {
+            // Legacy single-verdict layout: map to single completer.
+            let backend = single
                 .frontmatter
                 .get("backend")
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_owned());
-            completers.push(backend);
-            if let Some(pv) = parse_completion_verdict(&v.body) {
-                any_verdict = true;
-                if pv == CompletionVerdict::Complete {
-                    complete_votes += 1;
-                }
-            }
-            latest_verdict = Some(match latest_verdict {
-                Some(prev) if v.observed_at > prev.observed_at => v,
-                Some(prev) => prev,
-                None => v,
-            });
-        }
-        // Apply the same consensus formula as the runtime orchestrator:
-        // complete_votes >= min_completers AND ratio >= threshold.
-        let total = per_backend_verdicts.len() as u32;
-        let verdict = if any_verdict {
-            let consensus_reached = complete_votes >= min_completers
-                && total > 0
-                && (complete_votes as f64 / total as f64) >= consensus_threshold;
-            if consensus_reached {
-                Some(CompletionVerdict::Complete)
-            } else {
-                Some(CompletionVerdict::Continue)
-            }
+            let verdict = parse_completion_verdict(&single.body);
+            (vec![backend], Some(single), verdict)
         } else {
-            None
+            (Vec::new(), None, None)
         };
-        (completers, latest_verdict, verdict)
-    } else if let Some(single) = legacy_verdict {
-        // Legacy single-verdict layout: map to single completer.
-        let backend = single
-            .frontmatter
-            .get("backend")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_owned());
-        let verdict = parse_completion_verdict(&single.body);
-        (vec![backend], Some(single), verdict)
-    } else {
-        (Vec::new(), None, None)
-    };
 
     let mut acceptance_results = Vec::new();
     for artifact in &artifacts {
@@ -959,7 +960,11 @@ where
 }
 
 fn state_has_prompt_review(project_dir: &Path) -> bool {
-    project_dir.join("prompt-review.md").exists()
+    // A completed prompt review always writes both the canonical review
+    // artifact and the original prompt backup.  Requiring both prevents
+    // validator-rejected runs (which may still write prompt-review.md) from
+    // being reconstructed as completed.
+    project_dir.join("prompt-review.md").exists() && project_dir.join("prompt-original.md").exists()
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
@@ -1034,11 +1039,7 @@ mod tests {
         // Write prompt so reconstruction doesn't fail
         fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
         // Write project.toml metadata
-        fs::write(
-            project_dir.join("project.toml"),
-            "name = \"test-proj\"\n",
-        )
-        .unwrap();
+        fs::write(project_dir.join("project.toml"), "name = \"test-proj\"\n").unwrap();
         // No project config.toml → no project-level completion overrides
 
         // Write per-backend verdict artifacts: one COMPLETE, one CONTINUE
@@ -1092,11 +1093,7 @@ mod tests {
         fs::create_dir_all(&project_dir).unwrap();
 
         fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
-        fs::write(
-            project_dir.join("project.toml"),
-            "name = \"test-proj2\"\n",
-        )
-        .unwrap();
+        fs::write(project_dir.join("project.toml"), "name = \"test-proj2\"\n").unwrap();
         // Project config overrides threshold to 1.0
         fs::write(
             project_dir.join("config.toml"),

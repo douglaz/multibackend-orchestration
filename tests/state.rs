@@ -81,10 +81,7 @@ fn test_next_loop_number_with_completion_attempts() {
         slug: "completion".to_owned(),
         loop_type: LoopType::Completion,
         status: LoopStatus::Completed,
-        backends: CompletionLoopBackends::new(
-            "claude".to_owned(),
-            vec!["codex".to_owned()],
-        ),
+        backends: CompletionLoopBackends::new("claude".to_owned(), vec!["codex".to_owned()]),
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/005-completion/termination-request.md".to_owned(),
             verdict: Some("loops/005-completion/completer-verdict.md".to_owned()),
@@ -277,10 +274,7 @@ fn test_register_feature_loop() {
 fn test_register_completion_attempt() {
     let mut state = ProjectState::new("test", "Test", "hash", None);
 
-    let backends = CompletionLoopBackends::new(
-        "claude".to_owned(),
-        vec!["codex".to_owned()],
-    );
+    let backends = CompletionLoopBackends::new("claude".to_owned(), vec!["codex".to_owned()]);
 
     state.register_completion_attempt(
         3,
@@ -435,10 +429,7 @@ fn test_validate_invariants_rejects_duplicate_loop_numbers() {
         slug: "completion".to_owned(),
         loop_type: LoopType::Completion,
         status: LoopStatus::InProgress,
-        backends: CompletionLoopBackends::new(
-            "claude".to_owned(),
-            vec!["codex".to_owned()],
-        ),
+        backends: CompletionLoopBackends::new("claude".to_owned(), vec!["codex".to_owned()]),
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/001-completion/termination-request.md".to_owned(),
             verdict: None,
@@ -874,10 +865,7 @@ fn test_serialization_emits_acceptance_results_and_omits_legacy_fields() {
         slug: "completion".to_owned(),
         loop_type: LoopType::Completion,
         status: LoopStatus::InProgress,
-        backends: CompletionLoopBackends::new(
-            "claude".to_owned(),
-            vec!["codex".to_owned()],
-        ),
+        backends: CompletionLoopBackends::new("claude".to_owned(), vec!["codex".to_owned()]),
         artifacts: CompletionLoopArtifacts {
             termination_request: "loops/002-completion/termination-request.md".to_owned(),
             verdict: Some("loops/002-completion/completer-verdict.md".to_owned()),

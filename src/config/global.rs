@@ -335,6 +335,10 @@ pub struct WorkflowConfig {
     pub prompt_review_enabled: bool,
     #[serde(default = "default_prompt_review_backend")]
     pub prompt_review_backend: String,
+    #[serde(default = "default_prompt_review_backends")]
+    pub prompt_review_backends: Vec<String>,
+    #[serde(default = "default_prompt_review_min_reviewers")]
+    pub prompt_review_min_reviewers: u32,
     #[serde(default)]
     pub planner_backend: Option<String>,
     #[serde(default)]
@@ -438,6 +442,8 @@ pub struct TemplateConfig {
     pub reviewer: String,
     #[serde(default = "default_prompt_reviewer_template_path")]
     pub prompt_reviewer: String,
+    #[serde(default = "default_prompt_review_validator_template_path")]
+    pub prompt_review_validator: String,
     #[serde(default = "default_completer_template_path")]
     pub completer: String,
     #[serde(default = "default_qa_template_path")]
@@ -599,6 +605,8 @@ impl Default for WorkflowConfig {
             prompt_change_action: default_prompt_change_action(),
             prompt_review_enabled: default_prompt_review_enabled(),
             prompt_review_backend: default_prompt_review_backend(),
+            prompt_review_backends: default_prompt_review_backends(),
+            prompt_review_min_reviewers: default_prompt_review_min_reviewers(),
             planner_backend: None,
             implementer_backend: None,
             reviewer_backend: None,
@@ -637,6 +645,7 @@ impl Default for TemplateConfig {
             implementer: default_implementer_template_path(),
             reviewer: default_reviewer_template_path(),
             prompt_reviewer: default_prompt_reviewer_template_path(),
+            prompt_review_validator: default_prompt_review_validator_template_path(),
             completer: default_completer_template_path(),
             qa: default_qa_template_path(),
             final_reviewer: default_final_reviewer_template_path(),
@@ -971,12 +980,24 @@ fn default_prompt_review_backend() -> String {
     "codex(gpt-5.3-codex-xhigh)".to_owned()
 }
 
+fn default_prompt_review_backends() -> Vec<String> {
+    vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+}
+
+fn default_prompt_review_min_reviewers() -> u32 {
+    1
+}
+
 fn default_max_qa_iterations() -> u32 {
     3
 }
 
 fn default_prompt_reviewer_template_path() -> String {
     "templates/prompt_reviewer.md".to_owned()
+}
+
+fn default_prompt_review_validator_template_path() -> String {
+    "templates/prompt_review_validator.md".to_owned()
 }
 
 fn default_qa_template_path() -> String {
@@ -1186,6 +1207,11 @@ command = "claude-custom"
             "codex(gpt-5.3-codex-xhigh)"
         );
         assert_eq!(
+            config.workflow.prompt_review_backends,
+            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
+        assert_eq!(
             config.backends.claude.models.qa.as_deref(),
             Some("opus"),
             "claude qa model should default to opus"
@@ -1199,6 +1225,10 @@ command = "claude-custom"
         assert_eq!(
             config.templates.prompt_reviewer,
             "templates/prompt_reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/prompt_review_validator.md"
         );
         assert_eq!(
             config.templates.final_reviewer,
@@ -1409,10 +1439,19 @@ base_branch = "master"
             config.workflow.prompt_review_backend,
             "codex(gpt-5.3-codex-xhigh)"
         );
+        assert_eq!(
+            config.workflow.prompt_review_backends,
+            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
         assert_eq!(config.templates.qa, "templates/qa.md");
         assert_eq!(
             config.templates.prompt_reviewer,
             "templates/prompt_reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/prompt_review_validator.md"
         );
     }
 
@@ -1535,12 +1574,15 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = false
 prompt_review_backend = "claude(opus)"
+prompt_review_backends = ["claude(opus)", "codex"]
+prompt_review_min_reviewers = 2
 
 [templates]
 planner = "templates/spec.md"
 implementer = "templates/implementation.md"
 reviewer = "templates/review.md"
 prompt_reviewer = "templates/custom-prompt-reviewer.md"
+prompt_review_validator = "templates/custom-prompt-review-validator.md"
 completer = "templates/completion.md"
 
 [git]
@@ -1554,8 +1596,17 @@ base_branch = "master"
         assert!(!config.workflow.prompt_review_enabled);
         assert_eq!(config.workflow.prompt_review_backend, "claude(opus)");
         assert_eq!(
+            config.workflow.prompt_review_backends,
+            vec!["claude(opus)".to_owned(), "codex".to_owned()]
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 2);
+        assert_eq!(
             config.templates.prompt_reviewer,
             "templates/custom-prompt-reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/custom-prompt-review-validator.md"
         );
     }
 

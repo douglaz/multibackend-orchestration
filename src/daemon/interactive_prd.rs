@@ -384,14 +384,12 @@ fn advance_issue(
         PrdWorkflowState::Pending => {
             transition_pending_to_awaiting_answers(config, issue, &mut state, bot_login_cache)
         }
-        PrdWorkflowState::AwaitingAnswers => {
-            transition_awaiting_answers_to_awaiting_feedback(
-                config,
-                issue,
-                &mut state,
-                bot_login_cache,
-            )
-        }
+        PrdWorkflowState::AwaitingAnswers => transition_awaiting_answers_to_awaiting_feedback(
+            config,
+            issue,
+            &mut state,
+            bot_login_cache,
+        ),
         PrdWorkflowState::AwaitingFeedback => {
             transition_awaiting_feedback(config, issue, &mut state, bot_login_cache)
         }
@@ -565,8 +563,9 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         );
     }
 
-    let result = get_or_fetch_bot_login(bot_login_cache)
-        .and_then(|bot_login| do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login));
+    let result = get_or_fetch_bot_login(bot_login_cache).and_then(|bot_login| {
+        do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
+    });
     finish_transition(config, state, result, bot_login_cache)
 }
 
@@ -769,11 +768,8 @@ fn do_awaiting_feedback(
         .as_deref()
         .unwrap_or("(no previous draft)");
 
-    let revised_spec = generate_revision_from_feedback_with_timeout(
-        config,
-        current_draft,
-        &aggregated_feedback,
-    )?;
+    let revised_spec =
+        generate_revision_from_feedback_with_timeout(config, current_draft, &aggregated_feedback)?;
 
     // Post new draft comment with incremented marker
     let next_revision = state.draft_revision + 1;
@@ -943,9 +939,7 @@ fn generate_revision_from_feedback_with_timeout(
     let mut current_spec = run_draft_with_section_retry_sync(&writer, &revision_prompt, deadline)?;
 
     // Run reviewer/section validation loop (same as initial draft generation)
-    let idea_context = format!(
-        "Revision based on user feedback:\n{aggregated_feedback}"
-    );
+    let idea_context = format!("Revision based on user feedback:\n{aggregated_feedback}");
     for _iteration in 1..=config.max_revisions {
         let review_prompt = render_prompt(
             REVIEW_PROMPT,
@@ -1461,7 +1455,13 @@ pub fn tests_extract_questions_text(
     question_revision: u32,
     bot_login: &str,
 ) -> String {
-    extract_questions_text(comments, questions_comment_id, issue_number, question_revision, bot_login)
+    extract_questions_text(
+        comments,
+        questions_comment_id,
+        issue_number,
+        question_revision,
+        bot_login,
+    )
 }
 
 #[cfg(test)]
@@ -1470,12 +1470,12 @@ mod tests {
 
     use super::{
         apply_transition_result, detect_approval, extract_questions_text,
-        find_first_answer_comment, find_new_feedback_comments, generate_draft_from_answers_with_timeout,
-        generate_revision_from_feedback_with_timeout, prd_marker,
-        prd_status_approved_marker, render_answer_to_draft_prompt, run_draft_with_section_retry_sync,
-        InteractivePrdState, PrdPollConfig,
-        PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
-        PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        find_first_answer_comment, find_new_feedback_comments,
+        generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
+        prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
+        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
+        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -1834,7 +1834,9 @@ mod tests {
 
     #[test]
     fn detect_approval_plain_feedback_returns_false() {
-        assert!(!detect_approval("Please add more detail to the testing section."));
+        assert!(!detect_approval(
+            "Please add more detail to the testing section."
+        ));
         assert!(!detect_approval("The acceptance criteria are incomplete."));
         assert!(!detect_approval("Can you add error handling?"));
     }
@@ -1861,7 +1863,12 @@ mod tests {
             test_comment(200, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
             test_comment(201, "alice", "old answer", "2026-01-01T00:00:15Z"),
             // New comments after cursor (id > 201):
-            test_comment(202, "bob", "Please add error handling.", "2026-01-01T00:00:30Z"),
+            test_comment(
+                202,
+                "bob",
+                "Please add error handling.",
+                "2026-01-01T00:00:30Z",
+            ),
             test_comment(203, "alice", "LGTM, ship it!", "2026-01-01T00:00:35Z"),
         ];
 
@@ -1883,8 +1890,18 @@ mod tests {
             test_comment(300, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
             test_comment(301, "alice", "answers", "2026-01-01T00:00:15Z"),
             // New feedback:
-            test_comment(302, "bob", "Please fix the testing section.", "2026-01-01T00:00:30Z"),
-            test_comment(303, "carol", "Add more acceptance criteria.", "2026-01-01T00:00:35Z"),
+            test_comment(
+                302,
+                "bob",
+                "Please fix the testing section.",
+                "2026-01-01T00:00:30Z",
+            ),
+            test_comment(
+                303,
+                "carol",
+                "Add more acceptance criteria.",
+                "2026-01-01T00:00:35Z",
+            ),
         ];
 
         let new = find_new_feedback_comments(&comments, "ralph-bot", Some(301), Some(300));
@@ -1948,12 +1965,8 @@ mod tests {
             test_comment(603, "carol", "second answer", "2026-01-01T00:00:15Z"),
         ];
 
-        let answer = find_first_answer_comment(
-            &comments,
-            ts("2026-01-01T00:00:05Z"),
-            "ralph-bot",
-            None,
-        );
+        let answer =
+            find_first_answer_comment(&comments, ts("2026-01-01T00:00:05Z"), "ralph-bot", None);
         assert!(answer.is_some(), "should find an answer");
         assert_eq!(answer.unwrap().id, 602, "should select first valid answer");
     }
@@ -1976,8 +1989,18 @@ mod tests {
     fn transition_path_awaiting_feedback_revision() {
         let comments = vec![
             test_comment(800, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
-            test_comment(801, "alice", "Please add error handling.", "2026-01-01T00:00:25Z"),
-            test_comment(802, "bob", "Also fix the testing section.", "2026-01-01T00:00:30Z"),
+            test_comment(
+                801,
+                "alice",
+                "Please add error handling.",
+                "2026-01-01T00:00:25Z",
+            ),
+            test_comment(
+                802,
+                "bob",
+                "Also fix the testing section.",
+                "2026-01-01T00:00:30Z",
+            ),
         ];
 
         let new = find_new_feedback_comments(&comments, "ralph-bot", None, Some(800));
@@ -1994,7 +2017,9 @@ mod tests {
         let mut state = InteractivePrdState::new("acme", "widgets", 42);
         state.state = PrdWorkflowState::AwaitingFeedback;
 
-        let err = Err(RalphError::InteractivePrdFailed("persistent error".to_owned()));
+        let err = Err(RalphError::InteractivePrdFailed(
+            "persistent error".to_owned(),
+        ));
 
         // First error
         assert!(!apply_transition_result(&mut state, &err));
@@ -2035,7 +2060,12 @@ mod tests {
     #[test]
     fn pre_draft_comments_ignored_for_revision_aggregation() {
         let comments = vec![
-            test_comment(500, "alice", "old feedback from before draft", "2026-01-01T00:00:05Z"),
+            test_comment(
+                500,
+                "alice",
+                "old feedback from before draft",
+                "2026-01-01T00:00:05Z",
+            ),
             test_comment(501, "bob", "more old feedback", "2026-01-01T00:00:08Z"),
             test_comment(502, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
             test_comment(503, "carol", "new feedback", "2026-01-01T00:00:25Z"),
@@ -2124,7 +2154,10 @@ mod tests {
 ## Acceptance Criteria\n- [ ] AC\n\n\
 ## Technical Approach\nApproach.";
         let (_cleaned, missing) = check_spec_sections(partial);
-        assert!(!missing.is_empty(), "partial output should have missing sections");
+        assert!(
+            !missing.is_empty(),
+            "partial output should have missing sections"
+        );
 
         // The error message should list the missing section names
         let error_msg = format!(
@@ -2169,8 +2202,8 @@ mod tests {
     fn make_mock_backend(output: &str) -> CliBackend {
         let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
         writeln!(tmp, "#!/bin/sh").unwrap();
-        writeln!(tmp, "cat >/dev/null").unwrap();  // consume stdin
-        // Use a heredoc-style approach to avoid quoting issues
+        writeln!(tmp, "cat >/dev/null").unwrap(); // consume stdin
+                                                  // Use a heredoc-style approach to avoid quoting issues
         write!(tmp, "cat <<'__MOCK_EOF__'\n{output}\n__MOCK_EOF__").unwrap();
         tmp.flush().unwrap();
 
@@ -2296,8 +2329,10 @@ mod tests {
         );
         // Should list specific missing section names
         assert!(
-            msg.contains("Technical Approach") || msg.contains("Files & Modules")
-                || msg.contains("Testing Strategy") || msg.contains("Out of Scope"),
+            msg.contains("Technical Approach")
+                || msg.contains("Files & Modules")
+                || msg.contains("Testing Strategy")
+                || msg.contains("Out of Scope"),
             "error should list specific missing section names: {msg}"
         );
     }
@@ -2343,7 +2378,11 @@ mod tests {
         writeln!(tmp, "#!/bin/sh").unwrap();
         writeln!(tmp, "INPUT=\"$(cat)\"").unwrap();
         writeln!(tmp, "if echo \"$INPUT\" | grep -q 'Review the spec for\\|\\*\\*Engineering Spec:\\*\\*\\|review response could not be parsed'; then").unwrap();
-        writeln!(tmp, "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'").unwrap();
+        writeln!(
+            tmp,
+            "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'"
+        )
+        .unwrap();
         writeln!(tmp, "else").unwrap();
         write!(tmp, "  cat <<'__MOCK_EOF__'\n{spec_output}\n__MOCK_EOF__\n").unwrap();
         writeln!(tmp, "fi").unwrap();
@@ -2477,7 +2516,11 @@ mod tests {
         writeln!(tmp, "INPUT=\"$(cat)\"").unwrap();
         // Reviewer prompts: always approve
         writeln!(tmp, "if echo \"$INPUT\" | grep -q 'Review the spec for\\|\\*\\*Engineering Spec:\\*\\*\\|review response could not be parsed'; then").unwrap();
-        writeln!(tmp, "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'").unwrap();
+        writeln!(
+            tmp,
+            "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'"
+        )
+        .unwrap();
         writeln!(tmp, "else").unwrap();
         // Writer prompts: always produce incomplete spec (3 of 6 sections)
         writeln!(tmp, "  cat <<'__MOCK_EOF__'").unwrap();
@@ -2586,7 +2629,8 @@ mod tests {
     /// Bot-scoped extract_questions_text ignores user-authored spoof markers.
     #[test]
     fn extract_questions_text_ignores_user_spoof_marker() {
-        let marker_body = "<!-- ralph:prd:7:questions-v1 -->\n## Clarifying Questions\n1. Spoofed Q";
+        let marker_body =
+            "<!-- ralph:prd:7:questions-v1 -->\n## Clarifying Questions\n1. Spoofed Q";
         let comments = vec![
             // User spoofs the questions marker
             test_comment(100, "alice", marker_body, "2026-01-01T00:00:05Z"),

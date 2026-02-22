@@ -40,7 +40,8 @@ impl ValidationSurface {
 pub struct EffectiveWorkflowConfig {
     pub starting_backend: String,
     pub prompt_review_enabled: bool,
-    pub prompt_review_backend: String,
+    pub prompt_review_backends: Vec<String>,
+    pub prompt_review_min_reviewers: u32,
     pub planner_backend: Option<String>,
     pub implementer_backend: Option<String>,
     pub reviewer_backend: Option<String>,
@@ -90,6 +91,7 @@ pub struct EffectiveTemplateConfig {
     pub implementer: PathBuf,
     pub reviewer: PathBuf,
     pub prompt_reviewer: PathBuf,
+    pub prompt_review_validator: PathBuf,
     pub completer: PathBuf,
     pub qa: PathBuf,
     pub final_reviewer: PathBuf,
@@ -177,9 +179,21 @@ pub fn resolve_effective_config(
         project_ref.and_then(|p| p.workflow.qa_backend.as_deref()),
         global.workflow.qa_backend.as_deref(),
     );
-    let prompt_review_backend = project_ref
-        .and_then(|p| p.workflow.prompt_review_backend.clone())
-        .unwrap_or_else(|| global.workflow.prompt_review_backend.clone());
+    let default_prompt_review_backends = GlobalConfig::default().workflow.prompt_review_backends;
+    let global_prompt_review_backends_is_explicit =
+        global.workflow.prompt_review_backends != default_prompt_review_backends;
+    let prompt_review_backends = if let Some(backends) =
+        project_ref.and_then(|p| p.workflow.prompt_review_backends.clone())
+    {
+        backends
+    } else if global_prompt_review_backends_is_explicit {
+        global.workflow.prompt_review_backends.clone()
+    } else {
+        let backend = project_ref
+            .and_then(|p| p.workflow.prompt_review_backend.clone())
+            .unwrap_or_else(|| global.workflow.prompt_review_backend.clone());
+        vec![backend]
+    };
 
     if let Some(spec) = planner_backend.as_deref() {
         validate_backend_spec(
@@ -221,19 +235,15 @@ pub fn resolve_effective_config(
             ValidationSurface::Required,
         )?;
     }
-    validate_backend_spec(
-        &global,
-        &prompt_review_backend,
-        "prompt review backend override",
-        ValidationSurface::Required,
-    )?;
-
     let workflow = EffectiveWorkflowConfig {
         starting_backend,
         prompt_review_enabled: project_ref
             .and_then(|p| p.workflow.prompt_review_enabled)
             .unwrap_or(global.workflow.prompt_review_enabled),
-        prompt_review_backend,
+        prompt_review_backends,
+        prompt_review_min_reviewers: project_ref
+            .and_then(|p| p.workflow.prompt_review_min_reviewers)
+            .unwrap_or(global.workflow.prompt_review_min_reviewers),
         planner_backend,
         implementer_backend,
         reviewer_backend,
@@ -328,6 +338,7 @@ pub fn resolve_effective_config(
     }
 
     validate_completion_panel_config(&global, &workflow)?;
+    validate_prompt_review_panel_config(&global, &workflow)?;
 
     let templates = EffectiveTemplateConfig {
         planner: resolve_template_path(
@@ -353,6 +364,12 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.prompt_reviewer.as_deref()),
             &global.templates.prompt_reviewer,
+        ),
+        prompt_review_validator: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.prompt_review_validator.as_deref()),
+            &global.templates.prompt_review_validator,
         ),
         completer: resolve_template_path(
             workspace_root,
@@ -749,6 +766,34 @@ fn validate_completion_panel_config(
     Ok(())
 }
 
+fn validate_prompt_review_panel_config(
+    global: &GlobalConfig,
+    workflow: &EffectiveWorkflowConfig,
+) -> Result<()> {
+    if workflow.prompt_review_backends.is_empty() {
+        return Err(RalphError::Validation(
+            "prompt_review_backends must not be empty".to_owned(),
+        ));
+    }
+
+    if workflow.prompt_review_min_reviewers < 1 {
+        return Err(RalphError::Validation(format!(
+            "prompt_review_min_reviewers must be >= 1, got {}",
+            workflow.prompt_review_min_reviewers
+        )));
+    }
+
+    normalize_backend_specs_labeled_role(
+        global,
+        &workflow.prompt_review_backends,
+        "prompt review backend",
+        true,
+        Some("prompt_reviewer"),
+    )?;
+
+    Ok(())
+}
+
 /// Generate the deterministic verdict filename for a completion backend spec.
 /// Uses the same `slugify_backend` logic as `ArtifactKind::CompleterVerdictBackend`
 /// to ensure collision detection matches actual artifact naming.
@@ -956,8 +1001,11 @@ mod tests {
         global.workflow.max_qa_iterations = 3;
         global.workflow.prompt_review_enabled = true;
         global.workflow.prompt_review_backend = "codex(gpt-5.3-codex-xhigh)".to_owned();
+        global.workflow.prompt_review_backends = vec!["codex(gpt-5.3-codex-xhigh)".to_owned()];
         global.templates.qa = "templates/qa-global.md".to_owned();
         global.templates.prompt_reviewer = "templates/prompt-reviewer-global.md".to_owned();
+        global.templates.prompt_review_validator =
+            "templates/prompt-review-validator-global.md".to_owned();
 
         let project = ProjectConfig {
             workflow: ProjectWorkflowOverrides {
@@ -971,6 +1019,9 @@ mod tests {
             templates: crate::config::project::ProjectTemplateOverrides {
                 qa: Some("templates/qa-project.md".to_owned()),
                 prompt_reviewer: Some("templates/prompt-reviewer-project.md".to_owned()),
+                prompt_review_validator: Some(
+                    "templates/prompt-review-validator-project.md".to_owned(),
+                ),
                 ..crate::config::project::ProjectTemplateOverrides::default()
             },
             ..ProjectConfig::default()
@@ -995,7 +1046,10 @@ mod tests {
         assert!(effective.workflow.qa_enabled);
         assert_eq!(effective.workflow.max_qa_iterations, 9);
         assert!(!effective.workflow.prompt_review_enabled);
-        assert_eq!(effective.workflow.prompt_review_backend, "claude(opus)");
+        assert_eq!(
+            effective.workflow.prompt_review_backends,
+            vec!["claude(opus)".to_owned()]
+        );
         assert_eq!(
             effective.templates.qa,
             Path::new("/workspace/project-a/templates/qa-project.md")
@@ -1003,6 +1057,10 @@ mod tests {
         assert_eq!(
             effective.templates.prompt_reviewer,
             Path::new("/workspace/project-a/templates/prompt-reviewer-project.md")
+        );
+        assert_eq!(
+            effective.templates.prompt_review_validator,
+            Path::new("/workspace/project-a/templates/prompt-review-validator-project.md")
         );
     }
 
@@ -1022,7 +1080,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("unknown backend configured as prompt review backend override"));
+            .contains("unknown backend configured as prompt review backend"));
     }
 
     #[test]
@@ -1594,6 +1652,128 @@ mod tests {
         assert!(validation.arbiter_overlaps_reviewer_family);
     }
 
+    // --- Prompt review panel config validation tests ---
+
+    #[test]
+    fn prompt_review_alias_synthesizes_plural_when_plural_unset() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backend = "claude(opus)".to_owned();
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("alias synthesis should resolve");
+
+        assert_eq!(
+            effective.workflow.prompt_review_backends,
+            vec!["claude(opus)".to_owned()]
+        );
+    }
+
+    #[test]
+    fn prompt_review_plural_project_override_takes_precedence_over_singular() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backend = "claude(opus)".to_owned();
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                prompt_review_backend: Some("codex(gpt-5.3-codex-xhigh)".to_owned()),
+                prompt_review_backends: Some(vec!["claude".to_owned(), "codex".to_owned()]),
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("project plural should win");
+
+        assert_eq!(
+            effective.workflow.prompt_review_backends,
+            vec!["claude".to_owned(), "codex".to_owned()]
+        );
+    }
+
+    #[test]
+    fn prompt_review_panel_rejects_empty_backends() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backends = vec![];
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("empty prompt_review_backends should fail");
+        assert!(err
+            .to_string()
+            .contains("prompt_review_backends must not be empty"));
+    }
+
+    #[test]
+    fn prompt_review_panel_rejects_min_reviewers_zero() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_min_reviewers = 0;
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("prompt_review_min_reviewers=0 should fail");
+        assert!(err
+            .to_string()
+            .contains("prompt_review_min_reviewers must be >= 1"));
+    }
+
+    #[test]
+    fn prompt_review_panel_rejects_duplicate_specs_after_canonicalization() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backends = vec!["claude".to_owned(), "?claude".to_owned()];
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("duplicate resolved prompt review specs should fail");
+        assert!(
+            err.to_string()
+                .contains("duplicate resolved prompt review backend spec"),
+            "error should mention duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn prompt_review_panel_accepts_optional_gemini_backend() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backends = vec!["claude".to_owned(), "?gemini".to_owned()];
+
+        resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("optional gemini should be accepted on prompt review panel");
+    }
+
     // --- Completion panel config validation tests ---
 
     #[test]
@@ -1609,7 +1789,9 @@ mod tests {
             RunWorkflowOverrides::default(),
         )
         .expect_err("empty completion_backends should fail");
-        assert!(err.to_string().contains("completion_backends must not be empty"));
+        assert!(err
+            .to_string()
+            .contains("completion_backends must not be empty"));
     }
 
     #[test]
@@ -1625,7 +1807,9 @@ mod tests {
             RunWorkflowOverrides::default(),
         )
         .expect_err("min_completers=0 should fail");
-        assert!(err.to_string().contains("completion_min_completers must be >= 1"));
+        assert!(err
+            .to_string()
+            .contains("completion_min_completers must be >= 1"));
     }
 
     #[test]
@@ -1641,7 +1825,9 @@ mod tests {
             RunWorkflowOverrides::default(),
         )
         .expect_err("threshold=0.0 should fail");
-        assert!(err.to_string().contains("completion_consensus_threshold must be > 0.0"));
+        assert!(err
+            .to_string()
+            .contains("completion_consensus_threshold must be > 0.0"));
 
         let mut global2 = GlobalConfig::default();
         global2.workflow.completion_consensus_threshold = 1.5;
@@ -1654,15 +1840,16 @@ mod tests {
             RunWorkflowOverrides::default(),
         )
         .expect_err("threshold=1.5 should fail");
-        assert!(err2.to_string().contains("completion_consensus_threshold must be > 0.0"));
+        assert!(err2
+            .to_string()
+            .contains("completion_consensus_threshold must be > 0.0"));
     }
 
     #[test]
     fn completion_panel_rejects_duplicate_specs_after_canonicalization() {
         let mut global = GlobalConfig::default();
         // `claude` and `?claude` collapse to the same resolved target
-        global.workflow.completion_backends =
-            vec!["claude".to_owned(), "?claude".to_owned()];
+        global.workflow.completion_backends = vec!["claude".to_owned(), "?claude".to_owned()];
 
         let err = resolve_effective_config(
             Path::new("/workspace"),
@@ -1673,7 +1860,8 @@ mod tests {
         )
         .expect_err("duplicate resolved specs should fail");
         assert!(
-            err.to_string().contains("duplicate resolved completion backend spec"),
+            err.to_string()
+                .contains("duplicate resolved completion backend spec"),
             "error should mention duplicate: {err}"
         );
     }
@@ -1686,8 +1874,7 @@ mod tests {
         let mut global = GlobalConfig::default();
         // Default claude completer model is "opus", so bare `claude` resolves
         // to `claude(opus)` at runtime.
-        global.workflow.completion_backends =
-            vec!["claude".to_owned(), "claude(opus)".to_owned()];
+        global.workflow.completion_backends = vec!["claude".to_owned(), "claude(opus)".to_owned()];
 
         let err = resolve_effective_config(
             Path::new("/workspace"),
@@ -1707,8 +1894,7 @@ mod tests {
     #[test]
     fn completion_panel_accepts_valid_partial_threshold() {
         let mut global = GlobalConfig::default();
-        global.workflow.completion_backends =
-            vec!["claude".to_owned(), "codex".to_owned()];
+        global.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
         global.workflow.completion_min_completers = 1;
         global.workflow.completion_consensus_threshold = 0.5;
 

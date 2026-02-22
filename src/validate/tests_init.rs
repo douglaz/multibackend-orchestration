@@ -77,6 +77,7 @@ fn creates_template_files(h: &RalphHarness) -> TestResult {
             "implementation.md",
             "review.md",
             "prompt_reviewer.md",
+            "prompt_review_validator.md",
             "completion.md",
             "qa.md",
             "final_reviewer.md",
@@ -188,6 +189,7 @@ dry-run: write-template .ralph/templates/spec.md
 dry-run: write-template .ralph/templates/implementation.md
 dry-run: write-template .ralph/templates/review.md
 dry-run: write-template .ralph/templates/prompt_reviewer.md
+dry-run: write-template .ralph/templates/prompt_review_validator.md
 dry-run: write-template .ralph/templates/completion.md
 dry-run: write-template .ralph/templates/qa.md
 dry-run: write-template .ralph/templates/final_reviewer.md

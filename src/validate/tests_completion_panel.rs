@@ -303,10 +303,7 @@ fn write_wrapped_mock(h: &RalphHarness, name: &str, content: &str) -> std::path:
     let script = h
         .write_mock_script(name, content)
         .expect("write mock script");
-    let wrapper_content = format!(
-        "#!/bin/sh\nexec sh \"{}\"\n",
-        script.to_string_lossy()
-    );
+    let wrapper_content = format!("#!/bin/sh\nexec sh \"{}\"\n", script.to_string_lossy());
     let wrapper_name = format!("{}-wrapper.sh", name.trim_end_matches(".sh"));
     h.write_mock_script(&wrapper_name, &wrapper_content)
         .expect("write wrapper script")
@@ -319,12 +316,8 @@ fn setup_panel_mock(h: &RalphHarness, project_id: &str) {
         .expect("failed to write panel mock script");
     h.setup_mock_backends_stable(&script)
         .expect("setup_mock_backends_stable failed");
-    h.create_project(
-        project_id,
-        "Completion Panel Project",
-        "Panel test prompt",
-    )
-    .expect("create_project failed");
+    h.create_project(project_id, "Completion Panel Project", "Panel test prompt")
+        .expect("create_project failed");
 }
 
 /// Two completers (claude, codex), both return COMPLETE, min_completers=2,
@@ -335,12 +328,22 @@ fn two_completer_consensus_complete(h: &RalphHarness) -> TestResult {
         setup_panel_mock(h, project_id);
 
         // Configure 2-completer panel with strict consensus
-        h.ralph_ok(["config", "set", "workflow.completion_backends", "[\"claude\",\"codex\"]"])
-            .expect("set completion_backends");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\",\"codex\"]",
+        ])
+        .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
@@ -384,12 +387,22 @@ fn single_completer_backward_compat(h: &RalphHarness) -> TestResult {
         setup_panel_mock(h, project_id);
 
         // Configure single-completer panel
-        h.ralph_ok(["config", "set", "workflow.completion_backends", "[\"claude\"]"])
-            .expect("set completion_backends");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
@@ -433,26 +446,42 @@ fn panel_continue_verdict(h: &RalphHarness) -> TestResult {
         let claude_counter = h.temp_dir.path().join("claude-panel-counter");
         let codex_counter = h.temp_dir.path().join("codex-panel-counter");
         let claude_script = write_wrapped_mock(
-            h, "claude-panel.sh",
+            h,
+            "claude-panel.sh",
             &complete_mock_script_with_counter("COMPLETE", &claude_counter),
         );
         let codex_script = write_wrapped_mock(
-            h, "codex-panel.sh",
+            h,
+            "codex-panel.sh",
             &complete_mock_script_with_counter("CONTINUE", &codex_counter),
         );
         h.setup_separate_mock_backends(&claude_script, &codex_script)
             .expect("setup_separate_mock_backends failed");
 
-        h.create_project(project_id, "Panel Continue Project", "Panel continue prompt")
-            .expect("create_project failed");
+        h.create_project(
+            project_id,
+            "Panel Continue Project",
+            "Panel continue prompt",
+        )
+        .expect("create_project failed");
 
         // Configure 2-completer panel with strict consensus
-        h.ralph_ok(["config", "set", "workflow.completion_backends", "[\"claude\",\"codex\"]"])
-            .expect("set completion_backends");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\",\"codex\"]",
+        ])
+        .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         // Run 2 loops: first triggers completion check (CONTINUE due to 1/2 < threshold),
         // second does a normal feature loop to satisfy --loops.
@@ -485,12 +514,22 @@ fn per_backend_verdict_artifacts(h: &RalphHarness) -> TestResult {
         setup_panel_mock(h, project_id);
 
         // Configure 2-completer panel
-        h.ralph_ok(["config", "set", "workflow.completion_backends", "[\"claude\",\"codex\"]"])
-            .expect("set completion_backends");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\",\"codex\"]",
+        ])
+        .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
@@ -549,14 +588,21 @@ fn optional_backend_skip(h: &RalphHarness) -> TestResult {
         // `?gemini` is optional; gemini is already disabled by setup_panel_mock.
         // Claude and codex are mocked and available.
         h.ralph_ok([
-            "config", "set", "workflow.completion_backends",
+            "config",
+            "set",
+            "workflow.completion_backends",
             "[\"claude\",\"codex\",\"?gemini\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
@@ -605,14 +651,21 @@ fn required_backend_failure(h: &RalphHarness) -> TestResult {
         // `gemini` (without ?) is required; gemini is already disabled by
         // setup_panel_mock, so the run should fail when resolving the panel.
         h.ralph_ok([
-            "config", "set", "workflow.completion_backends",
+            "config",
+            "set",
+            "workflow.completion_backends",
             "[\"claude\",\"gemini\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
-        h.ralph_ok(["config", "set", "workflow.completion_consensus_threshold", "1.0"])
-            .expect("set completion_consensus_threshold");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "1.0",
+        ])
+        .expect("set completion_consensus_threshold");
 
         // The run should fail because a required backend (gemini) is unavailable
         let output = h
@@ -638,8 +691,10 @@ fn partial_threshold_consensus(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("init failed");
 
         // claude returns COMPLETE, codex returns CONTINUE.
-        let claude_script = write_wrapped_mock(h, "claude-partial.sh", &complete_mock_script("COMPLETE"));
-        let codex_script = write_wrapped_mock(h, "codex-partial.sh", &complete_mock_script("CONTINUE"));
+        let claude_script =
+            write_wrapped_mock(h, "claude-partial.sh", &complete_mock_script("COMPLETE"));
+        let codex_script =
+            write_wrapped_mock(h, "codex-partial.sh", &complete_mock_script("CONTINUE"));
         h.setup_separate_mock_backends(&claude_script, &codex_script)
             .expect("setup_separate_mock_backends failed");
 
@@ -653,14 +708,19 @@ fn partial_threshold_consensus(h: &RalphHarness) -> TestResult {
         // Configure panel: threshold=0.5 means 1/2 COMPLETE votes suffice,
         // and min_completers=1 so a single COMPLETE vote meets the minimum.
         h.ralph_ok([
-            "config", "set", "workflow.completion_backends",
+            "config",
+            "set",
+            "workflow.completion_backends",
             "[\"claude\",\"codex\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set completion_min_completers");
         h.ralph_ok([
-            "config", "set", "workflow.completion_consensus_threshold", "0.5",
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "0.5",
         ])
         .expect("set completion_consensus_threshold");
 
@@ -697,11 +757,13 @@ fn insufficient_min_completers(h: &RalphHarness) -> TestResult {
         let claude_counter = h.temp_dir.path().join("claude-minfail-counter");
         let codex_counter = h.temp_dir.path().join("codex-minfail-counter");
         let claude_script = write_wrapped_mock(
-            h, "claude-minfail.sh",
+            h,
+            "claude-minfail.sh",
             &complete_mock_script_with_counter("COMPLETE", &claude_counter),
         );
         let codex_script = write_wrapped_mock(
-            h, "codex-minfail.sh",
+            h,
+            "codex-minfail.sh",
             &complete_mock_script_with_counter("CONTINUE", &codex_counter),
         );
         h.setup_separate_mock_backends(&claude_script, &codex_script)
@@ -712,14 +774,19 @@ fn insufficient_min_completers(h: &RalphHarness) -> TestResult {
 
         // threshold=0.5 would allow 1/2, but min_completers=2 requires 2 COMPLETE votes
         h.ralph_ok([
-            "config", "set", "workflow.completion_backends",
+            "config",
+            "set",
+            "workflow.completion_backends",
             "[\"claude\",\"codex\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
             .expect("set completion_min_completers");
         h.ralph_ok([
-            "config", "set", "workflow.completion_consensus_threshold", "0.5",
+            "config",
+            "set",
+            "workflow.completion_consensus_threshold",
+            "0.5",
         ])
         .expect("set completion_consensus_threshold");
 

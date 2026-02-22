@@ -1178,7 +1178,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1191,7 +1197,10 @@ esac; exit 0
         assert_eq!(state.last_processed_comment_id, Some(303));
 
         let posted = fs::read_to_string(&comment_log).unwrap_or_default();
-        assert!(posted.contains("<!-- ralph:prd:30:draft-v2 -->"), "draft-v2 marker expected: {posted}");
+        assert!(
+            posted.contains("<!-- ralph:prd:30:draft-v2 -->"),
+            "draft-v2 marker expected: {posted}"
+        );
     })
 }
 
@@ -1204,7 +1213,10 @@ fn approval_by_comment(h: &RalphHarness) -> TestResult {
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/31.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/31.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 31, "owner": "acme", "repo": "widgets",
@@ -1258,7 +1270,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1286,7 +1304,10 @@ fn approval_by_label(h: &RalphHarness) -> TestResult {
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/32.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/32.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 32, "owner": "acme", "repo": "widgets",
@@ -1340,7 +1361,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1373,7 +1400,10 @@ fn feedback_stage_failure_labeling(h: &RalphHarness) -> TestResult {
             .unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/33.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/33.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         // Seed with error_count=2 so next failure triggers threshold
         let seed = serde_json::json!({
@@ -1429,7 +1459,13 @@ esac; exit 0
 
         let _output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1437,7 +1473,11 @@ esac; exit 0
         // Check state file for Failed
         let state: InteractivePrdState =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-        assert_eq!(state.state, PrdWorkflowState::Failed, "should be Failed after 3 errors");
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::Failed,
+            "should be Failed after 3 errors"
+        );
         assert!(state.is_terminal());
         assert!(state.error_count >= 3);
 
@@ -1459,7 +1499,10 @@ fn mixed_comments_approval_triggers_done(h: &RalphHarness) -> TestResult {
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/40.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/40.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 40, "owner": "acme", "repo": "widgets",
@@ -1514,7 +1557,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1528,7 +1577,10 @@ esac; exit 0
             "mixed comments (approval + feedback) should transition to Done"
         );
         assert!(state.is_terminal());
-        assert_eq!(state.draft_revision, 1, "draft should remain at 1 (no revision)");
+        assert_eq!(
+            state.draft_revision, 1,
+            "draft should remain at 1 (no revision)"
+        );
 
         let posted = fs::read_to_string(&comment_log).unwrap_or_default();
         assert!(
@@ -1549,7 +1601,10 @@ fn approval_path_github_failure_increments_error(h: &RalphHarness) -> TestResult
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/41.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/41.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 41, "owner": "acme", "repo": "widgets",
@@ -1600,7 +1655,13 @@ esac; exit 0
 
         let _output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1642,7 +1703,10 @@ fn approval_failure_exhaustion_transitions_to_failed(h: &RalphHarness) -> TestRe
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/45.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/45.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 45, "owner": "acme", "repo": "widgets",
@@ -1705,7 +1769,13 @@ esac; exit 0
         for tick in 1..=3 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -1767,7 +1837,10 @@ fn draft_boundary_filtering_excludes_pre_draft_approval(h: &RalphHarness) -> Tes
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/60.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/60.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         // Seed: AwaitingFeedback with draft at id=603, cursor at id=600
         let seed = serde_json::json!({
@@ -1815,7 +1888,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1842,7 +1921,10 @@ fn draft_boundary_filtering_excludes_pre_draft_revision(h: &RalphHarness) -> Tes
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/61.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/61.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 61, "owner": "acme", "repo": "widgets",
@@ -1889,7 +1971,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -1930,7 +2018,10 @@ printf '1. Q1?\n2. Q2?\n'
 
         // No persisted state — simulating a fresh start that picks up an issue
         // where the questions marker was already posted by a prior instance.
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/70.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/70.json");
 
         let label_log = dh.temp_dir.path().join("restart_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -1984,7 +2075,13 @@ esac; exit 0
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -2001,10 +2098,9 @@ esac; exit 0
         let qpa = state
             .questions_posted_at
             .expect("questions_posted_at should be set");
-        let expected =
-            chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
-                .expect("parse")
-                .with_timezone(&chrono::Utc);
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-01-10T12:00:00Z")
+            .expect("parse")
+            .with_timezone(&chrono::Utc);
         assert_eq!(
             qpa, expected,
             "questions_posted_at should be hydrated from existing marker comment's created_at, \
@@ -2024,7 +2120,10 @@ fn bot_login_failure_exhaustion_awaiting_answers(h: &RalphHarness) -> TestResult
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/200.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/200.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 200, "owner": "acme", "repo": "widgets",
@@ -2082,7 +2181,13 @@ esac; exit 0
         for tick in 1..=3u32 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -2129,7 +2234,10 @@ fn bot_login_failure_exhaustion_awaiting_feedback(h: &RalphHarness) -> TestResul
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/210.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/210.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 210, "owner": "acme", "repo": "widgets",
@@ -2187,7 +2295,13 @@ esac; exit 0
         for tick in 1..=3u32 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -2283,7 +2397,13 @@ esac; exit 0
         for tick in 1..=3u32 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -2332,7 +2452,10 @@ fn approval_label_ordering_partial_failure_recovery(h: &RalphHarness) -> TestRes
         let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/220.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/220.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 220, "owner": "acme", "repo": "widgets",
@@ -2408,7 +2531,13 @@ esac; exit 0
         // Tick 1: label add fails — state stays AwaitingFeedback
         let _output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .unwrap();
@@ -2498,9 +2627,7 @@ fn section_incomplete_revision_is_rejected(_harness: &RalphHarness) -> TestResul
 ## Technical Approach\nRevised approach.";
     let (_cleaned, missing) = check_spec_sections(partial_revision);
     if missing.is_empty() {
-        return TestResult::Fail(
-            "partial revision should report missing sections".to_owned(),
-        );
+        return TestResult::Fail("partial revision should report missing sections".to_owned());
     }
     // Verify that the 6-section requirement means exactly these are missing
     let expected_missing = [
@@ -2571,7 +2698,10 @@ EOF
             .unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/300.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/300.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 300, "owner": "acme", "repo": "widgets",
@@ -2634,7 +2764,13 @@ esac; exit 0
         for tick in 1..=3u32 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -2649,7 +2785,10 @@ esac; exit 0
                     PrdWorkflowState::AwaitingAnswers,
                     "tick {tick}: should remain AwaitingAnswers (not post incomplete draft)"
                 );
-                assert_eq!(state.error_count, tick, "tick {tick}: error_count should increment");
+                assert_eq!(
+                    state.error_count, tick,
+                    "tick {tick}: error_count should increment"
+                );
                 assert!(
                     state.last_error.is_some(),
                     "tick {tick}: last_error should be set"
@@ -2713,7 +2852,10 @@ EOF
             .unwrap();
         dh.setup_mock_backends_stable(&backend_script).unwrap();
 
-        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/310.json");
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/310.json");
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "issue_number": 310, "owner": "acme", "repo": "widgets",
@@ -2776,7 +2918,13 @@ esac; exit 0
         for tick in 1..=3u32 {
             let _output = dh
                 .daemon_env(
-                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
                     &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
                 )
                 .unwrap();
@@ -2791,7 +2939,10 @@ esac; exit 0
                     PrdWorkflowState::AwaitingFeedback,
                     "tick {tick}: should remain AwaitingFeedback (not post incomplete revision)"
                 );
-                assert_eq!(state.error_count, tick, "tick {tick}: error_count should increment");
+                assert_eq!(
+                    state.error_count, tick,
+                    "tick {tick}: error_count should increment"
+                );
                 assert!(
                     state.last_error.is_some(),
                     "tick {tick}: last_error should be set"
@@ -2865,11 +3016,7 @@ fn terminal_save_failure_keeps_retry_visibility(h: &RalphHarness) -> TestResult 
             "last_error": null,
             "last_advanced_at": null
         });
-        fs::write(
-            &state_path,
-            serde_json::to_string_pretty(&seed).unwrap(),
-        )
-        .unwrap();
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
         let gh_script = r#"#!/bin/sh
 case "$1" in
@@ -2904,7 +3051,13 @@ esac; exit 0
         // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[
                     ("PATH", &gh_path),
                     ("RALPH_DAEMON_BIN", &ralph_path),
@@ -2957,7 +3110,8 @@ fn bot_scoped_marker_ignores_user_spoof(_harness: &RalphHarness) -> TestResult {
         let generic = comments.iter().find(|c| c.body.contains(marker));
         assert!(generic.is_some());
         assert_eq!(
-            generic.unwrap().author_login, "mallory",
+            generic.unwrap().author_login,
+            "mallory",
             "generic lookup finds user spoof first"
         );
 
@@ -2967,7 +3121,8 @@ fn bot_scoped_marker_ignores_user_spoof(_harness: &RalphHarness) -> TestResult {
             .find(|c| c.author_login == "ralph-bot" && c.body.contains(marker));
         assert!(bot_scoped.is_some());
         assert_eq!(
-            bot_scoped.unwrap().author_login, "ralph-bot",
+            bot_scoped.unwrap().author_login,
+            "ralph-bot",
             "bot-scoped lookup should find bot comment"
         );
         assert_eq!(bot_scoped.unwrap().id, 101);
@@ -3002,7 +3157,11 @@ fn bot_scoped_extract_questions_ignores_spoof(_harness: &RalphHarness) -> TestRe
 
         // Lookup by marker (no ID) with bot_login should find bot comment
         let extracted = crate::daemon::interactive_prd::tests_extract_questions_text(
-            &comments, None, 42, 1, "ralph-bot",
+            &comments,
+            None,
+            42,
+            1,
+            "ralph-bot",
         );
         assert!(
             extracted.contains("Real bot question"),
@@ -3057,11 +3216,7 @@ fn terminal_save_failure_failed_path_keeps_retry_visibility(h: &RalphHarness) ->
             "last_error": "previous error",
             "last_advanced_at": null
         });
-        fs::write(
-            &state_path,
-            serde_json::to_string_pretty(&seed).unwrap(),
-        )
-        .unwrap();
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
         // gh mock returns feedback comment to trigger revision attempt;
         // the empty backend output causes section validation failure,
@@ -3099,7 +3254,13 @@ esac; exit 0
         // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[
                     ("PATH", &gh_path),
                     ("RALPH_DAEMON_BIN", &ralph_path),
@@ -3133,14 +3294,12 @@ fn status_failed_marker_spoof_resistance(_harness: &RalphHarness) -> TestResult 
     run_case(|| {
         let marker = "<!-- ralph:prd:42:status-failed -->";
 
-        let comments = vec![
-            github::IssueComment {
-                id: 300,
-                author_login: "mallory".to_owned(),
-                body: format!("{marker}\n## PRD Workflow Failed\nSpoofed failure"),
-                created_at: chrono::Utc::now(),
-            },
-        ];
+        let comments = vec![github::IssueComment {
+            id: 300,
+            author_login: "mallory".to_owned(),
+            body: format!("{marker}\n## PRD Workflow Failed\nSpoofed failure"),
+            created_at: chrono::Utc::now(),
+        }];
 
         // Generic (non-scoped) lookup finds the user spoof
         let generic = comments.iter().find(|c| c.body.contains(marker));
@@ -3168,8 +3327,15 @@ fn status_failed_marker_spoof_resistance(_harness: &RalphHarness) -> TestResult 
         let bot_result = comments_with_bot
             .iter()
             .find(|c| c.author_login == "ralph-bot" && c.body.contains(marker));
-        assert!(bot_result.is_some(), "bot-scoped lookup should find bot comment");
-        assert_eq!(bot_result.unwrap().id, 301, "should find the bot comment, not the spoof");
+        assert!(
+            bot_result.is_some(),
+            "bot-scoped lookup should find bot comment"
+        );
+        assert_eq!(
+            bot_result.unwrap().id,
+            301,
+            "should find the bot comment, not the spoof"
+        );
     })
 }
 

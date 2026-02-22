@@ -116,6 +116,8 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 project_config.clone(),
                 RunWorkflowOverrides::default(),
             )?;
+            let prompt_review_backend_alias =
+                effective.workflow.prompt_review_backends.first().cloned();
 
             let value = serde_json::json!({
                 "scope": {
@@ -127,7 +129,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
                     "prompt_review_enabled": effective.workflow.prompt_review_enabled,
-                    "prompt_review_backend": effective.workflow.prompt_review_backend,
+                    "prompt_review_backend": prompt_review_backend_alias,
+                    "prompt_review_backends": effective.workflow.prompt_review_backends,
+                    "prompt_review_min_reviewers": effective.workflow.prompt_review_min_reviewers,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -178,6 +182,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "prompt_reviewer": effective.templates.prompt_reviewer,
+                    "prompt_review_validator": effective.templates.prompt_review_validator,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                     "final_reviewer": effective.templates.final_reviewer,
@@ -217,6 +222,8 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 project_config,
                 RunWorkflowOverrides::default(),
             )?;
+            let prompt_review_backend_alias =
+                effective.workflow.prompt_review_backends.first().cloned();
 
             serde_json::json!({
                 "workspace": effective.global.workspace,
@@ -224,7 +231,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
                     "prompt_review_enabled": effective.workflow.prompt_review_enabled,
-                    "prompt_review_backend": effective.workflow.prompt_review_backend,
+                    "prompt_review_backend": prompt_review_backend_alias,
+                    "prompt_review_backends": effective.workflow.prompt_review_backends,
+                    "prompt_review_min_reviewers": effective.workflow.prompt_review_min_reviewers,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -275,6 +284,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "prompt_reviewer": effective.templates.prompt_reviewer,
+                    "prompt_review_validator": effective.templates.prompt_review_validator,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                     "final_reviewer": effective.templates.final_reviewer,
@@ -446,6 +456,12 @@ fn set_global_value(
             ensure_backend(raw_value)?;
             config.workflow.prompt_review_backend = raw_value.to_owned();
         }
+        "workflow.prompt_review_backends" => {
+            config.workflow.prompt_review_backends = parse_string_list(raw_value)?;
+        }
+        "workflow.prompt_review_min_reviewers" => {
+            config.workflow.prompt_review_min_reviewers = parse_u32(raw_value, key)?;
+        }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
         }
@@ -537,6 +553,9 @@ fn set_global_value(
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
         "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
+        "templates.prompt_review_validator" => {
+            config.templates.prompt_review_validator = raw_value.to_owned()
+        }
         "templates.completer" => config.templates.completer = raw_value.to_owned(),
         "templates.qa" => config.templates.qa = raw_value.to_owned(),
         "templates.final_reviewer" => config.templates.final_reviewer = raw_value.to_owned(),
@@ -652,6 +671,12 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "workflow.prompt_review_backend" => {
             config.workflow.prompt_review_backend = parse_optional_backend(raw_value)?;
         }
+        "workflow.prompt_review_backends" => {
+            config.workflow.prompt_review_backends = parse_optional_string_list(raw_value)?;
+        }
+        "workflow.prompt_review_min_reviewers" => {
+            config.workflow.prompt_review_min_reviewers = parse_optional_u32(raw_value, key)?;
+        }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
         }
@@ -756,6 +781,9 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
         "templates.prompt_reviewer" => {
             config.templates.prompt_reviewer = parse_optional_string(raw_value)
+        }
+        "templates.prompt_review_validator" => {
+            config.templates.prompt_review_validator = parse_optional_string(raw_value)
         }
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
         "templates.qa" => config.templates.qa = parse_optional_string(raw_value),

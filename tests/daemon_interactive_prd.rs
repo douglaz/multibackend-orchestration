@@ -487,8 +487,7 @@ EOF
         .join(".ralph")
         .join("interactive-prd")
         .join("88.json");
-    fs::create_dir_all(state_path.parent().expect("state path parent"))
-        .expect("create state dir");
+    fs::create_dir_all(state_path.parent().expect("state path parent")).expect("create state dir");
 
     let seed_state = serde_json::json!({
         "issue_number": 88,
@@ -629,10 +628,17 @@ exit 0
 
     // Should still be AwaitingFeedback (revision, not approval)
     assert_eq!(state.state, PrdWorkflowState::AwaitingFeedback);
-    assert_eq!(state.draft_revision, 2, "draft_revision should be incremented to 2");
+    assert_eq!(
+        state.draft_revision, 2,
+        "draft_revision should be incremented to 2"
+    );
     assert_eq!(state.last_processed_comment_id, Some(803));
     assert!(
-        state.latest_draft_body.as_deref().unwrap_or_default().contains("## Summary"),
+        state
+            .latest_draft_body
+            .as_deref()
+            .unwrap_or_default()
+            .contains("## Summary"),
         "revised draft should contain spec sections"
     );
 
@@ -668,8 +674,7 @@ fn awaiting_feedback_approval_by_comment_transitions_to_done() {
         .join(".ralph")
         .join("interactive-prd")
         .join("90.json");
-    fs::create_dir_all(state_path.parent().expect("parent"))
-        .expect("create state dir");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
 
     let seed = serde_json::json!({
         "issue_number": 90,
@@ -810,7 +815,11 @@ exit 0
 
     let state_raw = fs::read_to_string(&state_path).expect("state should exist");
     let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state");
-    assert_eq!(state.state, PrdWorkflowState::Done, "state should be Done after approval");
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::Done,
+        "state should be Done after approval"
+    );
     assert!(state.is_terminal());
 
     // Verify approval comment was posted
@@ -852,8 +861,7 @@ fn awaiting_feedback_approval_by_label_transitions_to_done() {
         .join(".ralph")
         .join("interactive-prd")
         .join("91.json");
-    fs::create_dir_all(state_path.parent().expect("parent"))
-        .expect("create state dir");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
 
     let seed = serde_json::json!({
         "issue_number": 91,
@@ -979,7 +987,11 @@ exit 0
 
     let state_raw = fs::read_to_string(&state_path).expect("state should exist");
     let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state");
-    assert_eq!(state.state, PrdWorkflowState::Done, "should be Done after label approval");
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::Done,
+        "should be Done after label approval"
+    );
     assert_eq!(state.draft_revision, 2, "draft_revision should remain 2");
 
     let comment_body = fs::read_to_string(&comment_log).unwrap_or_default();
@@ -1014,8 +1026,7 @@ fn awaiting_feedback_mixed_comments_approval_plus_feedback_transitions_to_done()
         .join(".ralph")
         .join("interactive-prd")
         .join("95.json");
-    fs::create_dir_all(state_path.parent().expect("parent"))
-        .expect("create state dir");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
 
     let seed = serde_json::json!({
         "issue_number": 95,
@@ -1152,7 +1163,10 @@ exit 0
         "mixed comments with any approval should transition to Done, not revision"
     );
     assert!(state.is_terminal());
-    assert_eq!(state.draft_revision, 1, "draft_revision should remain 1 (no revision generated)");
+    assert_eq!(
+        state.draft_revision, 1,
+        "draft_revision should remain 1 (no revision generated)"
+    );
 
     // Verify approval comment was posted
     let approval_body = fs::read_to_string(&approval_log).unwrap_or_default();
@@ -1254,11 +1268,11 @@ EOF
     let ts_answer = (base_ts - chrono::Duration::seconds(10))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // Draft comment: base - 5s (after answer)
-    let ts_draft = (base_ts - chrono::Duration::seconds(5))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let ts_draft =
+        (base_ts - chrono::Duration::seconds(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // Approval comment: base - 1s (after draft)
-    let ts_approval = (base_ts - chrono::Duration::seconds(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let ts_approval =
+        (base_ts - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let gh_script = format!(
         r#"#!/bin/sh
@@ -1497,8 +1511,7 @@ fn pre_draft_comments_excluded_from_feedback_in_awaiting_feedback() {
         .join(".ralph")
         .join("interactive-prd")
         .join("110.json");
-    fs::create_dir_all(state_path.parent().expect("parent"))
-        .expect("create state dir");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
 
     // Seed: AwaitingFeedback, draft at id=1103, cursor at id=1100
     // There's a user comment (1102) that's pre-draft but post-cursor
@@ -2174,7 +2187,10 @@ fn terminal_save_failure_approval_path_keeps_issue_retryable() {
     h.setup_mock_backends_stable(&backend_script)
         .expect("setup mock backends");
 
-    let state_dir = h.temp_dir.path().join("acme/widgets/.ralph/interactive-prd");
+    let state_dir = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd");
     fs::create_dir_all(&state_dir).expect("create state dir");
 
     let state_path = state_dir.join("150.json");
@@ -2492,7 +2508,10 @@ fn terminal_save_failure_failed_path_keeps_issue_retryable() {
     // an error on this tick.  error_count goes from 2→3, triggering
     // transition_to_failed.  We then make the state dir read-only so the
     // save inside transition_to_failed fails.
-    let state_dir = h.temp_dir.path().join("acme/widgets/.ralph/interactive-prd");
+    let state_dir = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd");
     fs::create_dir_all(&state_dir).expect("create state dir");
 
     let state_path = state_dir.join("155.json");
@@ -2633,7 +2652,10 @@ fn ralph_bin_absolute() -> PathBuf {
     // 1. Compile-time injection (preferred when available)
     if let Some(p) = option_env!("CARGO_BIN_EXE_ralph") {
         let pb = PathBuf::from(p);
-        searched.push(format!("CARGO_BIN_EXE_ralph (compile-time) = {}", pb.display()));
+        searched.push(format!(
+            "CARGO_BIN_EXE_ralph (compile-time) = {}",
+            pb.display()
+        ));
         if pb.exists() {
             return pb;
         }
@@ -2685,7 +2707,8 @@ fn ralph_bin_absolute() -> PathBuf {
             std::env::var("CARGO_CFG_TARGET_ARCH"),
             std::env::var("CARGO_CFG_TARGET_OS"),
         ) {
-            let vendor = std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_else(|_| "unknown".to_owned());
+            let vendor =
+                std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_else(|_| "unknown".to_owned());
             let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
             if env.is_empty() {
                 ts.push(format!("{arch}-{vendor}-{os}"));

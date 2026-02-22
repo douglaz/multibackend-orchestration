@@ -426,6 +426,9 @@ mod tests {
         assert!(workspace_root.join("templates/implementation.md").exists());
         assert!(workspace_root.join("templates/review.md").exists());
         assert!(workspace_root.join("templates/prompt_reviewer.md").exists());
+        assert!(workspace_root
+            .join("templates/prompt_review_validator.md")
+            .exists());
         assert!(workspace_root.join("templates/completion.md").exists());
         assert!(workspace_root.join("templates/qa.md").exists());
         assert_eq!(workspace.config, GlobalConfig::default());
