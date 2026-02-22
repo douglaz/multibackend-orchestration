@@ -1,13 +1,22 @@
 //! State and helper utilities for the daemon's interactive PRD workflow.
+//!
+//! This module contains the state machine, persistence, transition logic, and
+//! question-generation orchestration for the interactive PRD flow triggered by
+//! `ralph:prd` issues.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
+use crate::config::GlobalConfig;
+use crate::daemon::github::{self, GhIssue};
+use crate::error::RalphError;
 use crate::Result;
 
 /// PRD workflow states persisted for daemon restart-safety.
@@ -188,6 +197,396 @@ fn has_pattern_match(text: &str, patterns: &[&str]) -> bool {
             .expect("approval regex should compile")
             .is_match(text)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Runtime configuration for the interactive PRD poll phase
+// ---------------------------------------------------------------------------
+
+/// Runtime configuration for the interactive PRD poll phase.
+#[derive(Debug, Clone)]
+pub struct PrdPollConfig {
+    pub owner: String,
+    pub repo: String,
+    pub data_dir: PathBuf,
+    pub prd_enabled: bool,
+    pub question_backends: Vec<String>,
+    pub writer_backend: String,
+    pub reviewer_backend: String,
+    pub max_revisions: u32,
+    pub backend_timeout_secs: u64,
+    pub global_config: GlobalConfig,
+    pub verbose: bool,
+}
+
+/// All PRD lifecycle label names.
+pub const PRD_LABEL_NAMES: &[&str] = &[
+    "ralph:prd",
+    "ralph:prd-active",
+    "ralph:prd-approved",
+    "ralph:prd-done",
+    "ralph:prd-failed",
+];
+
+/// Returns `true` if any PRD lifecycle label is present on the issue.
+pub fn has_prd_label(labels: &[String]) -> bool {
+    labels.iter().any(|l| PRD_LABEL_NAMES.contains(&l.as_str()))
+}
+
+// ---------------------------------------------------------------------------
+// Backend helpers
+// ---------------------------------------------------------------------------
+
+/// Create a CLI backend from a backend spec string and global config.
+fn create_backend(backend_spec: &str, global_config: &GlobalConfig) -> Result<CliBackend> {
+    let spec = parse_backend_spec(backend_spec)?;
+    let model = spec.model.as_deref();
+    match spec.name.as_str() {
+        "claude" => Ok(claude::backend_from_config(global_config, model, None)),
+        "codex" => Ok(codex::backend_from_config(global_config, model, None)),
+        _ => Err(RalphError::Validation(format!(
+            "unknown PRD backend: {backend_spec}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Question-generation prompts
+// ---------------------------------------------------------------------------
+
+const QUESTION_GEN_PROMPT: &str = r#"You are an engineering specification analyst. Given the following GitHub issue that describes a feature idea, generate 3-5 clarifying questions that will help produce a complete engineering specification.
+
+Focus on:
+- Missing technical details (API design, data models, error handling)
+- Scope ambiguities (what's in/out of scope)
+- Non-functional requirements (performance, security, compatibility)
+- User experience details (edge cases, error states)
+
+Output ONLY a numbered list of questions, one per line. Do not include any preamble or explanation.
+
+--- ISSUE ---
+"#;
+
+const SYNTHESIS_PROMPT: &str = r#"You are an engineering specification analyst. Given two sets of clarifying questions generated for the same feature, merge and deduplicate them into a single numbered list of 3-7 prioritized questions.
+
+Rules:
+- Remove exact or near-duplicate questions
+- Combine related questions into a single more precise question
+- Prioritize questions that address the most critical unknowns first
+- Output ONLY a numbered list of questions, one per line
+- Do not include preamble, explanation, or commentary
+
+--- QUESTION SET A ---
+{questions_a}
+
+--- QUESTION SET B ---
+{questions_b}
+"#;
+
+// ---------------------------------------------------------------------------
+// Poll and advance: the main entry point called from the daemon runtime
+// ---------------------------------------------------------------------------
+
+/// Poll for `ralph:prd` issues and advance at most one transition per issue.
+///
+/// This function is called once per daemon poll tick when `prd_enabled` is true.
+/// It runs synchronously (blocking) because the daemon wraps it in
+/// `spawn_blocking`.
+pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
+    let labels = vec!["ralph:prd".to_owned()];
+    let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
+
+    for issue in &issues {
+        if let Err(err) = advance_issue(config, issue) {
+            eprintln!(
+                "prd: failed to advance {}/{}#{}: {err}",
+                config.owner, config.repo, issue.number
+            );
+        }
+    }
+
+    // Also process issues that are in prd-active state (already picked up).
+    let active_labels = vec!["ralph:prd-active".to_owned()];
+    let (active_issues, _) =
+        github::poll_issues(&config.owner, &config.repo, &active_labels)?;
+
+    for issue in &active_issues {
+        if let Err(err) = advance_issue(config, issue) {
+            eprintln!(
+                "prd: failed to advance active {}/{}#{}: {err}",
+                config.owner, config.repo, issue.number
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Advance a single issue by at most one state transition.
+fn advance_issue(config: &PrdPollConfig, issue: &GhIssue) -> Result<()> {
+    let mut state = InteractivePrdState::load(
+        &config.data_dir,
+        &config.owner,
+        &config.repo,
+        issue.number,
+    )?
+    .unwrap_or_else(|| {
+        InteractivePrdState::new(&config.owner, &config.repo, issue.number)
+    });
+
+    if state.is_terminal() {
+        return Ok(());
+    }
+
+    match state.state.clone() {
+        PrdWorkflowState::Pending => {
+            transition_pending_to_awaiting_answers(config, issue, &mut state)
+        }
+        // Future transitions (AwaitingAnswers, AwaitingFeedback) will be
+        // implemented in subsequent loops.
+        PrdWorkflowState::AwaitingAnswers
+        | PrdWorkflowState::AwaitingFeedback => Ok(()),
+        PrdWorkflowState::Done | PrdWorkflowState::Failed => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pending -> AwaitingAnswers transition
+// ---------------------------------------------------------------------------
+
+/// Execute the Pending -> AwaitingAnswers transition:
+/// 1. Swap labels: remove `ralph:prd`, add `ralph:prd-active`.
+/// 2. If `ralph:ready` exists, remove it.
+/// 3. Generate clarifying questions using two backends + synthesis.
+/// 4. Post questions comment with idempotent marker.
+/// 5. Persist updated state.
+fn transition_pending_to_awaiting_answers(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+) -> Result<()> {
+    let issue_number = issue.number;
+    let owner = &config.owner;
+    let repo = &config.repo;
+
+    if config.verbose {
+        eprintln!(
+            "prd: transition Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}"
+        );
+    }
+
+    let result = do_pending_to_awaiting(config, issue, state);
+
+    match result {
+        Ok(()) => {
+            state.error_count = 0;
+            state.last_error = None;
+            state.save(&config.data_dir)?;
+            Ok(())
+        }
+        Err(err) => {
+            state.error_count += 1;
+            state.last_error = Some(err.to_string());
+
+            if state.error_count >= 3 {
+                // Transition to Failed
+                transition_to_failed(config, state)?;
+            } else {
+                // Persist incremented error_count for retry next tick
+                state.save(&config.data_dir)?;
+            }
+
+            Err(err)
+        }
+    }
+}
+
+fn do_pending_to_awaiting(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+) -> Result<()> {
+    let issue_number = issue.number;
+    let owner = &config.owner;
+    let repo = &config.repo;
+
+    // 1. Swap labels: remove ralph:prd, add ralph:prd-active
+    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:prd", "ralph:prd-active")
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "label swap failed for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    // 2. Remove ralph:ready if present (prevent dual workflow ownership)
+    if issue.labels.iter().any(|l| l == "ralph:ready") {
+        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:ready");
+    }
+
+    // 3. Generate questions with timeout
+    let issue_text = format!(
+        "{}\n\n{}",
+        issue.title,
+        issue.body.as_deref().unwrap_or_default()
+    );
+
+    let questions = generate_questions_with_timeout(config, &issue_text)?;
+
+    // 4. Post questions comment with idempotent marker
+    let next_revision = state.question_revision + 1;
+    let marker = prd_marker(issue_number, "questions", next_revision);
+
+    let comment_body = format!(
+        "## Clarifying Questions\n\n\
+         Before generating the engineering specification, I need some clarification. \
+         Please answer the following questions in a reply to this comment:\n\n\
+         {questions}\n\n\
+         *Reply to this comment with your answers and I'll generate a draft spec.*"
+    );
+
+    let comment_id =
+        github::post_comment_with_marker(owner, repo, issue_number, &marker, &comment_body)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
+
+    // 5. Update and persist state
+    state.state = PrdWorkflowState::AwaitingAnswers;
+    state.question_revision = next_revision;
+    state.questions_comment_id = comment_id;
+    state.questions_posted_at = Some(Utc::now());
+    state.last_advanced_at = Some(Utc::now());
+
+    Ok(())
+}
+
+/// Generate clarifying questions using two configured backends plus synthesis.
+///
+/// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
+fn generate_questions_with_timeout(
+    config: &PrdPollConfig,
+    issue_text: &str,
+) -> Result<String> {
+    if config.question_backends.len() != 2 {
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "expected exactly 2 question backends, got {}",
+            config.question_backends.len()
+        )));
+    }
+
+    let timeout = Duration::from_secs(config.backend_timeout_secs);
+    let deadline = std::time::Instant::now() + timeout;
+
+    let prompt = format!("{QUESTION_GEN_PROMPT}{issue_text}");
+
+    // Backend A
+    let backend_a = create_backend(&config.question_backends[0], &config.global_config)?;
+    let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
+
+    // Backend B
+    let backend_b = create_backend(&config.question_backends[1], &config.global_config)?;
+    let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
+
+    // Synthesis: merge/dedupe/prioritize
+    let synthesis_prompt = SYNTHESIS_PROMPT
+        .replace("{questions_a}", &questions_a)
+        .replace("{questions_b}", &questions_b);
+
+    // Use the first question backend for synthesis
+    let synthesized = run_backend_sync(&backend_a, &synthesis_prompt, deadline)?;
+
+    if synthesized.trim().is_empty() {
+        return Err(RalphError::InteractivePrdFailed(
+            "synthesis produced empty output".to_owned(),
+        ));
+    }
+
+    Ok(synthesized)
+}
+
+/// Run a backend synchronously with a deadline, using tokio runtime.
+fn run_backend_sync(
+    backend: &CliBackend,
+    prompt: &str,
+    deadline: std::time::Instant,
+) -> Result<String> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .unwrap_or(Duration::ZERO);
+
+    if remaining.is_zero() {
+        return Err(RalphError::InteractivePrdFailed(
+            "PRD backend timeout exceeded".to_owned(),
+        ));
+    }
+
+    // Create a runtime for blocking backend execution
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
+        })?;
+
+    let result = rt.block_on(async {
+        tokio::time::timeout(remaining, backend.execute(prompt)).await
+    });
+
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
+            "backend execution failed: {err}"
+        ))),
+        Err(_) => Err(RalphError::InteractivePrdFailed(
+            "PRD backend timeout exceeded".to_owned(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Failure transition
+// ---------------------------------------------------------------------------
+
+/// Transition an issue to the Failed state.
+fn transition_to_failed(config: &PrdPollConfig, state: &mut InteractivePrdState) -> Result<()> {
+    let owner = &config.owner;
+    let repo = &config.repo;
+    let issue_number = state.issue_number;
+
+    // Post error comment marker
+    let marker = format!("<!-- ralph:prd:{issue_number}:status-failed -->");
+    let error_body = format!(
+        "## PRD Workflow Failed\n\n\
+         The interactive PRD workflow has failed after {} consecutive errors.\n\n\
+         Last error: {}\n\n\
+         *Apply the `ralph:prd` label again to retry.*",
+        state.error_count,
+        state.last_error.as_deref().unwrap_or("unknown")
+    );
+
+    let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &error_body);
+
+    // Swap labels: remove ralph:prd-active, add ralph:prd-failed
+    // Best-effort: the label may not exist if we failed during Pending
+    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active");
+    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+    let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-failed");
+
+    state.state = PrdWorkflowState::Failed;
+    state.last_advanced_at = Some(Utc::now());
+    state.save(&config.data_dir)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Marker status-failed format (no version)
+// ---------------------------------------------------------------------------
+
+pub fn prd_status_failed_marker(issue_number: u32) -> String {
+    format!("<!-- ralph:prd:{issue_number}:status-failed -->")
 }
 
 #[cfg(test)]

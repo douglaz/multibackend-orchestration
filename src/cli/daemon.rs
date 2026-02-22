@@ -149,6 +149,9 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         // Ensure lifecycle labels exist (best-effort, non-blocking)
         github::ensure_labels_best_effort(&owner, &repo_name);
 
+        // Ensure PRD lifecycle labels exist (best-effort, non-blocking)
+        github::ensure_prd_labels_best_effort(&owner, &repo_name);
+
         // Load workspace from repo's .ralph/
         let workspace = Workspace::load(repo_dir.join(".ralph"))?;
 
@@ -215,6 +218,12 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
             rebase_agent_backend: rebase_agent_backend_str,
             workspace_root: workspace.root.clone(),
+            prd_enabled: daemon_cfg.prd_enabled,
+            prd_question_backends: daemon_cfg.prd_question_backends,
+            prd_writer_backend: daemon_cfg.prd_writer_backend,
+            prd_reviewer_backend: daemon_cfg.prd_reviewer_backend,
+            prd_max_revisions: daemon_cfg.prd_max_revisions,
+            prd_backend_timeout_secs: daemon_cfg.prd_backend_timeout_secs,
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;

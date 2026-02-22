@@ -12,6 +12,7 @@ use crate::daemon::rebase_agent::{
     classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend, RebaseFailureKind,
 };
 
+use crate::daemon::interactive_prd::{self, PrdPollConfig};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
@@ -56,6 +57,19 @@ pub struct DaemonRuntimeConfig {
     pub rebase_agent_backend: String,
     /// Workspace root (`.ralph/` directory).
     pub workspace_root: PathBuf,
+    /// Whether the interactive PRD workflow is enabled.
+    pub prd_enabled: bool,
+    /// Backend specs for PRD question generation (exactly 2).
+    pub prd_question_backends: Vec<String>,
+    /// Backend spec for PRD draft writer.
+    pub prd_writer_backend: String,
+    /// Backend spec for PRD draft reviewer.
+    pub prd_reviewer_backend: String,
+    /// Maximum internal writer/reviewer retries for PRD draft generation.
+    pub prd_max_revisions: u32,
+    /// Total wall-clock timeout (seconds) for backend calls within a single
+    /// PRD state transition.
+    pub prd_backend_timeout_secs: u64,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -527,6 +541,14 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children).await;
 
+        // Interactive PRD phase: advance PRD-labeled issues (before claim/dispatch
+        // to prevent dual workflow ownership).
+        if config.prd_enabled {
+            if let Err(err) = run_prd_phase(config).await {
+                eprintln!("warning: interactive PRD phase failed: {err}");
+            }
+        }
+
         // Poll for new issues
         let active_count = children.len() as u32;
         let slots = config.max_concurrent.saturating_sub(active_count);
@@ -561,6 +583,28 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run the interactive PRD poll/advance phase.
+///
+/// Builds a `PrdPollConfig` from the runtime config and delegates to
+/// `interactive_prd::poll_and_advance_prd` in a blocking task.
+async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
+    let prd_config = PrdPollConfig {
+        owner: config.owner.clone(),
+        repo: config.repo.clone(),
+        data_dir: config.repo_root.clone(),
+        prd_enabled: config.prd_enabled,
+        question_backends: config.prd_question_backends.clone(),
+        writer_backend: config.prd_writer_backend.clone(),
+        reviewer_backend: config.prd_reviewer_backend.clone(),
+        max_revisions: config.prd_max_revisions,
+        backend_timeout_secs: config.prd_backend_timeout_secs,
+        global_config: config.global_config.clone(),
+        verbose: config.verbose,
+    };
+
+    spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await
 }
 
 /// Startup reconciliation: every issue currently labeled `ralph:in-progress`
@@ -667,6 +711,17 @@ async fn poll_and_claim(
 
         // Only claim issues with `ralph:ready` and no other lifecycle labels
         if lifecycle.len() != 1 || lifecycle[0] != "ralph:ready" {
+            continue;
+        }
+
+        // Skip issues carrying any PRD label (prevents dual workflow ownership)
+        if interactive_prd::has_prd_label(&issue.labels) {
+            if config.verbose {
+                eprintln!(
+                    "verbose: skipping issue #{} — carries PRD label, handled by interactive PRD workflow",
+                    issue.number
+                );
+            }
             continue;
         }
 
