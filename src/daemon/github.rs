@@ -468,6 +468,45 @@ pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> R
     Ok(())
 }
 
+/// Post a raw comment on an issue without any idempotency check.
+///
+/// This is used when bot identity is unavailable and body-only marker lookup
+/// would be vulnerable to user spoofing.  Callers should include any marker
+/// text in `body` themselves.
+pub fn post_raw_issue_comment(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    body: &str,
+) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to post raw comment on {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue comment (raw) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Check for an existing PR with the given head branch.
 /// Returns `Some(url)` if found, `None` otherwise.
 pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {

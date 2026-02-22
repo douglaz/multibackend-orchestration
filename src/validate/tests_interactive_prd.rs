@@ -2795,26 +2795,17 @@ esac; exit 0
         let gh_path = write_mock_gh(&dh, gh_script).unwrap();
         let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
-        // Make state dir read-only to force save failure
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
-        }
-
+        // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
             .daemon_env(
                 ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
+                ],
             )
             .unwrap();
-
-        // Restore permissions
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let state_raw = fs::read_to_string(&state_path).unwrap();
         let state: InteractivePrdState = serde_json::from_str(&state_raw).unwrap();
@@ -2922,9 +2913,8 @@ fn bot_scoped_extract_questions_ignores_spoof(_harness: &RalphHarness) -> TestRe
 /// (transition_to_failed) keeps the issue retryable by leaving it in a
 /// non-terminal state when the save inside transition_to_failed fails.
 ///
-/// Uses a blocking-file approach: replace the state directory with a regular
-/// file so that `create_dir_all` / `NamedTempFile::new_in` fails deterministically
-/// regardless of privilege level.
+/// Uses env-var failure injection (`RALPH_TEST_INJECT_SAVE_FAILURE`) for
+/// deterministic behavior regardless of privilege level.
 fn terminal_save_failure_failed_path_keeps_retry_visibility(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -3000,26 +2990,17 @@ esac; exit 0
         let gh_path = write_mock_gh(&dh, gh_script).unwrap();
         let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
-        // Make state dir read-only to force save failure in transition_to_failed
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
-        }
-
+        // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
             .daemon_env(
                 ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
+                ],
             )
             .unwrap();
-
-        // Restore permissions
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
 
         let state_raw = fs::read_to_string(&state_path).unwrap();
         let state: InteractivePrdState = serde_json::from_str(&state_raw).unwrap();

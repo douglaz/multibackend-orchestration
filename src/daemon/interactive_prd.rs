@@ -76,6 +76,19 @@ impl InteractivePrdState {
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<()> {
+        // Test-only failure injection: when RALPH_TEST_INJECT_SAVE_FAILURE is
+        // set, all saves fail deterministically.  This allows integration and
+        // conformance tests to exercise save-failure paths reliably regardless
+        // of privilege level (e.g., running as root).  The env var is only
+        // checked at runtime and has zero cost when unset.
+        if std::env::var_os("RALPH_TEST_INJECT_SAVE_FAILURE").is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected save failure for testing",
+            )
+            .into());
+        }
+
         let path = state_path(data_dir, &self.owner, &self.repo, self.issue_number);
         let parent = path.parent().expect("state path should have a parent");
         fs::create_dir_all(parent)?;
@@ -1000,6 +1013,14 @@ fn finish_transition(
         let bot_login = bot_login_cache.as_deref();
         transition_to_failed(config, state, bot_login)?;
     } else {
+        // Skip the redundant save for successful Done transitions —
+        // do_approval_transition already persisted the terminal state.
+        // A second save is unnecessary and increases the window for
+        // transient I/O failures to cause state/label drift.
+        if state.state == PrdWorkflowState::Done && result.is_ok() {
+            return Ok(());
+        }
+
         // Attempt to save state.  If save fails, route the failure through
         // retry accounting so that terminal transitions are not silently lost
         // and can trigger retry exhaustion after 3 consecutive save failures.
@@ -1367,8 +1388,11 @@ fn transition_to_failed(
     let repo = &config.repo;
     let issue_number = state.issue_number;
 
-    // Post error comment marker (best-effort).
-    // Bot-scoped when bot identity is available; generic fallback otherwise.
+    // Post error comment marker (best-effort, bot-scoped).
+    // When bot identity is available, use bot-scoped idempotent posting so
+    // user-spoofed markers are ignored.  When bot identity is unavailable,
+    // post non-idempotently (no duplicate check) rather than falling back to
+    // body-only lookup which would be vulnerable to user marker spoofing.
     let marker = format!("<!-- ralph:prd:{issue_number}:status-failed -->");
     let error_body = format!(
         "## PRD Workflow Failed\n\n\
@@ -1389,7 +1413,10 @@ fn transition_to_failed(
             login,
         );
     } else {
-        let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &error_body);
+        // No bot identity — post without idempotency check rather than using
+        // body-only lookup (which a user spoof could suppress).
+        let full_body = format!("{marker}\n{error_body}");
+        let _ = github::post_raw_issue_comment(owner, repo, issue_number, &full_body);
     }
 
     // Add ralph:prd-failed BEFORE removing ralph:prd-active (boundary-safe ordering).

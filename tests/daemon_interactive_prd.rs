@@ -2053,7 +2053,6 @@ fn terminal_save_failure_approval_path_keeps_issue_retryable() {
     h.setup_mock_backends_stable(&backend_script)
         .expect("setup mock backends");
 
-    // Use a read-only directory for state persistence to force save failure
     let state_dir = h.temp_dir.path().join("acme/widgets/.ralph/interactive-prd");
     fs::create_dir_all(&state_dir).expect("create state dir");
 
@@ -2084,8 +2083,7 @@ fn terminal_save_failure_approval_path_keeps_issue_retryable() {
     let label_log = h.temp_dir.path().join("save_fail_approval_label.log");
     let label_log_str = label_log.to_string_lossy().into_owned();
 
-    // gh mock: approval comment posted, but we make the state dir read-only
-    // AFTER the state file is written to force save failures during transition.
+    // gh mock: approval comment present; save failure injected via env var.
     let gh_script = format!(
         r#"#!/bin/sh
 LLOG="{label_log_str}"
@@ -2127,14 +2125,7 @@ esac; exit 0
         .expect("write mock ralph");
     let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
-    // Make state directory read-only to force save failure
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o444);
-        std::fs::set_permissions(&state_dir, perms).expect("set read-only");
-    }
-
+    // Inject save failure via env var — deterministic regardless of privilege level
     // Run one tick — save should fail, state should remain AwaitingFeedback
     let _output = h
         .daemon_env(
@@ -2145,17 +2136,13 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[
+                ("PATH", &path_env),
+                ("RALPH_DAEMON_BIN", &mock_ralph_str),
+                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
+            ],
         )
         .expect("daemon start");
-
-    // Restore write permissions for cleanup
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&state_dir, perms).expect("restore permissions");
-    }
 
     // State file should still exist with pre-transition content because save failed
     let state_raw = fs::read_to_string(&state_path).expect("state should still exist");
@@ -2466,14 +2453,7 @@ esac; exit 0
         .expect("write mock ralph");
     let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
-    // Make state directory read-only to force save failure in transition_to_failed
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o444);
-        std::fs::set_permissions(&state_dir, perms).expect("set read-only");
-    }
-
+    // Inject save failure via env var — deterministic regardless of privilege level.
     // Run one tick — backend error pushes error_count to 3, transition_to_failed
     // tries to save but fails, state should remain non-terminal
     let _output = h
@@ -2485,17 +2465,13 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[
+                ("PATH", &path_env),
+                ("RALPH_DAEMON_BIN", &mock_ralph_str),
+                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
+            ],
         )
         .expect("daemon start");
-
-    // Restore write permissions for cleanup
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&state_dir, perms).expect("restore permissions");
-    }
 
     // State file should still exist with pre-transition content because save failed
     let state_raw = fs::read_to_string(&state_path).expect("state should still exist");
