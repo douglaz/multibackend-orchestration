@@ -2049,9 +2049,13 @@ esac; exit 0
 /// Panics with a diagnostic message listing all searched paths if no binary is
 /// found.
 fn ralph_bin_absolute() -> PathBuf {
+    // Collect all searched paths for diagnostics on failure
+    let mut searched: Vec<String> = Vec::new();
+
     // 1. Compile-time injection (preferred when available)
     if let Some(p) = option_env!("CARGO_BIN_EXE_ralph") {
         let pb = PathBuf::from(p);
+        searched.push(format!("CARGO_BIN_EXE_ralph (compile-time) = {}", pb.display()));
         if pb.exists() {
             return pb;
         }
@@ -2060,6 +2064,7 @@ fn ralph_bin_absolute() -> PathBuf {
     // 2. Runtime env (set by `cargo test` for binary targets)
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_ralph") {
         let pb = PathBuf::from(p);
+        searched.push(format!("CARGO_BIN_EXE_ralph (runtime) = {}", pb.display()));
         if pb.exists() {
             return pb;
         }
@@ -2068,13 +2073,13 @@ fn ralph_bin_absolute() -> PathBuf {
     // 3. Explicit override for Nix / CI
     if let Ok(p) = std::env::var("RALPH_TEST_BIN") {
         let pb = PathBuf::from(p);
+        searched.push(format!("RALPH_TEST_BIN = {}", pb.display()));
         if pb.exists() {
             return pb;
         }
     }
 
     // 4. Probe standard Cargo layouts under target dir
-    let mut searched: Vec<String> = Vec::new();
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
     let target_root = std::env::var("CARGO_TARGET_DIR")

@@ -2286,4 +2286,120 @@ mod tests {
             result.err()
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Reviewer approval does NOT bypass 6-section gating
+    // -----------------------------------------------------------------------
+
+    /// Write a mock script where the reviewer always approves but the writer
+    /// always produces an incomplete spec (only 3 of 6 sections).  This
+    /// exercises the "approval does not bypass section completeness" contract
+    /// in `generate_draft_from_answers_with_timeout`.
+    fn write_approving_reviewer_incomplete_writer_script() -> String {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
+        writeln!(tmp, "#!/bin/sh").unwrap();
+        writeln!(tmp, "INPUT=\"$(cat)\"").unwrap();
+        // Reviewer prompts: always approve
+        writeln!(tmp, "if echo \"$INPUT\" | grep -q 'Review the spec for\\|\\*\\*Engineering Spec:\\*\\*\\|review response could not be parsed'; then").unwrap();
+        writeln!(tmp, "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'").unwrap();
+        writeln!(tmp, "else").unwrap();
+        // Writer prompts: always produce incomplete spec (3 of 6 sections)
+        writeln!(tmp, "  cat <<'__MOCK_EOF__'").unwrap();
+        writeln!(tmp, "## Summary").unwrap();
+        writeln!(tmp, "Incomplete draft from approval-bypass test.").unwrap();
+        writeln!(tmp, "").unwrap();
+        writeln!(tmp, "## Acceptance Criteria").unwrap();
+        writeln!(tmp, "- [ ] Criterion 1").unwrap();
+        writeln!(tmp, "").unwrap();
+        writeln!(tmp, "## Technical Approach").unwrap();
+        writeln!(tmp, "Approach description.").unwrap();
+        writeln!(tmp, "__MOCK_EOF__").unwrap();
+        writeln!(tmp, "fi").unwrap();
+        tmp.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(tmp.path(), perms).unwrap();
+        }
+
+        let path = tmp.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
+        std::mem::forget(path);
+        path_str
+    }
+
+    /// `generate_draft_from_answers_with_timeout` must reject an incomplete
+    /// spec even when the reviewer approves it (`{"approved": true}`).
+    #[test]
+    fn generate_draft_reviewer_approval_does_not_bypass_section_gating() {
+        let script = write_approving_reviewer_incomplete_writer_script();
+        let config = make_test_prd_config(&script);
+
+        let result = generate_draft_from_answers_with_timeout(
+            &config,
+            "Feature: add auth",
+            "1. What auth method?",
+            "Use JWT tokens.",
+        );
+        assert!(
+            result.is_err(),
+            "incomplete spec should fail even when reviewer approves"
+        );
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing required sections"),
+            "error should mention missing sections despite reviewer approval: {msg}"
+        );
+        // Verify at least one of the actually-missing sections is named
+        assert!(
+            msg.contains("Files & Modules")
+                || msg.contains("Testing Strategy")
+                || msg.contains("Out of Scope"),
+            "error should list specific missing section names: {msg}"
+        );
+    }
+
+    /// `generate_revision_from_feedback_with_timeout` must reject an incomplete
+    /// revision even when the reviewer approves it (`{"approved": true}`).
+    #[test]
+    fn generate_revision_reviewer_approval_does_not_bypass_section_gating() {
+        let script = write_approving_reviewer_incomplete_writer_script();
+        let config = make_test_prd_config(&script);
+
+        let current_draft = "\
+## Summary\nOriginal.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nOld.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let result = generate_revision_from_feedback_with_timeout(
+            &config,
+            current_draft,
+            "Please expand the testing strategy.",
+        );
+        assert!(
+            result.is_err(),
+            "incomplete revision should fail even when reviewer approves"
+        );
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing required sections"),
+            "error should mention missing sections despite reviewer approval: {msg}"
+        );
+        assert!(
+            msg.contains("Files & Modules")
+                || msg.contains("Testing Strategy")
+                || msg.contains("Out of Scope"),
+            "error should list specific missing section names: {msg}"
+        );
+    }
 }
