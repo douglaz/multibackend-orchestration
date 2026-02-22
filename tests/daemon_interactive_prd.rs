@@ -1885,6 +1885,127 @@ esac; exit 0
 }
 
 // ---------------------------------------------------------------------------
+// Bot-login retry exhaustion in Pending stage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_bot_login_failure_exhaustion_transitions_to_failed() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let label_log = h.temp_dir.path().join("bot_login_pending_label.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+
+    // gh mock: `gh api user` always fails; issue #130 starts fresh (Pending, no state file)
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0; has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":130,"title":"T","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0; want_tb=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; title,body) want_tb=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then printf '{{"comments":[]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{{"title":"T","body":"B"}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api)
+    if [ "$2" = "user" ]; then
+      echo "gh: error resolving authenticated user" >&2
+      exit 1
+    fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/130.json");
+
+    // Run 3 ticks — each should fail due to bot-login error
+    for tick in 1..=3 {
+        let _output = h
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            )
+            .expect("daemon start");
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("read state"))
+                .unwrap_or_else(|e| panic!("parse state after tick {tick}: {e}"));
+
+        if tick < 3 {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::Pending,
+                "tick {tick}: should remain Pending"
+            );
+            assert_eq!(
+                state.error_count, tick as u32,
+                "tick {tick}: error_count should be {tick}"
+            );
+            assert!(
+                state.last_error.is_some(),
+                "tick {tick}: last_error should be set"
+            );
+        } else {
+            assert_eq!(
+                state.state,
+                PrdWorkflowState::Failed,
+                "tick 3: should be Failed after bot-login exhaustion"
+            );
+            assert!(state.is_terminal());
+            assert!(state.error_count >= 3);
+        }
+    }
+
+    // Verify ralph:prd-failed label was applied
+    let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("ralph:prd-failed"),
+        "ralph:prd-failed label should be added: {label_raw}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Approval label-swap partial-failure recovery
 // ---------------------------------------------------------------------------
 

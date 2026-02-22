@@ -120,6 +120,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: bot_login_failure_exhaustion_awaiting_feedback,
         },
         ConformanceTest {
+            name: "interactive_prd::bot_login_failure_exhaustion_pending",
+            func: bot_login_failure_exhaustion_pending,
+        },
+        ConformanceTest {
             name: "interactive_prd::approval_label_ordering_partial_failure_recovery",
             func: approval_label_ordering_partial_failure_recovery,
         },
@@ -769,6 +773,12 @@ case "$1" in
       create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
       edit) exit 0 ;;
     esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
     ;;
   repo) printf 'acme/widgets\n' ; exit 0 ;;
   label)
@@ -2191,6 +2201,102 @@ esac; exit 0
                     state.state,
                     PrdWorkflowState::AwaitingFeedback,
                     "tick {tick}: should remain AwaitingFeedback"
+                );
+                assert_eq!(state.error_count, tick, "tick {tick}: error_count");
+                assert!(state.last_error.is_some(), "tick {tick}: last_error set");
+            } else {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Failed,
+                    "tick 3: should be Failed"
+                );
+                assert!(state.is_terminal());
+                assert!(state.error_count >= 3);
+            }
+        }
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("ralph:prd-failed"),
+            "ralph:prd-failed should be added: {label_raw}"
+        );
+    })
+}
+
+/// Verify that repeated `gh api user` failures during the Pending stage
+/// (Pending -> AwaitingAnswers pickup) are routed through transition retry
+/// accounting. After 3 consecutive failures the state transitions to Failed
+/// with `ralph:prd-failed`.
+fn bot_login_failure_exhaustion_pending(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let label_log = dh.temp_dir.path().join("botlogin_pending_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // `gh api user` always fails; issue #300 starts in Pending (no pre-seeded state)
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0; has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":300,"title":"T","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0; want_tb=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; title,body) want_tb=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then printf '{{"comments":[]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{{"title":"T","body":"B"}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api)
+    if [ "$2" = "user" ]; then
+      echo "gh: error resolving authenticated user" >&2
+      exit 1
+    fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/300.json");
+
+        for tick in 1..=3u32 {
+            let _output = dh
+                .daemon_env(
+                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                )
+                .unwrap();
+
+            let state: InteractivePrdState =
+                serde_json::from_str(&fs::read_to_string(&state_path).unwrap())
+                    .unwrap_or_else(|e| panic!("parse state tick {tick}: {e}"));
+
+            if tick < 3 {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Pending,
+                    "tick {tick}: should remain Pending"
                 );
                 assert_eq!(state.error_count, tick, "tick {tick}: error_count");
                 assert!(state.last_error.is_some(), "tick {tick}: last_error set");
