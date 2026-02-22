@@ -616,6 +616,16 @@ fn normalize_backend_specs_labeled(
     label: &str,
     reject_duplicates: bool,
 ) -> Result<Vec<String>> {
+    normalize_backend_specs_labeled_role(global, specs, label, reject_duplicates, None)
+}
+
+fn normalize_backend_specs_labeled_role(
+    global: &GlobalConfig,
+    specs: &[String],
+    label: &str,
+    reject_duplicates: bool,
+    resolve_role: Option<&str>,
+) -> Result<Vec<String>> {
     let mut normalized = Vec::new();
     let mut seen = HashSet::new();
 
@@ -624,7 +634,14 @@ fn normalize_backend_specs_labeled(
         validate_backend_spec(global, &canonical, label, ValidationSurface::PanelList)?;
         // Derive a resolution key that collapses optional/required variants
         // (e.g. `claude` and `?claude`) to the same target.
-        let parsed = parse_backend_spec(&canonical)?;
+        // When a resolve_role is provided, also apply role-model injection so
+        // that e.g. `claude` and `claude(opus)` collapse when the completer
+        // role model for claude is `opus`.
+        let resolved = match resolve_role {
+            Some(role) => resolve_spec_for_role(global, &canonical, role),
+            None => canonical.clone(),
+        };
+        let parsed = parse_backend_spec(&resolved)?;
         let resolution_key = match &parsed.model {
             Some(model) => format!("{}({model})", parsed.name),
             None => parsed.name.clone(),
@@ -642,6 +659,26 @@ fn normalize_backend_specs_labeled(
     }
 
     Ok(normalized)
+}
+
+/// Apply the same role-model resolution that `BackendRegistry::resolve_backend_for_role`
+/// performs, but using `GlobalConfig` directly.  When the spec already has an explicit
+/// model, it is returned unchanged; otherwise the configured role model is injected.
+fn resolve_spec_for_role(global: &GlobalConfig, canonical_spec: &str, role: &str) -> String {
+    let parsed = match parse_backend_spec(canonical_spec) {
+        Ok(p) => p,
+        Err(_) => return canonical_spec.to_owned(),
+    };
+    if parsed.model.is_some() {
+        return canonical_spec.to_owned();
+    }
+    let model = global
+        .backend_config(&parsed.name)
+        .and_then(|bc| bc.models.for_role(role));
+    match model {
+        Some(m) => format!("{}({m})", parsed.name),
+        None => canonical_spec.to_owned(),
+    }
 }
 
 fn unique_backend_families(specs: &[String]) -> Result<Vec<String>> {
@@ -683,20 +720,25 @@ fn validate_completion_panel_config(
         )));
     }
 
-    // normalize_backend_specs_labeled with reject_duplicates=true rejects duplicate
-    // resolved specs (including optional/required variants collapsing to the same target).
-    let normalized = normalize_backend_specs_labeled(
+    // normalize_backend_specs_labeled_role with reject_duplicates=true rejects
+    // duplicate resolved specs (including optional/required variants and
+    // role-model injection collapsing to the same target, e.g. `claude` and
+    // `claude(opus)` when the completer role model for claude is `opus`).
+    let normalized = normalize_backend_specs_labeled_role(
         global,
         &workflow.completion_backends,
         "completion backend",
         true,
+        Some("completer"),
     )?;
 
     // Check for per-backend verdict filename collisions using the same
-    // slugification logic as ArtifactKind::CompleterVerdictBackend.
+    // slugification logic as ArtifactKind::CompleterVerdictBackend, applied
+    // to role-resolved specs (matching what the runtime orchestrator writes).
     let mut seen_filenames = HashSet::new();
     for spec in &normalized {
-        let filename = completion_verdict_filename(spec);
+        let resolved = resolve_spec_for_role(global, spec, "completer");
+        let filename = completion_verdict_filename(&resolved);
         if !seen_filenames.insert(filename.clone()) {
             return Err(RalphError::Validation(format!(
                 "completion verdict filename collision for spec '{spec}': {filename}"
@@ -710,6 +752,22 @@ fn validate_completion_panel_config(
 /// Generate the deterministic verdict filename for a completion backend spec.
 /// Uses the same `slugify_backend` logic as `ArtifactKind::CompleterVerdictBackend`
 /// to ensure collision detection matches actual artifact naming.
+/// Return the effective completion consensus settings by merging
+/// global workflow defaults with optional project overrides.  Used by
+/// reconstruction to match the runtime consensus behaviour.
+pub fn effective_completion_consensus(
+    global: &GlobalConfig,
+    project: Option<&project::ProjectConfig>,
+) -> (u32, f64) {
+    let min = project
+        .and_then(|p| p.workflow.completion_min_completers)
+        .unwrap_or(global.workflow.completion_min_completers);
+    let threshold = project
+        .and_then(|p| p.workflow.completion_consensus_threshold)
+        .unwrap_or(global.workflow.completion_consensus_threshold);
+    (min, threshold)
+}
+
 fn completion_verdict_filename(spec: &str) -> String {
     format!("completer-verdict-{}.md", slugify_backend(spec))
 }
@@ -1616,6 +1674,32 @@ mod tests {
         .expect_err("duplicate resolved specs should fail");
         assert!(
             err.to_string().contains("duplicate resolved completion backend spec"),
+            "error should mention duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn completion_panel_rejects_role_resolution_collapse() {
+        // `claude` and `claude(opus)` collapse to the same resolved target
+        // when the completer role model for claude is `opus` (the default).
+        // Validation must detect this via role-model resolution.
+        let mut global = GlobalConfig::default();
+        // Default claude completer model is "opus", so bare `claude` resolves
+        // to `claude(opus)` at runtime.
+        global.workflow.completion_backends =
+            vec!["claude".to_owned(), "claude(opus)".to_owned()];
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("role-resolved duplicate specs should fail");
+        assert!(
+            err.to_string()
+                .contains("duplicate resolved completion backend spec"),
             "error should mention duplicate: {err}"
         );
     }
