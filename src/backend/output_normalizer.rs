@@ -33,6 +33,11 @@ const STREAM_EVENT_TYPES: &[&str] = &[
     "system",
     // Codex CLI (first event is "thread.started")
     "thread.started",
+    // Gemini CLI stream-json
+    "init",
+    "message",
+    "tool_use",
+    "tool_result",
 ];
 
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
@@ -141,12 +146,39 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 }
                 merge_usage_from_event(&event, &mut output);
             }
+            "init" => {
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "message" => {
+                if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                    if let Some(content) = event.get("content") {
+                        if let Some(text) = extract_text_from_content(content) {
+                            if !output.text.is_empty() && !output.text.ends_with('\n') {
+                                output.text.push('\n');
+                            }
+                            output.text.push_str(&text);
+                        }
+                    }
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "tool_use" | "tool_result" => {}
             "result" => {
                 // Summary event; always capture result text — it contains the
                 // clean final response without narration from assistant events.
-                if let Some(text) = event.get("result").and_then(Value::as_str) {
+                if let Some(text) = extract_result_event_text(&event) {
                     if !text.is_empty() {
-                        result_text = Some(text.to_owned());
+                        result_text = Some(text);
                     }
                 }
                 if output.session_id.is_none() {
@@ -271,6 +303,21 @@ fn extract_single_json_text(value: &Value) -> Option<String> {
         }
     }
 
+    None
+}
+
+fn extract_result_event_text(event: &Value) -> Option<String> {
+    if let Some(text) = event.get("result").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    if let Some(text) = event.get("text").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    if let Some(content) = event.get("content") {
+        if let Some(text) = extract_text_from_content(content) {
+            return Some(text);
+        }
+    }
     None
 }
 
@@ -610,5 +657,39 @@ Done."#;
             !normalized.text.contains("internal reasoning"),
             "reasoning text should be filtered out"
         );
+    }
+
+    #[test]
+    fn normalize_output_gemini_stream_extracts_session_and_text() {
+        let raw = concat!(
+            r#"{"type":"init","session_id":"gem-sess-1"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","content":"first"}"#,
+            "\n",
+            r#"{"type":"tool_use","name":"search"}"#,
+            "\n",
+            r#"{"type":"tool_result","name":"search","content":"ignored"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","content":[{"text":"second"}]}"#,
+            "\n",
+            r#"{"type":"result","text":"final response"}"#,
+        );
+        let normalized = normalize_output(raw).expect("gemini stream parse");
+        assert_eq!(normalized.session_id.as_deref(), Some("gem-sess-1"));
+        assert_eq!(normalized.text, "final response");
+    }
+
+    #[test]
+    fn normalize_output_gemini_message_requires_assistant_role_for_text() {
+        let raw = concat!(
+            r#"{"type":"init","session_id":"gem-sess-2"}"#,
+            "\n",
+            r#"{"type":"message","role":"user","content":"ignore this"}"#,
+            "\n",
+            r#"{"type":"result","content":[{"text":"assistant final"}]}"#,
+        );
+        let normalized = normalize_output(raw).expect("gemini stream parse");
+        assert_eq!(normalized.session_id.as_deref(), Some("gem-sess-2"));
+        assert_eq!(normalized.text, "assistant final");
     }
 }

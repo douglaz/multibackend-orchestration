@@ -3082,7 +3082,14 @@ async fn run_final_review_phase(
     let loop_slug = completion.slug.clone();
     let planner_backend_name = completion.backends.planner.clone();
 
-    let reviewers = normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let reviewer_specs =
+        normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let reviewers = resolve_effective_final_review_backends(
+        registry,
+        &reviewer_specs,
+        effective.workflow.final_review_min_reviewers,
+    )
+    .await?;
     let arbiter_backend =
         canonicalize_backend_spec(&effective.workflow.final_review_arbiter_backend)?;
     let snapshot = FinalReviewConfigSnapshot {
@@ -3499,24 +3506,85 @@ async fn run_final_review_phase(
     Ok(Some((Phase::FinalReview, Phase::Planning)))
 }
 
-fn normalize_final_review_backends(backends: &[String]) -> Result<Vec<String>> {
-    let mut normalized = Vec::new();
-    let mut seen = HashSet::new();
+fn normalize_final_review_backends(
+    backends: &[String],
+) -> Result<Vec<crate::backend::BackendSpec>> {
+    let mut normalized: Vec<crate::backend::BackendSpec> = Vec::new();
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+
     for backend in backends {
-        let canonical = canonicalize_backend_spec(backend)?;
-        if seen.insert(canonical.clone()) {
-            normalized.push(canonical);
+        let parsed = crate::backend::parse_backend_spec(backend)?;
+        let key = canonicalize_parsed_backend_spec(&parsed);
+        if let Some(idx) = index_by_key.get(&key).copied() {
+            // Required entries win over optional duplicates.
+            if !parsed.optional && normalized[idx].optional {
+                normalized[idx].optional = false;
+            }
+            continue;
         }
+        index_by_key.insert(key, normalized.len());
+        normalized.push(parsed);
     }
     Ok(normalized)
 }
 
+async fn resolve_effective_final_review_backends(
+    registry: &mut BackendRegistry,
+    backends: &[crate::backend::BackendSpec],
+    min_reviewers: u32,
+) -> Result<Vec<String>> {
+    let mut effective = Vec::new();
+    let mut unavailable_optional = Vec::new();
+
+    for backend in backends {
+        let canonical = canonicalize_parsed_backend_spec(backend);
+        let available = registry
+            .backend_available_for_spec(&canonical, Some("final_reviewer"))
+            .await?;
+        if available {
+            effective.push(canonical);
+            continue;
+        }
+
+        if backend.optional {
+            warn!(
+                backend = %canonical,
+                "optional final review backend unavailable; skipping"
+            );
+            unavailable_optional.push(canonical);
+            continue;
+        }
+
+        return Err(RalphError::BackendUnavailable { backend: canonical });
+    }
+
+    if effective.len() < min_reviewers as usize {
+        let unavailable = if unavailable_optional.is_empty() {
+            "none".to_owned()
+        } else {
+            unavailable_optional.join(", ")
+        };
+        return Err(RalphError::Validation(format!(
+            "final_review_backends has {} available backend(s) after optional filtering; unavailable optional backends: {}; final_review_min_reviewers is {}",
+            effective.len(),
+            unavailable,
+            min_reviewers
+        )));
+    }
+
+    Ok(effective)
+}
+
 fn canonicalize_backend_spec(spec: &str) -> Result<String> {
     let parsed = crate::backend::parse_backend_spec(spec)?;
-    Ok(match parsed.model {
-        Some(model) => format!("{}({model})", parsed.name),
-        None => parsed.name,
-    })
+    Ok(canonicalize_parsed_backend_spec(&parsed))
+}
+
+fn canonicalize_parsed_backend_spec(spec: &crate::backend::BackendSpec) -> String {
+    match spec.model.as_deref() {
+        Some(model) => format!("{}({model})", spec.name),
+        None => spec.name.clone(),
+    }
 }
 
 fn final_review_restart_count_from_artifacts(project_dir: &Path) -> u32 {
@@ -5294,6 +5362,7 @@ mod tests {
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
+        assert!(registry.get("gemini(gemini-3-pro)").is_some());
     }
 
     #[test]
@@ -5301,6 +5370,7 @@ mod tests {
         let mut config = GlobalConfig::default();
         config.backends.claude.models = BackendRoleModels::default();
         config.backends.codex.models = BackendRoleModels::default();
+        config.backends.gemini.models = BackendRoleModels::default();
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         preload_role_model_backends(&mut registry)
@@ -5308,6 +5378,7 @@ mod tests {
 
         assert!(registry.get("claude(opus)").is_none());
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
+        assert!(registry.get("gemini(gemini-3-pro)").is_none());
     }
 
     #[test]
@@ -5335,6 +5406,17 @@ mod tests {
             acceptance_qa: Some("codex-acceptance-qa".to_owned()),
             reformatter: Some("codex-reformatter".to_owned()),
         };
+        config.backends.gemini.models = BackendRoleModels {
+            planner: Some("gemini-planner".to_owned()),
+            implementer: Some("gemini-implementer".to_owned()),
+            reviewer: Some("gemini-reviewer".to_owned()),
+            final_reviewer: Some("gemini-final-reviewer".to_owned()),
+            arbiter: Some("gemini-arbiter".to_owned()),
+            qa: Some("gemini-qa".to_owned()),
+            completer: Some("gemini-completer".to_owned()),
+            acceptance_qa: Some("gemini-acceptance-qa".to_owned()),
+            reformatter: Some("gemini-reformatter".to_owned()),
+        };
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         preload_role_model_backends(&mut registry)
@@ -5359,6 +5441,15 @@ mod tests {
             "codex(codex-completer)",
             "codex(codex-acceptance-qa)",
             "codex(codex-reformatter)",
+            "gemini(gemini-planner)",
+            "gemini(gemini-implementer)",
+            "gemini(gemini-reviewer)",
+            "gemini(gemini-final-reviewer)",
+            "gemini(gemini-arbiter)",
+            "gemini(gemini-qa)",
+            "gemini(gemini-completer)",
+            "gemini(gemini-acceptance-qa)",
+            "gemini(gemini-reformatter)",
         ] {
             assert!(
                 registry.get(expected_spec).is_some(),

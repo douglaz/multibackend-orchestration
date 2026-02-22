@@ -531,11 +531,24 @@ fn set_global_value(
         "git.base_branch" => config.git.base_branch = raw_value.to_owned(),
         "backends.claude.command" => config.backends.claude.command = raw_value.to_owned(),
         "backends.codex.command" => config.backends.codex.command = raw_value.to_owned(),
+        "backends.gemini.command" => config.backends.gemini.command = raw_value.to_owned(),
         "backends.claude.timeout_seconds" => {
             config.backends.claude.timeout_seconds = parse_u64(raw_value, key)?;
         }
         "backends.codex.timeout_seconds" => {
             config.backends.codex.timeout_seconds = parse_u64(raw_value, key)?;
+        }
+        "backends.gemini.timeout_seconds" => {
+            config.backends.gemini.timeout_seconds = parse_u64(raw_value, key)?;
+        }
+        "backends.claude.enabled" => {
+            config.backends.claude.enabled = parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.codex.enabled" => {
+            config.backends.codex.enabled = parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.gemini.enabled" => {
+            config.backends.gemini.enabled = parse_backend_enabled(raw_value, key)?;
         }
         _ if key.starts_with("backends.claude.role_timeouts.") => {
             let role = key.trim_start_matches("backends.claude.role_timeouts.");
@@ -545,8 +558,13 @@ fn set_global_value(
             let role = key.trim_start_matches("backends.codex.role_timeouts.");
             set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
         }
+        _ if key.starts_with("backends.gemini.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.gemini.role_timeouts.");
+            set_role_timeout(&mut config.backends.gemini.role_timeouts, role, raw_value)?;
+        }
         "backends.claude.args" => config.backends.claude.args = parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = parse_string_list(raw_value)?,
+        "backends.gemini.args" => config.backends.gemini.args = parse_string_list(raw_value)?,
         _ if key.starts_with("backends.claude.models.") => {
             let role = key.trim_start_matches("backends.claude.models.");
             set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
@@ -554,6 +572,10 @@ fn set_global_value(
         _ if key.starts_with("backends.codex.models.") => {
             let role = key.trim_start_matches("backends.codex.models.");
             set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.gemini.models.") => {
+            let role = key.trim_start_matches("backends.gemini.models.");
+            set_backend_model(&mut config.backends.gemini.models, role, raw_value)?;
         }
         _ if key.starts_with("backends.claude.env.") => {
             let env_key = key.trim_start_matches("backends.claude.env.");
@@ -568,6 +590,14 @@ fn set_global_value(
             config
                 .backends
                 .codex
+                .env
+                .insert(env_key.to_owned(), raw_value.to_owned());
+        }
+        _ if key.starts_with("backends.gemini.env.") => {
+            let env_key = key.trim_start_matches("backends.gemini.env.");
+            config
+                .backends
+                .gemini
                 .env
                 .insert(env_key.to_owned(), raw_value.to_owned());
         }
@@ -747,6 +777,17 @@ fn parse_bool(raw: &str, key: &str) -> Result<bool> {
     raw.parse::<bool>().map_err(|_| {
         RalphError::Validation(format!("key '{key}' expects boolean value (true/false)"))
     })
+}
+
+fn parse_backend_enabled(raw: &str, key: &str) -> Result<crate::config::global::BackendEnabled> {
+    match raw {
+        "true" => Ok(crate::config::global::BackendEnabled::Enabled),
+        "false" => Ok(crate::config::global::BackendEnabled::Disabled),
+        "auto" => Ok(crate::config::global::BackendEnabled::Auto),
+        _ => Err(RalphError::Validation(format!(
+            "key '{key}' expects true, false, or auto"
+        ))),
+    }
 }
 
 fn parse_u32(raw: &str, key: &str) -> Result<u32> {
@@ -1100,6 +1141,13 @@ mod tests {
     fn parse_optional_backend_accepts_bare_name() {
         let result = parse_optional_backend("codex").expect("should parse successfully");
         assert_eq!(result, Some("codex".to_owned()));
+    }
+
+    #[test]
+    fn parse_optional_backend_accepts_optional_gemini() {
+        let result = parse_optional_backend("?gemini(gemini-3-pro)")
+            .expect("optional gemini should parse successfully");
+        assert_eq!(result, Some("?gemini(gemini-3-pro)".to_owned()));
     }
 
     #[test]

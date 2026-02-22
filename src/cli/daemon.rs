@@ -164,6 +164,9 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         };
 
         let daemon_cfg = resolve_daemon_config(&workspace.config, project_config.as_ref());
+        crate::config::validate_daemon_workspace_config(&workspace.config).map_err(|err| {
+            RalphError::Validation(format!("invalid daemon config for {slug}: {err}"))
+        })?;
         // Validate the backend string at startup so invalid config fails early.
         // The raw string is stored and parsed again at invocation time by
         // resolve_rebase_conflicts.

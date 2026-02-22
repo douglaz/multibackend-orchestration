@@ -15,6 +15,26 @@ pub use global::{
 };
 pub use project::{ProjectConfig, ProjectDaemonOverrides};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationSurface {
+    Required,
+    RequiredPanel,
+    PanelList,
+}
+
+impl ValidationSurface {
+    fn allows_optional(self) -> bool {
+        matches!(self, ValidationSurface::PanelList)
+    }
+
+    fn allows_gemini(self) -> bool {
+        matches!(
+            self,
+            ValidationSurface::PanelList | ValidationSurface::RequiredPanel
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EffectiveWorkflowConfig {
     pub starting_backend: String,
@@ -121,7 +141,12 @@ pub fn resolve_effective_config(
     } else {
         global.workspace.default_backend.clone()
     };
-    validate_backend_spec(&global, &starting_backend, "starting backend")?;
+    validate_backend_spec(
+        &global,
+        &starting_backend,
+        "starting backend",
+        ValidationSurface::Required,
+    )?;
 
     let planner_backend = resolve_optional_backend_override(
         run_overrides.planner_backend,
@@ -153,24 +178,50 @@ pub fn resolve_effective_config(
         .unwrap_or_else(|| global.workflow.prompt_review_backend.clone());
 
     if let Some(spec) = planner_backend.as_deref() {
-        validate_backend_spec(&global, spec, "planner backend override")?;
+        validate_backend_spec(
+            &global,
+            spec,
+            "planner backend override",
+            ValidationSurface::Required,
+        )?;
     }
     if let Some(spec) = implementer_backend.as_deref() {
-        validate_backend_spec(&global, spec, "implementer backend override")?;
+        validate_backend_spec(
+            &global,
+            spec,
+            "implementer backend override",
+            ValidationSurface::Required,
+        )?;
     }
     if let Some(spec) = reviewer_backend.as_deref() {
-        validate_backend_spec(&global, spec, "reviewer backend override")?;
+        validate_backend_spec(
+            &global,
+            spec,
+            "reviewer backend override",
+            ValidationSurface::Required,
+        )?;
     }
     if let Some(spec) = completer_backend.as_deref() {
-        validate_backend_spec(&global, spec, "completer backend override")?;
+        validate_backend_spec(
+            &global,
+            spec,
+            "completer backend override",
+            ValidationSurface::Required,
+        )?;
     }
     if let Some(spec) = qa_backend.as_deref() {
-        validate_backend_spec(&global, spec, "qa backend override")?;
+        validate_backend_spec(
+            &global,
+            spec,
+            "qa backend override",
+            ValidationSurface::Required,
+        )?;
     }
     validate_backend_spec(
         &global,
         &prompt_review_backend,
         "prompt review backend override",
+        ValidationSurface::Required,
     )?;
 
     let workflow = EffectiveWorkflowConfig {
@@ -407,14 +458,32 @@ fn resolve_optional_backend_override(
         .map(ToOwned::to_owned)
 }
 
-fn validate_backend_spec(global: &GlobalConfig, backend_spec: &str, label: &str) -> Result<()> {
+fn validate_backend_spec(
+    global: &GlobalConfig,
+    backend_spec: &str,
+    label: &str,
+    surface: ValidationSurface,
+) -> Result<crate::backend::BackendSpec> {
     let parsed = parse_backend_spec(backend_spec)?;
+    if parsed.optional && !surface.allows_optional() {
+        return Err(RalphError::Validation(format!(
+            "optional backend specs (?backend) are not supported for {label}; optional syntax is allowed only in panel backend lists"
+        )));
+    }
+
     if global.backend_config(&parsed.name).is_none() {
         return Err(RalphError::Validation(format!(
             "unknown backend configured as {label}: {backend_spec}"
         )));
     }
-    Ok(())
+
+    if parsed.name == "gemini" && !surface.allows_gemini() {
+        return Err(RalphError::Validation(format!(
+            "gemini backend is not supported for {label}; it may only be used in panel surfaces (final review, completion, prompt review)"
+        )));
+    }
+
+    Ok(parsed)
 }
 
 pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Result<()> {
@@ -431,6 +500,7 @@ pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Resul
             global,
             backend_spec,
             &format!("workspace.daemon_prd_question_backends[{index}]"),
+            ValidationSurface::Required,
         )?;
     }
 
@@ -438,13 +508,25 @@ pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Resul
         global,
         &workspace.daemon_prd_writer_backend,
         "workspace.daemon_prd_writer_backend",
+        ValidationSurface::Required,
     )?;
     validate_backend_spec(
         global,
         &workspace.daemon_prd_reviewer_backend,
         "workspace.daemon_prd_reviewer_backend",
+        ValidationSurface::Required,
     )?;
 
+    Ok(())
+}
+
+pub fn validate_daemon_workspace_config(global: &GlobalConfig) -> Result<()> {
+    validate_backend_spec(
+        global,
+        &global.workspace.daemon_refinement_backend,
+        "workspace.daemon_refinement_backend",
+        ValidationSurface::Required,
+    )?;
     Ok(())
 }
 
@@ -489,8 +571,16 @@ fn validate_final_review_config(
 
     let reviewer_families = unique_backend_families(&normalized_reviewers)?;
 
-    let arbiter_backend = canonicalize_backend_spec(&workflow.final_review_arbiter_backend)?;
-    validate_backend_spec(global, &arbiter_backend, "final review arbiter backend")?;
+    let arbiter_parsed = validate_backend_spec(
+        global,
+        &workflow.final_review_arbiter_backend,
+        "final review arbiter backend",
+        ValidationSurface::RequiredPanel,
+    )?;
+    let arbiter_backend = match arbiter_parsed.model.as_deref() {
+        Some(model) => format!("{}({model})", arbiter_parsed.name),
+        None => arbiter_parsed.name.clone(),
+    };
     let arbiter_family = parse_backend_spec(&arbiter_backend)?.name;
 
     Ok(FinalReviewValidation {
@@ -507,7 +597,12 @@ fn normalize_backend_specs(global: &GlobalConfig, specs: &[String]) -> Result<Ve
 
     for spec in specs {
         let canonical = canonicalize_backend_spec(spec)?;
-        validate_backend_spec(global, &canonical, "final review backend")?;
+        validate_backend_spec(
+            global,
+            &canonical,
+            "final review backend",
+            ValidationSurface::PanelList,
+        )?;
         if seen.insert(canonical.clone()) {
             normalized.push(canonical);
         }
@@ -543,8 +638,9 @@ mod tests {
     use crate::config::{
         global::{PlannerStateInPrompt, PreviousSpecsInPrompt},
         project::{ProjectDaemonOverrides, ProjectWorkflowOverrides},
-        resolve_daemon_config, resolve_effective_config, validate_interactive_prd_workspace_config,
-        GlobalConfig, ProjectConfig, RunWorkflowOverrides,
+        resolve_daemon_config, resolve_effective_config, validate_daemon_workspace_config,
+        validate_interactive_prd_workspace_config, GlobalConfig, ProjectConfig,
+        RunWorkflowOverrides,
     };
 
     #[test]
@@ -581,6 +677,57 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown backend configured as starting backend: unknown(opus)"));
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_optional_backend_on_required_surface() {
+        let mut global = GlobalConfig::default();
+        global.workspace.default_backend = "?claude".to_owned();
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("optional syntax on required surface should fail");
+
+        assert!(error
+            .to_string()
+            .contains("optional backend specs (?backend) are not supported for starting backend"));
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_gemini_on_required_surfaces() {
+        let mut global = GlobalConfig::default();
+        global.workspace.default_backend = "gemini".to_owned();
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("gemini should be rejected for starting backend");
+        assert!(error
+            .to_string()
+            .contains("gemini backend is not supported"));
+
+        let mut global = GlobalConfig::default();
+        global.workflow.planner_backend = Some("gemini(gemini-3-pro)".to_owned());
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("gemini should be rejected for planner backend");
+        assert!(error.to_string().contains("planner backend override"));
+        assert!(error
+            .to_string()
+            .contains("gemini backend is not supported"));
     }
 
     #[test]
@@ -757,6 +904,37 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unknown backend configured as workspace.daemon_prd_writer_backend"));
+    }
+
+    #[test]
+    fn validate_prd_config_rejects_gemini_backend_specs() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_prd_question_backends =
+            vec!["claude(opus)".to_owned(), "gemini(gemini-3-pro)".to_owned()];
+
+        let error = validate_interactive_prd_workspace_config(&global)
+            .expect_err("gemini should be rejected on daemon PRD surfaces");
+        assert!(error
+            .to_string()
+            .contains("gemini backend is not supported"));
+        assert!(error
+            .to_string()
+            .contains("workspace.daemon_prd_question_backends[1]"));
+    }
+
+    #[test]
+    fn validate_daemon_workspace_config_rejects_gemini_refinement_backend() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_refinement_backend = "gemini(gemini-3-pro)".to_owned();
+
+        let error = validate_daemon_workspace_config(&global)
+            .expect_err("gemini should be rejected on daemon refinement backend");
+        assert!(error
+            .to_string()
+            .contains("gemini backend is not supported"));
+        assert!(error
+            .to_string()
+            .contains("workspace.daemon_refinement_backend"));
     }
 
     #[test]
@@ -1186,6 +1364,45 @@ mod tests {
             RunWorkflowOverrides::default(),
         )
         .expect("deduplicated unique reviewer set should pass minimum");
+    }
+
+    #[test]
+    fn resolve_effective_config_accepts_optional_syntax_in_final_review_list() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_enabled = true;
+        global.workflow.final_review_backends = vec![
+            "claude".to_owned(),
+            "codex".to_owned(),
+            "?gemini".to_owned(),
+        ];
+        global.workflow.final_review_min_reviewers = 2;
+
+        resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("optional syntax should be accepted on final_review_backends");
+    }
+
+    #[test]
+    fn resolve_effective_config_rejects_optional_syntax_on_final_review_arbiter() {
+        let mut global = GlobalConfig::default();
+        global.workflow.final_review_arbiter_backend = "?claude".to_owned();
+
+        let error = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("optional syntax should be rejected on required arbiter surface");
+        assert!(error.to_string().contains(
+            "optional backend specs (?backend) are not supported for final review arbiter backend"
+        ));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod gemini;
 pub mod mock;
 pub mod output_normalizer;
 pub mod tmux;
@@ -20,6 +21,7 @@ use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use crate::config::global::BackendEnabled;
 use crate::config::GlobalConfig;
 use crate::error::{RalphError, TimeoutKind};
 use crate::output_log::LogWriter;
@@ -45,6 +47,7 @@ pub trait Backend: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendSpec {
+    pub optional: bool,
     pub name: String,
     pub model: Option<String>,
 }
@@ -59,11 +62,29 @@ pub struct RoleOverrides {
 }
 
 pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
-    let spec = spec.trim();
+    let mut spec = spec.trim();
     if spec.is_empty() {
         return Err(RalphError::Validation(
             "backend spec must not be empty".to_owned(),
         ));
+    }
+
+    let optional = if let Some(stripped) = spec.strip_prefix('?') {
+        spec = stripped.trim();
+        true
+    } else {
+        false
+    };
+
+    if spec.is_empty() {
+        return Err(RalphError::Validation(
+            "backend name must not be empty in spec".to_owned(),
+        ));
+    }
+    if spec.contains('?') {
+        return Err(RalphError::Validation(format!(
+            "invalid backend spec format: {spec}"
+        )));
     }
 
     let open_count = spec.matches('(').count();
@@ -71,6 +92,7 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
 
     if open_count == 0 && close_count == 0 {
         return Ok(BackendSpec {
+            optional,
             name: spec.to_owned(),
             model: None,
         });
@@ -100,6 +122,7 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendSpec> {
     }
 
     Ok(BackendSpec {
+        optional,
         name: name.to_owned(),
         model: Some(model.to_owned()),
     })
@@ -196,6 +219,7 @@ impl CliBackend {
             Some(id) => match self.name.as_str() {
                 n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
+                n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
                 _ => Ok(self.args.clone()),
             },
             None if ctx.json_output_required => self.ensure_json_output_args(),
@@ -231,6 +255,27 @@ impl CliBackend {
                         args.push("--json".to_owned());
                     }
                 }
+                Ok(args)
+            }
+            n if n.starts_with("gemini") || n == "gemini" => {
+                let mut args = Vec::with_capacity(self.args.len() + 2);
+                let mut skip_next = false;
+                for arg in &self.args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if arg == "--output-format" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if arg.starts_with("--output-format=") {
+                        continue;
+                    }
+                    args.push(arg.clone());
+                }
+                args.push("--output-format".to_owned());
+                args.push("json".to_owned());
                 Ok(args)
             }
             _ => Ok(self.args.clone()),
@@ -349,6 +394,36 @@ impl CliBackend {
         result.push("--json".to_owned());
         result.push("-".to_owned());
 
+        Ok(result)
+    }
+
+    fn effective_args_gemini(&self, session_id: &str) -> Result<Vec<String>> {
+        // Gemini resume rules:
+        // 1. Keep -p if present.
+        // 2. Remove all existing --resume and --output-format forms.
+        // 3. Add exactly one --resume <id> and --output-format json.
+        let mut result = Vec::new();
+        let mut skip_next = false;
+
+        for arg in self.args.iter() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--resume" || arg == "--output-format" {
+                skip_next = true;
+                continue;
+            }
+            if arg.starts_with("--resume=") || arg.starts_with("--output-format=") {
+                continue;
+            }
+            result.push(arg.clone());
+        }
+
+        result.push("--resume".to_owned());
+        result.push(session_id.to_owned());
+        result.push("--output-format".to_owned());
+        result.push("json".to_owned());
         Ok(result)
     }
 
@@ -741,6 +816,12 @@ impl BackendRegistry {
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
         );
+        let mut gemini_backend = gemini::backend_from_config(config, None, None);
+        gemini_backend.invocation_ctx = shared_invocation.clone();
+        backends.insert(
+            "gemini".to_owned(),
+            backend_with_optional_tmux(gemini_backend, &tmux, shared_ctx.clone()),
+        );
 
         Self {
             backends,
@@ -790,6 +871,15 @@ impl BackendRegistry {
 
     fn get_or_create_inner(&mut self, spec: &str, role: Option<&str>) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
+        if self
+            .config
+            .backend_config(&parsed.name)
+            .is_some_and(|cfg| cfg.enabled == BackendEnabled::Disabled)
+        {
+            return Err(RalphError::BackendUnavailable {
+                backend: backend_spec_key(&parsed),
+            });
+        }
         let cache_key = match role {
             Some(r) => format!("{}:{r}", backend_spec_key(&parsed)),
             None => backend_spec_key(&parsed),
@@ -946,10 +1036,26 @@ impl BackendRegistry {
             "reformatter",
         ];
 
-        for (backend_name, models) in [
-            ("claude", &self.config.backends.claude.models),
-            ("codex", &self.config.backends.codex.models),
+        for (backend_name, models, enabled) in [
+            (
+                "claude",
+                &self.config.backends.claude.models,
+                &self.config.backends.claude.enabled,
+            ),
+            (
+                "codex",
+                &self.config.backends.codex.models,
+                &self.config.backends.codex.enabled,
+            ),
+            (
+                "gemini",
+                &self.config.backends.gemini.models,
+                &self.config.backends.gemini.enabled,
+            ),
         ] {
+            if *enabled == BackendEnabled::Disabled {
+                continue;
+            }
             for role in roles {
                 if let Some(model) = models.for_role(role) {
                     specs.insert(format!("{backend_name}({model})"));
@@ -961,10 +1067,47 @@ impl BackendRegistry {
     }
 
     pub async fn health_check_all(&self) -> Result<()> {
-        for backend in self.backends.values() {
-            backend.health_check().await?;
+        for (name, enabled_mode) in [
+            ("claude", self.config.backends.claude.enabled.clone()),
+            ("codex", self.config.backends.codex.enabled.clone()),
+            ("gemini", self.config.backends.gemini.enabled.clone()),
+        ] {
+            if enabled_mode != BackendEnabled::Enabled {
+                continue;
+            }
+            if let Some(backend) = self.backends.get(name) {
+                backend.health_check().await?;
+            }
         }
         Ok(())
+    }
+
+    pub async fn backend_available_for_spec(
+        &mut self,
+        backend_spec: &str,
+        role: Option<&str>,
+    ) -> Result<bool> {
+        let parsed = parse_backend_spec(backend_spec)?;
+        let Some(config) = self.config.backend_config(&parsed.name) else {
+            return Err(RalphError::Validation(format!(
+                "unknown backend for spec lookup: {}",
+                backend_spec
+            )));
+        };
+
+        if config.enabled == BackendEnabled::Disabled {
+            return Ok(false);
+        }
+
+        let backend = match role {
+            Some(r) => self.get_or_create_for_role(backend_spec, r)?,
+            None => self.get_or_create_for_spec(backend_spec)?,
+        };
+        match backend.health_check().await {
+            Ok(()) => Ok(true),
+            Err(RalphError::BackendUnavailable { .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     /// Obtain a `CliBackend` for the given backend spec string (e.g. "claude(opus)").
@@ -979,10 +1122,21 @@ impl BackendRegistry {
         spec: &BackendSpec,
         role: Option<&str>,
     ) -> Result<CliBackend> {
+        if self
+            .config
+            .backend_config(&spec.name)
+            .is_some_and(|cfg| cfg.enabled == BackendEnabled::Disabled)
+        {
+            return Err(RalphError::BackendUnavailable {
+                backend: backend_spec_key(spec),
+            });
+        }
+
         let model = spec.model.as_deref();
         match spec.name.as_str() {
             "claude" => Ok(claude::backend_from_config(&self.config, model, role)),
             "codex" => Ok(codex::backend_from_config(&self.config, model, role)),
+            "gemini" => Ok(gemini::backend_from_config(&self.config, model, role)),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for spec lookup: {}",
                 backend_spec_key(spec)
@@ -1029,6 +1183,7 @@ mod tests {
         parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig, BackendSpec,
         CliBackend,
     };
+    use crate::config::global::BackendEnabled;
     use crate::config::GlobalConfig;
     use crate::error::{RalphError, TimeoutKind};
     use crate::output_log::LogWriter;
@@ -1039,6 +1194,7 @@ mod tests {
         assert_eq!(
             parsed,
             BackendSpec {
+                optional: false,
                 name: "claude".to_owned(),
                 model: None,
             }
@@ -1051,8 +1207,35 @@ mod tests {
         assert_eq!(
             parsed,
             BackendSpec {
+                optional: false,
                 name: "claude".to_owned(),
                 model: Some("opus".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_spec_accepts_optional_bare_name() {
+        let parsed = parse_backend_spec("?gemini").expect("optional backend should parse");
+        assert_eq!(
+            parsed,
+            BackendSpec {
+                optional: true,
+                name: "gemini".to_owned(),
+                model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_backend_spec_accepts_optional_name_with_model() {
+        let parsed = parse_backend_spec("?gemini(gemini-3-pro)").expect("optional modeled backend");
+        assert_eq!(
+            parsed,
+            BackendSpec {
+                optional: true,
+                name: "gemini".to_owned(),
+                model: Some("gemini-3-pro".to_owned()),
             }
         );
     }
@@ -1075,6 +1258,12 @@ mod tests {
     #[test]
     fn parse_backend_spec_rejects_missing_opening_paren() {
         assert!(parse_backend_spec("claudeopus)").is_err());
+    }
+
+    #[test]
+    fn parse_backend_spec_rejects_missing_name_after_optional_prefix() {
+        assert!(parse_backend_spec("?").is_err());
+        assert!(parse_backend_spec("??").is_err());
     }
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
@@ -1117,6 +1306,29 @@ mod tests {
             registry.timeout_for_role("claude(", "planner").as_secs(),
             7200
         );
+    }
+
+    #[test]
+    fn backend_registry_creates_gemini_backend_for_modeled_spec() {
+        let config = GlobalConfig::default();
+        let mut registry = BackendRegistry::new(&config, tmux_disabled());
+
+        let backend = registry
+            .get_or_create_for_spec("gemini(gemini-3-pro)")
+            .expect("gemini backend should be creatable from registry");
+        assert_eq!(backend.name(), "gemini(gemini-3-pro)");
+    }
+
+    #[test]
+    fn backend_registry_rejects_disabled_backend() {
+        let mut config = GlobalConfig::default();
+        config.backends.gemini.enabled = BackendEnabled::Disabled;
+        let mut registry = BackendRegistry::new(&config, tmux_disabled());
+        let result = registry.get_or_create_for_spec("gemini");
+        assert!(matches!(
+            result,
+            Err(RalphError::BackendUnavailable { backend }) if backend == "gemini"
+        ));
     }
 
     fn write_executable_script(
@@ -1273,6 +1485,29 @@ sleep 30
         };
         let args = backend.effective_args(&ctx).unwrap();
         assert_eq!(args, vec!["-p", "--flag"]);
+    }
+
+    #[test]
+    fn effective_args_no_session_gemini_rewrites_output_format_to_json() {
+        let backend = CliBackend::new(
+            "gemini",
+            "gemini".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--output-format".to_owned(),
+                "stream-json".to_owned(),
+                "--other".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(None);
+        let args = backend.effective_args(&ctx).unwrap();
+        assert_eq!(
+            args,
+            vec!["-p", "--other", "--output-format", "json"],
+            "gemini first call should force output-format=json"
+        );
     }
 
     #[test]
@@ -1581,6 +1816,72 @@ sleep 30
             1,
             "exactly one --json"
         );
+    }
+
+    #[test]
+    fn effective_args_gemini_rewrites_for_resume_and_keeps_print_flag() {
+        let backend = CliBackend::new(
+            "gemini",
+            "gemini".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--yolo".to_owned(),
+                "--resume".to_owned(),
+                "old-session".to_owned(),
+                "--output-format".to_owned(),
+                "stream-json".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("new-session"));
+        let args = backend.effective_args(&ctx).unwrap();
+        assert!(args.contains(&"-p".to_owned()), "gemini should keep -p");
+        assert!(
+            !args.contains(&"old-session".to_owned()),
+            "old session id must be replaced"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "--resume").count(),
+            1,
+            "exactly one --resume"
+        );
+        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[resume_idx + 1], "new-session");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--output-format").count(),
+            1,
+            "exactly one --output-format"
+        );
+        let fmt_idx = args.iter().position(|a| a == "--output-format").unwrap();
+        assert_eq!(args[fmt_idx + 1], "json");
+    }
+
+    #[test]
+    fn effective_args_gemini_resume_rewrite_is_idempotent() {
+        let backend = CliBackend::new(
+            "gemini",
+            "gemini".to_owned(),
+            vec![
+                "-p".to_owned(),
+                "--yolo".to_owned(),
+                "--output-format".to_owned(),
+                "stream-json".to_owned(),
+            ],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let ctx = make_invocation_ctx(Some("sess-1"));
+        let args1 = backend.effective_args(&ctx).unwrap();
+        let backend2 = CliBackend::new(
+            "gemini",
+            "gemini".to_owned(),
+            args1.clone(),
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+        let args2 = backend2.effective_args(&ctx).unwrap();
+        assert_eq!(args1, args2);
     }
 
     /// Active streaming beyond timeout_seconds without timeout: the process emits
