@@ -78,6 +78,11 @@ const REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtim
 - Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues."#;
 
 const FINAL_REVIEWER_GUARDRAILS: &str = r#"- Evaluate project-wide outcomes against the master prompt.
+- You have full access to the codebase. Use your tools to read files, run git commands, and explore the source code.
+- Run `git diff <base_branch>...HEAD -- . ':(exclude).ralph'` to see all source changes, then read key files to review them.
+- Review source code for bugs, correctness issues, error handling edge cases, and cross-cutting side effects on unrelated code paths.
+- Check for stray/orphaned files (e.g. `git status`, unexpected files in repo root).
+- Verify that new code follows existing patterns and conventions in the codebase.
 - Propose only concrete, high-signal amendments with clear affected files.
 - Use globally unique amendment IDs within your response."#;
 

@@ -376,11 +376,15 @@ Given:
 - `prompt.md` (the master prompt)
 - The full project state
 - All implemented features and their specs
+- Full access to the project codebase via your tools (file reading, search, shell commands)
 
 Your job is to:
 1. Review the entire project against the master prompt requirements
-2. Identify any issues, gaps, or improvements needed
-3. Propose specific amendments if changes are required
+2. Use your tools to explore the actual source code — run `git diff`, read modified files, check for side effects
+3. Review code for bugs, correctness issues, missing error handling, and architectural problems
+4. Check for stray files, dead code, or unintended changes outside the scope of the requirements
+5. Identify any issues, gaps, or improvements needed
+6. Propose specific amendments if changes are required
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)
