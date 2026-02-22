@@ -8,8 +8,8 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use tokio::time::{sleep, Duration};
 
-use crate::git::ralph_commit::{derive_position, parse_last_ralph_commit};
 use crate::cli::TailArgs;
+use crate::git::ralph_commit::{derive_position, parse_last_ralph_commit};
 use crate::project::artifacts::parse_artifact_filename_timestamp;
 use crate::project::lifecycle::{project_git_context, reconstruct_project_state};
 use crate::project::state::{CompletionVerdict, LoopStatus, Phase, ProjectStatus};
@@ -830,10 +830,9 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        completion_verdict_label, create_phase_change_event, event_output,
-        filename_ts_to_datetime, first_h1, normalize_event_time, phase_label, sort_events,
-        split_frontmatter, PhaseSnapshot, TailEvent, TailEventKind, EVENT_ORDER_ARTIFACT,
-        EVENT_ORDER_GIT, EVENT_ORDER_STATE,
+        completion_verdict_label, create_phase_change_event, event_output, filename_ts_to_datetime,
+        first_h1, normalize_event_time, phase_label, sort_events, split_frontmatter, PhaseSnapshot,
+        TailEvent, TailEventKind, EVENT_ORDER_ARTIFACT, EVENT_ORDER_GIT, EVENT_ORDER_STATE,
     };
     use crate::project::state::{CompletionVerdict, Phase};
 

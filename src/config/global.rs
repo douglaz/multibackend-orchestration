@@ -58,6 +58,18 @@ pub struct WorkspaceConfig {
     pub daemon_rebase_timeout_seconds: u64,
     #[serde(default = "default_daemon_rebase_agent_backend")]
     pub daemon_rebase_agent_backend: String,
+    #[serde(default = "default_daemon_prd_enabled")]
+    pub daemon_prd_enabled: bool,
+    #[serde(default = "default_daemon_prd_question_backends")]
+    pub daemon_prd_question_backends: Vec<String>,
+    #[serde(default = "default_daemon_prd_writer_backend")]
+    pub daemon_prd_writer_backend: String,
+    #[serde(default = "default_daemon_prd_reviewer_backend")]
+    pub daemon_prd_reviewer_backend: String,
+    #[serde(default = "default_daemon_prd_max_revisions")]
+    pub daemon_prd_max_revisions: u32,
+    #[serde(default = "default_daemon_prd_backend_timeout_secs")]
+    pub daemon_prd_backend_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -390,6 +402,12 @@ impl Default for WorkspaceConfig {
             daemon_max_rebases_per_cycle: default_daemon_max_rebases_per_cycle(),
             daemon_rebase_timeout_seconds: default_daemon_rebase_timeout_seconds(),
             daemon_rebase_agent_backend: default_daemon_rebase_agent_backend(),
+            daemon_prd_enabled: default_daemon_prd_enabled(),
+            daemon_prd_question_backends: default_daemon_prd_question_backends(),
+            daemon_prd_writer_backend: default_daemon_prd_writer_backend(),
+            daemon_prd_reviewer_backend: default_daemon_prd_reviewer_backend(),
+            daemon_prd_max_revisions: default_daemon_prd_max_revisions(),
+            daemon_prd_backend_timeout_secs: default_daemon_prd_backend_timeout_secs(),
         }
     }
 }
@@ -711,6 +729,30 @@ fn default_daemon_rebase_agent_backend() -> String {
     "claude(opus)".to_owned()
 }
 
+fn default_daemon_prd_enabled() -> bool {
+    true
+}
+
+fn default_daemon_prd_question_backends() -> Vec<String> {
+    vec!["claude".to_owned(), "codex".to_owned()]
+}
+
+fn default_daemon_prd_writer_backend() -> String {
+    "claude".to_owned()
+}
+
+fn default_daemon_prd_reviewer_backend() -> String {
+    "codex".to_owned()
+}
+
+fn default_daemon_prd_max_revisions() -> u32 {
+    3
+}
+
+fn default_daemon_prd_backend_timeout_secs() -> u64 {
+    120
+}
+
 fn default_planner_max_prior_loops() -> Option<usize> {
     Some(10)
 }
@@ -963,6 +1005,15 @@ command = "claude-custom"
         assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 3);
         assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 120);
         assert_eq!(config.workspace.daemon_rebase_agent_backend, "claude(opus)");
+        assert!(config.workspace.daemon_prd_enabled);
+        assert_eq!(
+            config.workspace.daemon_prd_question_backends,
+            vec!["claude".to_owned(), "codex".to_owned()]
+        );
+        assert_eq!(config.workspace.daemon_prd_writer_backend, "claude");
+        assert_eq!(config.workspace.daemon_prd_reviewer_backend, "codex");
+        assert_eq!(config.workspace.daemon_prd_max_revisions, 3);
+        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 120);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
@@ -1066,6 +1117,15 @@ base_branch = "master"
         assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 3);
         assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 120);
         assert_eq!(config.workspace.daemon_rebase_agent_backend, "claude(opus)");
+        assert!(config.workspace.daemon_prd_enabled);
+        assert_eq!(
+            config.workspace.daemon_prd_question_backends,
+            vec!["claude".to_owned(), "codex".to_owned()]
+        );
+        assert_eq!(config.workspace.daemon_prd_writer_backend, "claude");
+        assert_eq!(config.workspace.daemon_prd_reviewer_backend, "codex");
+        assert_eq!(config.workspace.daemon_prd_max_revisions, 3);
+        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 120);
         let defaults = GlobalConfig::default();
         assert_eq!(
             config.backends.claude.models,
@@ -1119,6 +1179,12 @@ daemon_rebase_interval_seconds = 900
 daemon_max_rebases_per_cycle = 5
 daemon_rebase_timeout_seconds = 240
 daemon_rebase_agent_backend = "none"
+daemon_prd_enabled = false
+daemon_prd_question_backends = ["claude(opus)", "codex(gpt-5.3-codex-high)"]
+daemon_prd_writer_backend = "claude(sonnet)"
+daemon_prd_reviewer_backend = "codex(gpt-5.3-codex-medium)"
+daemon_prd_max_revisions = 7
+daemon_prd_backend_timeout_secs = 300
 
 [backends.claude]
 command = "claude"
@@ -1172,6 +1238,21 @@ base_branch = "master"
         assert_eq!(config.workspace.daemon_max_rebases_per_cycle, 5);
         assert_eq!(config.workspace.daemon_rebase_timeout_seconds, 240);
         assert_eq!(config.workspace.daemon_rebase_agent_backend, "none");
+        assert!(!config.workspace.daemon_prd_enabled);
+        assert_eq!(
+            config.workspace.daemon_prd_question_backends,
+            vec![
+                "claude(opus)".to_owned(),
+                "codex(gpt-5.3-codex-high)".to_owned()
+            ]
+        );
+        assert_eq!(config.workspace.daemon_prd_writer_backend, "claude(sonnet)");
+        assert_eq!(
+            config.workspace.daemon_prd_reviewer_backend,
+            "codex(gpt-5.3-codex-medium)"
+        );
+        assert_eq!(config.workspace.daemon_prd_max_revisions, 7);
+        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 300);
     }
 
     #[test]

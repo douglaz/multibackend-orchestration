@@ -9,10 +9,10 @@ use crate::config::GlobalConfig;
 use crate::daemon::bootstrap;
 use crate::daemon::github::{self, PrMergeStatus};
 use crate::daemon::rebase_agent::{
-    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend,
-    RebaseFailureKind,
+    classify_rebase_failure_pure, parse_rebase_agent_backend, RebaseAgentBackend, RebaseFailureKind,
 };
 
+use crate::daemon::interactive_prd::{self, PrdPollConfig};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
@@ -57,6 +57,19 @@ pub struct DaemonRuntimeConfig {
     pub rebase_agent_backend: String,
     /// Workspace root (`.ralph/` directory).
     pub workspace_root: PathBuf,
+    /// Whether the interactive PRD workflow is enabled.
+    pub prd_enabled: bool,
+    /// Backend specs for PRD question generation (exactly 2).
+    pub prd_question_backends: Vec<String>,
+    /// Backend spec for PRD draft writer.
+    pub prd_writer_backend: String,
+    /// Backend spec for PRD draft reviewer.
+    pub prd_reviewer_backend: String,
+    /// Maximum internal writer/reviewer retries for PRD draft generation.
+    pub prd_max_revisions: u32,
+    /// Total wall-clock timeout (seconds) for backend calls within a single
+    /// PRD state transition.
+    pub prd_backend_timeout_secs: u64,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -528,6 +541,14 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children).await;
 
+        // Interactive PRD phase: advance PRD-labeled issues (before claim/dispatch
+        // to prevent dual workflow ownership).
+        if config.prd_enabled {
+            if let Err(err) = run_prd_phase(config).await {
+                eprintln!("warning: interactive PRD phase failed: {err}");
+            }
+        }
+
         // Poll for new issues
         let active_count = children.len() as u32;
         let slots = config.max_concurrent.saturating_sub(active_count);
@@ -562,6 +583,38 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run the interactive PRD poll/advance phase.
+///
+/// Builds a `PrdPollConfig` from the runtime config and delegates to
+/// `interactive_prd::poll_and_advance_prd` in a blocking task.
+async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
+    // data_dir must be the root above owner/repo so that state_path()
+    // constructs {data_dir}/{owner}/{repo}/.ralph/interactive-prd/{issue}.json
+    // without duplicating the owner/repo segment already present in repo_root.
+    let data_dir = config
+        .repo_root
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| config.repo_root.clone());
+
+    let prd_config = PrdPollConfig {
+        owner: config.owner.clone(),
+        repo: config.repo.clone(),
+        data_dir,
+        prd_enabled: config.prd_enabled,
+        question_backends: config.prd_question_backends.clone(),
+        writer_backend: config.prd_writer_backend.clone(),
+        reviewer_backend: config.prd_reviewer_backend.clone(),
+        max_revisions: config.prd_max_revisions,
+        backend_timeout_secs: config.prd_backend_timeout_secs,
+        global_config: config.global_config.clone(),
+        verbose: config.verbose,
+    };
+
+    spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await
 }
 
 /// Startup reconciliation: every issue currently labeled `ralph:in-progress`
@@ -668,6 +721,17 @@ async fn poll_and_claim(
 
         // Only claim issues with `ralph:ready` and no other lifecycle labels
         if lifecycle.len() != 1 || lifecycle[0] != "ralph:ready" {
+            continue;
+        }
+
+        // Skip issues carrying any PRD label (prevents dual workflow ownership)
+        if interactive_prd::has_prd_label(&issue.labels) {
+            if config.verbose {
+                eprintln!(
+                    "verbose: skipping issue #{} — carries PRD label, handled by interactive PRD workflow",
+                    issue.number
+                );
+            }
             continue;
         }
 
@@ -1532,10 +1596,8 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
             let br = branch.clone();
             let timeout_dur = timeout;
             let backend_str = config.rebase_agent_backend.clone();
-            spawn_blocking_op(move || {
-                execute_rebase(&wt, &target, &br, timeout_dur, &backend_str)
-            })
-            .await
+            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend_str))
+                .await
         };
 
         // Clean up rebase worktree (best-effort)
@@ -1695,8 +1757,9 @@ fn execute_rebase(
                     RebaseAgentBackend::None => {
                         // Disabled: abort with bounded timeout and fail as before
                         bounded_abort(worktree_path);
-                        let stderr =
-                            String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                        let stderr = String::from_utf8_lossy(&rebase_output.stderr)
+                            .trim()
+                            .to_owned();
                         return Err(RalphError::Orchestration(format!(
                             "git rebase failed with merge conflicts (agent resolution was skipped/disabled): {stderr}"
                         )));
@@ -1719,7 +1782,9 @@ fn execute_rebase(
             RebaseFailureKind::Other => {
                 // Non-conflict failure: abort with bounded timeout and return error
                 bounded_abort(worktree_path);
-                let stderr = String::from_utf8_lossy(&rebase_output.stderr).trim().to_owned();
+                let stderr = String::from_utf8_lossy(&rebase_output.stderr)
+                    .trim()
+                    .to_owned();
                 return Err(RalphError::Orchestration(format!(
                     "git rebase failed: {stderr}"
                 )));
@@ -2320,10 +2385,7 @@ mod tests {
     }
 
     fn write_quick_prd(worktree_path: &std::path::Path, slug: &str, content: &str) -> PathBuf {
-        let cache_dir = worktree_path
-            .join(".ralph")
-            .join("quick-prd")
-            .join(slug);
+        let cache_dir = worktree_path.join(".ralph").join("quick-prd").join(slug);
         std::fs::create_dir_all(&cache_dir).expect("create spec dir");
         let spec_path = cache_dir.join("SPEC.md");
         std::fs::write(&spec_path, content).expect("write spec");

@@ -312,8 +312,13 @@ pub struct Amendment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalReviewerDecision {
-    NoAmendments { body: String },
-    Amendments { body: String, amendments: Vec<Amendment> },
+    NoAmendments {
+        body: String,
+    },
+    Amendments {
+        body: String,
+        amendments: Vec<Amendment>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,7 +385,10 @@ pub fn parse_final_reviewer_output(raw: &str) -> Result<FinalReviewerDecision> {
                         .to_owned(),
                 ));
             }
-            validate_no_duplicate_ids(&amendments.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), "final reviewer")?;
+            validate_no_duplicate_ids(
+                &amendments.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+                "final reviewer",
+            )?;
             for amendment in &amendments {
                 validate_amendment_subsections(
                     &amendment.body,
@@ -416,7 +424,10 @@ pub fn parse_planner_position_output(
     }
 
     let positions = extract_amendment_value_blocks(&body, "Position", "planner position")?;
-    validate_no_duplicate_ids(&positions.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), "planner position")?;
+    validate_no_duplicate_ids(
+        &positions.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+        "planner position",
+    )?;
     validate_exact_id_coverage(
         &positions.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
         required_ids,
@@ -455,7 +466,10 @@ pub fn parse_vote_output(raw: &str, required_ids: &[&str]) -> Result<VoteDecisio
     }
 
     let votes = extract_amendment_value_blocks(&body, "Vote", "vote")?;
-    validate_no_duplicate_ids(&votes.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(), "vote")?;
+    validate_no_duplicate_ids(
+        &votes.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(),
+        "vote",
+    )?;
     validate_exact_id_coverage(
         &votes.iter().map(|v| v.0.as_str()).collect::<Vec<_>>(),
         required_ids,
@@ -494,7 +508,10 @@ pub fn parse_arbiter_output(raw: &str, required_ids: &[&str]) -> Result<ArbiterD
     }
 
     let rulings = extract_amendment_value_blocks(&body, "Ruling", "arbiter")?;
-    validate_no_duplicate_ids(&rulings.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), "arbiter")?;
+    validate_no_duplicate_ids(
+        &rulings.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        "arbiter",
+    )?;
     validate_exact_id_coverage(
         &rulings.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
         required_ids,
@@ -568,7 +585,11 @@ fn extract_amendment_value_blocks(
     let mut current_id: Option<String> = None;
     let mut current_lines = Vec::new();
 
-    let flush = |id: String, lines: &[&str], value_section: &str, scope: &str| -> Result<(String, String, String)> {
+    let flush = |id: String,
+                 lines: &[&str],
+                 value_section: &str,
+                 scope: &str|
+     -> Result<(String, String, String)> {
         let block = lines.join("\n");
         let value_heading = format!("### {value_section}");
         let mut in_value = false;
@@ -634,7 +655,11 @@ fn validate_no_duplicate_ids(ids: &[&str], scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_exact_id_coverage(found_ids: &[&str], required_ids: &[&str], scope: &str) -> Result<()> {
+fn validate_exact_id_coverage(
+    found_ids: &[&str],
+    required_ids: &[&str],
+    scope: &str,
+) -> Result<()> {
     let found_set: std::collections::HashSet<&str> = found_ids.iter().copied().collect();
     let required_set: std::collections::HashSet<&str> = required_ids.iter().copied().collect();
 
@@ -1118,7 +1143,10 @@ mod tests {
         let text = "no heading here";
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing a top-level H1"));
     }
 
     #[test]
@@ -1126,7 +1154,10 @@ mod tests {
         let text = "# Something Else\n\n## Summary\nstuff";
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unsupported final reviewer H1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported final reviewer H1"));
     }
 
     #[test]
@@ -1134,7 +1165,10 @@ mod tests {
         let text = "# Final Review: AMENDMENTS\n\nno amendment blocks here";
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no ## Amendment: blocks"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no ## Amendment: blocks"));
     }
 
     #[test]
@@ -1142,7 +1176,10 @@ mod tests {
         let text = "# Final Review: AMENDMENTS\n\n## Amendment: DUP-1\n\n### Problem\nx\n\n### Proposed Change\nfix\n\n### Affected Files\n- `a.rs`\n\n## Amendment: DUP-1\n\n### Problem\ny\n\n### Proposed Change\nfix2\n\n### Affected Files\n- `b.rs`";
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate amendment ID"));
     }
 
     #[test]
@@ -1162,7 +1199,10 @@ mod tests {
         let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok";
         let result = parse_planner_position_output(text, &["FIX-001", "FIX-002"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing amendment IDs"));
     }
 
     #[test]
@@ -1170,7 +1210,10 @@ mod tests {
         let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok\n\n## Amendment: FIX-EXTRA\n\n### Position\nREJECT\n\n### Rationale\nnah";
         let result = parse_planner_position_output(text, &["FIX-001"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unexpected amendment IDs"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected amendment IDs"));
     }
 
     #[test]
@@ -1178,7 +1221,10 @@ mod tests {
         let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nMAYBE\n\n### Rationale\nhmm";
         let result = parse_planner_position_output(text, &["FIX-001"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected ACCEPT or REJECT"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected ACCEPT or REJECT"));
     }
 
     #[test]
@@ -1186,7 +1232,10 @@ mod tests {
         let text = "# Planner Positions\n\n## Amendment: FIX-001\n\n### Position\nACCEPT\n\n### Rationale\nok\n\n## Amendment: FIX-001\n\n### Position\nREJECT\n\n### Rationale\nnah";
         let result = parse_planner_position_output(text, &["FIX-001"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate amendment ID"));
     }
 
     #[test]
@@ -1203,7 +1252,10 @@ mod tests {
         let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT\n\n### Rationale\nyes";
         let result = parse_vote_output(text, &["A1", "A2"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing amendment IDs"));
     }
 
     #[test]
@@ -1211,7 +1263,10 @@ mod tests {
         let text = "# Vote Results\n\n## Amendment: A1\n\n### Vote\nACCEPT\n\n### Rationale\nyes\n\n## Amendment: A1\n\n### Vote\nREJECT\n\n### Rationale\nno";
         let result = parse_vote_output(text, &["A1"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("duplicate amendment ID"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate amendment ID"));
     }
 
     #[test]
@@ -1225,18 +1280,26 @@ mod tests {
 
     #[test]
     fn arbiter_output_rejects_missing_ids() {
-        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\ngood";
+        let text =
+            "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\ngood";
         let result = parse_arbiter_output(text, &["D1", "D2"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing amendment IDs"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing amendment IDs"));
     }
 
     #[test]
     fn arbiter_output_rejects_invalid_ruling() {
-        let text = "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nDEFER\n\n### Rationale\nhmm";
+        let text =
+            "# Arbiter Ruling\n\n## Amendment: D1\n\n### Ruling\nDEFER\n\n### Rationale\nhmm";
         let result = parse_arbiter_output(text, &["D1"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected ACCEPT or REJECT"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected ACCEPT or REJECT"));
     }
 
     #[test]
@@ -1244,7 +1307,10 @@ mod tests {
         let text = "# Wrong Heading\n\n## Amendment: D1\n\n### Ruling\nACCEPT\n\n### Rationale\nok";
         let result = parse_arbiter_output(text, &["D1"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unsupported arbiter H1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported arbiter H1"));
     }
 
     #[test]
@@ -1259,7 +1325,10 @@ mod tests {
         let text = "no heading at all";
         let result = parse_vote_output(text, &["A1"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing a top-level H1"));
     }
 
     #[test]
@@ -1267,7 +1336,10 @@ mod tests {
         let text = "no heading at all";
         let result = parse_planner_position_output(text, &["A1"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing a top-level H1"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing a top-level H1"));
     }
 
     #[test]
@@ -1288,8 +1360,14 @@ mod tests {
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Problem"), "expected missing Problem error, got: {err}");
-        assert!(err.contains("FIX-001"), "expected amendment ID in error, got: {err}");
+        assert!(
+            err.contains("### Problem"),
+            "expected missing Problem error, got: {err}"
+        );
+        assert!(
+            err.contains("FIX-001"),
+            "expected amendment ID in error, got: {err}"
+        );
     }
 
     #[test]
@@ -1298,7 +1376,10 @@ mod tests {
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Proposed Change"), "expected missing Proposed Change error, got: {err}");
+        assert!(
+            err.contains("### Proposed Change"),
+            "expected missing Proposed Change error, got: {err}"
+        );
     }
 
     #[test]
@@ -1307,7 +1388,10 @@ mod tests {
         let result = parse_final_reviewer_output(text);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Affected Files"), "expected missing Affected Files error, got: {err}");
+        assert!(
+            err.contains("### Affected Files"),
+            "expected missing Affected Files error, got: {err}"
+        );
     }
 
     #[test]
@@ -1318,7 +1402,10 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("### Proposed Change"), "got: {err}");
-        assert!(err.contains("BAD-2"), "error should reference the failing amendment ID, got: {err}");
+        assert!(
+            err.contains("BAD-2"),
+            "error should reference the failing amendment ID, got: {err}"
+        );
     }
 
     #[test]
@@ -1327,8 +1414,14 @@ mod tests {
         let result = parse_planner_position_output(text, &["FIX-001"]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
-        assert!(err.contains("FIX-001"), "expected amendment ID in error, got: {err}");
+        assert!(
+            err.contains("### Rationale"),
+            "expected missing Rationale error, got: {err}"
+        );
+        assert!(
+            err.contains("FIX-001"),
+            "expected amendment ID in error, got: {err}"
+        );
     }
 
     #[test]
@@ -1337,8 +1430,14 @@ mod tests {
         let result = parse_vote_output(text, &["A1"]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
-        assert!(err.contains("A1"), "expected amendment ID in error, got: {err}");
+        assert!(
+            err.contains("### Rationale"),
+            "expected missing Rationale error, got: {err}"
+        );
+        assert!(
+            err.contains("A1"),
+            "expected amendment ID in error, got: {err}"
+        );
     }
 
     #[test]
@@ -1347,8 +1446,14 @@ mod tests {
         let result = parse_arbiter_output(text, &["D1"]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("### Rationale"), "expected missing Rationale error, got: {err}");
-        assert!(err.contains("D1"), "expected amendment ID in error, got: {err}");
+        assert!(
+            err.contains("### Rationale"),
+            "expected missing Rationale error, got: {err}"
+        );
+        assert!(
+            err.contains("D1"),
+            "expected amendment ID in error, got: {err}"
+        );
     }
 
     #[test]
@@ -1359,6 +1464,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("### Rationale"), "got: {err}");
-        assert!(err.contains("A2"), "error should reference the failing amendment, got: {err}");
+        assert!(
+            err.contains("A2"),
+            "error should reference the failing amendment, got: {err}"
+        );
     }
 }

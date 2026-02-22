@@ -909,6 +909,14 @@ case "$1" in
         ;;
     esac
     ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
   label)
     case "$2" in
       create)

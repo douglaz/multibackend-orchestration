@@ -2,6 +2,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::error::RalphError;
@@ -460,6 +461,45 @@ pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> R
             "gh pr comment failed for {}#{}: {}",
             full_repo,
             pr_number,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Post a raw comment on an issue without any idempotency check.
+///
+/// This is used when bot identity is unavailable and body-only marker lookup
+/// would be vulnerable to user spoofing.  Callers should include any marker
+/// text in `body` themselves.
+pub fn post_raw_issue_comment(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    body: &str,
+) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to post raw comment on {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue comment (raw) failed for {full_repo}#{issue_number}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -949,12 +989,7 @@ pub fn swap_lifecycle_label(
 }
 
 /// Add a label with retry-on-conflict/transient-failure behavior.
-pub fn add_label_with_retry(
-    owner: &str,
-    repo: &str,
-    issue_number: u32,
-    label: &str,
-) -> Result<()> {
+pub fn add_label_with_retry(owner: &str, repo: &str, issue_number: u32, label: &str) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     for attempt in 0..LABEL_RETRY_MAX {
         let output = Command::new("gh")
@@ -1053,11 +1088,7 @@ pub fn remove_label_with_retry(
 }
 
 /// Fetch the current lifecycle labels for an issue from GitHub.
-pub fn fetch_issue_labels(
-    owner: &str,
-    repo: &str,
-    issue_number: u32,
-) -> Result<Vec<String>> {
+pub fn fetch_issue_labels(owner: &str, repo: &str, issue_number: u32) -> Result<Vec<String>> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -1071,9 +1102,7 @@ pub fn fetch_issue_labels(
         ])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to run gh issue view for labels: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to run gh issue view for labels: {err}"))
         })?;
 
     if !output.status.success() {
@@ -1085,7 +1114,9 @@ pub fn fetch_issue_labels(
 
     let raw = String::from_utf8_lossy(&output.stdout);
     let parsed: RawIssueLabels = serde_json::from_str(raw.trim()).map_err(|err| {
-        RalphError::Orchestration(format!("failed to parse gh issue view labels output: {err}"))
+        RalphError::Orchestration(format!(
+            "failed to parse gh issue view labels output: {err}"
+        ))
     })?;
     Ok(parsed.labels.into_iter().map(|l| l.name).collect())
 }
@@ -1104,6 +1135,29 @@ pub fn is_retryable_gh_error(stderr: &str) -> bool {
         || lower.contains("connection")
         || lower.contains("network")
         || lower.contains("could not resolve")
+}
+
+#[derive(Deserialize)]
+struct RawIssueComments {
+    #[serde(default)]
+    comments: Vec<RawComment>,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    author: Option<RawCommentAuthor>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default, rename = "createdAt")]
+    created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+struct RawCommentAuthor {
+    login: String,
 }
 
 #[derive(Deserialize)]
@@ -1142,6 +1196,320 @@ struct RawPrMergeInfo {
     head_ref_oid: String,
 }
 
+/// A structured issue comment returned by [`fetch_issue_comments`].
+#[derive(Debug, Clone)]
+pub struct IssueComment {
+    pub id: u64,
+    pub author_login: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fetch all comments on an issue as structured data.
+///
+/// Returns a list of [`IssueComment`] in chronological order.
+pub fn fetch_issue_comments(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<Vec<IssueComment>> {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "comments",
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to fetch issue comments for {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue view (comments) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw_trimmed = raw.trim();
+    if raw_trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parsed: RawIssueComments = serde_json::from_str(raw_trimmed).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to parse issue comments for {full_repo}#{issue_number}: {err}"
+        ))
+    })?;
+
+    let mut comments: Vec<IssueComment> = parsed
+        .comments
+        .into_iter()
+        .filter_map(|raw_comment| {
+            let id = raw_comment.id?;
+            let author_login = raw_comment
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_default();
+            let body = raw_comment.body.unwrap_or_default();
+            let created_at = raw_comment.created_at?;
+            Some(IssueComment {
+                id,
+                author_login,
+                body,
+                created_at,
+            })
+        })
+        .collect();
+
+    comments.sort_by_key(|c| c.created_at);
+    Ok(comments)
+}
+
+/// Resolve the GitHub login of the currently authenticated `gh` user.
+///
+/// Uses `gh api user -q .login` and returns a non-empty login string.
+pub fn fetch_authenticated_login() -> Result<String> {
+    let output = Command::new("gh")
+        .args(["api", "user", "-q", ".login"])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh api user for authenticated login: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh api user failed while resolving authenticated login: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_authenticated_login(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Check whether any comment on the issue contains the given marker string.
+pub fn find_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+) -> Result<Option<IssueComment>> {
+    let comments = fetch_issue_comments(owner, repo, issue_number)?;
+    Ok(comments.into_iter().find(|c| c.body.contains(marker)))
+}
+
+/// Post a comment on an issue with a marker prefix. If a comment with the same
+/// marker already exists, skip posting and return the existing comment's ID.
+///
+/// Returns the comment ID of the posted (or existing) comment.
+pub fn post_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+) -> Result<Option<u64>> {
+    let meta = post_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text)?;
+    Ok(meta.map(|c| c.id))
+}
+
+/// Post a comment on an issue with a marker prefix and return full structured
+/// metadata (id, created_at, etc.). If a comment with the same marker already
+/// exists, skip posting and return the existing comment's metadata.
+pub fn post_comment_with_marker_metadata(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+) -> Result<Option<IssueComment>> {
+    if let Some(existing) = find_comment_with_marker(owner, repo, issue_number, marker)? {
+        return Ok(Some(existing));
+    }
+
+    let full_body = format!("{marker}\n{body_text}");
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            &full_body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to post marker comment on {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue comment failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    // Fetch back to get the full metadata of the newly posted comment.
+    Ok(find_comment_with_marker(owner, repo, issue_number, marker)?)
+}
+
+/// Find a comment with the given marker string authored by the specified bot login.
+///
+/// Bot-scoped lookup: only matches comments where `author_login == bot_login`
+/// AND the body contains the marker string.  User-authored comments with the
+/// same marker text are ignored, preventing marker spoofing.
+pub fn find_bot_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    let comments = fetch_issue_comments(owner, repo, issue_number)?;
+    Ok(comments
+        .into_iter()
+        .find(|c| c.author_login == bot_login && c.body.contains(marker)))
+}
+
+/// Post a comment on an issue with a marker prefix, using bot-scoped idempotency.
+///
+/// Only considers existing bot-authored comments when checking for duplicate
+/// markers.  User-authored spoof markers are ignored.  Returns `Some(id)` of
+/// the posted (or existing bot) comment.
+pub fn post_bot_comment_with_marker(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<u64>> {
+    let meta =
+        post_bot_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text, bot_login)?;
+    Ok(meta.map(|c| c.id))
+}
+
+/// Post a comment on an issue with a marker prefix and return full structured
+/// metadata, using bot-scoped idempotency.
+///
+/// Only considers existing bot-authored comments when checking for duplicate
+/// markers.  User-authored spoof markers are ignored.
+pub fn post_bot_comment_with_marker_metadata(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    if let Some(existing) =
+        find_bot_comment_with_marker(owner, repo, issue_number, marker, bot_login)?
+    {
+        return Ok(Some(existing));
+    }
+
+    let full_body = format!("{marker}\n{body_text}");
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            &full_body,
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to post bot marker comment on {full_repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh issue comment (bot-scoped) failed for {full_repo}#{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    // Fetch back to get the full metadata of the newly posted comment.
+    Ok(find_bot_comment_with_marker(
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )?)
+}
+
+/// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
+pub fn ensure_prd_labels_best_effort(owner: &str, repo: &str) {
+    use crate::daemon::interactive_prd::PRD_LABELS;
+    let full_repo = format!("{owner}/{repo}");
+
+    for (name, color, description) in PRD_LABELS {
+        let output = Command::new("gh")
+            .args([
+                "label",
+                "create",
+                name,
+                "--repo",
+                &full_repo,
+                "--color",
+                color,
+                "--description",
+                description,
+            ])
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let combined = format!("{stdout}\n{stderr}");
+                if combined.to_ascii_lowercase().contains("already exists") {
+                    continue;
+                }
+
+                let detail = stderr.trim();
+                let detail = if detail.is_empty() {
+                    stdout.trim()
+                } else {
+                    detail
+                };
+                eprintln!(
+                    "warning: failed to ensure PRD label '{}' for {}: {}",
+                    name, full_repo, detail
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to run gh label create for PRD label '{}' in {}: {}",
+                    name, full_repo, err
+                );
+            }
+        }
+    }
+}
+
 fn parse_issue_list(raw: &str) -> Result<Vec<RawGhIssue>> {
     serde_json::from_str(raw).map_err(|err| {
         RalphError::Orchestration(format!("failed to parse gh issue list output: {err}"))
@@ -1158,6 +1526,16 @@ fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
         base_branch: parsed.base_ref_name,
         head_oid: parsed.head_ref_oid,
     })
+}
+
+fn parse_authenticated_login(raw: &str) -> Result<String> {
+    let login = raw.trim();
+    if login.is_empty() {
+        return Err(RalphError::Orchestration(
+            "gh api user returned empty login".to_owned(),
+        ));
+    }
+    Ok(login.to_owned())
 }
 
 #[cfg(test)]
@@ -1386,6 +1764,19 @@ mod tests {
         assert!(!super::is_retryable_gh_error(
             "HTTP 401 Unauthorized: Bad credentials"
         ));
+    }
+
+    #[test]
+    fn parse_authenticated_login_trims_and_returns_value() {
+        let login = super::parse_authenticated_login("  ralph-bot\n").expect("login should parse");
+        assert_eq!(login, "ralph-bot");
+    }
+
+    #[test]
+    fn parse_authenticated_login_rejects_empty() {
+        let err = super::parse_authenticated_login("   ").expect_err("empty login should fail");
+        let message = err.to_string();
+        assert!(message.contains("empty login"));
     }
 
     fn git(repo_root: &std::path::Path, args: &[&str]) {

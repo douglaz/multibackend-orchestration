@@ -149,6 +149,9 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         // Ensure lifecycle labels exist (best-effort, non-blocking)
         github::ensure_labels_best_effort(&owner, &repo_name);
 
+        // Ensure PRD lifecycle labels exist (best-effort, non-blocking)
+        github::ensure_prd_labels_best_effort(&owner, &repo_name);
+
         // Load workspace from repo's .ralph/
         let workspace = Workspace::load(repo_dir.join(".ralph"))?;
 
@@ -170,6 +173,13 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
                 "invalid daemon rebase agent backend for {slug}: {err}"
             ))
         })?;
+
+        // Validate PRD backend config at startup so invalid specs fail fast.
+        if daemon_cfg.prd_enabled {
+            crate::config::validate_interactive_prd_workspace_config(&workspace.config).map_err(
+                |err| RalphError::Validation(format!("invalid PRD config for {slug}: {err}")),
+            )?;
+        }
 
         if !deprecation_warned && daemon_cfg.repo.is_some() {
             eprintln!(
@@ -215,6 +225,12 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             rebase_timeout_seconds: daemon_cfg.rebase_timeout_seconds,
             rebase_agent_backend: rebase_agent_backend_str,
             workspace_root: workspace.root.clone(),
+            prd_enabled: daemon_cfg.prd_enabled,
+            prd_question_backends: daemon_cfg.prd_question_backends,
+            prd_writer_backend: daemon_cfg.prd_writer_backend,
+            prd_reviewer_backend: daemon_cfg.prd_reviewer_backend,
+            prd_max_revisions: daemon_cfg.prd_max_revisions,
+            prd_backend_timeout_secs: daemon_cfg.prd_backend_timeout_secs,
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;
@@ -301,10 +317,7 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
 
         if !found_any {
             println!("DAEMON ISSUES");
-            println!(
-                "{:<20} {:<8} {:<30}",
-                "REPO", "ISSUE", "LIFECYCLE LABELS"
-            );
+            println!("{:<20} {:<8} {:<30}", "REPO", "ISSUE", "LIFECYCLE LABELS");
             found_any = true;
         }
 
@@ -329,15 +342,12 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
 /// Abort: kill child (if running locally) and swap label to `ralph:failed`.
 fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
-        RalphError::Validation(format!(
-            "invalid issue number: {}",
-            args.issue_number
-        ))
+        RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
 
-    let slug = args.repo.ok_or_else(|| {
-        RalphError::Validation("--repo is required for abort".to_owned())
-    })?;
+    let slug = args
+        .repo
+        .ok_or_else(|| RalphError::Validation("--repo is required for abort".to_owned()))?;
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
     // Verify the issue is currently in-progress
@@ -360,15 +370,12 @@ fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
 
 fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
-        RalphError::Validation(format!(
-            "invalid issue number: {}",
-            args.issue_number
-        ))
+        RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
 
-    let slug = args.repo.ok_or_else(|| {
-        RalphError::Validation("--repo is required for retrigger".to_owned())
-    })?;
+    let slug = args
+        .repo
+        .ok_or_else(|| RalphError::Validation("--repo is required for retrigger".to_owned()))?;
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
     retrigger_failed_task(&owner, &repo_name, issue_number)?;

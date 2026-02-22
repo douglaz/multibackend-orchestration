@@ -47,7 +47,10 @@ pub enum RalphError {
     },
 
     #[error("daemon is already running for repo {repo_root}: {lock_path}")]
-    DaemonLocked { repo_root: PathBuf, lock_path: PathBuf },
+    DaemonLocked {
+        repo_root: PathBuf,
+        lock_path: PathBuf,
+    },
 
     #[error("corrupted state at {path}: {reason}")]
     CorruptedState { path: PathBuf, reason: String },
@@ -121,6 +124,9 @@ pub enum RalphError {
     #[error("quick PRD failed: {0}")]
     QuickPrdFailed(String),
 
+    #[error("interactive PRD failed: {0}")]
+    InteractivePrdFailed(String),
+
     #[error("PRD cache mismatch: {0}")]
     PrdCacheMismatch(String),
 
@@ -141,6 +147,7 @@ impl RalphError {
             Self::PrdValidationFailed(_) => 11,
             Self::PrdMissingInfo => 12,
             Self::QuickPrdFailed(_) => 13,
+            Self::InteractivePrdFailed(_) => 14,
             _ => 1,
         }
     }
@@ -184,5 +191,11 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("idle_seconds: 30"));
         assert!(debug.contains("timeout_kind: Walltime"));
+    }
+
+    #[test]
+    fn interactive_prd_failed_has_expected_exit_code() {
+        let err = RalphError::InteractivePrdFailed("boom".to_owned());
+        assert_eq!(err.exit_code(), 14);
     }
 }

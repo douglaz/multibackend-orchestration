@@ -378,8 +378,10 @@ async fn runs_full_feature_loop_and_commits() {
         .await
         .expect("orchestration should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     assert!(state.loops[0].commit.is_some());
@@ -404,7 +406,10 @@ async fn runs_full_feature_loop_and_commits() {
 
     // Verify a structured checkpoint commit was pushed for loop 1
     let repo_root = workspace_root.parent().expect("repo root");
-    let log = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"]);
+    let log = git_output(
+        repo_root,
+        &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"],
+    );
     assert!(
         !log.is_empty(),
         "expected a Ralph checkpoint commit for loop 1"
@@ -427,8 +432,10 @@ async fn supports_interrupt_and_resume_from_commit_phase() {
         .await
         .expect("orchestration until-review should succeed");
 
-    let state_after_review = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state_after_review = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state_after_review.current_phase, Phase::Committing);
     // With checkpoint commits, the reviewing→committing transition already
     // produces a commit hash; the loop is marked Completed by reconstruction
@@ -442,8 +449,10 @@ async fn supports_interrupt_and_resume_from_commit_phase() {
         .await
         .expect("resume run should commit");
 
-    let final_state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let final_state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert!(final_state.loops[0].commit.is_some());
     assert_eq!(final_state.loops[0].status, LoopStatus::Completed);
 }
@@ -464,8 +473,10 @@ async fn executes_completion_flow_until_complete() {
         .await
         .expect("completion flow should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.completion_attempts.len(), 1);
     assert_eq!(
@@ -521,8 +532,10 @@ async fn dry_run_does_not_checkout_project_branch() {
     let branch_after = git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(branch_before, branch_after);
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     // No checkpoint commits exist after dry-run; reconstruction defaults to loop 1.
     assert!(
         state.loops.is_empty(),
@@ -610,8 +623,10 @@ async fn refuses_new_loop_when_non_workspace_changes_are_dirty() {
         "error should list changed path: {err_message}"
     );
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     // Dirty-tree rejection prevents any loops; reconstruction defaults to loop 1.
     assert!(
         state.loops.is_empty(),
@@ -1009,8 +1024,10 @@ async fn two_loop_happy_path_with_separate_backends() {
         .await
         .expect("two-loop orchestration should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
 
     // --- 1. Loop count ---
     assert_eq!(
@@ -1067,10 +1084,22 @@ async fn two_loop_happy_path_with_separate_backends() {
 
     // --- 5. Checkpoint commits ---
     let repo_root = workspace_root.parent().expect("repo root");
-    let log1 = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"]);
-    assert!(!log1.is_empty(), "expected a Ralph checkpoint commit for loop 1");
-    let log2 = git_output(repo_root, &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 2"]);
-    assert!(!log2.is_empty(), "expected a Ralph checkpoint commit for loop 2");
+    let log1 = git_output(
+        repo_root,
+        &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 1"],
+    );
+    assert!(
+        !log1.is_empty(),
+        "expected a Ralph checkpoint commit for loop 1"
+    );
+    let log2 = git_output(
+        repo_root,
+        &["log", "--oneline", "--all", "--grep=ralph(issue-1): loop 2"],
+    );
+    assert!(
+        !log2.is_empty(),
+        "expected a Ralph checkpoint commit for loop 2"
+    );
 
     // --- 6. Artifacts ---
     // Loop 1: spec, impl-notes, approval
@@ -1359,8 +1388,10 @@ async fn review_iteration_limit_rollback() {
     );
 
     // Verify state was rolled back cleanly
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert!(
         state.loops.is_empty(),
         "loops should be empty after rollback, got {} loop(s)",
@@ -2417,8 +2448,10 @@ async fn qa_disabled_skips_phase() {
         .await
         .expect("orchestration should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     // QA results should be empty when QA is disabled
@@ -2441,8 +2474,10 @@ async fn qa_pass_proceeds_to_review() {
         .await
         .expect("orchestration with QA should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     assert!(state.loops[0].commit.is_some());
@@ -2475,8 +2510,10 @@ async fn qa_fail_retries_implementer_then_passes() {
         .await
         .expect("orchestration with QA fail-then-pass should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.loops.len(), 1);
     assert_eq!(state.loops[0].status, LoopStatus::Completed);
     assert!(state.loops[0].commit.is_some());
@@ -2547,8 +2584,10 @@ async fn qa_limit_exceeded_rolls_back() {
     );
 
     // Verify state was rolled back
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert!(
         state.loops.is_empty(),
         "loops should be empty after QA limit rollback"
@@ -2581,8 +2620,10 @@ async fn acceptance_gate_pass_keeps_completed() {
         .await
         .expect("orchestration with acceptance-pass should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.status, ProjectStatus::Completed);
     assert_eq!(state.completion_attempts.len(), 1);
 
@@ -2641,8 +2682,10 @@ async fn acceptance_gate_fail_overrides_complete_to_continue() {
         .await
         .expect("orchestration with acceptance fail-then-pass should succeed");
 
-    let state = reconstruct_project_state_from_project_dir(&workspace_root.join("projects").join(&project_id))
-        .expect("load project state");
+    let state = reconstruct_project_state_from_project_dir(
+        &workspace_root.join("projects").join(&project_id),
+    )
+    .expect("load project state");
     assert_eq!(state.completion_attempts.len(), 2);
 
     let first_attempt = &state.completion_attempts[0];
@@ -3028,40 +3071,51 @@ fn setup_workspace_for_final_review(
     workspace.config.backends.claude.command = script_path.to_string_lossy().to_string();
     workspace.config.backends.claude.args = Vec::new();
     workspace.config.backends.claude.timeout_seconds = 30;
-    workspace.config.backends.claude.env.insert(
-        "COUNTER_DIR".to_owned(),
-        counter_dir_str.clone(),
-    );
-    workspace.config.backends.claude.env.insert(
-        "FINAL_REVIEW_SCENARIO".to_owned(),
-        scenario.to_owned(),
-    );
-    workspace.config.backends.claude.env.insert(
-        "FINAL_REVIEW_BACKEND".to_owned(),
-        "claude".to_owned(),
-    );
+    workspace
+        .config
+        .backends
+        .claude
+        .env
+        .insert("COUNTER_DIR".to_owned(), counter_dir_str.clone());
+    workspace
+        .config
+        .backends
+        .claude
+        .env
+        .insert("FINAL_REVIEW_SCENARIO".to_owned(), scenario.to_owned());
+    workspace
+        .config
+        .backends
+        .claude
+        .env
+        .insert("FINAL_REVIEW_BACKEND".to_owned(), "claude".to_owned());
 
     workspace.config.backends.codex.command = script_path.to_string_lossy().to_string();
     workspace.config.backends.codex.args = Vec::new();
     workspace.config.backends.codex.timeout_seconds = 30;
-    workspace.config.backends.codex.env.insert(
-        "COUNTER_DIR".to_owned(),
-        counter_dir_str,
-    );
-    workspace.config.backends.codex.env.insert(
-        "FINAL_REVIEW_SCENARIO".to_owned(),
-        scenario.to_owned(),
-    );
-    workspace.config.backends.codex.env.insert(
-        "FINAL_REVIEW_BACKEND".to_owned(),
-        "codex".to_owned(),
-    );
+    workspace
+        .config
+        .backends
+        .codex
+        .env
+        .insert("COUNTER_DIR".to_owned(), counter_dir_str);
+    workspace
+        .config
+        .backends
+        .codex
+        .env
+        .insert("FINAL_REVIEW_SCENARIO".to_owned(), scenario.to_owned());
+    workspace
+        .config
+        .backends
+        .codex
+        .env
+        .insert("FINAL_REVIEW_BACKEND".to_owned(), "codex".to_owned());
 
     workspace.config.workflow.prompt_review_enabled = false;
     workspace.config.workflow.final_review_enabled = true;
     workspace.config.workflow.max_final_review_restarts = max_restarts;
-    workspace.config.workflow.final_review_backends =
-        vec!["claude".to_owned(), "codex".to_owned()];
+    workspace.config.workflow.final_review_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.config.workflow.final_review_arbiter_backend = "claude".to_owned();
     workspace.config.workflow.final_review_consensus_threshold = 1.0;
     workspace.config.git.base_branch =
@@ -3103,31 +3157,29 @@ fn read_counter(counter_dir: &Path, name: &str) -> u32 {
 }
 
 fn loop_has_artifact_suffix(project_dir: &Path, loop_number: u32, suffix: &str) -> bool {
-    let Some(repo_rel_loop_dir) = fs::read_dir(project_dir.join("loops"))
-        .ok()
-        .and_then(|entries| {
-            entries
-                .flatten()
-                .find(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(&format!("{loop_number:03}-"))
-                })
-                .map(|entry| entry.path())
-        })
+    let Some(repo_rel_loop_dir) =
+        fs::read_dir(project_dir.join("loops"))
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(&format!("{loop_number:03}-"))
+                    })
+                    .map(|entry| entry.path())
+            })
     else {
         return false;
     };
     let Ok(entries) = fs::read_dir(repo_rel_loop_dir) else {
         return false;
     };
-    entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_string_lossy()
-            .ends_with(suffix)
-    })
+    entries
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().ends_with(suffix))
 }
 
 #[tokio::test]
@@ -3179,8 +3231,9 @@ async fn final_review_accepted_amendments_restart_to_planning_then_complete() {
         2,
         "accepted amendments should trigger a planning restart and second completion attempt"
     );
-    let amendments_file = fs::read_to_string(project_dir.join("final-review-amendments-applied.md"))
-        .expect("amendments file should exist");
+    let amendments_file =
+        fs::read_to_string(project_dir.join("final-review-amendments-applied.md"))
+            .expect("amendments file should exist");
     assert!(amendments_file.contains("## Round 1"));
     assert!(amendments_file.contains("CLAUDE-R1") || amendments_file.contains("CODEX-R1"));
 
@@ -3261,7 +3314,9 @@ async fn final_review_resume_skips_completed_proposal_step() {
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     let mut orchestrator = Orchestrator::new(workspace);
-    let first = orchestrator.run(run_until_complete_options(&project_id)).await;
+    let first = orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await;
     assert!(first.is_err(), "first run should fail after proposals");
     assert_eq!(read_counter(&counter_dir, "final_reviewer_claude"), 1);
     assert_eq!(read_counter(&counter_dir, "final_reviewer_codex"), 1);
@@ -3292,7 +3347,9 @@ async fn final_review_config_mismatch_invalidates_and_restarts_round() {
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     let mut orchestrator = Orchestrator::new(workspace);
-    let first = orchestrator.run(run_until_complete_options(&project_id)).await;
+    let first = orchestrator
+        .run(run_until_complete_options(&project_id))
+        .await;
     assert!(first.is_err(), "first run should fail after proposals");
     assert_eq!(read_counter(&counter_dir, "final_reviewer_claude"), 1);
     assert_eq!(read_counter(&counter_dir, "final_reviewer_codex"), 1);

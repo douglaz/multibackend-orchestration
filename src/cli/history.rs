@@ -104,7 +104,10 @@ pub fn execute(args: HistoryArgs) -> Result<()> {
     Ok(())
 }
 
-fn collect_checkpoint_history(workspace: &Workspace, project_id: &str) -> Result<Vec<CheckpointEntry>> {
+fn collect_checkpoint_history(
+    workspace: &Workspace,
+    project_id: &str,
+) -> Result<Vec<CheckpointEntry>> {
     let Some(git_ctx) = project_git_context(workspace, project_id) else {
         return Ok(Vec::new());
     };

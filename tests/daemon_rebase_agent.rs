@@ -138,9 +138,7 @@ fn write_mock_claude(tmp: &TempDir, script_content: &str) -> PathBuf {
     fs::create_dir_all(&bin_dir).expect("create mock-bin dir");
     let claude_path = bin_dir.join("claude");
     fs::write(&claude_path, script_content).expect("write mock claude");
-    let mut perms = fs::metadata(&claude_path)
-        .expect("metadata")
-        .permissions();
+    let mut perms = fs::metadata(&claude_path).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&claude_path, perms).expect("set permissions");
 
@@ -368,10 +366,7 @@ fn claude_shorthand_backend_string_works() {
         "shorthand 'claude' backend should work, got: {:?}",
         result.err()
     );
-    assert!(
-        !is_rebase_in_progress(repo),
-        "rebase should be complete"
-    );
+    assert!(!is_rebase_in_progress(repo), "rebase should be complete");
 }
 
 #[test]

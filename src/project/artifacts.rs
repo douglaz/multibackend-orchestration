@@ -11,7 +11,13 @@ pub const ARTIFACT_TIMESTAMP_LEN: usize = 14;
 /// e.g. `claude(model/v2)` → `claude-model-v2`
 fn slugify_backend(spec: &str) -> String {
     spec.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 

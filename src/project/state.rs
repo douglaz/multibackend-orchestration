@@ -438,7 +438,6 @@ impl ProjectState {
 
         Ok(())
     }
-
 }
 
 impl CompletionLoopArtifacts {
@@ -476,13 +475,12 @@ impl CompletionLoopArtifacts {
                 .any(|result| result.backend == *backend && !result.passed)
         })
     }
-
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
     use super::{default_created_at, ProjectState};
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn new_state_defaults_prompt_review_completed_to_false() {
