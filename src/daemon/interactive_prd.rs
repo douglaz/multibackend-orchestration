@@ -1007,6 +1007,8 @@ fn finish_transition(
     result: Result<()>,
     bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
+    // Capture the pre-transition state so we can revert correctly on save failure.
+    let pre_transition_state = state.state.clone();
     let should_fail = apply_transition_result(state, &result);
 
     if should_fail {
@@ -1025,21 +1027,11 @@ fn finish_transition(
         // retry accounting so that terminal transitions are not silently lost
         // and can trigger retry exhaustion after 3 consecutive save failures.
         if let Err(save_err) = state.save(&config.data_dir) {
-            // If the transition itself succeeded but save failed, we need to
-            // revert any terminal state so the issue remains retryable.
-            // For Done transitions: do_approval_transition already saved and
-            // reverted on failure, so state may already be AwaitingFeedback.
-            // Revert the in-memory state to its pre-terminal value so retry
-            // accounting sees it as a non-terminal error.
-            let was_terminal = state.is_terminal();
-            if was_terminal {
-                // Revert to the last non-terminal state so it can be retried.
-                // The specific revert target depends on what transition failed:
-                // - Done reverts to AwaitingFeedback
-                // - (Failed save is handled in transition_to_failed separately)
-                if state.state == PrdWorkflowState::Done {
-                    state.state = PrdWorkflowState::AwaitingFeedback;
-                }
+            // If the transition itself succeeded but save failed, revert any
+            // terminal state to the pre-transition value so the issue remains
+            // retryable and the state machine stays valid.
+            if state.is_terminal() {
+                state.state = pre_transition_state;
             }
 
             state.error_count += 1;
@@ -1423,6 +1415,7 @@ fn transition_to_failed(
     let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-failed");
 
     // Set terminal state and persist BEFORE removing the poll-visible labels.
+    let prev_state = state.state.clone();
     state.state = PrdWorkflowState::Failed;
     state.last_advanced_at = Some(Utc::now());
 
@@ -1434,8 +1427,9 @@ fn transition_to_failed(
             "prd: CRITICAL: failed to save Failed state for {owner}/{repo}#{issue_number}: {save_err}; \
              leaving labels intact for retry"
         );
-        // Revert in-memory state so the caller doesn't think we succeeded
-        state.state = PrdWorkflowState::AwaitingFeedback;
+        // Revert in-memory state to pre-transition value so the caller
+        // doesn't think we succeeded and the state machine stays valid.
+        state.state = prev_state;
         return Err(RalphError::InteractivePrdFailed(format!(
             "failed to persist Failed state for {owner}/{repo}#{issue_number}: {save_err}"
         )));

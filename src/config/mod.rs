@@ -113,7 +113,6 @@ pub fn resolve_effective_config(
 ) -> Result<EffectiveConfig> {
     let project_ref = project.as_ref();
     let daemon = resolve_daemon_config(&global, project_ref);
-    validate_interactive_prd_workspace_config(&global)?;
 
     let starting_backend = if let Some(override_backend) = run_overrides.starting_backend {
         override_backend.to_owned()
@@ -544,8 +543,8 @@ mod tests {
     use crate::config::{
         global::{PlannerStateInPrompt, PreviousSpecsInPrompt},
         project::{ProjectDaemonOverrides, ProjectWorkflowOverrides},
-        resolve_daemon_config, resolve_effective_config, GlobalConfig, ProjectConfig,
-        RunWorkflowOverrides,
+        resolve_daemon_config, resolve_effective_config, validate_interactive_prd_workspace_config,
+        GlobalConfig, ProjectConfig, RunWorkflowOverrides,
     };
 
     #[test]
@@ -731,18 +730,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_config_rejects_invalid_prd_question_backend_count() {
+    fn validate_prd_config_rejects_invalid_question_backend_count() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_prd_question_backends = vec!["claude".to_owned()];
 
-        let error = resolve_effective_config(
-            Path::new("/workspace"),
-            Path::new("/workspace/project"),
-            global,
-            None,
-            RunWorkflowOverrides::default(),
-        )
-        .expect_err("invalid PRD backend count should fail");
+        let error = validate_interactive_prd_workspace_config(&global)
+            .expect_err("invalid PRD backend count should fail");
 
         assert!(error.to_string().contains(
             "workspace.daemon_prd_question_backends must contain exactly 2 backend specs"
@@ -750,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_config_rejects_invalid_prd_backend_specs() {
+    fn validate_prd_config_rejects_invalid_backend_specs() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_prd_question_backends = vec![
             "claude(opus)".to_owned(),
@@ -758,14 +751,8 @@ mod tests {
         ];
         global.workspace.daemon_prd_writer_backend = "unknown(model)".to_owned();
 
-        let error = resolve_effective_config(
-            Path::new("/workspace"),
-            Path::new("/workspace/project"),
-            global,
-            None,
-            RunWorkflowOverrides::default(),
-        )
-        .expect_err("invalid writer backend should fail");
+        let error = validate_interactive_prd_workspace_config(&global)
+            .expect_err("invalid writer backend should fail");
 
         assert!(error
             .to_string()
