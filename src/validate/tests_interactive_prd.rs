@@ -139,6 +139,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::section_constants_are_correct",
             func: section_constants_are_correct,
         },
+        ConformanceTest {
+            name: "interactive_prd::section_incomplete_draft_exhaustion_transitions_to_failed",
+            func: section_incomplete_draft_exhaustion_transitions_to_failed,
+        },
+        ConformanceTest {
+            name: "interactive_prd::section_incomplete_revision_exhaustion_transitions_to_failed",
+            func: section_incomplete_revision_exhaustion_transitions_to_failed,
+        },
     ]
 }
 
@@ -2408,6 +2416,290 @@ fn section_constants_are_correct(_harness: &RalphHarness) -> TestResult {
         ));
     }
     TestResult::Pass
+}
+
+/// Verify that an incomplete-spec writer backend causes the AwaitingAnswers ->
+/// draft transition to fail: no `draft-vN` comment is posted, `error_count`
+/// increments on each tick, and the state transitions to `Failed` after 3
+/// consecutive errors.
+fn section_incomplete_draft_exhaustion_transitions_to_failed(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        // Backend that always produces an incomplete spec (only 2 of 6 sections)
+        let backend_script = dh
+            .write_mock_script(
+                "prd_incomplete_draft.sh",
+                r#"#!/bin/sh
+cat >/dev/null
+cat <<'EOF'
+## Summary
+Incomplete draft from section test.
+
+## Acceptance Criteria
+- [ ] Incomplete.
+EOF
+"#,
+            )
+            .unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/300.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 300, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingAnswers",
+            "question_revision": 1, "draft_revision": 0,
+            "questions_comment_id": 3000, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": null,
+            "latest_draft_body": null,
+            "user_answers": null, "last_processed_comment_id": null,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let comment_log = dh.temp_dir.path().join("section_draft_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("section_draft_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+CLOG="{comment_log_str}"
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":300,"title":"Incomplete draft test","labels":[{{"name":"ralph:prd-active"}}],"body":"Test body"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0; want_tb=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; title,body) want_tb=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":3000,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:300:questions-v1 -->\\n1. Q?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":3001,"author":{{"login":"octocat"}},"body":"User answers here","createdAt":"2026-01-01T00:00:15Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{{"title":"Incomplete draft test","body":"Test body"}}'; exit 0; fi
+        exit 0 ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in --body) printf '%s\n' "$2" >> "$CLOG"; shift 2 ;; *) shift ;; esac
+        done; exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        // Run 3 daemon ticks — each should fail because the backend produces
+        // an incomplete spec missing 4 of 6 required sections.
+        for tick in 1..=3u32 {
+            let _output = dh
+                .daemon_env(
+                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                )
+                .unwrap();
+
+            let state: InteractivePrdState =
+                serde_json::from_str(&fs::read_to_string(&state_path).unwrap())
+                    .unwrap_or_else(|e| panic!("parse state tick {tick}: {e}"));
+
+            if tick < 3 {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::AwaitingAnswers,
+                    "tick {tick}: should remain AwaitingAnswers (not post incomplete draft)"
+                );
+                assert_eq!(state.error_count, tick, "tick {tick}: error_count should increment");
+                assert!(
+                    state.last_error.is_some(),
+                    "tick {tick}: last_error should be set"
+                );
+                let err_msg = state.last_error.as_deref().unwrap();
+                assert!(
+                    err_msg.contains("missing required sections"),
+                    "tick {tick}: error should mention missing sections: {err_msg}"
+                );
+            } else {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Failed,
+                    "tick 3: should be Failed after exhaustion"
+                );
+                assert!(state.is_terminal());
+                assert!(state.error_count >= 3);
+            }
+        }
+
+        // Verify no draft-v1 comment was posted (incomplete draft rejected)
+        let comments_raw = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            !comments_raw.contains("draft-v1"),
+            "no draft-v1 comment should be posted for incomplete spec, comment log:\n{comments_raw}"
+        );
+
+        // Verify Failed label was added
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("ralph:prd-failed"),
+            "ralph:prd-failed should be added: {label_raw}"
+        );
+    })
+}
+
+/// Verify that an incomplete-spec writer backend causes the AwaitingFeedback
+/// revision transition to fail: no new `draft-vN` comment is posted,
+/// `error_count` increments, and the state transitions to `Failed` after 3
+/// consecutive errors.
+fn section_incomplete_revision_exhaustion_transitions_to_failed(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        // Backend that always produces an incomplete spec (only 2 of 6 sections)
+        let backend_script = dh
+            .write_mock_script(
+                "prd_incomplete_revision.sh",
+                r#"#!/bin/sh
+cat >/dev/null
+cat <<'EOF'
+## Summary
+Incomplete revision.
+
+## Acceptance Criteria
+- [ ] Still incomplete.
+EOF
+"#,
+            )
+            .unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/310.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 310, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 3100, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 3102,
+            "latest_draft_body": "## Summary\nOriginal draft.\n\n## Acceptance Criteria\n- [ ] AC.\n\n## Technical Approach\nOld.\n\n## Files & Modules\n- f.rs\n\n## Testing Strategy\n- tests\n\n## Out of Scope\n- none",
+            "user_answers": "User answer text", "last_processed_comment_id": 3101,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let comment_log = dh.temp_dir.path().join("section_revision_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("section_revision_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+CLOG="{comment_log_str}"
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":310,"title":"Incomplete revision test","labels":[{{"name":"ralph:prd-active"}}],"body":"Test body"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0; want_tb=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; title,body) want_tb=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":3100,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":3101,"author":{{"login":"octocat"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":3102,"author":{{"login":"ralph-bot"}},"body":"draft v1","createdAt":"2026-01-01T00:00:15Z"}},{{"id":3103,"author":{{"login":"octocat"}},"body":"Please add error handling details.","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{{"title":"Incomplete revision test","body":"Test body"}}'; exit 0; fi
+        exit 0 ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in --body) printf '%s\n' "$2" >> "$CLOG"; shift 2 ;; *) shift ;; esac
+        done; exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        // Run 3 daemon ticks — each should fail because the backend produces
+        // an incomplete revision missing 4 of 6 required sections.
+        for tick in 1..=3u32 {
+            let _output = dh
+                .daemon_env(
+                    ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                )
+                .unwrap();
+
+            let state: InteractivePrdState =
+                serde_json::from_str(&fs::read_to_string(&state_path).unwrap())
+                    .unwrap_or_else(|e| panic!("parse state tick {tick}: {e}"));
+
+            if tick < 3 {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::AwaitingFeedback,
+                    "tick {tick}: should remain AwaitingFeedback (not post incomplete revision)"
+                );
+                assert_eq!(state.error_count, tick, "tick {tick}: error_count should increment");
+                assert!(
+                    state.last_error.is_some(),
+                    "tick {tick}: last_error should be set"
+                );
+                let err_msg = state.last_error.as_deref().unwrap();
+                assert!(
+                    err_msg.contains("missing required sections"),
+                    "tick {tick}: error should mention missing sections: {err_msg}"
+                );
+            } else {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Failed,
+                    "tick 3: should be Failed after exhaustion"
+                );
+                assert!(state.is_terminal());
+                assert!(state.error_count >= 3);
+            }
+        }
+
+        // Verify no draft-v2 comment was posted (incomplete revision rejected)
+        let comments_raw = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            !comments_raw.contains("draft-v2"),
+            "no draft-v2 comment should be posted for incomplete revision, comment log:\n{comments_raw}"
+        );
+
+        // Verify Failed label was added
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("ralph:prd-failed"),
+            "ralph:prd-failed should be added: {label_raw}"
+        );
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult

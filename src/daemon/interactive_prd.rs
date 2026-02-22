@@ -1294,14 +1294,23 @@ mod tests {
 
     use super::{
         apply_transition_result, detect_approval, extract_questions_text,
-        find_first_answer_comment, find_new_feedback_comments, prd_marker,
-        prd_status_approved_marker, render_answer_to_draft_prompt, InteractivePrdState,
+        find_first_answer_comment, find_new_feedback_comments, generate_draft_from_answers_with_timeout,
+        generate_revision_from_feedback_with_timeout, prd_marker,
+        prd_status_approved_marker, render_answer_to_draft_prompt, run_draft_with_section_retry_sync,
+        InteractivePrdState, PrdPollConfig,
         PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
         PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
+    use crate::backend::CliBackend;
+    use crate::config::GlobalConfig;
     use crate::daemon::github::IssueComment;
     use crate::error::RalphError;
     use crate::prd::quick::check_spec_sections;
+
+    use std::collections::BTreeMap;
+    use std::io::Write as IoWrite;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn prd_workflow_state_serialization_roundtrip_for_all_variants() {
@@ -1973,5 +1982,308 @@ mod tests {
         );
         // In the hardened code, this causes the loop to continue to revision
         // rather than returning Ok(current_spec)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test helpers: temporary mock backend scripts
+    // -----------------------------------------------------------------------
+
+    /// Write a temporary bash script that echoes fixed output and return a
+    /// `CliBackend` pointing to it.
+    fn make_mock_backend(output: &str) -> CliBackend {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
+        writeln!(tmp, "#!/bin/sh").unwrap();
+        writeln!(tmp, "cat >/dev/null").unwrap();  // consume stdin
+        // Use a heredoc-style approach to avoid quoting issues
+        write!(tmp, "cat <<'__MOCK_EOF__'\n{output}\n__MOCK_EOF__").unwrap();
+        tmp.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(tmp.path(), perms).unwrap();
+        }
+
+        // Persist the temp file so it outlives this function.
+        // The test is responsible for cleanup (or it happens on drop of PathBuf).
+        let path = tmp.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
+        // Leak the temp path so it isn't deleted while the backend is in use.
+        std::mem::forget(path);
+
+        CliBackend::new(
+            "mock-backend",
+            path_str,
+            vec![],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        )
+    }
+
+    /// Build a `PrdPollConfig` whose claude/codex backends both point to a
+    /// given script path.  The writer and reviewer both use "claude" spec
+    /// so `create_backend` resolves through `GlobalConfig.backends.claude`.
+    fn make_test_prd_config(script_path: &str) -> PrdPollConfig {
+        let mut global = GlobalConfig::default();
+        global.backends.claude.command = script_path.to_owned();
+        global.backends.claude.args = vec![];
+        global.backends.codex.command = script_path.to_owned();
+        global.backends.codex.args = vec![];
+
+        PrdPollConfig {
+            owner: "test".to_owned(),
+            repo: "repo".to_owned(),
+            data_dir: PathBuf::from("/tmp/ralph-test-prd-unit"),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+            writer_backend: "claude".to_owned(),
+            reviewer_backend: "codex".to_owned(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: global,
+            verbose: false,
+        }
+    }
+
+    /// Create a persistent temp script that echoes the given output.
+    /// Returns the absolute path to the script.
+    fn write_persistent_mock_script(output: &str) -> String {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
+        writeln!(tmp, "#!/bin/sh").unwrap();
+        writeln!(tmp, "cat >/dev/null").unwrap();
+        write!(tmp, "cat <<'__MOCK_EOF__'\n{output}\n__MOCK_EOF__").unwrap();
+        tmp.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(tmp.path(), perms).unwrap();
+        }
+
+        let path = tmp.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
+        std::mem::forget(path);
+        path_str
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests exercising actual draft/revision control flow
+    // -----------------------------------------------------------------------
+
+    /// `run_draft_with_section_retry_sync` with a complete-spec backend
+    /// should return Ok with the complete spec.
+    #[test]
+    fn run_draft_with_section_retry_sync_complete_output_succeeds() {
+        let complete = "\
+## Summary\nDraft.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nApproach.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let backend = make_mock_backend(complete);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        assert!(
+            result.is_ok(),
+            "complete spec should succeed: {:?}",
+            result.err()
+        );
+        let spec = result.unwrap();
+        let (_cleaned, missing) = check_spec_sections(&spec);
+        assert!(missing.is_empty(), "returned spec should have all sections");
+    }
+
+    /// `run_draft_with_section_retry_sync` with an incomplete-spec backend
+    /// should return `InteractivePrdFailed` listing the missing sections.
+    #[test]
+    fn run_draft_with_section_retry_sync_incomplete_output_fails() {
+        let incomplete = "\
+## Summary\nPartial.\n\n\
+## Acceptance Criteria\n- [ ] AC1";
+
+        let backend = make_mock_backend(incomplete);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        assert!(result.is_err(), "incomplete spec should fail");
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("draft missing required sections"),
+            "error should mention missing sections: {msg}"
+        );
+        // Should list specific missing section names
+        assert!(
+            msg.contains("Technical Approach") || msg.contains("Files & Modules")
+                || msg.contains("Testing Strategy") || msg.contains("Out of Scope"),
+            "error should list specific missing section names: {msg}"
+        );
+    }
+
+    /// `generate_draft_from_answers_with_timeout` with an incomplete-spec
+    /// backend should return `InteractivePrdFailed` after exhausting retries.
+    #[test]
+    fn generate_draft_incomplete_writer_output_fails_after_exhaustion() {
+        let incomplete = "\
+## Summary\nPartial draft.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nApproach.";
+
+        let script = write_persistent_mock_script(incomplete);
+        let config = make_test_prd_config(&script);
+
+        let result = generate_draft_from_answers_with_timeout(
+            &config,
+            "Feature: add auth",
+            "1. What auth method?",
+            "Use JWT tokens.",
+        );
+        assert!(
+            result.is_err(),
+            "incomplete writer output should cause failure"
+        );
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing required sections"),
+            "error should mention missing sections: {msg}"
+        );
+    }
+
+    /// Write a persistent mock script that distinguishes writer vs reviewer
+    /// prompts: reviewer prompts contain "REVIEW_PROMPT" sentinel or the
+    /// `{{spec}}` placeholder pattern; for those, output valid approved JSON.
+    /// For writer prompts, output a complete spec.
+    fn write_smart_mock_script(spec_output: &str) -> String {
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
+        // The script reads stdin, checks if it's a review prompt, and outputs accordingly
+        writeln!(tmp, "#!/bin/sh").unwrap();
+        writeln!(tmp, "INPUT=\"$(cat)\"").unwrap();
+        writeln!(tmp, "if echo \"$INPUT\" | grep -q 'Review the spec for\\|\\*\\*Engineering Spec:\\*\\*\\|review response could not be parsed'; then").unwrap();
+        writeln!(tmp, "  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'").unwrap();
+        writeln!(tmp, "else").unwrap();
+        write!(tmp, "  cat <<'__MOCK_EOF__'\n{spec_output}\n__MOCK_EOF__\n").unwrap();
+        writeln!(tmp, "fi").unwrap();
+        tmp.flush().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(tmp.path(), perms).unwrap();
+        }
+
+        let path = tmp.into_temp_path();
+        let path_str = path.to_string_lossy().into_owned();
+        std::mem::forget(path);
+        path_str
+    }
+
+    /// `generate_draft_from_answers_with_timeout` with a complete-spec
+    /// backend should return Ok.
+    #[test]
+    fn generate_draft_complete_writer_output_succeeds() {
+        let complete = "\
+## Summary\nDraft.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nApproach.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let script = write_smart_mock_script(complete);
+        let config = make_test_prd_config(&script);
+
+        let result = generate_draft_from_answers_with_timeout(
+            &config,
+            "Feature: add auth",
+            "1. What auth method?",
+            "Use JWT tokens.",
+        );
+        assert!(
+            result.is_ok(),
+            "complete writer output should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    /// `generate_revision_from_feedback_with_timeout` with an incomplete-spec
+    /// backend should return `InteractivePrdFailed`.
+    #[test]
+    fn generate_revision_incomplete_writer_output_fails_after_exhaustion() {
+        let incomplete = "\
+## Summary\nRevised.\n\n\
+## Acceptance Criteria\n- [ ] Updated AC.";
+
+        let script = write_persistent_mock_script(incomplete);
+        let config = make_test_prd_config(&script);
+
+        let current_draft = "\
+## Summary\nOriginal.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nOld.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let result = generate_revision_from_feedback_with_timeout(
+            &config,
+            current_draft,
+            "Please add more detail to the testing strategy.",
+        );
+        assert!(
+            result.is_err(),
+            "incomplete revision output should cause failure"
+        );
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing required sections"),
+            "error should mention missing sections: {msg}"
+        );
+    }
+
+    /// `generate_revision_from_feedback_with_timeout` with a complete-spec
+    /// backend should return Ok.
+    #[test]
+    fn generate_revision_complete_writer_output_succeeds() {
+        let complete = "\
+## Summary\nRevised.\n\n\
+## Acceptance Criteria\n- [ ] Updated AC.\n\n\
+## Technical Approach\nUpdated approach.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let script = write_smart_mock_script(complete);
+        let config = make_test_prd_config(&script);
+
+        let current_draft = "\
+## Summary\nOriginal.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nOld.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+
+        let result = generate_revision_from_feedback_with_timeout(
+            &config,
+            current_draft,
+            "Please add more detail.",
+        );
+        assert!(
+            result.is_ok(),
+            "complete revision output should succeed: {:?}",
+            result.err()
+        );
     }
 }
