@@ -421,15 +421,13 @@ fn do_pending_to_awaiting(
     let owner = &config.owner;
     let repo = &config.repo;
 
-    // 1. Swap labels idempotently: only remove ralph:prd if still present,
-    //    only add ralph:prd-active if not already present. This prevents
-    //    failures on retry when labels were already swapped in a prior attempt.
+    // 1. Swap labels idempotently: add ralph:prd-active BEFORE removing
+    //    ralph:prd so that on partial failure the issue remains visible to
+    //    future polls (either label will be found). Only remove ralph:prd
+    //    once active is confirmed present.
     let has_prd = issue.labels.iter().any(|l| l == "ralph:prd");
     let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
 
-    if has_prd {
-        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
-    }
     if !has_active {
         github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active")
             .map_err(|err| {
@@ -437,6 +435,9 @@ fn do_pending_to_awaiting(
                     "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
                 ))
             })?;
+    }
+    if has_prd {
+        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
     }
 
     // 2. Remove ralph:ready if present (prevent dual workflow ownership)

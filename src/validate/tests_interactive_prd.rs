@@ -61,6 +61,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::idempotent_state_reprocessing",
             func: idempotent_state_reprocessing,
         },
+        ConformanceTest {
+            name: "interactive_prd::pickup_and_question_posting",
+            func: pickup_and_question_posting,
+        },
     ]
 }
 
@@ -381,7 +385,10 @@ exit 1
             .filter(|line| !line.trim().is_empty())
             .collect();
 
-        // Verify PRD labels are created
+        // Verify PRD labels are created.
+        // Use exact token matching: "create <label> " (with trailing space) to
+        // avoid substring false positives (e.g. "ralph:prd" matching
+        // "ralph:prd-active").
         let prd_label_names = [
             "ralph:prd",
             "ralph:prd-active",
@@ -390,7 +397,7 @@ exit 1
             "ralph:prd-failed",
         ];
         for label_name in &prd_label_names {
-            let needle = format!("create {label_name}");
+            let needle = format!("create {label_name} ");
             let count = lines.iter().filter(|line| line.contains(&needle)).count();
             assert_eq!(
                 count, 1,
@@ -400,7 +407,7 @@ exit 1
 
         // Also verify standard labels are created
         for (label_name, _, _) in github::REQUIRED_LABELS {
-            let needle = format!("create {label_name}");
+            let needle = format!("create {label_name} ");
             let count = lines.iter().filter(|line| line.contains(&needle)).count();
             assert_eq!(
                 count, 1,
@@ -519,6 +526,238 @@ fn idempotent_state_reprocessing(harness: &RalphHarness) -> TestResult {
     }
 
     TestResult::Pass
+}
+
+/// Verify that a `ralph:prd` issue is picked up, questions are posted with the
+/// correct marker, labels are swapped (`ralph:prd-active` added, `ralph:prd`
+/// removed), and state is persisted as `AwaitingAnswers`.
+///
+/// Runs a single-iteration daemon tick with mock gh and mock backends. Then
+/// verifies:
+/// 1. `ralph:prd-active` was added to the issue
+/// 2. `ralph:prd` was removed from the issue
+/// 3. A questions comment was posted (logged)
+/// 4. Persisted state shows `AwaitingAnswers` with `question_revision == 1`
+///
+/// On a second daemon tick, the same issue (now `ralph:prd-active`) should NOT
+/// produce a duplicate questions comment (idempotency).
+fn pickup_and_question_posting(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Set up mock backends that produce question output
+        let question_script = dh
+            .write_mock_script(
+                "prd_question_backend.sh",
+                r#"#!/bin/sh
+# Mock backend for PRD question generation - reads stdin, produces questions
+cat >/dev/null
+printf '1. What are the performance requirements?\n'
+printf '2. What error handling strategy should be used?\n'
+printf '3. Are there any backward compatibility constraints?\n'
+"#,
+            )
+            .expect("write question backend script");
+
+        // Configure both claude and codex backends to use our mock
+        dh.setup_mock_backends_stable(&question_script)
+            .expect("setup mock backends");
+
+        let label_log = dh.temp_dir.path().join("prd_pickup_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let comment_log = dh.temp_dir.path().join("prd_pickup_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        // Mock gh script that:
+        // - Returns issue #10 with ralph:prd label on `issue list --label ralph:prd`
+        // - Returns empty on `issue list --label ralph:prd-active` (first tick)
+        // - Logs label edits
+        // - Tracks posted comments for marker idempotency
+        let gh_script = format!(
+            r#"#!/bin/sh
+LABEL_LOG="{label_log_str}"
+COMMENT_LOG="{comment_log_str}"
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        # Check which label is being queried
+        has_prd=0
+        has_active=0
+        has_ready=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+            ralph:ready) has_ready=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":10,"title":"Add user auth","labels":[{{"name":"ralph:prd"}}],"body":"We need user authentication"}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[]'
+        elif [ "$has_ready" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "$LABEL_LOG"
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          # Return the posted comment if it exists (for marker idempotency check)
+          if [ -f "$COMMENT_LOG" ]; then
+            comment_body="$(cat "$COMMENT_LOG")"
+            printf '{{"comments":[{{"id":42001,"author":{{"login":"ralph-bot"}},"body":"%s","createdAt":"2026-01-01T00:00:00Z"}}]}}' "$(printf '%s' "$comment_body" | sed 's/"/\\"/g' | tr '\n' ' ')"
+          else
+            printf '{{"comments":[]}}'
+          fi
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"Add user auth","body":"We need user authentication"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        # Log the comment body to a file for marker checks
+        shift; shift  # skip 'issue' 'comment'
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s' "$2" > "$COMMENT_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        // Run first daemon tick
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // 1. Verify ralph:prd-active was added
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:prd-active"),
+            "ralph:prd-active should have been added, label log:\n{label_raw}"
+        );
+
+        // 2. Verify ralph:prd was removed
+        assert!(
+            label_raw.contains("--remove-label") && label_raw.contains("ralph:prd"),
+            "ralph:prd should have been removed, label log:\n{label_raw}"
+        );
+
+        // 3. Verify questions comment was posted (comment log exists and contains marker)
+        let comment_raw = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            comment_raw.contains("<!-- ralph:prd:10:questions-v1 -->"),
+            "questions marker should be in posted comment, comment log:\n{comment_raw}"
+        );
+        assert!(
+            comment_raw.contains("Clarifying Questions"),
+            "posted comment should contain questions heading, comment log:\n{comment_raw}"
+        );
+
+        // 4. Verify persisted state
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme")
+            .join("widgets")
+            .join(".ralph")
+            .join("interactive-prd")
+            .join("10.json");
+        let state_raw = fs::read_to_string(&state_path).unwrap_or_else(|e| {
+            panic!(
+                "state file should exist at {}: {e}",
+                state_path.display()
+            )
+        });
+        let state: InteractivePrdState = serde_json::from_str(&state_raw).unwrap_or_else(|e| {
+            panic!("state should be valid JSON: {e}\n{state_raw}")
+        });
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingAnswers,
+            "state should be AwaitingAnswers after pickup, got: {:?}",
+            state.state
+        );
+        assert_eq!(
+            state.question_revision, 1,
+            "question_revision should be 1"
+        );
+        assert!(
+            state.questions_posted_at.is_some(),
+            "questions_posted_at should be set"
+        );
+        assert!(
+            state.last_advanced_at.is_some(),
+            "last_advanced_at should be set"
+        );
+        assert_eq!(state.error_count, 0, "error_count should be 0");
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult
