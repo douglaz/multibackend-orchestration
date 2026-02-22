@@ -988,6 +988,179 @@ exit 0
     );
 }
 
+// ---------------------------------------------------------------------------
+// Mixed comments: approval + non-approval feedback -> Done (not revision)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn awaiting_feedback_mixed_comments_approval_plus_feedback_transitions_to_done() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    // Backend not needed for approval path (no revision), but must exist
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme")
+        .join("widgets")
+        .join(".ralph")
+        .join("interactive-prd")
+        .join("95.json");
+    fs::create_dir_all(state_path.parent().expect("parent"))
+        .expect("create state dir");
+
+    let seed = serde_json::json!({
+        "issue_number": 95,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 950,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 952,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 951,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let approval_log = h.temp_dir.path().join("mixed_approval_comment.log");
+    let approval_log_str = approval_log.to_string_lossy().into_owned();
+    // Two new comments: one non-approval feedback, one approval
+    let gh_script = format!(
+        r#"#!/bin/sh
+APPROVAL_LOG="{approval_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd-active) has_active=1 ;; esac
+        done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":95,"title":"Mixed test","labels":[{{"name":"ralph:prd-active"}}],"body":"Test."}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          if [ -f "$APPROVAL_LOG" ]; then
+            printf '{{"comments":[{{"id":950,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":951,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":952,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:95:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":953,"author":{{"login":"bob"}},"body":"Please fix the error handling section.","createdAt":"2026-01-01T00:00:25Z"}},{{"id":954,"author":{{"login":"alice"}},"body":"LGTM, ship it!","createdAt":"2026-01-01T00:00:30Z"}},{{"id":955,"author":{{"login":"ralph-bot"}},"body":"approved marker","createdAt":"2026-01-01T00:00:35Z"}}]}}'
+          else
+            printf '{{"comments":[{{"id":950,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":951,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":952,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:95:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":953,"author":{{"login":"bob"}},"body":"Please fix the error handling section.","createdAt":"2026-01-01T00:00:25Z"}},{{"id":954,"author":{{"login":"alice"}},"body":"LGTM, ship it!","createdAt":"2026-01-01T00:00:30Z"}}]}}'
+          fi
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s' "$2" > "$APPROVAL_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then printf 'ralph-bot\n' ; exit 0 ; fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac
+exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    let output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start");
+    assert_exit_code(&output, 0);
+
+    let state_raw = fs::read_to_string(&state_path).expect("state should exist");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state");
+
+    // Key assertion: mixed comments (approval + non-approval) should trigger Done, not revision
+    assert_eq!(
+        state.state,
+        PrdWorkflowState::Done,
+        "mixed comments with any approval should transition to Done, not revision"
+    );
+    assert!(state.is_terminal());
+    assert_eq!(state.draft_revision, 1, "draft_revision should remain 1 (no revision generated)");
+
+    // Verify approval comment was posted
+    let approval_body = fs::read_to_string(&approval_log).unwrap_or_default();
+    assert!(
+        approval_body.contains("<!-- ralph:prd:95:status-approved-v1 -->"),
+        "approval marker should be posted: {approval_body}"
+    );
+}
+
 fn ralph_bin_absolute() -> PathBuf {
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_ralph") {
         return PathBuf::from(p);

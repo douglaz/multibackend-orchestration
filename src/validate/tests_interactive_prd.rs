@@ -85,6 +85,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::feedback_stage_failure_labeling",
             func: feedback_stage_failure_labeling,
         },
+        ConformanceTest {
+            name: "interactive_prd::mixed_comments_approval_triggers_done",
+            func: mixed_comments_approval_triggers_done,
+        },
+        ConformanceTest {
+            name: "interactive_prd::approval_path_github_failure_increments_error",
+            func: approval_path_github_failure_increments_error,
+        },
     ]
 }
 
@@ -1353,6 +1361,189 @@ esac; exit 0
         assert!(
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed label should be added: {label_raw}"
+        );
+    })
+}
+
+/// Verify that when new comments include both an approval ("LGTM") and
+/// non-approval feedback, the approval wins and transitions to Done.
+fn mixed_comments_approval_triggers_done(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/40.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 40, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 400, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 402,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 401,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let comment_log = dh.temp_dir.path().join("mixed_appr_conf.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        // Two new comments: one plain feedback (id 403) and one LGTM (id 404)
+        let gh_script = format!(
+            r#"#!/bin/sh
+LOG="{comment_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":40,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          if [ -f "$LOG" ]; then
+            printf '{{"comments":[{{"id":400,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":401,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":402,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":403,"author":{{"login":"bob"}},"body":"Fix the testing section.","createdAt":"2026-01-01T00:00:25Z"}},{{"id":404,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:30Z"}},{{"id":405,"author":{{"login":"ralph-bot"}},"body":"ok","createdAt":"2026-01-01T00:00:35Z"}}]}}'
+          else
+            printf '{{"comments":[{{"id":400,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":401,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":402,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":403,"author":{{"login":"bob"}},"body":"Fix the testing section.","createdAt":"2026-01-01T00:00:25Z"}},{{"id":404,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:30Z"}}]}}'
+          fi; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) shift; shift; while [ $# -gt 0 ]; do case "$1" in --body) printf '%s' "$2" > "$LOG"; shift 2 ;; *) shift ;; esac; done; exit 0 ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::Done,
+            "mixed comments (approval + feedback) should transition to Done"
+        );
+        assert!(state.is_terminal());
+        assert_eq!(state.draft_revision, 1, "draft should remain at 1 (no revision)");
+
+        let posted = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            posted.contains("<!-- ralph:prd:40:status-approved-v1 -->"),
+            "should post status-approved marker: {posted}"
+        );
+    })
+}
+
+/// Verify that when the approval path fails (e.g. GitHub comment posting fails),
+/// the error is propagated and `error_count` is incremented rather than
+/// persisting terminal Done.
+fn approval_path_github_failure_increments_error(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh.temp_dir.path().join("acme/widgets/.ralph/interactive-prd/41.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 41, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 410, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 412,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 411,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        // Mock gh that returns an approval comment but fails on `issue comment` (posting)
+        let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":41,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{"comments":[{"id":410,"author":{"login":"ralph-bot"},"body":"q","createdAt":"2026-01-01T00:00:05Z"},{"id":411,"author":{"login":"u"},"body":"ans","createdAt":"2026-01-01T00:00:10Z"},{"id":412,"author":{"login":"ralph-bot"},"body":"draft","createdAt":"2026-01-01T00:00:15Z"},{"id":413,"author":{"login":"u"},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}]}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
+        exit 0 ;;
+      comment)
+        # Simulate GitHub failure when posting approval comment
+        echo "gh: error posting comment" >&2
+        exit 1
+        ;;
+      edit) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#;
+        let gh_path = write_mock_gh(&dh, gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        let _output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+
+        // Should NOT be Done — the error should be recorded
+        assert_ne!(
+            state.state,
+            PrdWorkflowState::Done,
+            "approval-path GitHub failure should not persist terminal Done"
+        );
+        assert!(
+            state.error_count >= 1,
+            "error_count should be incremented on approval-path failure, got {}",
+            state.error_count
+        );
+        assert!(
+            state.last_error.is_some(),
+            "last_error should be set on approval-path failure"
+        );
+        // State should remain AwaitingFeedback (retryable)
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "state should remain AwaitingFeedback for retry"
         );
     })
 }

@@ -677,10 +677,9 @@ fn do_awaiting_feedback(
 
     // Check if any new comment is an approval
     let has_approval = new_comments.iter().any(|c| detect_approval(&c.body));
-    let has_non_approval = new_comments.iter().any(|c| !detect_approval(&c.body));
 
-    // If approval is present (and no conflicting non-approval feedback), transition to Done
-    if has_approval && !has_non_approval {
+    // If any new comment passes approval detection, transition to Done
+    if has_approval {
         // Update last_processed_comment_id to the latest comment
         let last_id = new_comments.last().map(|c| c.id);
         if let Some(id) = last_id {
@@ -755,12 +754,27 @@ fn do_approval_transition(
          *The interactive PRD workflow is now complete.*",
         state.draft_revision
     );
-    let _ = github::post_comment_with_marker(owner, repo, issue_number, &marker, &approval_body);
+    github::post_comment_with_marker(owner, repo, issue_number, &marker, &approval_body)
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to post approval comment for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
 
     // Swap labels: remove ralph:prd-active, add ralph:prd-done
     // Keep ralph:prd-approved if already present
-    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active");
-    let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done");
+    github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
+        |err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        },
+    )?;
+    github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done").map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     // Persist terminal Done state
     state.state = PrdWorkflowState::Done;
@@ -1522,5 +1536,51 @@ mod tests {
     fn detect_approval_question_about_lgtm_still_matches() {
         // Per spec: `\blgtm\b` matches standalone "lgtm" even in questions
         assert!(detect_approval("is this lgtm?"));
+    }
+
+    /// Mixed new comments: one LGTM and one non-approval feedback.
+    /// Per spec, any approval comment triggers Done. This test verifies that
+    /// `has_approval` is true when at least one comment passes `detect_approval()`,
+    /// even when other comments are plain feedback.
+    #[test]
+    fn mixed_comments_approval_plus_feedback_triggers_approval() {
+        let comments = vec![
+            test_comment(200, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(201, "alice", "old answer", "2026-01-01T00:00:15Z"),
+            // New comments after cursor (id > 201):
+            test_comment(202, "bob", "Please add error handling.", "2026-01-01T00:00:30Z"),
+            test_comment(203, "alice", "LGTM, ship it!", "2026-01-01T00:00:35Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(201));
+        assert_eq!(new.len(), 2, "should find 2 new non-bot comments");
+
+        let has_approval = new.iter().any(|c| detect_approval(&c.body));
+        assert!(
+            has_approval,
+            "has_approval should be true when any comment passes detect_approval()"
+        );
+    }
+
+    /// All new comments are plain feedback with no approval signals.
+    /// In this case has_approval is false, triggering the revision path.
+    #[test]
+    fn all_feedback_comments_without_approval_triggers_revision() {
+        let comments = vec![
+            test_comment(300, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(301, "alice", "answers", "2026-01-01T00:00:15Z"),
+            // New feedback:
+            test_comment(302, "bob", "Please fix the testing section.", "2026-01-01T00:00:30Z"),
+            test_comment(303, "carol", "Add more acceptance criteria.", "2026-01-01T00:00:35Z"),
+        ];
+
+        let new = find_new_feedback_comments(&comments, "ralph-bot", Some(301));
+        assert_eq!(new.len(), 2);
+
+        let has_approval = new.iter().any(|c| detect_approval(&c.body));
+        assert!(
+            !has_approval,
+            "has_approval should be false when no comment passes detect_approval()"
+        );
     }
 }
