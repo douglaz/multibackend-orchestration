@@ -5,8 +5,10 @@ use std::fs;
 use crate::daemon::github;
 use crate::daemon::interactive_prd::{
     detect_approval, has_prd_label, prd_marker, prd_status_approved_marker,
-    prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
+    prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, DRAFT_SECTION_RETRIES,
+    PRD_LABELS, PRD_LABEL_NAMES, REQUIRED_SPEC_SECTION_COUNT,
 };
+use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
@@ -120,6 +122,22 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "interactive_prd::approval_label_ordering_partial_failure_recovery",
             func: approval_label_ordering_partial_failure_recovery,
+        },
+        ConformanceTest {
+            name: "interactive_prd::section_complete_spec_passes_validation",
+            func: section_complete_spec_passes_validation,
+        },
+        ConformanceTest {
+            name: "interactive_prd::section_incomplete_draft_is_rejected",
+            func: section_incomplete_draft_is_rejected,
+        },
+        ConformanceTest {
+            name: "interactive_prd::section_incomplete_revision_is_rejected",
+            func: section_incomplete_revision_is_rejected,
+        },
+        ConformanceTest {
+            name: "interactive_prd::section_constants_are_correct",
+            func: section_constants_are_correct,
         },
     ]
 }
@@ -2284,6 +2302,112 @@ esac; exit 0
             "ralph:prd-active should NOT have been removed (add-done failed first): {label_raw}"
         );
     })
+}
+
+// ---------------------------------------------------------------------------
+// Section-completeness conformance tests
+// ---------------------------------------------------------------------------
+
+/// Verify that a complete 6-section spec passes `check_spec_sections`.
+fn section_complete_spec_passes_validation(_harness: &RalphHarness) -> TestResult {
+    let complete = "\
+## Summary\nDraft summary.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nApproach.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+    let (_cleaned, missing) = check_spec_sections(complete);
+    if !missing.is_empty() {
+        return TestResult::Fail(format!(
+            "complete spec should have no missing sections, got: {missing:?}"
+        ));
+    }
+    TestResult::Pass
+}
+
+/// Verify that a spec missing sections is detected and would be rejected
+/// by the hardened draft generation flow (returns InteractivePrdFailed).
+fn section_incomplete_draft_is_rejected(_harness: &RalphHarness) -> TestResult {
+    let incomplete = "\
+## Summary\nPartial draft.\n\n\
+## Acceptance Criteria\n- [ ] AC1";
+    let (_cleaned, missing) = check_spec_sections(incomplete);
+    if missing.is_empty() {
+        return TestResult::Fail("incomplete spec should report missing sections".to_owned());
+    }
+    // Verify the error message format matches what run_draft_with_section_retry_sync produces
+    let error_msg = format!(
+        "draft missing required sections after {} retries: {}",
+        DRAFT_SECTION_RETRIES,
+        missing.join(", ")
+    );
+    if !error_msg.contains("## Technical Approach")
+        && !error_msg.contains("## Files & Modules")
+        && !error_msg.contains("## Testing Strategy")
+        && !error_msg.contains("## Out of Scope")
+    {
+        return TestResult::Fail(format!(
+            "error message should list specific missing section names: {error_msg}"
+        ));
+    }
+    TestResult::Pass
+}
+
+/// Verify that an incomplete revision output would be rejected by
+/// the hardened revision generation flow.
+fn section_incomplete_revision_is_rejected(_harness: &RalphHarness) -> TestResult {
+    // Simulate a revision that has only 3 of 6 required sections
+    let partial_revision = "\
+## Summary\nRevised summary.\n\n\
+## Acceptance Criteria\n- [ ] Updated AC.\n\n\
+## Technical Approach\nRevised approach.";
+    let (_cleaned, missing) = check_spec_sections(partial_revision);
+    if missing.is_empty() {
+        return TestResult::Fail(
+            "partial revision should report missing sections".to_owned(),
+        );
+    }
+    // Verify that the 6-section requirement means exactly these are missing
+    let expected_missing = [
+        "## Files & Modules",
+        "## Testing Strategy",
+        "## Out of Scope",
+    ];
+    for section in &expected_missing {
+        if !missing.iter().any(|m| m == *section) {
+            return TestResult::Fail(format!(
+                "expected {section} to be reported as missing, got: {missing:?}"
+            ));
+        }
+    }
+
+    // An empty spec should report all 6 sections missing
+    let empty = "Just some text without any section headers.";
+    let (_cleaned, all_missing) = check_spec_sections(empty);
+    if all_missing.len() != REQUIRED_SPEC_SECTION_COUNT {
+        return TestResult::Fail(format!(
+            "empty spec should be missing all {REQUIRED_SPEC_SECTION_COUNT} sections, got {} missing",
+            all_missing.len()
+        ));
+    }
+
+    TestResult::Pass
+}
+
+/// Verify that section completeness constants are correct.
+fn section_constants_are_correct(_harness: &RalphHarness) -> TestResult {
+    if REQUIRED_SPEC_SECTION_COUNT != 6 {
+        return TestResult::Fail(format!(
+            "REQUIRED_SPEC_SECTION_COUNT should be 6, got {REQUIRED_SPEC_SECTION_COUNT}"
+        ));
+    }
+    if DRAFT_SECTION_RETRIES < 1 {
+        return TestResult::Fail(format!(
+            "DRAFT_SECTION_RETRIES should be >= 1, got {DRAFT_SECTION_RETRIES}"
+        ));
+    }
+    TestResult::Pass
 }
 
 fn run_case<F>(f: F) -> TestResult

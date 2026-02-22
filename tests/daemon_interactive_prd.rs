@@ -2034,19 +2034,116 @@ esac; exit 0
     // ralph:prd-active is still present so the issue remains poll-visible.
 }
 
+/// Resolve the absolute path to the `ralph` binary for integration tests.
+///
+/// Uses a multi-layout strategy that works across Cargo, Nix, and cross-compile
+/// environments:
+/// 1. Compile-time `CARGO_BIN_EXE_ralph` (set by `cargo test` when the `ralph`
+///    binary is a direct dependency of the test harness).
+/// 2. Runtime `CARGO_BIN_EXE_ralph` environment variable.
+/// 3. `RALPH_TEST_BIN` — explicit override for CI / Nix builds.
+/// 4. `CARGO_TARGET_DIR` / `target` relative to `CARGO_MANIFEST_DIR`:
+///    - `{root}/{debug,release}/ralph`
+///    - `{root}/{triple}/{debug,release}/ralph`
+///
+/// Panics with a diagnostic message listing all searched paths if no binary is
+/// found.
 fn ralph_bin_absolute() -> PathBuf {
+    // 1. Compile-time injection (preferred when available)
+    if let Some(p) = option_env!("CARGO_BIN_EXE_ralph") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return pb;
+        }
+    }
+
+    // 2. Runtime env (set by `cargo test` for binary targets)
     if let Ok(p) = std::env::var("CARGO_BIN_EXE_ralph") {
-        return PathBuf::from(p);
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return pb;
+        }
     }
 
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
-    let candidate = PathBuf::from(manifest)
-        .join("target")
-        .join("debug")
-        .join("ralph");
-    if candidate.exists() {
-        return candidate;
+    // 3. Explicit override for Nix / CI
+    if let Ok(p) = std::env::var("RALPH_TEST_BIN") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return pb;
+        }
     }
 
-    panic!("ralph binary not found for integration test");
+    // 4. Probe standard Cargo layouts under target dir
+    let mut searched: Vec<String> = Vec::new();
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
+    let target_root = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(&manifest_dir).join("target"));
+
+    // Profiles to check
+    let profiles = ["debug", "release"];
+
+    // Direct layout: target/{profile}/ralph
+    for profile in &profiles {
+        let candidate = target_root.join(profile).join("ralph");
+        searched.push(candidate.display().to_string());
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Cross-compile layout: target/{triple}/{profile}/ralph
+    // Detect host triple from CARGO_CFG_TARGET_ARCH + friends, or probe common triples
+    let triples: Vec<String> = {
+        let mut ts = Vec::new();
+        // Try to construct from environment
+        if let (Ok(arch), Ok(os)) = (
+            std::env::var("CARGO_CFG_TARGET_ARCH"),
+            std::env::var("CARGO_CFG_TARGET_OS"),
+        ) {
+            let vendor = std::env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_else(|_| "unknown".to_owned());
+            let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+            if env.is_empty() {
+                ts.push(format!("{arch}-{vendor}-{os}"));
+            } else {
+                ts.push(format!("{arch}-{vendor}-{os}-{env}"));
+            }
+        }
+        // Also try the TARGET env var set by some build systems
+        if let Ok(t) = std::env::var("TARGET") {
+            if !ts.contains(&t) {
+                ts.push(t);
+            }
+        }
+        // Common Linux triples as fallback
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+        ] {
+            if !ts.contains(&triple.to_owned()) {
+                ts.push(triple.to_owned());
+            }
+        }
+        ts
+    };
+
+    for triple in &triples {
+        for profile in &profiles {
+            let candidate = target_root.join(triple).join(profile).join("ralph");
+            searched.push(candidate.display().to_string());
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    panic!(
+        "ralph binary not found for integration test.\n\
+         Searched paths:\n  {}\n\n\
+         Set RALPH_TEST_BIN or CARGO_BIN_EXE_ralph to the absolute path of the ralph binary.",
+        searched.join("\n  ")
+    );
 }

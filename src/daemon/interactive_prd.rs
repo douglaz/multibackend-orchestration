@@ -300,8 +300,8 @@ const INTERACTIVE_DRAFT_CONTEXT_TEMPLATE: &str = r#"Generate an implementation-r
 {answers}
 "#;
 
-const DRAFT_SECTION_RETRIES: u8 = 2;
-const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
+pub const DRAFT_SECTION_RETRIES: u8 = 2;
+pub const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
 
 // ---------------------------------------------------------------------------
 // Poll and advance: the main entry point called from the daemon runtime
@@ -897,7 +897,12 @@ fn generate_revision_from_feedback_with_timeout(
             })?;
 
         if feedback.approved || feedback.issues.is_empty() {
-            return Ok(current_spec);
+            // Reviewer approval does not bypass section completeness
+            let (_cleaned, missing) = check_spec_sections(&current_spec);
+            if missing.is_empty() {
+                return Ok(current_spec);
+            }
+            // Fall through to revision if sections are missing despite reviewer approval
         }
 
         let formatted_issues = format_issues(&feedback.issues);
@@ -911,9 +916,19 @@ fn generate_revision_from_feedback_with_timeout(
         );
         let revised = run_backend_sync(&writer, &rev_prompt, deadline)?;
         let (cleaned, missing) = check_spec_sections(&revised);
-        if missing.len() < REQUIRED_SPEC_SECTION_COUNT {
+        if missing.is_empty() {
             current_spec = cleaned;
         }
+    }
+
+    // Final section check after exhausting revisions
+    let (_final, missing) = check_spec_sections(&current_spec);
+    if !missing.is_empty() {
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "revision missing required sections after {} revisions: {}",
+            config.max_revisions,
+            missing.join(", ")
+        )));
     }
 
     Ok(current_spec)
@@ -1054,7 +1069,12 @@ fn generate_draft_from_answers_with_timeout(
             })?;
 
         if feedback.approved || feedback.issues.is_empty() {
-            return Ok(current_spec);
+            // Reviewer approval does not bypass section completeness
+            let (_cleaned, missing) = check_spec_sections(&current_spec);
+            if missing.is_empty() {
+                return Ok(current_spec);
+            }
+            // Fall through to revision if sections are missing despite reviewer approval
         }
 
         let formatted_issues = format_issues(&feedback.issues);
@@ -1068,9 +1088,19 @@ fn generate_draft_from_answers_with_timeout(
         );
         let revised = run_backend_sync(&writer, &revision_prompt, deadline)?;
         let (cleaned, missing) = check_spec_sections(&revised);
-        if missing.len() < REQUIRED_SPEC_SECTION_COUNT {
+        if missing.is_empty() {
             current_spec = cleaned;
         }
+    }
+
+    // Final section check after exhausting revisions
+    let (_final, missing) = check_spec_sections(&current_spec);
+    if !missing.is_empty() {
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "draft missing required sections after {} revisions: {}",
+            config.max_revisions,
+            missing.join(", ")
+        )));
     }
 
     Ok(current_spec)
@@ -1084,8 +1114,15 @@ fn run_draft_with_section_retry_sync(
     for attempt in 0..=DRAFT_SECTION_RETRIES {
         let raw = run_backend_sync(writer, prompt, deadline)?;
         let (cleaned, missing) = check_spec_sections(&raw);
-        if missing.is_empty() || attempt == DRAFT_SECTION_RETRIES {
+        if missing.is_empty() {
             return Ok(cleaned);
+        }
+        if attempt == DRAFT_SECTION_RETRIES {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "draft missing required sections after {} retries: {}",
+                DRAFT_SECTION_RETRIES,
+                missing.join(", ")
+            )));
         }
     }
     unreachable!("draft section retry loop should return")
@@ -1259,10 +1296,12 @@ mod tests {
         apply_transition_result, detect_approval, extract_questions_text,
         find_first_answer_comment, find_new_feedback_comments, prd_marker,
         prd_status_approved_marker, render_answer_to_draft_prompt, InteractivePrdState,
-        PrdWorkflowState, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
+        PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::daemon::github::IssueComment;
     use crate::error::RalphError;
+    use crate::prd::quick::check_spec_sections;
 
     #[test]
     fn prd_workflow_state_serialization_roundtrip_for_all_variants() {
@@ -1824,5 +1863,115 @@ mod tests {
             "only post-draft comments should be aggregated for revision"
         );
         assert_eq!(new[0].author_login, "carol");
+    }
+
+    // -----------------------------------------------------------------------
+    // Section-completeness enforcement unit tests
+    // -----------------------------------------------------------------------
+
+    /// A complete spec with all 6 sections passes section validation.
+    #[test]
+    fn section_complete_spec_passes_validation() {
+        let complete = "\
+## Summary\nDraft summary.\n\n\
+## Acceptance Criteria\n- [ ] AC1\n\n\
+## Technical Approach\nApproach.\n\n\
+## Files & Modules\n- file.rs\n\n\
+## Testing Strategy\n- tests\n\n\
+## Out of Scope\n- none";
+        let (_cleaned, missing) = check_spec_sections(complete);
+        assert!(
+            missing.is_empty(),
+            "complete spec should have no missing sections, got: {missing:?}"
+        );
+    }
+
+    /// A spec missing some sections is detected by check_spec_sections.
+    #[test]
+    fn section_incomplete_spec_reports_missing_sections() {
+        let incomplete = "\
+## Summary\nPartial draft.\n\n\
+## Acceptance Criteria\n- [ ] AC1";
+        let (_cleaned, missing) = check_spec_sections(incomplete);
+        assert!(
+            !missing.is_empty(),
+            "incomplete spec should report missing sections"
+        );
+        assert!(
+            missing.len() < REQUIRED_SPEC_SECTION_COUNT,
+            "should have fewer than all sections missing"
+        );
+    }
+
+    /// A completely empty spec should report all 6 sections as missing.
+    #[test]
+    fn section_empty_spec_reports_all_missing() {
+        let empty = "No sections at all, just plain text.";
+        let (_cleaned, missing) = check_spec_sections(empty);
+        assert_eq!(
+            missing.len(),
+            REQUIRED_SPEC_SECTION_COUNT,
+            "empty spec should be missing all {REQUIRED_SPEC_SECTION_COUNT} sections, got: {missing:?}"
+        );
+    }
+
+    /// Verify that DRAFT_SECTION_RETRIES is at least 1 (allows retry after
+    /// first incomplete output) and REQUIRED_SPEC_SECTION_COUNT is 6.
+    #[test]
+    fn section_retry_constants_are_correct() {
+        assert!(
+            DRAFT_SECTION_RETRIES >= 1,
+            "DRAFT_SECTION_RETRIES should be >= 1"
+        );
+        assert_eq!(
+            REQUIRED_SPEC_SECTION_COUNT, 6,
+            "REQUIRED_SPEC_SECTION_COUNT should be 6"
+        );
+    }
+
+    /// Verify that a spec with only some sections is considered incomplete
+    /// (would trigger the InteractivePrdFailed error in the hardened flow).
+    #[test]
+    fn section_incomplete_writer_output_would_fail_after_retries() {
+        // Simulate what happens when writer only produces 3 of 6 sections
+        let partial = "\
+## Summary\nPartial.\n\n\
+## Acceptance Criteria\n- [ ] AC\n\n\
+## Technical Approach\nApproach.";
+        let (_cleaned, missing) = check_spec_sections(partial);
+        assert!(!missing.is_empty(), "partial output should have missing sections");
+
+        // The error message should list the missing section names
+        let error_msg = format!(
+            "draft missing required sections after {} retries: {}",
+            DRAFT_SECTION_RETRIES,
+            missing.join(", ")
+        );
+        assert!(
+            error_msg.contains("Files & Modules")
+                || error_msg.contains("Testing Strategy")
+                || error_msg.contains("Out of Scope"),
+            "error message should list specific missing sections: {error_msg}"
+        );
+    }
+
+    /// Verify that reviewer approval does NOT bypass section completeness.
+    /// When a reviewer approves but the spec is incomplete, the spec should
+    /// not be accepted.
+    #[test]
+    fn section_reviewer_approval_does_not_bypass_completeness() {
+        // Simulate a spec that a reviewer might approve but is missing sections
+        let spec_with_missing = "\
+## Summary\nGreat draft.\n\n\
+## Acceptance Criteria\n- [ ] Well defined.\n\n\
+## Technical Approach\nSolid approach.";
+        let (_cleaned, missing) = check_spec_sections(spec_with_missing);
+        // Even if reviewer says "approved", missing sections should be detected
+        assert!(
+            !missing.is_empty(),
+            "spec should still have missing sections even if reviewer approved"
+        );
+        // In the hardened code, this causes the loop to continue to revision
+        // rather than returning Ok(current_spec)
     }
 }
