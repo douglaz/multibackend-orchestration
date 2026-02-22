@@ -774,8 +774,8 @@ exit 1
             .filter(|line| !line.trim().is_empty())
             .collect();
         // 4 standard labels + 5 PRD labels = 9 total
-        let total_labels = github::REQUIRED_LABELS.len()
-            + crate::daemon::interactive_prd::PRD_LABELS.len();
+        let total_labels =
+            github::REQUIRED_LABELS.len() + crate::daemon::interactive_prd::PRD_LABELS.len();
         assert_eq!(
             lines.len(),
             total_labels,
@@ -869,11 +869,10 @@ exit 1
             .filter(|line| !line.trim().is_empty())
             .count();
         // 4 standard labels + 5 PRD labels = 9 total
-        let total_labels = github::REQUIRED_LABELS.len()
-            + crate::daemon::interactive_prd::PRD_LABELS.len();
+        let total_labels =
+            github::REQUIRED_LABELS.len() + crate::daemon::interactive_prd::PRD_LABELS.len();
         assert_eq!(
-            call_count,
-            total_labels,
+            call_count, total_labels,
             "expected startup to attempt all lifecycle labels (standard + PRD)"
         );
     })
@@ -956,11 +955,10 @@ exit 1
             .filter(|line| !line.trim().is_empty())
             .count();
         // 4 standard labels + 5 PRD labels = 9 total
-        let total_labels = github::REQUIRED_LABELS.len()
-            + crate::daemon::interactive_prd::PRD_LABELS.len();
+        let total_labels =
+            github::REQUIRED_LABELS.len() + crate::daemon::interactive_prd::PRD_LABELS.len();
         assert_eq!(
-            call_count,
-            total_labels,
+            call_count, total_labels,
             "expected startup to attempt all lifecycle labels (standard + PRD)"
         );
     })

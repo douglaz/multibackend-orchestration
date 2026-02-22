@@ -7,6 +7,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +18,10 @@ use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
 use crate::config::GlobalConfig;
 use crate::daemon::github::{self, GhIssue};
 use crate::error::RalphError;
+use crate::prd::quick::{
+    check_spec_sections, format_issues, render_prompt, run_review_with_retry, DRAFT_PROMPT,
+    REVIEW_PROMPT, REVISION_PROMPT,
+};
 use crate::Result;
 
 /// PRD workflow states persisted for daemon restart-safety.
@@ -283,6 +288,21 @@ Rules:
 {questions_b}
 "#;
 
+const INTERACTIVE_DRAFT_CONTEXT_TEMPLATE: &str = r#"Generate an implementation-ready engineering specification from the following interactive issue context.
+
+## Original Issue
+{issue}
+
+## Clarifying Questions Asked
+{questions}
+
+## User Answers
+{answers}
+"#;
+
+const DRAFT_SECTION_RETRIES: u8 = 2;
+const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
+
 // ---------------------------------------------------------------------------
 // Poll and advance: the main entry point called from the daemon runtime
 // ---------------------------------------------------------------------------
@@ -297,6 +317,7 @@ Rules:
 /// by deduplicating issue numbers across both poll passes.
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     let mut processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut bot_login_cache: Option<String> = None;
 
     let labels = vec!["ralph:prd".to_owned()];
     let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
@@ -305,7 +326,7 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
         if !processed.insert(issue.number) {
             continue;
         }
-        if let Err(err) = advance_issue(config, issue) {
+        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
             eprintln!(
                 "prd: failed to advance {}/{}#{}: {err}",
                 config.owner, config.repo, issue.number
@@ -315,14 +336,13 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
 
     // Also process issues that are in prd-active state (already picked up).
     let active_labels = vec!["ralph:prd-active".to_owned()];
-    let (active_issues, _) =
-        github::poll_issues(&config.owner, &config.repo, &active_labels)?;
+    let (active_issues, _) = github::poll_issues(&config.owner, &config.repo, &active_labels)?;
 
     for issue in &active_issues {
         if !processed.insert(issue.number) {
             continue; // already advanced in the ralph:prd pass
         }
-        if let Err(err) = advance_issue(config, issue) {
+        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
             eprintln!(
                 "prd: failed to advance active {}/{}#{}: {err}",
                 config.owner, config.repo, issue.number
@@ -334,16 +354,14 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
 }
 
 /// Advance a single issue by at most one state transition.
-fn advance_issue(config: &PrdPollConfig, issue: &GhIssue) -> Result<()> {
-    let mut state = InteractivePrdState::load(
-        &config.data_dir,
-        &config.owner,
-        &config.repo,
-        issue.number,
-    )?
-    .unwrap_or_else(|| {
-        InteractivePrdState::new(&config.owner, &config.repo, issue.number)
-    });
+fn advance_issue(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    bot_login_cache: &mut Option<String>,
+) -> Result<()> {
+    let mut state =
+        InteractivePrdState::load(&config.data_dir, &config.owner, &config.repo, issue.number)?
+            .unwrap_or_else(|| InteractivePrdState::new(&config.owner, &config.repo, issue.number));
 
     if state.is_terminal() {
         return Ok(());
@@ -353,10 +371,11 @@ fn advance_issue(config: &PrdPollConfig, issue: &GhIssue) -> Result<()> {
         PrdWorkflowState::Pending => {
             transition_pending_to_awaiting_answers(config, issue, &mut state)
         }
-        // Future transitions (AwaitingAnswers, AwaitingFeedback) will be
-        // implemented in subsequent loops.
-        PrdWorkflowState::AwaitingAnswers
-        | PrdWorkflowState::AwaitingFeedback => Ok(()),
+        PrdWorkflowState::AwaitingAnswers => {
+            let bot_login = get_or_fetch_bot_login(bot_login_cache)?;
+            transition_awaiting_answers_to_awaiting_feedback(config, issue, &mut state, &bot_login)
+        }
+        PrdWorkflowState::AwaitingFeedback => Ok(()),
         PrdWorkflowState::Done | PrdWorkflowState::Failed => Ok(()),
     }
 }
@@ -381,35 +400,11 @@ fn transition_pending_to_awaiting_answers(
     let repo = &config.repo;
 
     if config.verbose {
-        eprintln!(
-            "prd: transition Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}"
-        );
+        eprintln!("prd: transition Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
     }
 
     let result = do_pending_to_awaiting(config, issue, state);
-
-    match result {
-        Ok(()) => {
-            state.error_count = 0;
-            state.last_error = None;
-            state.save(&config.data_dir)?;
-            Ok(())
-        }
-        Err(err) => {
-            state.error_count += 1;
-            state.last_error = Some(err.to_string());
-
-            if state.error_count >= 3 {
-                // Transition to Failed
-                transition_to_failed(config, state)?;
-            } else {
-                // Persist incremented error_count for retry next tick
-                state.save(&config.data_dir)?;
-            }
-
-            Err(err)
-        }
-    }
+    finish_transition(config, state, result)
 }
 
 fn do_pending_to_awaiting(
@@ -429,12 +424,13 @@ fn do_pending_to_awaiting(
     let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
 
     if !has_active {
-        github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active")
-            .map_err(|err| {
+        github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
+            |err| {
                 RalphError::InteractivePrdFailed(format!(
                     "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
                 ))
-            })?;
+            },
+        )?;
     }
     if has_prd {
         let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
@@ -484,13 +480,327 @@ fn do_pending_to_awaiting(
     Ok(())
 }
 
+fn get_or_fetch_bot_login(bot_login_cache: &mut Option<String>) -> Result<String> {
+    if let Some(login) = bot_login_cache.clone() {
+        return Ok(login);
+    }
+
+    let login = github::fetch_authenticated_login().map_err(|err| {
+        RalphError::InteractivePrdFailed(format!("failed to resolve authenticated gh login: {err}"))
+    })?;
+    *bot_login_cache = Some(login.clone());
+    Ok(login)
+}
+
+/// Execute the AwaitingAnswers -> AwaitingFeedback transition:
+/// 1. Find the first unprocessed non-bot answer comment after questions_posted_at.
+/// 2. Generate a draft engineering spec from issue + questions + answers.
+/// 3. Post draft comment idempotently with draft marker.
+/// 4. Persist updated state fields and move to AwaitingFeedback.
+fn transition_awaiting_answers_to_awaiting_feedback(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+    bot_login: &str,
+) -> Result<()> {
+    let issue_number = issue.number;
+    if config.verbose {
+        eprintln!(
+            "prd: transition AwaitingAnswers->AwaitingFeedback for {}/{}#{issue_number}",
+            config.owner, config.repo
+        );
+    }
+
+    let result = do_awaiting_answers_to_awaiting_feedback(config, issue, state, bot_login);
+    finish_transition(config, state, result)
+}
+
+fn do_awaiting_answers_to_awaiting_feedback(
+    config: &PrdPollConfig,
+    issue: &GhIssue,
+    state: &mut InteractivePrdState,
+    bot_login: &str,
+) -> Result<()> {
+    let issue_number = issue.number;
+    let owner = &config.owner;
+    let repo = &config.repo;
+
+    let questions_posted_at = state.questions_posted_at.ok_or_else(|| {
+        RalphError::InteractivePrdFailed(format!(
+            "missing questions_posted_at for {owner}/{repo}#{issue_number}"
+        ))
+    })?;
+
+    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
+
+    let Some(answer_comment) = find_first_answer_comment(
+        &comments,
+        questions_posted_at,
+        bot_login,
+        state.last_processed_comment_id,
+    ) else {
+        // No user answers yet; remain AwaitingAnswers with no state mutation.
+        return Ok(());
+    };
+
+    let user_answers = answer_comment.body.trim().to_owned();
+    let questions_text = extract_questions_text(
+        &comments,
+        state.questions_comment_id,
+        issue_number,
+        state.question_revision,
+    );
+
+    let issue_text = format!(
+        "{}\n\n{}",
+        issue.title,
+        issue.body.as_deref().unwrap_or_default()
+    );
+
+    let draft_spec = generate_draft_from_answers_with_timeout(
+        config,
+        &issue_text,
+        &questions_text,
+        &user_answers,
+    )?;
+
+    let next_revision = state.draft_revision + 1;
+    let marker = prd_marker(issue_number, "draft", next_revision);
+    let draft_comment_body = format!(
+        "## Draft Engineering Specification (Revision {next_revision})\n\n{draft_spec}\n\n\
+         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
+    );
+    let comment_id =
+        github::post_comment_with_marker(owner, repo, issue_number, &marker, &draft_comment_body)
+            .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to post draft comment for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
+
+    state.state = PrdWorkflowState::AwaitingFeedback;
+    state.draft_revision = next_revision;
+    state.latest_draft_comment_id = comment_id;
+    state.latest_draft_body = Some(draft_spec);
+    state.user_answers = Some(user_answers);
+    state.last_processed_comment_id = Some(answer_comment.id);
+    state.last_advanced_at = Some(Utc::now());
+
+    Ok(())
+}
+
+fn finish_transition(
+    config: &PrdPollConfig,
+    state: &mut InteractivePrdState,
+    result: Result<()>,
+) -> Result<()> {
+    let should_fail = apply_transition_result(state, &result);
+
+    if should_fail {
+        transition_to_failed(config, state)?;
+    } else {
+        state.save(&config.data_dir)?;
+    }
+
+    result
+}
+
+fn apply_transition_result(state: &mut InteractivePrdState, result: &Result<()>) -> bool {
+    match result {
+        Ok(()) => {
+            state.error_count = 0;
+            state.last_error = None;
+            false
+        }
+        Err(err) => {
+            state.error_count += 1;
+            state.last_error = Some(err.to_string());
+            state.error_count >= 3
+        }
+    }
+}
+
+fn find_first_answer_comment<'a>(
+    comments: &'a [github::IssueComment],
+    questions_posted_at: DateTime<Utc>,
+    bot_login: &str,
+    last_processed_comment_id: Option<u64>,
+) -> Option<&'a github::IssueComment> {
+    comments.iter().find(|comment| {
+        if comment.author_login == bot_login {
+            return false;
+        }
+        if comment.created_at <= questions_posted_at {
+            return false;
+        }
+        if let Some(last) = last_processed_comment_id {
+            if comment.id <= last {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+fn extract_questions_text(
+    comments: &[github::IssueComment],
+    questions_comment_id: Option<u64>,
+    issue_number: u32,
+    question_revision: u32,
+) -> String {
+    if let Some(id) = questions_comment_id {
+        if let Some(comment) = comments.iter().find(|comment| comment.id == id) {
+            return strip_prd_marker_lines(&comment.body);
+        }
+    }
+
+    if question_revision > 0 {
+        let marker = prd_marker(issue_number, "questions", question_revision);
+        if let Some(comment) = comments
+            .iter()
+            .find(|comment| comment.body.contains(&marker))
+        {
+            return strip_prd_marker_lines(&comment.body);
+        }
+    }
+
+    "(questions unavailable)".to_owned()
+}
+
+fn strip_prd_marker_lines(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("<!-- ralph:prd:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn render_answer_to_draft_prompt(
+    issue_text: &str,
+    questions_text: &str,
+    user_answers: &str,
+) -> String {
+    let idea = INTERACTIVE_DRAFT_CONTEXT_TEMPLATE
+        .replace("{issue}", issue_text)
+        .replace("{questions}", questions_text)
+        .replace("{answers}", user_answers);
+    render_prompt(DRAFT_PROMPT, &[("{{idea}}", &idea)])
+}
+
+fn generate_draft_from_answers_with_timeout(
+    config: &PrdPollConfig,
+    issue_text: &str,
+    questions_text: &str,
+    user_answers: &str,
+) -> Result<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
+    let writer = create_backend(&config.writer_backend, &config.global_config)?;
+    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+
+    let idea_context = INTERACTIVE_DRAFT_CONTEXT_TEMPLATE
+        .replace("{issue}", issue_text)
+        .replace("{questions}", questions_text)
+        .replace("{answers}", user_answers);
+    let draft_prompt = render_answer_to_draft_prompt(issue_text, questions_text, user_answers);
+
+    let mut current_spec = run_draft_with_section_retry_sync(&writer, &draft_prompt, deadline)?;
+
+    for _iteration in 1..=config.max_revisions {
+        let review_prompt = render_prompt(
+            REVIEW_PROMPT,
+            &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
+        );
+        let feedback =
+            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "review/retry failed while generating draft: {err}"
+                ))
+            })?;
+
+        if feedback.approved || feedback.issues.is_empty() {
+            return Ok(current_spec);
+        }
+
+        let formatted_issues = format_issues(&feedback.issues);
+        let revision_prompt = render_prompt(
+            REVISION_PROMPT,
+            &[
+                ("{{idea}}", &idea_context),
+                ("{{spec}}", &current_spec),
+                ("{{issues}}", &formatted_issues),
+            ],
+        );
+        let revised = run_backend_sync(&writer, &revision_prompt, deadline)?;
+        let (cleaned, missing) = check_spec_sections(&revised);
+        if missing.len() < REQUIRED_SPEC_SECTION_COUNT {
+            current_spec = cleaned;
+        }
+    }
+
+    Ok(current_spec)
+}
+
+fn run_draft_with_section_retry_sync(
+    writer: &CliBackend,
+    prompt: &str,
+    deadline: std::time::Instant,
+) -> Result<String> {
+    for attempt in 0..=DRAFT_SECTION_RETRIES {
+        let raw = run_backend_sync(writer, prompt, deadline)?;
+        let (cleaned, missing) = check_spec_sections(&raw);
+        if missing.is_empty() || attempt == DRAFT_SECTION_RETRIES {
+            return Ok(cleaned);
+        }
+    }
+    unreachable!("draft section retry loop should return")
+}
+
+fn run_review_with_retry_sync(
+    reviewer: &CliBackend,
+    prompt: String,
+    deadline: std::time::Instant,
+) -> Result<crate::prd::quick::ReviewFeedback> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .unwrap_or(Duration::ZERO);
+    if remaining.is_zero() {
+        return Err(RalphError::InteractivePrdFailed(
+            "PRD backend timeout exceeded".to_owned(),
+        ));
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
+        })?;
+
+    let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
+    let result = rt.block_on(async {
+        tokio::time::timeout(remaining, run_review_with_retry(backend, prompt)).await
+    });
+
+    match result {
+        Ok(Ok(feedback)) => Ok(feedback),
+        Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
+            "review execution failed: {err}"
+        ))),
+        Err(_) => Err(RalphError::InteractivePrdFailed(
+            "PRD backend timeout exceeded".to_owned(),
+        )),
+    }
+}
+
 /// Generate clarifying questions using two configured backends plus synthesis.
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
-fn generate_questions_with_timeout(
-    config: &PrdPollConfig,
-    issue_text: &str,
-) -> Result<String> {
+fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -552,9 +862,8 @@ fn run_backend_sync(
             RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
         })?;
 
-    let result = rt.block_on(async {
-        tokio::time::timeout(remaining, backend.execute(prompt)).await
-    });
+    let result =
+        rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await });
 
     match result {
         Ok(Ok(output)) => Ok(output),
@@ -616,9 +925,12 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        detect_approval, prd_marker, InteractivePrdState, PrdWorkflowState, PRD_LABELS,
-        PRD_LIFECYCLE_LABELS,
+        apply_transition_result, detect_approval, extract_questions_text,
+        find_first_answer_comment, prd_marker, render_answer_to_draft_prompt, InteractivePrdState,
+        PrdWorkflowState, PRD_LABELS, PRD_LIFECYCLE_LABELS,
     };
+    use crate::daemon::github::IssueComment;
+    use crate::error::RalphError;
 
     #[test]
     fn prd_workflow_state_serialization_roundtrip_for_all_variants() {
@@ -739,5 +1051,122 @@ mod tests {
     fn prd_labels_alias_matches_lifecycle_labels() {
         assert_eq!(PRD_LABELS, PRD_LIFECYCLE_LABELS);
         assert_eq!(PRD_LABELS.len(), 5);
+    }
+
+    #[test]
+    fn answer_comment_detection_skips_bot_and_selects_first_valid_user_comment() {
+        let comments = vec![
+            test_comment(10, "ralph-bot", "bot question", "2026-01-01T00:00:10Z"),
+            test_comment(11, "alice", "before question", "2025-12-31T23:59:59Z"),
+            test_comment(12, "bob", "first answer", "2026-01-01T00:00:20Z"),
+            test_comment(13, "carol", "later answer", "2026-01-01T00:00:30Z"),
+        ];
+
+        let found =
+            find_first_answer_comment(&comments, ts("2026-01-01T00:00:15Z"), "ralph-bot", None)
+                .expect("should find answer");
+
+        assert_eq!(found.id, 12);
+        assert_eq!(found.author_login, "bob");
+    }
+
+    #[test]
+    fn answer_comment_detection_returns_none_when_no_qualifying_comment() {
+        let comments = vec![
+            test_comment(1, "ralph-bot", "bot response", "2026-01-01T00:00:20Z"),
+            test_comment(2, "alice", "old answer", "2026-01-01T00:00:05Z"),
+        ];
+
+        let found =
+            find_first_answer_comment(&comments, ts("2026-01-01T00:00:10Z"), "ralph-bot", None);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn answer_comment_detection_respects_last_processed_comment_id() {
+        let comments = vec![
+            test_comment(20, "alice", "first", "2026-01-01T00:00:20Z"),
+            test_comment(21, "bob", "second", "2026-01-01T00:00:30Z"),
+        ];
+
+        let found =
+            find_first_answer_comment(&comments, ts("2026-01-01T00:00:10Z"), "ralph-bot", Some(20))
+                .expect("should find unprocessed answer");
+        assert_eq!(found.id, 21);
+    }
+
+    #[test]
+    fn extract_questions_text_prefers_comment_id_and_strips_marker() {
+        let comments = vec![
+            test_comment(
+                100,
+                "ralph-bot",
+                "<!-- ralph:prd:7:questions-v1 -->\n## Clarifying Questions\n1. Q1",
+                "2026-01-01T00:00:10Z",
+            ),
+            test_comment(101, "alice", "answer", "2026-01-01T00:00:20Z"),
+        ];
+
+        let extracted = extract_questions_text(&comments, Some(100), 7, 1);
+        assert!(!extracted.contains("<!-- ralph:prd:"));
+        assert!(extracted.contains("Clarifying Questions"));
+        assert!(extracted.contains("1. Q1"));
+    }
+
+    #[test]
+    fn draft_prompt_contains_issue_questions_and_answers() {
+        let prompt = render_answer_to_draft_prompt(
+            "Issue title\nIssue body",
+            "1. What is the API?",
+            "Use REST endpoints.",
+        );
+        assert!(prompt.contains("Issue title"));
+        assert!(prompt.contains("What is the API"));
+        assert!(prompt.contains("Use REST endpoints."));
+        assert!(prompt.contains("## Summary"));
+    }
+
+    #[test]
+    fn transition_error_accumulation_triggers_failure_on_third_error() {
+        let mut state = InteractivePrdState::new("acme", "widgets", 42);
+
+        let err = Err(RalphError::InteractivePrdFailed("boom".to_owned()));
+        assert!(!apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 1);
+        assert!(!apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 2);
+        assert!(apply_transition_result(&mut state, &err));
+        assert_eq!(state.error_count, 3);
+        assert!(state
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("interactive PRD failed: boom"));
+    }
+
+    #[test]
+    fn successful_transition_result_clears_previous_error_state() {
+        let mut state = InteractivePrdState::new("acme", "widgets", 42);
+        state.error_count = 2;
+        state.last_error = Some("previous".to_owned());
+        let ok: crate::Result<()> = Ok(());
+        assert!(!apply_transition_result(&mut state, &ok));
+        assert_eq!(state.error_count, 0);
+        assert!(state.last_error.is_none());
+    }
+
+    fn ts(raw: &str) -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .expect("timestamp should parse")
+            .with_timezone(&Utc)
+    }
+
+    fn test_comment(id: u64, author: &str, body: &str, created_at: &str) -> IssueComment {
+        IssueComment {
+            id,
+            author_login: author.to_owned(),
+            body: body.to_owned(),
+            created_at: ts(created_at),
+        }
     }
 }

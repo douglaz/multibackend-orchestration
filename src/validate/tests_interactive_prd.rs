@@ -65,6 +65,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::pickup_and_question_posting",
             func: pickup_and_question_posting,
         },
+        ConformanceTest {
+            name: "interactive_prd::answer_to_draft",
+            func: answer_to_draft,
+        },
     ]
 }
 
@@ -95,10 +99,7 @@ fn state_serialization_roundtrip(_harness: &RalphHarness) -> TestResult {
 
 fn prd_labels_are_complete(_harness: &RalphHarness) -> TestResult {
     if PRD_LABELS.len() != 5 {
-        return TestResult::Fail(format!(
-            "expected 5 PRD labels, got {}",
-            PRD_LABELS.len()
-        ));
+        return TestResult::Fail(format!("expected 5 PRD labels, got {}", PRD_LABELS.len()));
     }
 
     let expected = [
@@ -121,9 +122,7 @@ fn prd_label_detection_filters_correctly(_harness: &RalphHarness) -> TestResult 
     // All PRD labels should be detected
     for &label_name in PRD_LABEL_NAMES {
         if !has_prd_label(&[label_name.to_owned()]) {
-            return TestResult::Fail(format!(
-                "has_prd_label should return true for {label_name}"
-            ));
+            return TestResult::Fail(format!("has_prd_label should return true for {label_name}"));
         }
     }
 
@@ -198,7 +197,10 @@ fn state_persistence_survives_restart(harness: &RalphHarness) -> TestResult {
     match InteractivePrdState::load(data_dir, "acme", "widgets", 42) {
         Ok(Some(loaded)) => {
             if loaded.state != PrdWorkflowState::AwaitingAnswers {
-                return TestResult::Fail(format!("expected AwaitingAnswers, got {:?}", loaded.state));
+                return TestResult::Fail(format!(
+                    "expected AwaitingAnswers, got {:?}",
+                    loaded.state
+                ));
             }
             if loaded.question_revision != 1 {
                 return TestResult::Fail(format!(
@@ -236,7 +238,10 @@ fn failed_state_persists_error_info(harness: &RalphHarness) -> TestResult {
                 return TestResult::Fail(format!("expected Failed, got {:?}", loaded.state));
             }
             if loaded.error_count != 3 {
-                return TestResult::Fail(format!("expected error_count=3, got {}", loaded.error_count));
+                return TestResult::Fail(format!(
+                    "expected error_count=3, got {}",
+                    loaded.error_count
+                ));
             }
             if loaded.last_error.as_deref() != Some("backend timeout after 120s") {
                 return TestResult::Fail("last_error mismatch".to_owned());
@@ -442,7 +447,8 @@ fn prd_ready_conflict_in_claim_path(h: &RalphHarness) -> TestResult {
         // Issue has both ralph:ready and ralph:prd — should be skipped by claim path
         let issues = r#"[{"number":50,"title":"prd conflict issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd"}],"body":"test"}]"#;
 
-        let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_script()).expect("write mock gh");
+        let gh_path =
+            write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_script()).expect("write mock gh");
         let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
@@ -511,7 +517,9 @@ fn idempotent_state_reprocessing(harness: &RalphHarness) -> TestResult {
     };
 
     if loaded1 != loaded2 {
-        return TestResult::Fail("state should be identical after save/load/save/load cycle".to_owned());
+        return TestResult::Fail(
+            "state should be identical after save/load/save/load cycle".to_owned(),
+        );
     }
 
     // Verify key fields survived
@@ -688,10 +696,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
-                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -729,25 +734,17 @@ exit 0
             .join(".ralph")
             .join("interactive-prd")
             .join("10.json");
-        let state_raw = fs::read_to_string(&state_path).unwrap_or_else(|e| {
-            panic!(
-                "state file should exist at {}: {e}",
-                state_path.display()
-            )
-        });
-        let state: InteractivePrdState = serde_json::from_str(&state_raw).unwrap_or_else(|e| {
-            panic!("state should be valid JSON: {e}\n{state_raw}")
-        });
+        let state_raw = fs::read_to_string(&state_path)
+            .unwrap_or_else(|e| panic!("state file should exist at {}: {e}", state_path.display()));
+        let state: InteractivePrdState = serde_json::from_str(&state_raw)
+            .unwrap_or_else(|e| panic!("state should be valid JSON: {e}\n{state_raw}"));
         assert_eq!(
             state.state,
             PrdWorkflowState::AwaitingAnswers,
             "state should be AwaitingAnswers after pickup, got: {:?}",
             state.state
         );
-        assert_eq!(
-            state.question_revision, 1,
-            "question_revision should be 1"
-        );
+        assert_eq!(state.question_revision, 1, "question_revision should be 1");
         assert!(
             state.questions_posted_at.is_some(),
             "questions_posted_at should be set"
@@ -757,6 +754,242 @@ exit 0
             "last_advanced_at should be set"
         );
         assert_eq!(state.error_count, 0, "error_count should be 0");
+    })
+}
+
+/// Verify AwaitingAnswers -> AwaitingFeedback transition:
+/// 1. Detects first non-bot answer comment after questions_posted_at
+/// 2. Generates a draft via writer/reviewer mock backends
+/// 3. Posts `draft-v1` marker comment idempotently
+/// 4. Persists AwaitingFeedback state fields
+fn answer_to_draft(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let backend_script = dh
+            .write_mock_script(
+                "prd_draft_backend.sh",
+                r#"#!/bin/sh
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "reviewing an engineering specification"; then
+  cat <<'EOF'
+```json
+{"approved": true, "issues": []}
+```
+EOF
+  exit 0
+fi
+
+cat <<'EOF'
+## Summary
+Generated from interactive answers.
+
+## Acceptance Criteria
+- [ ] Draft posted to issue.
+
+## Technical Approach
+Use the daemon transition and quick-prd review loop.
+
+## Files & Modules
+- src/daemon/interactive_prd.rs
+
+## Testing Strategy
+- conformance test coverage
+
+## Out of Scope
+- webhooks
+EOF
+"#,
+            )
+            .expect("write backend script");
+        dh.setup_mock_backends_stable(&backend_script)
+            .expect("setup mock backends");
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme")
+            .join("widgets")
+            .join(".ralph")
+            .join("interactive-prd")
+            .join("22.json");
+        fs::create_dir_all(state_path.parent().expect("state path parent should exist"))
+            .expect("create state dir");
+        let seeded = serde_json::json!({
+            "issue_number": 22,
+            "owner": "acme",
+            "repo": "widgets",
+            "state": "AwaitingAnswers",
+            "question_revision": 1,
+            "draft_revision": 0,
+            "questions_comment_id": 320,
+            "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": null,
+            "latest_draft_body": null,
+            "user_answers": null,
+            "last_processed_comment_id": null,
+            "error_count": 0,
+            "last_error": null,
+            "last_advanced_at": null
+        });
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded).expect("serialize seed state"),
+        )
+        .expect("write seeded state");
+
+        let draft_log = dh.temp_dir.path().join("prd_answer_to_draft_comment.log");
+        let draft_log_str = draft_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+DRAFT_LOG="{draft_log_str}"
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        has_ready=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+            ralph:ready) has_ready=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[{{"number":22,"title":"PRD issue","labels":[{{"name":"ralph:prd-active"}}],"body":"Need a spec from answers"}}]'
+        elif [ "$has_ready" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          if [ -f "$DRAFT_LOG" ]; then
+            draft_body="$(cat "$DRAFT_LOG" | sed 's/"/\\"/g' | tr '\n' ' ')"
+            printf '{{"comments":[{{"id":320,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:22:questions-v1 -->\\n## Clarifying Questions\\n1. What API should be exposed?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":321,"author":{{"login":"octocat"}},"body":"Expose REST and include retries.","createdAt":"2026-01-01T00:00:15Z"}},{{"id":322,"author":{{"login":"ralph-bot"}},"body":"%s","createdAt":"2026-01-01T00:00:20Z"}}]}}' "$draft_body"
+          else
+            printf '{{"comments":[{{"id":320,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:22:questions-v1 -->\\n## Clarifying Questions\\n1. What API should be exposed?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":321,"author":{{"login":"octocat"}},"body":"Expose REST and include retries.","createdAt":"2026-01-01T00:00:15Z"}}]}}'
+          fi
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"PRD issue","body":"Need a spec from answers"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s' "$2" > "$DRAFT_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let state_raw = fs::read_to_string(&state_path).expect("state should exist");
+        let state: InteractivePrdState =
+            serde_json::from_str(&state_raw).expect("state should parse");
+        assert_eq!(state.state, PrdWorkflowState::AwaitingFeedback);
+        assert_eq!(state.draft_revision, 1);
+        assert_eq!(state.last_processed_comment_id, Some(321));
+        assert_eq!(
+            state.user_answers.as_deref(),
+            Some("Expose REST and include retries.")
+        );
+        assert_eq!(state.latest_draft_comment_id, Some(322));
+        assert!(
+            state
+                .latest_draft_body
+                .as_deref()
+                .unwrap_or_default()
+                .contains("## Summary"),
+            "latest draft body should include spec sections"
+        );
+
+        let draft_raw = fs::read_to_string(&draft_log).expect("draft comment should be written");
+        assert!(
+            draft_raw.contains("<!-- ralph:prd:22:draft-v1 -->"),
+            "expected draft-v1 marker in posted comment: {draft_raw}"
+        );
     })
 }
 

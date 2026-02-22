@@ -1236,6 +1236,29 @@ pub fn fetch_issue_comments(
     Ok(comments)
 }
 
+/// Resolve the GitHub login of the currently authenticated `gh` user.
+///
+/// Uses `gh api user -q .login` and returns a non-empty login string.
+pub fn fetch_authenticated_login() -> Result<String> {
+    let output = Command::new("gh")
+        .args(["api", "user", "-q", ".login"])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh api user for authenticated login: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh api user failed while resolving authenticated login: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    parse_authenticated_login(&String::from_utf8_lossy(&output.stdout))
+}
+
 /// Check whether any comment on the issue contains the given marker string.
 pub fn find_comment_with_marker(
     owner: &str,
@@ -1363,6 +1386,16 @@ fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
         base_branch: parsed.base_ref_name,
         head_oid: parsed.head_ref_oid,
     })
+}
+
+fn parse_authenticated_login(raw: &str) -> Result<String> {
+    let login = raw.trim();
+    if login.is_empty() {
+        return Err(RalphError::Orchestration(
+            "gh api user returned empty login".to_owned(),
+        ));
+    }
+    Ok(login.to_owned())
 }
 
 #[cfg(test)]
@@ -1591,6 +1624,19 @@ mod tests {
         assert!(!super::is_retryable_gh_error(
             "HTTP 401 Unauthorized: Bad credentials"
         ));
+    }
+
+    #[test]
+    fn parse_authenticated_login_trims_and_returns_value() {
+        let login = super::parse_authenticated_login("  ralph-bot\n").expect("login should parse");
+        assert_eq!(login, "ralph-bot");
+    }
+
+    #[test]
+    fn parse_authenticated_login_rejects_empty() {
+        let err = super::parse_authenticated_login("   ").expect_err("empty login should fail");
+        let message = err.to_string();
+        assert!(message.contains("empty login"));
     }
 
     fn git(repo_root: &std::path::Path, args: &[&str]) {
