@@ -125,6 +125,7 @@ fn validate_relative_bin_resolves_correctly() {
         filter: Some("init::creates_workspace_structure".to_string()),
         list: false,
         verbose: false,
+        jobs: None,
     };
 
     let result = execute(args);
@@ -141,6 +142,7 @@ fn validate_nonexistent_bin_fails_with_error() {
         filter: None,
         list: true,
         verbose: false,
+        jobs: None,
     };
 
     let result = execute(args);
@@ -175,6 +177,7 @@ fn validate_non_executable_bin_fails_with_error() {
         filter: None,
         list: true,
         verbose: false,
+        jobs: None,
     };
 
     let result = execute(args);

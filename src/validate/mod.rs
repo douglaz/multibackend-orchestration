@@ -44,6 +44,9 @@ pub struct ValidateArgs {
     pub list: bool,
     #[arg(long)]
     pub verbose: bool,
+    /// Number of parallel test jobs (defaults to number of CPU cores)
+    #[arg(short = 'j', long, value_name = "N")]
+    pub jobs: Option<usize>,
 }
 
 pub fn execute(args: ValidateArgs) -> Result<()> {
@@ -74,8 +77,14 @@ pub fn execute(args: ValidateArgs) -> Result<()> {
         }
     }
 
+    let jobs = args.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+
     let tests = register_tests();
-    let runner = TestRunner::new(tests, ralph_bin, args.filter, args.verbose);
+    let runner = TestRunner::new(tests, ralph_bin, args.filter, args.verbose, jobs);
     let success = runner.run(args.list)?;
 
     if success {
