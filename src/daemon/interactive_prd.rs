@@ -417,9 +417,7 @@ fn transition_pending_to_awaiting_answers(
     let owner = &config.owner;
     let repo = &config.repo;
 
-    if config.verbose {
-        eprintln!("prd: transition Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
-    }
+    eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
     let result = get_or_fetch_bot_login(bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
@@ -556,12 +554,10 @@ fn transition_awaiting_answers_to_awaiting_feedback(
     bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
     let issue_number = issue.number;
-    if config.verbose {
-        eprintln!(
-            "prd: transition AwaitingAnswers->AwaitingFeedback for {}/{}#{issue_number}",
-            config.owner, config.repo
-        );
-    }
+    eprintln!(
+        "prd: checking AwaitingAnswers for {}/{}#{issue_number}",
+        config.owner, config.repo
+    );
 
     let result = get_or_fetch_bot_login(bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
@@ -597,9 +593,17 @@ fn do_awaiting_answers_to_awaiting_feedback(
         bot_login,
         state.last_processed_comment_id,
     ) else {
-        // No user answers yet; remain AwaitingAnswers with no state mutation.
+        eprintln!(
+            "prd: no answer found for {owner}/{repo}#{issue_number} ({} comments, questions_posted_at={})",
+            comments.len(), questions_posted_at
+        );
         return Ok(());
     };
+
+    eprintln!(
+        "prd: found answer for {owner}/{repo}#{issue_number} by @{} (comment {})",
+        answer_comment.author_login, answer_comment.id
+    );
 
     let user_answers = answer_comment.body.trim().to_owned();
     let questions_text = extract_questions_text(
@@ -616,12 +620,17 @@ fn do_awaiting_answers_to_awaiting_feedback(
         issue.body.as_deref().unwrap_or_default()
     );
 
+    eprintln!("prd: generating draft for {owner}/{repo}#{issue_number}...");
     let draft_spec = generate_draft_from_answers_with_timeout(
         config,
         &issue_text,
         &questions_text,
         &user_answers,
     )?;
+    eprintln!(
+        "prd: draft generated for {owner}/{repo}#{issue_number} ({} chars)",
+        draft_spec.len()
+    );
 
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
@@ -651,6 +660,9 @@ fn do_awaiting_answers_to_awaiting_feedback(
     state.last_processed_comment_id = Some(answer_comment.id);
     state.last_advanced_at = Some(Utc::now());
 
+    eprintln!(
+        "prd: AwaitingAnswers->AwaitingFeedback complete for {owner}/{repo}#{issue_number} (draft v{next_revision})"
+    );
     Ok(())
 }
 
@@ -682,12 +694,10 @@ fn transition_awaiting_feedback(
     bot_login_cache: &mut Option<String>,
 ) -> Result<()> {
     let issue_number = issue.number;
-    if config.verbose {
-        eprintln!(
-            "prd: transition AwaitingFeedback for {}/{}#{issue_number}",
-            config.owner, config.repo
-        );
-    }
+    eprintln!(
+        "prd: checking AwaitingFeedback for {}/{}#{issue_number}",
+        config.owner, config.repo
+    );
 
     let result = get_or_fetch_bot_login(bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
@@ -719,6 +729,7 @@ fn do_awaiting_feedback(
 
     // Check approval by label
     if labels.iter().any(|l| l == "ralph:prd-approved") {
+        eprintln!("prd: label approval detected for {owner}/{repo}#{issue_number}");
         return do_approval_transition(config, state, issue_number, bot_login);
     }
 
@@ -731,15 +742,21 @@ fn do_awaiting_feedback(
     );
 
     if new_comments.is_empty() {
-        // No new feedback and no approval signal — no-op
+        eprintln!("prd: no new feedback for {owner}/{repo}#{issue_number}");
         return Ok(());
     }
+
+    eprintln!(
+        "prd: {} new feedback comment(s) for {owner}/{repo}#{issue_number}",
+        new_comments.len()
+    );
 
     // Check if any new comment is an approval
     let has_approval = new_comments.iter().any(|c| detect_approval(&c.body));
 
     // If any new comment passes approval detection, transition to Done
     if has_approval {
+        eprintln!("prd: comment approval detected for {owner}/{repo}#{issue_number}");
         // Perform approval transition first — only advance cursor on success
         // so that if this fails, the approval comments remain "new" on the
         // next tick and can be retried (reaching failure threshold if needed).
@@ -1023,6 +1040,10 @@ fn finish_transition(
         // retry accounting so that terminal transitions are not silently lost
         // and can trigger retry exhaustion after 3 consecutive save failures.
         if let Err(save_err) = state.save(&config.data_dir) {
+            eprintln!(
+                "prd: state save FAILED for {}/{}#{}: {save_err}",
+                config.owner, config.repo, state.issue_number
+            );
             // If the transition itself succeeded but save failed, revert any
             // terminal state to the pre-transition value so the issue remains
             // retryable and the state machine stays valid.
@@ -1063,6 +1084,10 @@ fn apply_transition_result(state: &mut InteractivePrdState, result: &Result<()>)
         Err(err) => {
             state.error_count += 1;
             state.last_error = Some(err.to_string());
+            eprintln!(
+                "prd: transition error for {}/{}#{} ({}/3): {err}",
+                state.owner, state.repo, state.issue_number, state.error_count
+            );
             state.error_count >= 3
         }
     }
