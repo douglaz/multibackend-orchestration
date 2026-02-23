@@ -1145,7 +1145,7 @@ struct RawIssueComments {
 
 #[derive(Deserialize)]
 struct RawComment {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_comment_id")]
     id: Option<u64>,
     #[serde(default)]
     author: Option<RawCommentAuthor>,
@@ -1158,6 +1158,54 @@ struct RawComment {
 #[derive(Deserialize)]
 struct RawCommentAuthor {
     login: String,
+}
+
+/// Deserialize a comment ID that may be a numeric u64 (REST API / mocks)
+/// or a string node ID (GraphQL API via `gh issue view --json`).
+/// String node IDs are hashed to a stable u64 for ordering comparisons.
+fn deserialize_comment_id<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    use std::fmt;
+
+    struct CommentIdVisitor;
+
+    impl<'de> de::Visitor<'de> for CommentIdVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a u64 or string comment ID")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Some(v as u64))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            // GraphQL node IDs like "IC_kwDORMeVKs7q9rJD" — hash to stable u64.
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            v.hash(&mut hasher);
+            Ok(Some(hasher.finish()))
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(CommentIdVisitor)
 }
 
 #[derive(Deserialize)]
