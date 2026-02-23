@@ -195,6 +195,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::worktree_uses_origin_head_not_local_refs",
             func: worktree_uses_origin_head_not_local_refs,
         },
+        ConformanceTest {
+            name: "daemon::worktree_falls_back_when_origin_head_missing",
+            func: worktree_falls_back_when_origin_head_missing,
+        },
         // --- Loop 4 Label Lifecycle No-Durable-Store Tests ---
         ConformanceTest {
             name: "daemon::no_tasks_json_written_after_runtime",
@@ -3035,6 +3039,118 @@ fn worktree_uses_origin_head_not_local_refs(_h: &RalphHarness) -> TestResult {
         assert_eq!(
             origin_head_sha, wt_head_sha,
             "worktree HEAD should match origin/HEAD"
+        );
+    })
+}
+
+/// Conformance: worktree creation falls back to origin/master (or origin/main)
+/// when origin/HEAD symbolic ref is missing (fresh repos).
+fn worktree_falls_back_when_origin_head_missing(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Build a repo without origin/HEAD by using init + remote add + fetch
+        // instead of git clone.
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let bare_path = tmp.path().join("remote.git");
+        let repo_path = tmp.path().join("repo");
+
+        // Create bare remote with an initial commit on master
+        let status = Command::new("git")
+            .args(["init", "--bare", &bare_path.to_string_lossy()])
+            .status()
+            .expect("git init --bare");
+        assert!(status.success());
+
+        let setup_path = tmp.path().join("setup");
+        fs::create_dir_all(&setup_path).unwrap();
+        let git_setup = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&setup_path)
+                .status()
+                .expect("git setup");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        git_setup(&["init"]);
+        git_setup(&["config", "user.email", "test@example.com"]);
+        git_setup(&["config", "user.name", "Test User"]);
+        fs::write(setup_path.join("README.md"), "# test\n").unwrap();
+        git_setup(&["add", "-A"]);
+        git_setup(&["commit", "-m", "initial"]);
+        git_setup(&["remote", "add", "origin", &bare_path.to_string_lossy()]);
+        git_setup(&["push", "-u", "origin", "HEAD"]);
+
+        // Set up repo using init + remote add + fetch (no clone → no origin/HEAD)
+        fs::create_dir_all(&repo_path).unwrap();
+        let git_repo = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .status()
+                .expect("git repo setup");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        git_repo(&["init"]);
+        git_repo(&["config", "user.email", "test@example.com"]);
+        git_repo(&["config", "user.name", "Test User"]);
+        git_repo(&["remote", "add", "origin", &bare_path.to_string_lossy()]);
+        git_repo(&["fetch", "origin"]);
+
+        // Modern git (2.52+) may auto-set origin/HEAD on fetch from local
+        // bare repos. Explicitly remove it to simulate the fresh-repo
+        // scenario where origin/HEAD is absent (common with GitHub repos).
+        let _ = Command::new("git")
+            .args(["remote", "set-head", "origin", "--delete"])
+            .current_dir(&repo_path)
+            .output();
+
+        // Point origin at a non-existent path so `set-head --auto` cannot
+        // restore origin/HEAD.  origin/master still exists from the fetch.
+        let _ = Command::new("git")
+            .args(["remote", "set-url", "origin", "/nonexistent/repo.git"])
+            .current_dir(&repo_path)
+            .output();
+
+        // Verify origin/HEAD is indeed missing
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", "origin/HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("rev-parse");
+        assert!(
+            !check.status.success(),
+            "origin/HEAD should not exist in this setup"
+        );
+
+        // Verify origin/master does exist (the fallback target)
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", "origin/master"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("rev-parse");
+        assert!(
+            check.status.success(),
+            "origin/master should exist after fetch"
+        );
+
+        let workspace_root = repo_path.join(".ralph");
+        fs::create_dir_all(workspace_root.join("daemon")).unwrap();
+
+        let result = worktree::create_worktree(&repo_path, &workspace_root, "fresh-task-1");
+        assert!(
+            result.is_ok(),
+            "worktree creation should succeed via fallback: {:?}",
+            result.err()
+        );
+
+        let wt_path = result.unwrap();
+        assert!(wt_path.exists(), "worktree dir should exist");
+
+        // Verify worktree HEAD matches origin/master
+        let origin_master_sha = git_out(&repo_path, &["rev-parse", "origin/master"]);
+        let wt_head_sha = git_out(&wt_path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            origin_master_sha, wt_head_sha,
+            "worktree HEAD should match origin/master when origin/HEAD is missing"
         );
     })
 }

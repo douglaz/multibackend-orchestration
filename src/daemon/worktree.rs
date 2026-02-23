@@ -40,8 +40,8 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
 
     prune_worktrees(repo_root, task_id);
 
-    // Remote-first: fetch and use origin/HEAD as base ref. Never fall back
-    // to local refs (master, main, HEAD) for daemon worktree creation.
+    // Remote-first: fetch and use origin/HEAD as base ref, falling back to
+    // origin/main or origin/master for fresh repos. Never fall back to local refs.
     match has_origin_remote(repo_root) {
         Ok(has_origin) => {
             if has_origin {
@@ -56,12 +56,34 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     }
 
     let base_ref = if revision_exists(repo_root, "origin/HEAD")? {
-        "origin/HEAD"
+        "origin/HEAD".to_string()
     } else {
-        return Err(RalphError::Orchestration(format!(
-            "origin/HEAD is missing; cannot create worktree for task {task_id}. \
-             Ensure the remote has a default branch configured."
-        )));
+        // origin/HEAD is missing (common with fresh repos). Try to auto-detect it.
+        let auto_set = Command::new("git")
+            .args(["remote", "set-head", "origin", "--auto"])
+            .current_dir(repo_root)
+            .output();
+        if auto_set.as_ref().map(|o| o.status.success()).unwrap_or(false)
+            && revision_exists(repo_root, "origin/HEAD")?
+        {
+            "origin/HEAD".to_string()
+        } else {
+            // Fallback: probe common default branch names on the remote.
+            let mut found = None;
+            for candidate in &["origin/main", "origin/master"] {
+                if revision_exists(repo_root, candidate)? {
+                    found = Some(candidate.to_string());
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                RalphError::Orchestration(format!(
+                    "origin/HEAD is missing and no origin/main or origin/master found; \
+                     cannot create worktree for task {task_id}. \
+                     Ensure the remote has a default branch configured."
+                ))
+            })?
+        }
     };
 
     // Check if the branch already exists (e.g. from a previous failed run
@@ -92,7 +114,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
                 "-b",
                 &branch_name,
                 &wt_path.to_string_lossy(),
-                base_ref,
+                &base_ref,
             ])
             .current_dir(repo_root)
             .output()
