@@ -41,7 +41,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     prune_worktrees(repo_root, task_id);
 
     // Remote-first: fetch and use origin/HEAD as base ref, falling back to
-    // origin/main or origin/master for fresh repos. Never fall back to local refs.
+    // origin/main, origin/master, or local HEAD for fresh/empty repos.
     match has_origin_remote(repo_root) {
         Ok(has_origin) => {
             if has_origin {
@@ -68,9 +68,11 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
         {
             "origin/HEAD".to_string()
         } else {
-            // Fallback: probe common default branch names on the remote.
+            // Fallback: probe common default branch names on the remote,
+            // then local HEAD for repos with no remote branches (e.g. empty
+            // GitHub repos bootstrapped with a local commit).
             let mut found = None;
-            for candidate in &["origin/main", "origin/master"] {
+            for candidate in &["origin/main", "origin/master", "HEAD"] {
                 if revision_exists(repo_root, candidate)? {
                     found = Some(candidate.to_string());
                     break;
@@ -78,7 +80,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
             }
             found.ok_or_else(|| {
                 RalphError::Orchestration(format!(
-                    "origin/HEAD is missing and no origin/main or origin/master found; \
+                    "origin/HEAD is missing and no fallback ref found; \
                      cannot create worktree for task {task_id}. \
                      Ensure the remote has a default branch configured."
                 ))

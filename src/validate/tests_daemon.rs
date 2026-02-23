@@ -199,6 +199,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::worktree_falls_back_when_origin_head_missing",
             func: worktree_falls_back_when_origin_head_missing,
         },
+        ConformanceTest {
+            name: "daemon::worktree_falls_back_to_head_for_empty_remote",
+            func: worktree_falls_back_to_head_for_empty_remote,
+        },
         // --- Loop 4 Label Lifecycle No-Durable-Store Tests ---
         ConformanceTest {
             name: "daemon::no_tasks_json_written_after_runtime",
@@ -3151,6 +3155,86 @@ fn worktree_falls_back_when_origin_head_missing(_h: &RalphHarness) -> TestResult
         assert_eq!(
             origin_master_sha, wt_head_sha,
             "worktree HEAD should match origin/master when origin/HEAD is missing"
+        );
+    })
+}
+
+/// Conformance: worktree creation falls back to local HEAD when the remote
+/// has no branches at all (empty GitHub repo bootstrapped with a local commit).
+fn worktree_falls_back_to_head_for_empty_remote(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let repo_path = tmp.path().join("repo");
+
+        // Simulate what clone_or_bootstrap does for an empty remote:
+        // git init, add a remote, bootstrap a local commit.
+        fs::create_dir_all(&repo_path).unwrap();
+        let git_repo = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .status()
+                .expect("git repo setup");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        git_repo(&["init"]);
+        git_repo(&["config", "user.email", "test@example.com"]);
+        git_repo(&["config", "user.name", "Test User"]);
+        // Point origin at a non-existent path (simulates empty GitHub remote).
+        git_repo(&["remote", "add", "origin", "/nonexistent/repo.git"]);
+        // Create a bootstrap commit (what ensure_repo_ready_sync does).
+        git_repo(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            "ralph: bootstrap empty commit",
+        ]);
+
+        // Verify: no remote branches exist at all
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", "origin/HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("rev-parse");
+        assert!(!check.status.success(), "origin/HEAD should not exist");
+
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", "origin/master"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("rev-parse");
+        assert!(!check.status.success(), "origin/master should not exist");
+
+        // But local HEAD exists (from bootstrap commit)
+        let check = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("rev-parse");
+        assert!(check.status.success(), "local HEAD should exist");
+
+        let workspace_root = repo_path.join(".ralph");
+        fs::create_dir_all(workspace_root.join("daemon")).unwrap();
+
+        let result = worktree::create_worktree(&repo_path, &workspace_root, "empty-remote-1");
+        assert!(
+            result.is_ok(),
+            "worktree creation should succeed via HEAD fallback: {:?}",
+            result.err()
+        );
+
+        let wt_path = result.unwrap();
+        assert!(wt_path.exists(), "worktree dir should exist");
+
+        // Verify worktree HEAD matches the local HEAD
+        let local_head_sha = git_out(&repo_path, &["rev-parse", "HEAD"]);
+        let wt_head_sha = git_out(&wt_path, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            local_head_sha, wt_head_sha,
+            "worktree HEAD should match local HEAD for empty-remote repos"
         );
     })
 }
