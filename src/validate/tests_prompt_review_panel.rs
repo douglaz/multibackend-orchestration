@@ -1,5 +1,6 @@
 use super::*;
 
+use std::fs;
 use std::path::PathBuf;
 
 use crate::validate::assertions::{
@@ -26,6 +27,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prompt_review_panel::optional_validator_skipping",
             func: optional_validator_skipping,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::optional_first_backend_falls_through",
+            func: optional_first_backend_falls_through,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::prompt_original_guard_prevents_artifact_writes",
+            func: prompt_original_guard_prevents_artifact_writes,
         },
         ConformanceTest {
             name: "prompt_review_panel::singular_alias_compatibility",
@@ -377,6 +386,69 @@ fn optional_validator_skipping(h: &RalphHarness) -> TestResult {
         let project_dir = h.project_dir(project_id);
         assert_file_exists(&project_dir.join("prompt-review-validator-codex.md"));
         assert_path_not_exists(&project_dir.join("prompt-review-validator-gemini.md"));
+    })
+}
+
+fn optional_first_backend_falls_through(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-panel-optional-first";
+        setup_panel_mocks(h, project_id, "ACCEPT", "ACCEPT");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backends",
+            "[\"?gemini\",\"claude\"]",
+        ])
+        .expect("set prompt_review_backends");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "1"])
+            .expect("set prompt_review_min_reviewers");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("run should succeed with optional first backend skipped");
+
+        let project_dir = h.project_dir(project_id);
+        let review = project_dir.join("prompt-review.md");
+        assert_file_exists(&review);
+        let fm = parse_yaml_frontmatter(&review);
+        assert_eq!(fm["backend"].as_str(), Some("claude"));
+        assert_path_not_exists(&project_dir.join("prompt-review-validator-claude.md"));
+        assert_path_not_exists(&project_dir.join("prompt-review-validator-gemini.md"));
+    })
+}
+
+fn prompt_original_guard_prevents_artifact_writes(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-panel-guard-ordering";
+        setup_panel_mocks(h, project_id, "ACCEPT", "ACCEPT");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backends",
+            "[\"claude\",\"codex\"]",
+        ])
+        .expect("set prompt_review_backends");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "1"])
+            .expect("set prompt_review_min_reviewers");
+
+        let project_dir = h.project_dir(project_id);
+        fs::write(
+            project_dir.join("prompt-original.md"),
+            "pre-existing prompt backup",
+        )
+        .expect("write pre-existing prompt-original.md");
+
+        let output = h
+            .ralph(["run", "--loops", "1"])
+            .expect("run should execute");
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "prompt-original.md already exists in project directory",
+        );
+        assert_path_not_exists(&project_dir.join("prompt-review.md"));
+        assert_path_not_exists(&project_dir.join("prompt-review-validator-codex.md"));
     })
 }
 

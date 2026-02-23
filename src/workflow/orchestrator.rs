@@ -286,47 +286,89 @@ impl Orchestrator {
                 ))
             })?;
 
-            let refiner_spec = effective
-                .workflow
-                .prompt_review_backends
-                .first()
-                .ok_or_else(|| {
-                    RalphError::Validation(
-                        "prompt_review_backends must contain at least one backend".to_owned(),
-                    )
-                })?
-                .to_owned();
-            let refiner_spec_parsed = crate::backend::parse_backend_spec(&refiner_spec)?;
-            let refiner_backend_spec = canonicalize_backend_spec(
-                &registry.resolve_backend_for_role(&refiner_spec, "prompt_reviewer"),
+            let (effective_prompt_review_backends, refiner_index) =
+                resolve_effective_prompt_review_backends(
+                    &mut registry,
+                    &effective.workflow.prompt_review_backends,
+                )
+                .await?;
+            let refiner_backend_spec = effective_prompt_review_backends[0].clone();
+
+            // Validate that prompt-original.md does not already exist before
+            // writing prompt-review artifacts or executing validators.
+            let backup_path = project_dir.join("prompt-original.md");
+            if backup_path.exists() {
+                return Err(RalphError::Validation(
+                    "prompt-original.md already exists in project directory; \
+                     remove or rename it before running prompt review"
+                        .to_owned(),
+                ));
+            }
+
+            let prompt_reviewer_prompt = build_prompt_reviewer_prompt(&effective, &prompt_content)?;
+
+            let pr_backend =
+                registry.get_or_create_for_role(&refiner_backend_spec, "prompt_reviewer")?;
+
+            registry
+                .set_tmux_context(TmuxExecutionContext {
+                    loop_number: None,
+                    role: Some("prompt_reviewer".to_owned()),
+                    loop_dir: None,
+                    session_id: None,
+                })
+                .await;
+
+            info!(
+                backend = pr_backend.name(),
+                "invoking prompt review refiner..."
+            );
+            let mut pr_log = LogWriter::open(&log_dir, &project_id, None, "prompt-reviewer");
+            let _retry_result = execute_with_parse_retries(
+                pr_backend,
+                &registry,
+                "prompt_reviewer",
+                "prompt_review",
+                0,
+                &prompt_reviewer_prompt,
+                None,
+                parse_prompt_reviewer_output,
+                &expected_format_template_for("prompt_reviewer", None),
+                registry
+                    .timeout_for_role(&refiner_backend_spec, "prompt_reviewer")
+                    .as_secs(),
+                &mut pr_log,
+                None,
+                repo_root_ref,
+            )
+            .await?;
+            let decision = _retry_result.parsed;
+
+            // Preserve canonical prompt-review artifact from refiner output
+            // even if later validators reject.
+            write_project_scoped_artifact(
+                &project_dir,
+                ProjectScopedArtifactWriteInput {
+                    artifact: "prompt-review",
+                    file_name: "prompt-review.md",
+                    project_id: &state.project_id,
+                    backend: &refiner_backend_spec,
+                    role: "prompt_reviewer",
+                    body: &decision.body,
+                },
             )?;
-            let refiner_available = match registry
-                .backend_available_for_spec(&refiner_backend_spec, Some("prompt_reviewer"))
-                .await
-            {
-                Ok(v) => v,
-                Err(_) if refiner_spec_parsed.optional => false,
-                Err(e) => return Err(e),
-            };
 
-            if !refiner_available {
-                if refiner_spec_parsed.optional {
-                    warn!(
-                        backend = %refiner_spec,
-                        "optional prompt review refiner unavailable; skipping prompt review"
-                    );
-                    state.prompt_review_completed = true;
-                } else {
-                    return Err(RalphError::BackendUnavailable {
-                        backend: refiner_backend_spec,
-                    });
-                }
-            } else {
-                let prompt_reviewer_prompt =
-                    build_prompt_reviewer_prompt(&effective, &prompt_content)?;
-
-                let pr_backend =
-                    registry.get_or_create_for_role(&refiner_backend_spec, "prompt_reviewer")?;
+            let mut validators_run = 0_usize;
+            let mut reject_reasons = Vec::new();
+            for validator_backend_spec in effective_prompt_review_backends.iter().skip(1) {
+                validators_run += 1;
+                let validator_backend =
+                    registry.get_or_create_for_role(validator_backend_spec, "prompt_reviewer")?;
+                let validator_prompt = build_prompt_review_validator_prompt(
+                    &effective,
+                    &prompt_content,
+                    &decision.refined_prompt,
+                )?;
 
                 registry
                     .set_tmux_context(TmuxExecutionContext {
@@ -338,194 +380,94 @@ impl Orchestrator {
                     .await;
 
                 info!(
-                    backend = pr_backend.name(),
-                    "invoking prompt review refiner..."
+                    backend = validator_backend.name(),
+                    "invoking prompt review validator..."
                 );
-                let mut pr_log = LogWriter::open(&log_dir, &project_id, None, "prompt-reviewer");
-                let _retry_result = execute_with_parse_retries(
-                    pr_backend,
-                    &registry,
-                    "prompt_reviewer",
-                    "prompt_review",
-                    0,
-                    &prompt_reviewer_prompt,
-                    None,
-                    parse_prompt_reviewer_output,
-                    &expected_format_template_for("prompt_reviewer", None),
-                    registry
-                        .timeout_for_role(&refiner_backend_spec, "prompt_reviewer")
-                        .as_secs(),
-                    &mut pr_log,
-                    None,
-                    repo_root_ref,
-                )
-                .await?;
-                let decision = _retry_result.parsed;
-
-                // Preserve canonical prompt-review artifact from refiner output
-                // even if later validators reject.
+                let log_name = format!(
+                    "prompt-review-validator-{}",
+                    slugify_backend(validator_backend_spec)
+                );
+                let mut validator_log = LogWriter::open(&log_dir, &project_id, None, &log_name);
+                let _retry_result: ParseRetryResult<PromptReviewValidatorVerdict> =
+                    execute_with_parse_retries(
+                        validator_backend,
+                        &registry,
+                        "prompt_reviewer",
+                        "prompt_review",
+                        0,
+                        &validator_prompt,
+                        None,
+                        parse_prompt_review_validator_output,
+                        &expected_format_template_for("prompt_review_validator", None),
+                        registry
+                            .timeout_for_role(validator_backend_spec, "prompt_reviewer")
+                            .as_secs(),
+                        &mut validator_log,
+                        None,
+                        repo_root_ref,
+                    )
+                    .await?;
+                let verdict = _retry_result.parsed;
+                let verdict_body = match &verdict {
+                    PromptReviewValidatorVerdict::Accept => "ACCEPT".to_owned(),
+                    PromptReviewValidatorVerdict::Reject { reason } => {
+                        format!("REJECT({reason})")
+                    }
+                };
+                let validator_file_name = format!(
+                    "prompt-review-validator-{}.md",
+                    slugify_backend(validator_backend_spec)
+                );
                 write_project_scoped_artifact(
                     &project_dir,
                     ProjectScopedArtifactWriteInput {
-                        artifact: "prompt-review",
-                        file_name: "prompt-review.md",
+                        artifact: "prompt-review-validator",
+                        file_name: &validator_file_name,
                         project_id: &state.project_id,
-                        backend: &refiner_backend_spec,
-                        role: "prompt_reviewer",
-                        body: &decision.body,
+                        backend: validator_backend_spec,
+                        role: "prompt_review_validator",
+                        body: &verdict_body,
                     },
                 )?;
 
-                let mut validators_run = 0_usize;
-                let mut reject_reasons = Vec::new();
-                for validator_spec in effective.workflow.prompt_review_backends.iter().skip(1) {
-                    let validator_parsed = crate::backend::parse_backend_spec(validator_spec)?;
-                    let validator_backend_spec = canonicalize_backend_spec(
-                        &registry.resolve_backend_for_role(validator_spec, "prompt_reviewer"),
-                    )?;
-                    let validator_available = match registry
-                        .backend_available_for_spec(
-                            &validator_backend_spec,
-                            Some("prompt_reviewer"),
-                        )
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(_) if validator_parsed.optional => false,
-                        Err(e) => return Err(e),
-                    };
-
-                    if !validator_available {
-                        if validator_parsed.optional {
-                            warn!(
-                                backend = %validator_spec,
-                                "optional prompt review validator unavailable; skipping"
-                            );
-                            continue;
-                        }
-                        return Err(RalphError::BackendUnavailable {
-                            backend: validator_backend_spec,
-                        });
-                    }
-
-                    validators_run += 1;
-                    let validator_backend = registry
-                        .get_or_create_for_role(&validator_backend_spec, "prompt_reviewer")?;
-                    let validator_prompt = build_prompt_review_validator_prompt(
-                        &effective,
-                        &prompt_content,
-                        &decision.refined_prompt,
-                    )?;
-
-                    registry
-                        .set_tmux_context(TmuxExecutionContext {
-                            loop_number: None,
-                            role: Some("prompt_reviewer".to_owned()),
-                            loop_dir: None,
-                            session_id: None,
-                        })
-                        .await;
-
-                    info!(
-                        backend = validator_backend.name(),
-                        "invoking prompt review validator..."
-                    );
-                    let log_name = format!(
-                        "prompt-review-validator-{}",
-                        slugify_backend(&validator_backend_spec)
-                    );
-                    let mut validator_log = LogWriter::open(&log_dir, &project_id, None, &log_name);
-                    let _retry_result: ParseRetryResult<PromptReviewValidatorVerdict> =
-                        execute_with_parse_retries(
-                            validator_backend,
-                            &registry,
-                            "prompt_reviewer",
-                            "prompt_review",
-                            0,
-                            &validator_prompt,
-                            None,
-                            parse_prompt_review_validator_output,
-                            &expected_format_template_for("prompt_review_validator", None),
-                            registry
-                                .timeout_for_role(&validator_backend_spec, "prompt_reviewer")
-                                .as_secs(),
-                            &mut validator_log,
-                            None,
-                            repo_root_ref,
-                        )
-                        .await?;
-                    let verdict = _retry_result.parsed;
-                    let verdict_body = match &verdict {
-                        PromptReviewValidatorVerdict::Accept => "ACCEPT".to_owned(),
-                        PromptReviewValidatorVerdict::Reject { reason } => {
-                            format!("REJECT({reason})")
-                        }
-                    };
-                    let validator_file_name = format!(
-                        "prompt-review-validator-{}.md",
-                        slugify_backend(&validator_backend_spec)
-                    );
-                    write_project_scoped_artifact(
-                        &project_dir,
-                        ProjectScopedArtifactWriteInput {
-                            artifact: "prompt-review-validator",
-                            file_name: &validator_file_name,
-                            project_id: &state.project_id,
-                            backend: &validator_backend_spec,
-                            role: "prompt_review_validator",
-                            body: &verdict_body,
-                        },
-                    )?;
-
-                    if let PromptReviewValidatorVerdict::Reject { reason } = verdict {
-                        reject_reasons.push(format!("{validator_backend_spec}: {reason}"));
-                    }
+                if let PromptReviewValidatorVerdict::Reject { reason } = verdict {
+                    reject_reasons.push(format!("{validator_backend_spec}: {reason}"));
                 }
-
-                let configured_validators = effective
-                    .workflow
-                    .prompt_review_backends
-                    .len()
-                    .saturating_sub(1);
-                if configured_validators > 0
-                    && validators_run < effective.workflow.prompt_review_min_reviewers as usize
-                {
-                    return Err(RalphError::Orchestration(format!(
-                        "only {validators_run} prompt review validator(s) available after optional filtering, but prompt_review_min_reviewers requires {}",
-                        effective.workflow.prompt_review_min_reviewers
-                    )));
-                }
-
-                if !reject_reasons.is_empty() {
-                    return Err(RalphError::Orchestration(format!(
-                        "prompt review rejected by validator(s): {}",
-                        reject_reasons.join("; ")
-                    )));
-                }
-
-                // Validate that prompt-original.md does not already exist.
-                let backup_path = project_dir.join("prompt-original.md");
-                if backup_path.exists() {
-                    return Err(RalphError::Validation(
-                        "prompt-original.md already exists in project directory; \
-                         remove or rename it before running prompt review"
-                            .to_owned(),
-                    ));
-                }
-
-                // Write backup of original prompt.
-                fs::write(&backup_path, &prompt_content)?;
-
-                // Overwrite prompt file with refined prompt.
-                fs::write(&prompt_path, &decision.refined_prompt)?;
-
-                // Update prompt hashes.
-                let new_hash = sha256_hex(&decision.refined_prompt);
-                state.prompt_hash = new_hash.clone();
-                state.prompt_hash_at_loop_start = new_hash;
-                state.prompt_review_completed = true;
-                info!("prompt review completed; prompt file updated");
             }
+
+            let configured_validators = effective
+                .workflow
+                .prompt_review_backends
+                .len()
+                .saturating_sub(refiner_index + 1);
+            if configured_validators > 0
+                && validators_run < effective.workflow.prompt_review_min_reviewers as usize
+            {
+                return Err(RalphError::Orchestration(format!(
+                    "only {validators_run} prompt review validator(s) available after optional filtering, but prompt_review_min_reviewers requires {}",
+                    effective.workflow.prompt_review_min_reviewers
+                )));
+            }
+
+            if !reject_reasons.is_empty() {
+                return Err(RalphError::Orchestration(format!(
+                    "prompt review rejected by validator(s): {}",
+                    reject_reasons.join("; ")
+                )));
+            }
+
+            // Write backup of original prompt.
+            fs::write(&backup_path, &prompt_content)?;
+
+            // Overwrite prompt file with refined prompt.
+            fs::write(&prompt_path, &decision.refined_prompt)?;
+
+            // Update prompt hashes.
+            let new_hash = sha256_hex(&decision.refined_prompt);
+            state.prompt_hash = new_hash.clone();
+            state.prompt_hash_at_loop_start = new_hash;
+            state.prompt_review_completed = true;
+            info!("prompt review completed; prompt file updated");
         }
 
         let feature_target = options.loops.unwrap_or(1);
@@ -3819,6 +3761,55 @@ async fn resolve_effective_final_review_backends(
     }
 
     Ok(effective)
+}
+
+async fn resolve_effective_prompt_review_backends(
+    registry: &mut BackendRegistry,
+    backends: &[String],
+) -> Result<(Vec<String>, usize)> {
+    let mut effective = Vec::new();
+    let mut first_effective_index: Option<usize> = None;
+
+    for (idx, backend_spec) in backends.iter().enumerate() {
+        let parsed = crate::backend::parse_backend_spec(backend_spec)?;
+        let canonical = canonicalize_backend_spec(
+            &registry.resolve_backend_for_role(backend_spec, "prompt_reviewer"),
+        )?;
+        let available = match registry
+            .backend_available_for_spec(&canonical, Some("prompt_reviewer"))
+            .await
+        {
+            Ok(v) => v,
+            Err(_) if parsed.optional => false,
+            Err(e) => return Err(e),
+        };
+
+        if available {
+            if first_effective_index.is_none() {
+                first_effective_index = Some(idx);
+            }
+            effective.push(canonical);
+            continue;
+        }
+
+        if parsed.optional {
+            warn!(
+                backend = %backend_spec,
+                "optional prompt review backend unavailable; skipping"
+            );
+            continue;
+        }
+
+        return Err(RalphError::BackendUnavailable { backend: canonical });
+    }
+
+    if effective.is_empty() {
+        return Err(RalphError::Validation(
+            "prompt_review_backends has no available backends after optional filtering".to_owned(),
+        ));
+    }
+
+    Ok((effective, first_effective_index.unwrap_or(0)))
 }
 
 fn canonicalize_backend_spec(spec: &str) -> Result<String> {
