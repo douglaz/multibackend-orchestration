@@ -62,10 +62,37 @@ pub fn remote_ref_exists(workdir: &Path, remote_ref: &str) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Detect the remote's default branch when the configured base branch is missing.
+///
+/// Tries `origin/HEAD` symbolic-ref first, then falls back to common names.
+/// Returns the **local** branch name (e.g. `"main"`), not the remote-tracking ref.
+fn detect_remote_default_branch(repo_root: &Path) -> Option<String> {
+    // Try symbolic-ref of origin/HEAD (set by `git clone` or `git remote set-head`).
+    if let Ok(refname) = run_git(repo_root, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        let refname = refname.trim().to_owned();
+        if let Some(branch) = refname.strip_prefix("refs/remotes/origin/") {
+            if !branch.is_empty() {
+                return Some(branch.to_owned());
+            }
+        }
+    }
+
+    // Fallback: probe common default branch names on the remote.
+    for candidate in &["main", "master"] {
+        let remote_ref = format!("origin/{candidate}");
+        if remote_ref_exists(repo_root, &remote_ref).unwrap_or(false) {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
 /// Remote-first project branch sync for daemon-managed worktrees.
 ///
 /// 1. `git fetch origin` (best-effort)
 /// 2. If remote base exists: `git branch -f <base_branch> origin/<base_branch>`
+///    (auto-detects the actual remote default branch when configured base is missing)
 /// 3. If `origin/ralph/issue-<n>` exists: `git checkout -B ralph/issue-<n> origin/ralph/issue-<n>`
 /// 4. Else: `git checkout -B ralph/issue-<n> origin/<base_branch>` (or local base for empty remotes)
 ///
@@ -81,7 +108,39 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     // for bootstrapped repos).
     let fetch_ok = run_git(repo_root, &["fetch", "origin"]).is_ok();
 
-    let has_remote_base = remote_ref_exists(repo_root, &remote_base_branch)?;
+    let mut has_remote_base = remote_ref_exists(repo_root, &remote_base_branch)?;
+
+    // If the configured base branch doesn't exist on the remote but fetch
+    // succeeded, auto-detect the actual default branch.  This handles the
+    // common case where config says "master" but the remote uses "main" (or
+    // vice-versa).
+    let effective_base;
+    let effective_remote_base;
+    if !has_remote_base && fetch_ok {
+        if let Some(detected) = detect_remote_default_branch(repo_root) {
+            if detected != base_branch {
+                eprintln!(
+                    "sync_project_branch: configured base_branch '{base_branch}' not found on remote; \
+                     using detected default branch '{detected}' for issue {issue_number}"
+                );
+                effective_base = detected;
+                effective_remote_base = format!("origin/{effective_base}");
+                has_remote_base = remote_ref_exists(repo_root, &effective_remote_base)?;
+            } else {
+                effective_base = base_branch.to_owned();
+                effective_remote_base = remote_base_branch.clone();
+            }
+        } else {
+            effective_base = base_branch.to_owned();
+            effective_remote_base = remote_base_branch.clone();
+        }
+    } else {
+        effective_base = base_branch.to_owned();
+        effective_remote_base = remote_base_branch.clone();
+    }
+
+    let base_branch = effective_base.as_str();
+    let remote_base_branch = &effective_remote_base;
 
     // Step 2: force-sync local base branch to the remote-tracking base.
     // Skip entirely when the remote has no branches (empty repo).
@@ -128,7 +187,49 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
                 )));
             }
         }
-    } else if !fetch_ok {
+    } else if fetch_ok {
+        // Fetch succeeded but no remote base branch exists — the remote is
+        // truly empty (brand-new repo with no default branch).  Bootstrap a
+        // local base branch from HEAD and push it so the remote gets a proper
+        // default branch.
+        let local_base_exists = run_git_status(
+            repo_root,
+            &["rev-parse", "--verify", &format!("refs/heads/{base_branch}")],
+        )
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+        if !local_base_exists {
+            // Create the local base branch from the current HEAD (bootstrap commit).
+            eprintln!(
+                "sync_project_branch: empty remote and no local '{base_branch}' branch; \
+                 creating from HEAD for issue {issue_number}"
+            );
+            run_git(repo_root, &["branch", base_branch, "HEAD"]).map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "sync_project_branch: git branch {base_branch} HEAD failed \
+                     for issue {issue_number}: {err}"
+                ))
+            })?;
+        }
+
+        // Push the base branch to origin to establish the remote default branch.
+        match run_git(repo_root, &["push", "-u", "origin", base_branch]) {
+            Ok(_) => {
+                eprintln!(
+                    "sync_project_branch: pushed '{base_branch}' to origin for issue {issue_number}"
+                );
+                // Re-check: the remote base should now exist after push.
+                has_remote_base = remote_ref_exists(repo_root, remote_base_branch)?;
+            }
+            Err(push_err) => {
+                eprintln!(
+                    "sync_project_branch: failed to push '{base_branch}' to origin \
+                     for issue {issue_number}: {push_err}; continuing with local base"
+                );
+            }
+        }
+    } else {
         eprintln!(
             "sync_project_branch: no remote base branch and fetch failed; \
              using local {base_branch} for issue {issue_number}"
@@ -156,8 +257,25 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     let start_ref = if has_remote_base {
         remote_base_branch.clone()
     } else {
-        // Empty remote: use local base branch (e.g. bootstrap commit).
-        base_branch.to_owned()
+        // Empty remote: prefer local base branch (e.g. bootstrap commit).
+        // If the local base branch doesn't exist either (e.g. repo was
+        // bootstrapped with a different default branch name, or the remote
+        // has no default branch at all), fall back to HEAD.
+        let local_base_exists = run_git_status(
+            repo_root,
+            &["rev-parse", "--verify", &format!("refs/heads/{base_branch}")],
+        )
+        .map(|s| s.success())
+        .unwrap_or(false);
+        if local_base_exists {
+            base_branch.to_owned()
+        } else {
+            eprintln!(
+                "sync_project_branch: local base branch '{base_branch}' not found; \
+                 falling back to HEAD for issue {issue_number}"
+            );
+            "HEAD".to_owned()
+        }
     };
 
     run_git(
@@ -541,6 +659,152 @@ mod tests {
         assert_eq!(
             head_after, remote_main_after,
             "new issue branch should be created from origin/main"
+        );
+    }
+
+    #[test]
+    fn sync_project_branch_autodetects_when_configured_base_missing() {
+        // Simulate: config says "master" but the remote only has "main".
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let bare_dir = temp_dir.path().join("remote.git");
+        let setup_dir = temp_dir.path().join("setup");
+        let clone_dir = temp_dir.path().join("clone");
+
+        // Create bare remote
+        git_ok_abs(&bare_dir, &["init", "--bare", &bare_dir.to_string_lossy()]);
+
+        // Create a working repo with "main" as the default branch, push to bare
+        fs::create_dir_all(&setup_dir).expect("create setup dir");
+        git_ok(&setup_dir, &["init", "-b", "main"]);
+        git_ok(&setup_dir, &["config", "user.email", "test@example.com"]);
+        git_ok(&setup_dir, &["config", "user.name", "Test User"]);
+        fs::write(setup_dir.join("README.md"), "# test\n").expect("write README");
+        git_ok(&setup_dir, &["add", "-A"]);
+        git_ok(&setup_dir, &["commit", "-m", "initial on main"]);
+        git_ok(
+            &setup_dir,
+            &["remote", "add", "origin", &bare_dir.to_string_lossy()],
+        );
+        git_ok(&setup_dir, &["push", "-u", "origin", "main"]);
+
+        // Point bare remote's HEAD to "main" so clone works correctly
+        git_ok(
+            &bare_dir,
+            &["symbolic-ref", "HEAD", "refs/heads/main"],
+        );
+
+        // Clone from bare
+        git_ok_abs(
+            &clone_dir,
+            &[
+                "clone",
+                &bare_dir.to_string_lossy(),
+                &clone_dir.to_string_lossy(),
+            ],
+        );
+        git_ok(&clone_dir, &["config", "user.email", "test@example.com"]);
+        git_ok(&clone_dir, &["config", "user.name", "Test User"]);
+
+        // Verify: no "master" branch exists locally or remotely
+        let branch_list = git_output(&clone_dir, &["branch", "-a"]);
+        assert!(
+            !branch_list.contains("master"),
+            "repo should have no master branch: {branch_list}"
+        );
+
+        let origin_main_sha = git_output(&clone_dir, &["rev-parse", "origin/main"]);
+
+        // Call sync_project_branch with "master" as configured base —
+        // should auto-detect "main" and succeed.
+        sync_project_branch(&clone_dir, 77, "master").expect(
+            "sync should succeed by auto-detecting 'main' when 'master' is missing",
+        );
+
+        let branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-77");
+
+        let head_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_sha, origin_main_sha,
+            "issue branch should be created from origin/main (auto-detected)"
+        );
+    }
+
+    #[test]
+    fn sync_project_branch_bootstraps_empty_remote() {
+        // Simulate: brand-new repo with no branches on remote at all.
+        // The local repo has a bootstrap commit (from ensure_repo_ready)
+        // on whatever branch git init created, but no "master" branch.
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let bare_dir = temp_dir.path().join("remote.git");
+        let work_dir = temp_dir.path().join("work");
+
+        // Create empty bare remote
+        git_ok_abs(&bare_dir, &["init", "--bare", &bare_dir.to_string_lossy()]);
+
+        // Create a local repo that simulates the daemon bootstrap:
+        // git init (creates branch with whatever default name),
+        // then one empty bootstrap commit.
+        fs::create_dir_all(&work_dir).expect("create work dir");
+        git_ok(&work_dir, &["init"]);
+        git_ok(&work_dir, &["config", "user.email", "test@example.com"]);
+        git_ok(&work_dir, &["config", "user.name", "Test User"]);
+        git_ok(
+            &work_dir,
+            &["commit", "--allow-empty", "-m", "ralph: bootstrap empty commit"],
+        );
+        git_ok(
+            &work_dir,
+            &["remote", "add", "origin", &bare_dir.to_string_lossy()],
+        );
+
+        let local_default = git_output(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let head_sha = git_output(&work_dir, &["rev-parse", "HEAD"]);
+
+        // The worktree would be checked out on a daemon branch.
+        // Simulate that by creating a separate branch.
+        git_ok(&work_dir, &["checkout", "-b", "ralph/daemon/test-task"]);
+
+        // Call sync_project_branch with "master" as configured base.
+        // The remote is empty — should create "master" locally from HEAD
+        // and push it.
+        sync_project_branch(&work_dir, 1, "master").expect(
+            "sync should succeed by bootstrapping master on empty remote",
+        );
+
+        let branch = git_output(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-1");
+
+        let issue_head = git_output(&work_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            issue_head, head_sha,
+            "issue branch should start from the bootstrap commit"
+        );
+
+        // Verify that "master" was pushed to the remote
+        let remote_master_exists = Command::new("git")
+            .args(["rev-parse", "--verify", "origin/master"])
+            .current_dir(&work_dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            remote_master_exists,
+            "master should have been pushed to origin"
+        );
+
+        // Verify the default branch was correctly named (may differ from
+        // "master" if git defaults to something else — the sync should
+        // create the configured base_branch name regardless).
+        let local_master_exists = Command::new("git")
+            .args(["rev-parse", "--verify", "refs/heads/master"])
+            .current_dir(&work_dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            local_master_exists,
+            "local 'master' branch should exist after bootstrap (default was '{local_default}')"
         );
     }
 }
