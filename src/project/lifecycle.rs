@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{effective_completion_consensus, GlobalConfig, ProjectConfig};
-use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
+use crate::git::branch::{branch_exists, create_branch, remote_ref_exists, resolve_branch_name};
 use crate::git::is_git_repo;
 use crate::git::ralph_commit::{derive_position, list_ralph_commits};
 use crate::project::artifacts::parse_artifact_filename_timestamp;
@@ -382,7 +382,13 @@ fn maybe_create_project_branch(
     let from_ref = if let Some(parent_id) = parent_project {
         resolve_branch_name(&workspace.config.git.branch_format, parent_id)
     } else {
-        format!("origin/{}", workspace.config.git.base_branch)
+        let remote_ref = format!("origin/{}", workspace.config.git.base_branch);
+        if remote_ref_exists(repo_root, &remote_ref)? {
+            remote_ref
+        } else {
+            // Empty remote (e.g. freshly bootstrapped repo) — use local base.
+            workspace.config.git.base_branch.clone()
+        }
     };
 
     create_branch(repo_root, &branch_name, &from_ref)?;
