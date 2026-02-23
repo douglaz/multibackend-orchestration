@@ -2899,15 +2899,15 @@ fn sync_project_branch_creates_from_origin_head(_h: &RalphHarness) -> TestResult
     })
 }
 
-/// Conformance: sync_project_branch produces an actionable error when
-/// origin/<base_branch> is missing, including issue number, branch name, and failed
-/// git operation.
+/// Conformance: sync_project_branch falls back to local base branch when
+/// origin/<base_branch> is missing (e.g. empty remote or deleted branch).
 fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResult {
     use crate::git::branch::sync_project_branch;
     run_case(|| {
         let (_tmp, bare, clone) = setup_remote_clone();
         let base_branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
         let origin_base_ref = format!("origin/{base_branch}");
+        let local_base_sha = git_out(&clone, &["rev-parse", &base_branch]);
         git_run(&clone, &["checkout", "-b", "scratch"]);
 
         // Delete remote base branch and point HEAD to a non-existent branch so
@@ -2924,23 +2924,19 @@ fn sync_project_branch_missing_origin_head_error(_h: &RalphHarness) -> TestResul
         );
 
         let result = sync_project_branch(&clone, 7, &base_branch);
-        assert!(result.is_err(), "should fail without origin/<base_branch>");
-        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains(&origin_base_ref),
-            "error should mention origin/<base_branch>: {err}"
+            result.is_ok(),
+            "should succeed via local base fallback: {:?}",
+            result.err()
         );
-        assert!(
-            err.contains("issue 7") || err.contains("issue-7"),
-            "error should mention issue: {err}"
-        );
-        assert!(
-            err.contains("ralph/issue-7"),
-            "error should mention branch: {err}"
-        );
-        assert!(
-            err.contains(&format!("git branch -f {base_branch} {origin_base_ref}")),
-            "error should mention the failed git operation: {err}"
+
+        // Project branch should be created from local base
+        let branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-7");
+        let head_sha = git_out(&clone, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_sha, local_base_sha,
+            "project branch should start from local base"
         );
     })
 }

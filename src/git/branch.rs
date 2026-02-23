@@ -64,11 +64,10 @@ pub fn remote_ref_exists(workdir: &Path, remote_ref: &str) -> Result<bool> {
 
 /// Remote-first project branch sync for daemon-managed worktrees.
 ///
-/// 1. `git fetch origin`
-/// 2. `git branch -f <base_branch> origin/<base_branch>`
+/// 1. `git fetch origin` (best-effort)
+/// 2. If remote base exists: `git branch -f <base_branch> origin/<base_branch>`
 /// 3. If `origin/ralph/issue-<n>` exists: `git checkout -B ralph/issue-<n> origin/ralph/issue-<n>`
-/// 4. Else: `git checkout -B ralph/issue-<n> origin/<base_branch>`
-/// 5. Never creates project branches from local refs.
+/// 4. Else: `git checkout -B ralph/issue-<n> origin/<base_branch>` (or local base for empty remotes)
 ///
 /// This function is intended **only** for daemon-managed worktree flows.
 pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &str) -> Result<()> {
@@ -78,56 +77,62 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     let remote_branch = format!("origin/ralph/issue-{issue_number}");
     let remote_base_branch = format!("origin/{base_branch}");
 
-    // Step 1: fetch origin
-    run_git(repo_root, &["fetch", "origin"]).map_err(|err| {
-        RalphError::Orchestration(format!(
-            "sync_project_branch: git fetch origin failed for issue {issue_number} \
-             (branch {branch}): {err}"
-        ))
-    })?;
+    // Step 1: fetch origin (best-effort — remote may be empty or unreachable
+    // for bootstrapped repos).
+    let fetch_ok = run_git(repo_root, &["fetch", "origin"]).is_ok();
+
+    let has_remote_base = remote_ref_exists(repo_root, &remote_base_branch)?;
 
     // Step 2: force-sync local base branch to the remote-tracking base.
-    // When the current worktree is checked out on the base branch, `git branch -f`
-    // cannot move it. Detach first so the force-update can proceed.
-    let active_branch = current_branch(repo_root).map_err(|err| {
-        RalphError::Orchestration(format!(
-            "sync_project_branch: failed to resolve current branch for issue {issue_number} \
-             (branch {branch}): {err}"
-        ))
-    })?;
-    if active_branch == base_branch {
-        run_git(repo_root, &["checkout", "--detach"]).map_err(|err| {
+    // Skip entirely when the remote has no branches (empty repo).
+    if has_remote_base {
+        // When the current worktree is checked out on the base branch, `git branch -f`
+        // cannot move it. Detach first so the force-update can proceed.
+        let active_branch = current_branch(repo_root).map_err(|err| {
             RalphError::Orchestration(format!(
-                "sync_project_branch: git checkout --detach failed before base sync \
-                 for issue {issue_number} (base {base_branch}, project branch {branch}): {err}"
+                "sync_project_branch: failed to resolve current branch for issue {issue_number} \
+                 (branch {branch}): {err}"
             ))
         })?;
-    }
-
-    let branch_force_result = run_git(
-        repo_root,
-        &["branch", "-f", base_branch, &remote_base_branch],
-    );
-    if let Err(branch_force_err) = branch_force_result {
-        let err_string = branch_force_err.to_string();
-        if err_string.contains("cannot force update the branch") {
-            let local_base_ref = format!("refs/heads/{base_branch}");
-            let remote_base_ref = format!("refs/remotes/{remote_base_branch}");
-            run_git(repo_root, &["update-ref", &local_base_ref, &remote_base_ref]).map_err(
-                |update_err| {
-                    RalphError::Orchestration(format!(
-                        "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
-                         for issue {issue_number} (project branch {branch}): {branch_force_err}; \
-                         fallback git update-ref {local_base_ref} {remote_base_ref} failed: {update_err}"
-                    ))
-                },
-            )?;
-        } else {
-            return Err(RalphError::Orchestration(format!(
-                "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
-                 for issue {issue_number} (project branch {branch}): {branch_force_err}"
-            )));
+        if active_branch == base_branch {
+            run_git(repo_root, &["checkout", "--detach"]).map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "sync_project_branch: git checkout --detach failed before base sync \
+                     for issue {issue_number} (base {base_branch}, project branch {branch}): {err}"
+                ))
+            })?;
         }
+
+        let branch_force_result = run_git(
+            repo_root,
+            &["branch", "-f", base_branch, &remote_base_branch],
+        );
+        if let Err(branch_force_err) = branch_force_result {
+            let err_string = branch_force_err.to_string();
+            if err_string.contains("cannot force update the branch") {
+                let local_base_ref = format!("refs/heads/{base_branch}");
+                let remote_base_ref = format!("refs/remotes/{remote_base_branch}");
+                run_git(repo_root, &["update-ref", &local_base_ref, &remote_base_ref]).map_err(
+                    |update_err| {
+                        RalphError::Orchestration(format!(
+                            "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
+                             for issue {issue_number} (project branch {branch}): {branch_force_err}; \
+                             fallback git update-ref {local_base_ref} {remote_base_ref} failed: {update_err}"
+                        ))
+                    },
+                )?;
+            } else {
+                return Err(RalphError::Orchestration(format!(
+                    "sync_project_branch: git branch -f {base_branch} {remote_base_branch} failed \
+                     for issue {issue_number} (project branch {branch}): {branch_force_err}"
+                )));
+            }
+        }
+    } else if !fetch_ok {
+        eprintln!(
+            "sync_project_branch: no remote base branch and fetch failed; \
+             using local {base_branch} for issue {issue_number}"
+        );
     }
 
     // Step 3: check if remote project branch exists
@@ -147,23 +152,21 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
         return Ok(());
     }
 
-    // Step 4: remote project branch missing — create from origin/<base_branch>
-    if !remote_ref_exists(repo_root, &remote_base_branch)? {
-        return Err(RalphError::Orchestration(format!(
-            "sync_project_branch: {remote_base_branch} is missing or invalid \
-             (failed: git rev-parse --verify {remote_base_branch}); \
-             cannot create branch {branch} for issue {issue_number}. \
-             Ensure the remote base branch '{base_branch}' exists and is fetched."
-        )));
-    }
+    // Step 4: remote project branch missing — create from remote or local base
+    let start_ref = if has_remote_base {
+        remote_base_branch.clone()
+    } else {
+        // Empty remote: use local base branch (e.g. bootstrap commit).
+        base_branch.to_owned()
+    };
 
     run_git(
         repo_root,
-        &["checkout", "--force", "-B", &branch, &remote_base_branch],
+        &["checkout", "--force", "-B", &branch, &start_ref],
     )
     .map_err(|err| {
         RalphError::Orchestration(format!(
-            "sync_project_branch: git checkout -B {branch} {remote_base_branch} failed \
+            "sync_project_branch: git checkout -B {branch} {start_ref} failed \
              for issue {issue_number}: {err}"
         ))
     })?;
@@ -389,10 +392,11 @@ mod tests {
     }
 
     #[test]
-    fn sync_project_branch_fails_when_origin_head_missing() {
+    fn sync_project_branch_falls_back_to_local_base_when_origin_missing() {
         let (_temp_dir, bare_dir, clone_dir) = init_test_repo_with_remote();
         let base_branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
         let origin_base_ref = format!("origin/{base_branch}");
+        let local_base_sha = git_output(&clone_dir, &["rev-parse", &base_branch]);
         git_ok(&clone_dir, &["checkout", "-b", "scratch"]);
 
         // Delete remote base branch and point HEAD to a non-existent branch so
@@ -413,25 +417,17 @@ mod tests {
 
         let result = sync_project_branch(&clone_dir, 7, &base_branch);
         assert!(
-            result.is_err(),
-            "should fail when origin/<base_branch> is missing"
+            result.is_ok(),
+            "should succeed via local base fallback: {:?}",
+            result.err()
         );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains(&origin_base_ref),
-            "error should mention origin/<base_branch>: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("issue 7") || err_msg.contains("issue-7"),
-            "error should mention issue number: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("ralph/issue-7"),
-            "error should mention branch name: {err_msg}"
-        );
-        assert!(
-            err_msg.contains(&format!("git branch -f {base_branch} {origin_base_ref}")),
-            "error should mention the failed git operation: {err_msg}"
+
+        let branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(branch, "ralph/issue-7");
+        let head_sha = git_output(&clone_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            head_sha, local_base_sha,
+            "project branch should start from local base"
         );
     }
 
