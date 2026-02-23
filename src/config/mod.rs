@@ -939,7 +939,7 @@ mod tests {
             .contains("gemini backend is not supported"));
 
         let mut global = GlobalConfig::default();
-        global.workflow.planner_backend = Some("gemini(gemini-3-pro)".to_owned());
+        global.workflow.planner_backend = Some("gemini(gemini-3-pro-preview)".to_owned());
         let error = resolve_effective_config(
             Path::new("/workspace"),
             Path::new("/workspace/project"),
@@ -1148,7 +1148,7 @@ mod tests {
     fn validate_prd_config_rejects_gemini_backend_specs() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_prd_question_backends =
-            vec!["claude(opus)".to_owned(), "gemini(gemini-3-pro)".to_owned()];
+            vec!["claude(opus)".to_owned(), "gemini(gemini-3-pro-preview)".to_owned()];
 
         let error = validate_interactive_prd_workspace_config(&global)
             .expect_err("gemini should be rejected on daemon PRD surfaces");
@@ -1163,7 +1163,7 @@ mod tests {
     #[test]
     fn validate_daemon_workspace_config_rejects_gemini_refinement_backend() {
         let mut global = GlobalConfig::default();
-        global.workspace.daemon_refinement_backend = "gemini(gemini-3-pro)".to_owned();
+        global.workspace.daemon_refinement_backend = "gemini(gemini-3-pro-preview)".to_owned();
 
         let error = validate_daemon_workspace_config(&global)
             .expect_err("gemini should be rejected on daemon refinement backend");
@@ -1180,7 +1180,7 @@ mod tests {
         let global = GlobalConfig::default();
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
-                refinement_backend: Some("gemini(gemini-3-pro)".to_owned()),
+                refinement_backend: Some("gemini(gemini-3-pro-preview)".to_owned()),
                 ..ProjectDaemonOverrides::default()
             },
             ..ProjectConfig::default()

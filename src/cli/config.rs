@@ -1235,9 +1235,9 @@ mod tests {
 
     #[test]
     fn parse_optional_backend_accepts_optional_gemini() {
-        let result = parse_optional_backend("?gemini(gemini-3-pro)")
+        let result = parse_optional_backend("?gemini(gemini-3-pro-preview)")
             .expect("optional gemini should parse successfully");
-        assert_eq!(result, Some("?gemini(gemini-3-pro)".to_owned()));
+        assert_eq!(result, Some("?gemini(gemini-3-pro-preview)".to_owned()));
     }
 
     #[test]
@@ -1262,7 +1262,7 @@ mod tests {
         let err = set_global_value(
             &mut config,
             "workflow.prompt_review_backend",
-            "?gemini(gemini-3-pro)",
+            "?gemini(gemini-3-pro-preview)",
         )
         .expect_err("optional syntax should be rejected for singular alias");
         assert!(err.to_string().contains(

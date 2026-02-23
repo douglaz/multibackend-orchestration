@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn validate_name_only_accepts_optional_gemini_with_model() {
-        validate_backend_spec_name("?gemini(gemini-3-pro)")
+        validate_backend_spec_name("?gemini(gemini-3-pro-preview)")
             .expect("optional gemini with model should be valid");
     }
 }

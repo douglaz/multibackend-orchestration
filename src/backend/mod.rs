@@ -1280,13 +1280,13 @@ mod tests {
 
     #[test]
     fn parse_backend_spec_accepts_optional_name_with_model() {
-        let parsed = parse_backend_spec("?gemini(gemini-3-pro)").expect("optional modeled backend");
+        let parsed = parse_backend_spec("?gemini(gemini-3-pro-preview)").expect("optional modeled backend");
         assert_eq!(
             parsed,
             BackendSpec {
                 optional: true,
                 name: "gemini".to_owned(),
-                model: Some("gemini-3-pro".to_owned()),
+                model: Some("gemini-3-pro-preview".to_owned()),
             }
         );
     }
@@ -1365,9 +1365,9 @@ mod tests {
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         let backend = registry
-            .get_or_create_for_spec("gemini(gemini-3-pro)")
+            .get_or_create_for_spec("gemini(gemini-3-pro-preview)")
             .expect("gemini backend should be creatable from registry");
-        assert_eq!(backend.name(), "gemini(gemini-3-pro)");
+        assert_eq!(backend.name(), "gemini(gemini-3-pro-preview)");
     }
 
     #[test]

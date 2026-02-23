@@ -209,7 +209,7 @@ fn daemon_refinement_guardrail_rejects_project_override(h: &RalphHarness) -> Tes
             "config",
             "set",
             "daemon.refinement_backend",
-            "gemini(gemini-3-pro)",
+            "gemini(gemini-3-pro-preview)",
             "--project",
             "daemon-guardrail",
         ])

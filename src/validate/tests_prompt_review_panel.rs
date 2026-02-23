@@ -627,7 +627,7 @@ fn singular_alias_rejects_optional_project_gemini(h: &RalphHarness) -> TestResul
                 "config",
                 "set",
                 "workflow.prompt_review_backend",
-                "?gemini(gemini-3-pro)",
+                "?gemini(gemini-3-pro-preview)",
                 "--project",
                 project_id,
             ])

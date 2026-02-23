@@ -765,10 +765,10 @@ fn default_gemini_backend_config() -> BackendConfig {
             planner: None,
             implementer: None,
             reviewer: None,
-            final_reviewer: Some("gemini-3-pro".to_owned()),
-            arbiter: Some("gemini-3-pro".to_owned()),
+            final_reviewer: Some("gemini-3-pro-preview".to_owned()),
+            arbiter: Some("gemini-3-pro-preview".to_owned()),
             qa: None,
-            completer: Some("gemini-3-pro".to_owned()),
+            completer: Some("gemini-3-pro-preview".to_owned()),
             acceptance_qa: None,
             reformatter: None,
         },
@@ -1275,15 +1275,15 @@ command = "claude-custom"
         );
         assert_eq!(
             config.backends.gemini.models.final_reviewer.as_deref(),
-            Some("gemini-3-pro")
+            Some("gemini-3-pro-preview")
         );
         assert_eq!(
             config.backends.gemini.models.arbiter.as_deref(),
-            Some("gemini-3-pro")
+            Some("gemini-3-pro-preview")
         );
         assert_eq!(
             config.backends.gemini.models.completer.as_deref(),
-            Some("gemini-3-pro")
+            Some("gemini-3-pro-preview")
         );
         assert!(config.backends.gemini.models.planner.is_none());
         assert_eq!(config.backends.gemini.enabled, BackendEnabled::Auto);

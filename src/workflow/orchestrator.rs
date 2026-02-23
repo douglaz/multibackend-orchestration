@@ -5641,7 +5641,7 @@ mod tests {
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
-        assert!(registry.get("gemini(gemini-3-pro)").is_some());
+        assert!(registry.get("gemini(gemini-3-pro-preview)").is_some());
     }
 
     #[test]
@@ -5657,7 +5657,7 @@ mod tests {
 
         assert!(registry.get("claude(opus)").is_none());
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
-        assert!(registry.get("gemini(gemini-3-pro)").is_none());
+        assert!(registry.get("gemini(gemini-3-pro-preview)").is_none());
     }
 
     #[test]
