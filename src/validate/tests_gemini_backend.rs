@@ -1,8 +1,10 @@
 use super::*;
 
+use std::process::Output;
+
 use crate::validate::assertions::{assert_exit_code, assert_json_field};
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::standard_mock_script;
+use crate::validate::mock_scripts::{daemon_mock_gh_script, standard_mock_script};
 use serde_json::json;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -18,6 +20,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "gemini_backend::guardrails_reject_disallowed_surfaces",
             func: guardrails_reject_disallowed_surfaces,
+        },
+        ConformanceTest {
+            name: "gemini_backend::daemon_refinement_guardrail_rejects_project_override",
+            func: daemon_refinement_guardrail_rejects_project_override,
         },
     ]
 }
@@ -183,6 +189,87 @@ fn guardrails_reject_disallowed_surfaces(h: &RalphHarness) -> TestResult {
             "expected optional syntax rejection message, got:\n{combined}"
         );
     })
+}
+
+fn daemon_refinement_guardrail_rejects_project_override(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("create daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.create_project(
+            "daemon-guardrail",
+            "Daemon Guardrail Project",
+            "Project used for daemon guardrail validation",
+        )
+        .expect("create project failed");
+
+        dh.ralph_ok(["project", "use", "daemon-guardrail"])
+            .expect("set active project");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "daemon.refinement_backend",
+            "gemini(gemini-3-pro)",
+            "--project",
+            "daemon-guardrail",
+        ])
+        .expect("set project daemon refinement backend");
+
+        let gh = dh
+            .write_mock_script("gh", &daemon_mock_gh_script())
+            .expect("write mock gh");
+        let gh_path = format!(
+            "{}:{}",
+            gh.parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
+                &[("PATH", &gh_path)],
+            )
+            .expect("daemon start should execute");
+        assert_nonzero_exit(
+            &output,
+            "daemon start should reject gemini refinement backend",
+        );
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("invalid daemon config for acme/widgets"),
+            "expected daemon config validation failure, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("daemon.refinement_backend"),
+            "expected effective daemon key in error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("gemini backend is not supported"),
+            "expected gemini guardrail message, got:\n{combined}"
+        );
+    })
+}
+
+fn assert_nonzero_exit(output: &Output, message: &str) {
+    assert!(
+        output.status.code().unwrap_or(-1) != 0,
+        "{message}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn run_case<F>(f: F) -> TestResult

@@ -52,6 +52,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "prompt_review_panel::project_singular_override_wins_over_global_plural",
             func: project_singular_override_wins_over_global_plural,
         },
+        ConformanceTest {
+            name: "prompt_review_panel::singular_alias_rejects_optional_global_gemini",
+            func: singular_alias_rejects_optional_global_gemini,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::singular_alias_rejects_optional_project_gemini",
+            func: singular_alias_rejects_optional_project_gemini,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::singular_alias_rejects_optional_global_claude",
+            func: singular_alias_rejects_optional_global_claude,
+        },
     ]
 }
 
@@ -574,6 +586,77 @@ fn project_singular_override_wins_over_global_plural(h: &RalphHarness) -> TestRe
             &parsed,
             "workflow.prompt_review_backends",
             &json!(["claude(sonnet)"]),
+        );
+    })
+}
+
+fn singular_alias_rejects_optional_global_gemini(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let output = h
+            .ralph([
+                "config",
+                "set",
+                "workflow.prompt_review_backend",
+                "?gemini",
+                "--global",
+            ])
+            .expect("config set should execute");
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend",
+        );
+    })
+}
+
+fn singular_alias_rejects_optional_project_gemini(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-panel-optional-project-gemini";
+        h.init_workspace().expect("init failed");
+        h.create_project(
+            project_id,
+            "Prompt Review Optional Project Gemini",
+            "Prompt review optional syntax rejection test",
+        )
+        .expect("create project failed");
+
+        let output = h
+            .ralph([
+                "config",
+                "set",
+                "workflow.prompt_review_backend",
+                "?gemini(gemini-3-pro)",
+                "--project",
+                project_id,
+            ])
+            .expect("config set should execute");
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend",
+        );
+    })
+}
+
+fn singular_alias_rejects_optional_global_claude(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let output = h
+            .ralph([
+                "config",
+                "set",
+                "workflow.prompt_review_backend",
+                "?claude",
+                "--global",
+            ])
+            .expect("config set should execute");
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend",
         );
     })
 }

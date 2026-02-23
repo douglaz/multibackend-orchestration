@@ -185,11 +185,23 @@ pub fn resolve_effective_config(
         backends
     } else if let Some(backend) = project_ref.and_then(|p| p.workflow.prompt_review_backend.clone())
     {
+        validate_backend_spec(
+            &global,
+            &backend,
+            "workflow.prompt_review_backend",
+            ValidationSurface::Required,
+        )?;
         vec![backend]
     } else if let Some(backends) = global.workflow.prompt_review_backends.clone() {
         backends
     } else {
-        global.workflow.prompt_review_backends_or_default()
+        validate_backend_spec(
+            &global,
+            &global.workflow.prompt_review_backend,
+            "workflow.prompt_review_backend",
+            ValidationSurface::Required,
+        )?;
+        vec![global.workflow.prompt_review_backend.clone()]
     };
 
     if let Some(spec) = planner_backend.as_deref() {
@@ -550,12 +562,32 @@ pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Resul
 }
 
 pub fn validate_daemon_workspace_config(global: &GlobalConfig) -> Result<()> {
-    validate_backend_spec(
+    validate_daemon_refinement_backend(
         global,
         &global.workspace.daemon_refinement_backend,
         "workspace.daemon_refinement_backend",
-        ValidationSurface::Required,
     )?;
+    Ok(())
+}
+
+pub fn validate_effective_daemon_config(
+    global: &GlobalConfig,
+    daemon: &EffectiveDaemonConfig,
+) -> Result<()> {
+    validate_daemon_refinement_backend(
+        global,
+        &daemon.refinement_backend,
+        "daemon.refinement_backend",
+    )?;
+    Ok(())
+}
+
+fn validate_daemon_refinement_backend(
+    global: &GlobalConfig,
+    backend: &str,
+    label: &str,
+) -> Result<()> {
+    validate_backend_spec(global, backend, label, ValidationSurface::Required)?;
     Ok(())
 }
 
@@ -644,8 +676,9 @@ fn normalize_backend_specs_labeled_role(
     let mut seen = HashSet::new();
 
     for spec in specs {
+        // Validate the raw entry first so optional marker semantics are preserved.
+        validate_backend_spec(global, spec, label, ValidationSurface::PanelList)?;
         let canonical = canonicalize_backend_spec(spec)?;
-        validate_backend_spec(global, &canonical, label, ValidationSurface::PanelList)?;
         // Derive a resolution key that collapses optional/required variants
         // (e.g. `claude` and `?claude`) to the same target.
         // When a resolve_role is provided, also apply role-model injection so
@@ -830,8 +863,8 @@ mod tests {
         global::{PlannerStateInPrompt, PreviousSpecsInPrompt},
         project::{ProjectDaemonOverrides, ProjectWorkflowOverrides},
         resolve_daemon_config, resolve_effective_config, validate_daemon_workspace_config,
-        validate_interactive_prd_workspace_config, GlobalConfig, ProjectConfig,
-        RunWorkflowOverrides,
+        validate_effective_daemon_config, validate_interactive_prd_workspace_config, GlobalConfig,
+        ProjectConfig, RunWorkflowOverrides,
     };
 
     #[test]
@@ -1078,7 +1111,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("unknown backend configured as prompt review backend"));
+            .contains("unknown backend configured as workflow.prompt_review_backend"));
     }
 
     #[test]
@@ -1140,6 +1173,26 @@ mod tests {
         assert!(error
             .to_string()
             .contains("workspace.daemon_refinement_backend"));
+    }
+
+    #[test]
+    fn validate_effective_daemon_config_rejects_project_gemini_refinement_backend() {
+        let global = GlobalConfig::default();
+        let project = ProjectConfig {
+            daemon: ProjectDaemonOverrides {
+                refinement_backend: Some("gemini(gemini-3-pro)".to_owned()),
+                ..ProjectDaemonOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let daemon = resolve_daemon_config(&global, Some(&project));
+        let error = validate_effective_daemon_config(&global, &daemon)
+            .expect_err("gemini should be rejected on effective daemon refinement backend");
+        assert!(error
+            .to_string()
+            .contains("gemini backend is not supported"));
+        assert!(error.to_string().contains("daemon.refinement_backend"));
     }
 
     #[test]
@@ -1670,6 +1723,50 @@ mod tests {
             effective.workflow.prompt_review_backends,
             vec!["claude(opus)".to_owned()]
         );
+    }
+
+    #[test]
+    fn prompt_review_alias_rejects_optional_global_singular_backend() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backend = "?gemini".to_owned();
+        global.workflow.prompt_review_backends = None;
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("optional syntax on singular alias should fail");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
+    }
+
+    #[test]
+    fn prompt_review_alias_rejects_optional_project_singular_backend() {
+        let global = GlobalConfig::default();
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                prompt_review_backend: Some("?claude".to_owned()),
+                prompt_review_backends: None,
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let err = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect_err("optional syntax on project singular alias should fail");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
     }
 
     #[test]

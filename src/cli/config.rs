@@ -453,7 +453,7 @@ fn set_global_value(
             config.workflow.prompt_review_enabled = parse_bool(raw_value, key)?;
         }
         "workflow.prompt_review_backend" => {
-            ensure_backend(raw_value)?;
+            ensure_required_backend(raw_value, "workflow.prompt_review_backend")?;
             config.workflow.prompt_review_backend = raw_value.to_owned();
         }
         "workflow.prompt_review_backends" => {
@@ -669,7 +669,8 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
             config.workflow.prompt_review_enabled = parse_optional_bool(raw_value, key)?;
         }
         "workflow.prompt_review_backend" => {
-            config.workflow.prompt_review_backend = parse_optional_backend(raw_value)?;
+            config.workflow.prompt_review_backend =
+                parse_optional_required_backend(raw_value, "workflow.prompt_review_backend")?;
         }
         "workflow.prompt_review_backends" => {
             config.workflow.prompt_review_backends = parse_optional_string_list(raw_value)?;
@@ -995,8 +996,26 @@ fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
     Ok(Some(raw.to_owned()))
 }
 
+fn parse_optional_required_backend(raw: &str, label: &str) -> Result<Option<String>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    ensure_required_backend(raw, label)?;
+    Ok(Some(raw.to_owned()))
+}
+
 fn ensure_backend(raw: &str) -> Result<()> {
     crate::cli::backend_spec::validate_backend_spec_name(raw)
+}
+
+fn ensure_required_backend(raw: &str, label: &str) -> Result<()> {
+    let parsed = crate::backend::parse_backend_spec(raw)?;
+    if parsed.optional {
+        return Err(RalphError::Validation(format!(
+            "optional backend specs (?backend) are not supported for {label}; optional syntax is allowed only in panel backend lists"
+        )));
+    }
+    ensure_backend(raw)
 }
 
 const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
@@ -1194,6 +1213,15 @@ mod tests {
     }
 
     #[test]
+    fn ensure_required_backend_rejects_optional_syntax() {
+        let err = ensure_required_backend("?gemini", "workflow.prompt_review_backend")
+            .expect_err("optional syntax should be rejected for required surfaces");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
+    }
+
+    #[test]
     fn parse_optional_backend_accepts_claude_with_model() {
         let result = parse_optional_backend("claude(opus)").expect("should parse successfully");
         assert_eq!(result, Some("claude(opus)".to_owned()));
@@ -1226,6 +1254,30 @@ mod tests {
     #[test]
     fn parse_optional_backend_rejects_malformed() {
         parse_optional_backend("claude()").expect_err("malformed spec should fail");
+    }
+
+    #[test]
+    fn set_global_value_rejects_optional_prompt_review_backend_alias() {
+        let mut config = crate::config::GlobalConfig::default();
+        let err = set_global_value(
+            &mut config,
+            "workflow.prompt_review_backend",
+            "?gemini(gemini-3-pro)",
+        )
+        .expect_err("optional syntax should be rejected for singular alias");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
+    }
+
+    #[test]
+    fn set_project_value_rejects_optional_prompt_review_backend_alias() {
+        let mut config = crate::config::ProjectConfig::default();
+        let err = set_project_value(&mut config, "workflow.prompt_review_backend", "?claude")
+            .expect_err("optional syntax should be rejected for project singular alias");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
     }
 
     #[test]
