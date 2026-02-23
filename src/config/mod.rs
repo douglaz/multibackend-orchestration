@@ -179,20 +179,17 @@ pub fn resolve_effective_config(
         project_ref.and_then(|p| p.workflow.qa_backend.as_deref()),
         global.workflow.qa_backend.as_deref(),
     );
-    let default_prompt_review_backends = GlobalConfig::default().workflow.prompt_review_backends;
-    let global_prompt_review_backends_is_explicit =
-        global.workflow.prompt_review_backends != default_prompt_review_backends;
     let prompt_review_backends = if let Some(backends) =
         project_ref.and_then(|p| p.workflow.prompt_review_backends.clone())
     {
         backends
-    } else if global_prompt_review_backends_is_explicit {
-        global.workflow.prompt_review_backends.clone()
-    } else {
-        let backend = project_ref
-            .and_then(|p| p.workflow.prompt_review_backend.clone())
-            .unwrap_or_else(|| global.workflow.prompt_review_backend.clone());
+    } else if let Some(backend) = project_ref.and_then(|p| p.workflow.prompt_review_backend.clone())
+    {
         vec![backend]
+    } else if let Some(backends) = global.workflow.prompt_review_backends.clone() {
+        backends
+    } else {
+        global.workflow.prompt_review_backends_or_default()
     };
 
     if let Some(spec) = planner_backend.as_deref() {
@@ -1001,7 +998,8 @@ mod tests {
         global.workflow.max_qa_iterations = 3;
         global.workflow.prompt_review_enabled = true;
         global.workflow.prompt_review_backend = "codex(gpt-5.3-codex-xhigh)".to_owned();
-        global.workflow.prompt_review_backends = vec!["codex(gpt-5.3-codex-xhigh)".to_owned()];
+        global.workflow.prompt_review_backends =
+            Some(vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]);
         global.templates.qa = "templates/qa-global.md".to_owned();
         global.templates.prompt_reviewer = "templates/prompt-reviewer-global.md".to_owned();
         global.templates.prompt_review_validator =
@@ -1675,6 +1673,60 @@ mod tests {
     }
 
     #[test]
+    fn prompt_review_alias_explicit_global_plural_wins_even_when_equal_to_default() {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backend = "claude(opus)".to_owned();
+        global.workflow.prompt_review_backends =
+            Some(vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]);
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("explicit global plural should win over singular alias");
+
+        assert_eq!(
+            effective.workflow.prompt_review_backends,
+            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+        );
+    }
+
+    #[test]
+    fn prompt_review_project_singular_override_wins_over_global_plural_when_project_plural_absent()
+    {
+        let mut global = GlobalConfig::default();
+        global.workflow.prompt_review_backends = Some(vec![
+            "codex(gpt-5.3-codex-xhigh)".to_owned(),
+            "claude(opus)".to_owned(),
+        ]);
+
+        let project = ProjectConfig {
+            workflow: ProjectWorkflowOverrides {
+                prompt_review_backend: Some("claude(sonnet)".to_owned()),
+                ..ProjectWorkflowOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("project singular override should win when project plural is absent");
+
+        assert_eq!(
+            effective.workflow.prompt_review_backends,
+            vec!["claude(sonnet)".to_owned()]
+        );
+    }
+
+    #[test]
     fn prompt_review_plural_project_override_takes_precedence_over_singular() {
         let mut global = GlobalConfig::default();
         global.workflow.prompt_review_backend = "claude(opus)".to_owned();
@@ -1706,7 +1758,7 @@ mod tests {
     #[test]
     fn prompt_review_panel_rejects_empty_backends() {
         let mut global = GlobalConfig::default();
-        global.workflow.prompt_review_backends = vec![];
+        global.workflow.prompt_review_backends = Some(vec![]);
 
         let err = resolve_effective_config(
             Path::new("/workspace"),
@@ -1742,7 +1794,8 @@ mod tests {
     #[test]
     fn prompt_review_panel_rejects_duplicate_specs_after_canonicalization() {
         let mut global = GlobalConfig::default();
-        global.workflow.prompt_review_backends = vec!["claude".to_owned(), "?claude".to_owned()];
+        global.workflow.prompt_review_backends =
+            Some(vec!["claude".to_owned(), "?claude".to_owned()]);
 
         let err = resolve_effective_config(
             Path::new("/workspace"),
@@ -1762,7 +1815,8 @@ mod tests {
     #[test]
     fn prompt_review_panel_accepts_optional_gemini_backend() {
         let mut global = GlobalConfig::default();
-        global.workflow.prompt_review_backends = vec!["claude".to_owned(), "?gemini".to_owned()];
+        global.workflow.prompt_review_backends =
+            Some(vec!["claude".to_owned(), "?gemini".to_owned()]);
 
         resolve_effective_config(
             Path::new("/workspace"),

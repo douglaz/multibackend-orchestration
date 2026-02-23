@@ -335,8 +335,8 @@ pub struct WorkflowConfig {
     pub prompt_review_enabled: bool,
     #[serde(default = "default_prompt_review_backend")]
     pub prompt_review_backend: String,
-    #[serde(default = "default_prompt_review_backends")]
-    pub prompt_review_backends: Vec<String>,
+    #[serde(default)]
+    pub prompt_review_backends: Option<Vec<String>>,
     #[serde(default = "default_prompt_review_min_reviewers")]
     pub prompt_review_min_reviewers: u32,
     #[serde(default)]
@@ -394,6 +394,14 @@ pub struct WorkflowConfig {
 }
 
 impl Eq for WorkflowConfig {}
+
+impl WorkflowConfig {
+    pub fn prompt_review_backends_or_default(&self) -> Vec<String> {
+        self.prompt_review_backends
+            .clone()
+            .unwrap_or_else(|| vec![self.prompt_review_backend.clone()])
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -605,7 +613,7 @@ impl Default for WorkflowConfig {
             prompt_change_action: default_prompt_change_action(),
             prompt_review_enabled: default_prompt_review_enabled(),
             prompt_review_backend: default_prompt_review_backend(),
-            prompt_review_backends: default_prompt_review_backends(),
+            prompt_review_backends: None,
             prompt_review_min_reviewers: default_prompt_review_min_reviewers(),
             planner_backend: None,
             implementer_backend: None,
@@ -980,10 +988,6 @@ fn default_prompt_review_backend() -> String {
     "codex(gpt-5.3-codex-xhigh)".to_owned()
 }
 
-fn default_prompt_review_backends() -> Vec<String> {
-    vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
-}
-
 fn default_prompt_review_min_reviewers() -> u32 {
     1
 }
@@ -1206,8 +1210,9 @@ command = "claude-custom"
             config.workflow.prompt_review_backend,
             "codex(gpt-5.3-codex-xhigh)"
         );
+        assert!(config.workflow.prompt_review_backends.is_none());
         assert_eq!(
-            config.workflow.prompt_review_backends,
+            config.workflow.prompt_review_backends_or_default(),
             vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
         );
         assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
@@ -1439,8 +1444,9 @@ base_branch = "master"
             config.workflow.prompt_review_backend,
             "codex(gpt-5.3-codex-xhigh)"
         );
+        assert!(config.workflow.prompt_review_backends.is_none());
         assert_eq!(
-            config.workflow.prompt_review_backends,
+            config.workflow.prompt_review_backends_or_default(),
             vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
         );
         assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
@@ -1597,7 +1603,7 @@ base_branch = "master"
         assert_eq!(config.workflow.prompt_review_backend, "claude(opus)");
         assert_eq!(
             config.workflow.prompt_review_backends,
-            vec!["claude(opus)".to_owned(), "codex".to_owned()]
+            Some(vec!["claude(opus)".to_owned(), "codex".to_owned()])
         );
         assert_eq!(config.workflow.prompt_review_min_reviewers, 2);
         assert_eq!(

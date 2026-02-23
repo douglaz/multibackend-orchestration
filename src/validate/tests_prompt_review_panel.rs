@@ -3,8 +3,8 @@ use super::*;
 use std::path::PathBuf;
 
 use crate::validate::assertions::{
-    assert_exit_code, assert_file_contains, assert_file_exists, assert_path_not_exists,
-    assert_stderr_contains, parse_yaml_frontmatter,
+    assert_exit_code, assert_file_contains, assert_file_exists, assert_json_field,
+    assert_path_not_exists, assert_stderr_contains, parse_yaml_frontmatter,
 };
 use crate::validate::harness::RalphHarness;
 use serde_json::json;
@@ -34,6 +34,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prompt_review_panel::min_reviewers_enforcement",
             func: min_reviewers_enforcement,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::global_plural_explicit_default_wins_over_singular",
+            func: global_plural_explicit_default_wins_over_singular,
+        },
+        ConformanceTest {
+            name: "prompt_review_panel::project_singular_override_wins_over_global_plural",
+            func: project_singular_override_wins_over_global_plural,
         },
     ]
 }
@@ -410,5 +418,90 @@ fn min_reviewers_enforcement(h: &RalphHarness) -> TestResult {
             .expect("run should execute");
         assert_exit_code(&output, 1);
         assert_stderr_contains(&output, "prompt_review_min_reviewers requires 1");
+    })
+}
+
+fn global_plural_explicit_default_wins_over_singular(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-panel-global-plural-default";
+        h.init_workspace().expect("init failed");
+        h.create_project(
+            project_id,
+            "Prompt Review Global Plural Default",
+            "Prompt review precedence test",
+        )
+        .expect("create project failed");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backend",
+            "claude(opus)",
+            "--global",
+        ])
+        .expect("set global singular alias");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backends",
+            "[\"codex(gpt-5.3-codex-xhigh)\"]",
+            "--global",
+        ])
+        .expect("set global plural explicitly to default value");
+
+        let output = h
+            .ralph(["config", "show", "--project", project_id])
+            .expect("config show --project should execute");
+        assert_exit_code(&output, 0);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("config show --project output should be valid JSON");
+        assert_json_field(
+            &parsed,
+            "workflow.prompt_review_backends",
+            &json!(["codex(gpt-5.3-codex-xhigh)"]),
+        );
+    })
+}
+
+fn project_singular_override_wins_over_global_plural(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "pr-panel-project-singular";
+        h.init_workspace().expect("init failed");
+        h.create_project(
+            project_id,
+            "Prompt Review Project Singular Override",
+            "Prompt review precedence test",
+        )
+        .expect("create project failed");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backends",
+            "[\"codex(gpt-5.3-codex-xhigh)\",\"claude(opus)\"]",
+            "--global",
+        ])
+        .expect("set global plural");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.prompt_review_backend",
+            "claude(sonnet)",
+        ])
+        .expect("set project singular alias");
+
+        let output = h
+            .ralph(["config", "show", "--project", project_id])
+            .expect("config show --project should execute");
+        assert_exit_code(&output, 0);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("config show --project output should be valid JSON");
+        assert_json_field(
+            &parsed,
+            "workflow.prompt_review_backends",
+            &json!(["claude(sonnet)"]),
+        );
     })
 }

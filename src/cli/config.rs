@@ -457,7 +457,7 @@ fn set_global_value(
             config.workflow.prompt_review_backend = raw_value.to_owned();
         }
         "workflow.prompt_review_backends" => {
-            config.workflow.prompt_review_backends = parse_string_list(raw_value)?;
+            config.workflow.prompt_review_backends = Some(parse_string_list(raw_value)?);
         }
         "workflow.prompt_review_min_reviewers" => {
             config.workflow.prompt_review_min_reviewers = parse_u32(raw_value, key)?;
