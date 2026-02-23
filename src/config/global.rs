@@ -897,7 +897,7 @@ fn default_daemon_prd_max_revisions() -> u32 {
 }
 
 fn default_daemon_prd_backend_timeout_secs() -> u64 {
-    120
+    3600
 }
 
 fn default_planner_max_prior_loops() -> Option<usize> {
@@ -1199,7 +1199,7 @@ command = "claude-custom"
         assert_eq!(config.workspace.daemon_prd_writer_backend, "claude");
         assert_eq!(config.workspace.daemon_prd_reviewer_backend, "codex");
         assert_eq!(config.workspace.daemon_prd_max_revisions, 3);
-        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 120);
+        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 3600);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
@@ -1413,7 +1413,7 @@ base_branch = "master"
         assert_eq!(config.workspace.daemon_prd_writer_backend, "claude");
         assert_eq!(config.workspace.daemon_prd_reviewer_backend, "codex");
         assert_eq!(config.workspace.daemon_prd_max_revisions, 3);
-        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 120);
+        assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 3600);
         let defaults = GlobalConfig::default();
         assert_eq!(
             config.backends.claude.models,

@@ -22,7 +22,7 @@ daemon_prd_question_backends = [
 daemon_prd_writer_backend = "claude"
 daemon_prd_reviewer_backend = "codex"
 daemon_prd_max_revisions = 3
-daemon_prd_backend_timeout_secs = 120
+daemon_prd_backend_timeout_secs = 3600
 
 [backends.claude]
 command = "claude"
