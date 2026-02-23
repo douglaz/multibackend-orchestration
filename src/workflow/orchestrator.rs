@@ -1727,7 +1727,7 @@ impl Orchestrator {
                     let (
                         loop_number,
                         planner_backend_name,
-                        effective_completers,
+                        mut effective_completers,
                         termination_rel,
                     ) = {
                         let completion = state.current_completion_attempt().ok_or_else(|| {
@@ -1744,6 +1744,23 @@ impl Orchestrator {
                             completion.artifacts.termination_request.clone(),
                         )
                     };
+
+                    // If reconstructed completers list is empty (e.g. process
+                    // stopped after writing termination-request but before any
+                    // completer verdict), re-resolve from config so the
+                    // completing phase doesn't silently skip all completers.
+                    if effective_completers.is_empty() {
+                        effective_completers = registry
+                            .resolve_completion_panel(
+                                &effective.workflow.completion_backends,
+                                effective.workflow.completion_min_completers,
+                            )
+                            .await?;
+                        // Persist the resolved completers back into state.
+                        if let Some(completion) = state.current_completion_attempt_mut() {
+                            completion.backends.completers = effective_completers.clone();
+                        }
+                    }
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;

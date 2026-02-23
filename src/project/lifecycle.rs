@@ -678,13 +678,34 @@ fn reconstruct_completion_attempt(
     });
 
     // Collect per-backend verdict artifacts (new panel layout).
-    let per_backend_verdicts: Vec<&ArtifactEntry> = artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact.base_name.starts_with("completer-verdict-")
+    // Deduplicate by backend: if retries produced multiple verdict files for
+    // the same backend, keep only the latest one per backend to avoid
+    // inflating the consensus vote count.
+    let per_backend_verdicts: Vec<&ArtifactEntry> = {
+        let mut by_backend: std::collections::BTreeMap<String, &ArtifactEntry> =
+            std::collections::BTreeMap::new();
+        for artifact in &artifacts {
+            if artifact.base_name.starts_with("completer-verdict-")
                 && artifact.base_name != "completer-verdict.md"
-        })
-        .collect();
+            {
+                let backend = artifact
+                    .frontmatter
+                    .get("backend")
+                    .cloned()
+                    .unwrap_or_else(|| artifact.base_name.clone());
+                match by_backend.get(&backend) {
+                    Some(prev) if artifact.observed_at > prev.observed_at => {
+                        by_backend.insert(backend, artifact);
+                    }
+                    None => {
+                        by_backend.insert(backend, artifact);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        by_backend.into_values().collect()
+    };
 
     // Legacy single verdict artifact.
     let legacy_verdict = latest_artifact(&artifacts, |artifact| {
