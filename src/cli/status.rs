@@ -120,8 +120,9 @@ pub fn execute(args: StatusArgs) -> Result<()> {
             loop_status_label(&attempt.status)
         );
         println!(
-            "Backends: planner={}, completer={}",
-            attempt.backends.planner, attempt.backends.completer
+            "Backends: planner={}, completers=[{}]",
+            attempt.backends.planner,
+            attempt.backends.completers.join(", ")
         );
         println!(
             "Verdict: {}",

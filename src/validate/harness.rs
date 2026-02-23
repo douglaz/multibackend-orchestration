@@ -217,12 +217,21 @@ impl RalphHarness {
             "set".to_owned(),
             "backends.claude.command".to_owned(),
             script.clone(),
+            "--global".to_owned(),
         ])?;
         self.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
             "backends.codex.command".to_owned(),
             script,
+            "--global".to_owned(),
+        ])?;
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
         ])?;
         Ok(())
     }
@@ -248,14 +257,23 @@ impl RalphHarness {
                 "set".to_owned(),
                 format!("backends.{backend}.command"),
                 wrapper_str.clone(),
+                "--global".to_owned(),
             ])?;
             self.ralph_ok(vec![
                 "config".to_owned(),
                 "set".to_owned(),
                 format!("backends.{backend}.args"),
                 "[]".to_owned(),
+                "--global".to_owned(),
             ])?;
         }
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
+        ])?;
         Ok(())
     }
 
@@ -271,12 +289,21 @@ impl RalphHarness {
             "set".to_owned(),
             "backends.claude.command".to_owned(),
             claude,
+            "--global".to_owned(),
         ])?;
         self.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
             "backends.codex.command".to_owned(),
             codex,
+            "--global".to_owned(),
+        ])?;
+        self.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
         ])?;
         Ok(())
     }

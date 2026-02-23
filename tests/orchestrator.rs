@@ -139,6 +139,7 @@ fn setup_workspace_with_project(
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     workspace.config.workflow.final_review_enabled = false;
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -487,13 +488,14 @@ async fn executes_completion_flow_until_complete() {
         &state.completion_attempts[0].artifacts.termination_request,
         "termination-request.md",
     );
-    assert_timestamped_artifact(
-        state.completion_attempts[0]
-            .artifacts
-            .verdict
-            .as_deref()
-            .expect("completion verdict artifact should exist"),
-        "completer-verdict.md",
+    let verdict_path = state.completion_attempts[0]
+        .artifacts
+        .verdict
+        .as_deref()
+        .expect("completion verdict artifact should exist");
+    assert!(
+        verdict_path.contains("completer-verdict"),
+        "verdict artifact should contain completer-verdict: {verdict_path}"
     );
 
     // Completion artifacts should be auto-committed
@@ -986,6 +988,7 @@ fn setup_workspace_with_split_backends() -> (TempDir, PathBuf, String) {
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     workspace.config.workflow.final_review_enabled = false;
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     // Create project
@@ -1154,13 +1157,14 @@ async fn two_loop_happy_path_with_separate_backends() {
         &state.completion_attempts[0].artifacts.termination_request,
         "termination-request.md",
     );
-    assert_timestamped_artifact(
-        state.completion_attempts[0]
-            .artifacts
-            .verdict
-            .as_deref()
-            .expect("completion verdict artifact should exist"),
-        "completer-verdict.md",
+    let verdict_path = state.completion_attempts[0]
+        .artifacts
+        .verdict
+        .as_deref()
+        .expect("completion verdict artifact should exist");
+    assert!(
+        verdict_path.contains("completer-verdict"),
+        "verdict artifact should contain completer-verdict: {verdict_path}"
     );
 }
 
@@ -1340,6 +1344,7 @@ fn setup_workspace_with_always_suggestions() -> (TempDir, PathBuf, String) {
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
     workspace.config.workflow.final_review_enabled = false;
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -1729,6 +1734,7 @@ fn setup_workspace_for_reformat_backend_test() -> (TempDir, PathBuf, String, Pat
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -2194,6 +2200,7 @@ fn setup_workspace_with_qa(
 
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");
@@ -3120,6 +3127,7 @@ fn setup_workspace_for_final_review(
     workspace.config.workflow.final_review_consensus_threshold = 1.0;
     workspace.config.git.base_branch =
         git_output(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    workspace.config.workflow.completion_backends = vec!["claude".to_owned(), "codex".to_owned()];
     workspace.save_config().expect("save config");
 
     let prompt_path = repo_root.join("PROMPT.md");

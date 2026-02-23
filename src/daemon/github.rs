@@ -1447,8 +1447,14 @@ pub fn post_bot_comment_with_marker(
     body_text: &str,
     bot_login: &str,
 ) -> Result<Option<u64>> {
-    let meta =
-        post_bot_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text, bot_login)?;
+    let meta = post_bot_comment_with_marker_metadata(
+        owner,
+        repo,
+        issue_number,
+        marker,
+        body_text,
+        bot_login,
+    )?;
     Ok(meta.map(|c| c.id))
 }
 

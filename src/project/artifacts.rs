@@ -9,8 +9,9 @@ pub const ARTIFACT_TIMESTAMP_LEN: usize = 14;
 
 /// Sanitize a backend spec for use in filenames by replacing path-unsafe characters.
 /// e.g. `claude(model/v2)` → `claude-model-v2`
-fn slugify_backend(spec: &str) -> String {
-    spec.chars()
+pub(crate) fn slugify_backend(spec: &str) -> String {
+    let s: String = spec
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -18,7 +19,8 @@ fn slugify_backend(spec: &str) -> String {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    s.trim_matches('-').to_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,7 @@ pub enum ArtifactKind {
     AcceptanceFail,
     TerminationRequest,
     CompleterVerdict,
+    CompleterVerdictBackend { backend: String },
     FinalReviewProposals { backend: String },
     FinalReviewPlannerPositions,
     FinalReviewVotes { backend: String },
@@ -57,6 +60,7 @@ impl ArtifactKind {
             Self::AcceptanceFail => "acceptance-fail",
             Self::TerminationRequest => "termination-request",
             Self::CompleterVerdict => "completer-verdict",
+            Self::CompleterVerdictBackend { .. } => "completer-verdict",
             Self::FinalReviewProposals { .. } => "final-review-proposals",
             Self::FinalReviewPlannerPositions => "final-review-planner-positions",
             Self::FinalReviewVotes { .. } => "final-review-votes",
@@ -85,6 +89,9 @@ impl ArtifactKind {
             Self::AcceptanceFail => "acceptance-fail.md".to_owned(),
             Self::TerminationRequest => "termination-request.md".to_owned(),
             Self::CompleterVerdict => "completer-verdict.md".to_owned(),
+            Self::CompleterVerdictBackend { backend } => {
+                format!("completer-verdict-{}.md", slugify_backend(backend))
+            }
             Self::FinalReviewProposals { backend } => {
                 format!("final-review-proposals-{}.md", slugify_backend(backend))
             }
@@ -434,7 +441,7 @@ mod tests {
                 backend: "codex(gpt-5)".to_owned()
             }
             .file_name(),
-            "final-review-votes-codex-gpt-5-.md"
+            "final-review-votes-codex-gpt-5.md"
         );
         assert_eq!(
             ArtifactKind::FinalReviewArbiterRuling.file_name(),

@@ -4,7 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use clap::ValueEnum;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Result;
 
@@ -85,6 +86,11 @@ pub struct BackendConfigs {
         deserialize_with = "deserialize_codex_backend_config"
     )]
     pub codex: BackendConfig,
+    #[serde(
+        default = "default_gemini_backend_config",
+        deserialize_with = "deserialize_gemini_backend_config"
+    )]
+    pub gemini: BackendConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,11 +103,81 @@ pub struct BackendConfig {
     #[serde(default = "default_backend_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default)]
+    pub enabled: BackendEnabled,
+    #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub models: BackendRoleModels,
     #[serde(default)]
     pub role_timeouts: RoleTimeouts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendEnabled {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl Default for BackendEnabled {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl Serialize for BackendEnabled {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Enabled => serializer.serialize_bool(true),
+            Self::Disabled => serializer.serialize_bool(false),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendEnabled {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BackendEnabledVisitor;
+
+        impl<'de> Visitor<'de> for BackendEnabledVisitor {
+            type Value = BackendEnabled;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("true, false, or \"auto\"")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(if value {
+                    BackendEnabled::Enabled
+                } else {
+                    BackendEnabled::Disabled
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "auto" => Ok(BackendEnabled::Auto),
+                    _ => Err(E::custom(format!(
+                        "invalid backend enabled mode '{value}'; expected true, false, or \"auto\""
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(BackendEnabledVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -260,6 +336,10 @@ pub struct WorkflowConfig {
     #[serde(default = "default_prompt_review_backend")]
     pub prompt_review_backend: String,
     #[serde(default)]
+    pub prompt_review_backends: Option<Vec<String>>,
+    #[serde(default = "default_prompt_review_min_reviewers")]
+    pub prompt_review_min_reviewers: u32,
+    #[serde(default)]
     pub planner_backend: Option<String>,
     #[serde(default)]
     pub implementer_backend: Option<String>,
@@ -281,6 +361,12 @@ pub struct WorkflowConfig {
     pub final_review_consensus_threshold: f64,
     #[serde(default = "default_max_final_review_restarts")]
     pub max_final_review_restarts: u32,
+    #[serde(default = "default_completion_backends")]
+    pub completion_backends: Vec<String>,
+    #[serde(default = "default_completion_min_completers")]
+    pub completion_min_completers: u32,
+    #[serde(default = "default_completion_consensus_threshold")]
+    pub completion_consensus_threshold: f64,
     #[serde(default = "default_qa_enabled")]
     pub qa_enabled: bool,
     #[serde(default = "default_max_qa_iterations")]
@@ -308,6 +394,14 @@ pub struct WorkflowConfig {
 }
 
 impl Eq for WorkflowConfig {}
+
+impl WorkflowConfig {
+    pub fn prompt_review_backends_or_default(&self) -> Vec<String> {
+        self.prompt_review_backends
+            .clone()
+            .unwrap_or_else(|| vec![self.prompt_review_backend.clone()])
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -356,6 +450,8 @@ pub struct TemplateConfig {
     pub reviewer: String,
     #[serde(default = "default_prompt_reviewer_template_path")]
     pub prompt_reviewer: String,
+    #[serde(default = "default_prompt_review_validator_template_path")]
+    pub prompt_review_validator: String,
     #[serde(default = "default_completer_template_path")]
     pub completer: String,
     #[serde(default = "default_qa_template_path")]
@@ -417,6 +513,7 @@ impl Default for BackendConfigs {
         Self {
             claude: default_claude_backend_config(),
             codex: default_codex_backend_config(),
+            gemini: default_gemini_backend_config(),
         }
     }
 }
@@ -427,6 +524,7 @@ impl Default for BackendConfig {
             command: default_backend_command(),
             args: default_backend_args(),
             timeout_seconds: default_backend_timeout_seconds(),
+            enabled: BackendEnabled::default(),
             env: BTreeMap::new(),
             models: BackendRoleModels::default(),
             role_timeouts: RoleTimeouts::default(),
@@ -440,6 +538,7 @@ struct PartialBackendConfig {
     command: Option<String>,
     args: Option<Vec<String>>,
     timeout_seconds: Option<u64>,
+    enabled: Option<BackendEnabled>,
     env: Option<BTreeMap<String, String>>,
     models: Option<BackendRoleModels>,
     role_timeouts: Option<RoleTimeouts>,
@@ -455,6 +554,9 @@ impl PartialBackendConfig {
         }
         if let Some(timeout_seconds) = self.timeout_seconds {
             defaults.timeout_seconds = timeout_seconds;
+        }
+        if let Some(enabled) = self.enabled {
+            defaults.enabled = enabled;
         }
         if let Some(env) = self.env {
             defaults.env = env;
@@ -491,6 +593,16 @@ where
     Ok(partial.into_backend_config_with_defaults(default_codex_backend_config()))
 }
 
+fn deserialize_gemini_backend_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BackendConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let partial = PartialBackendConfig::deserialize(deserializer)?;
+    Ok(partial.into_backend_config_with_defaults(default_gemini_backend_config()))
+}
+
 impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
@@ -501,6 +613,8 @@ impl Default for WorkflowConfig {
             prompt_change_action: default_prompt_change_action(),
             prompt_review_enabled: default_prompt_review_enabled(),
             prompt_review_backend: default_prompt_review_backend(),
+            prompt_review_backends: None,
+            prompt_review_min_reviewers: default_prompt_review_min_reviewers(),
             planner_backend: None,
             implementer_backend: None,
             reviewer_backend: None,
@@ -512,6 +626,9 @@ impl Default for WorkflowConfig {
             final_review_min_reviewers: default_final_review_min_reviewers(),
             final_review_consensus_threshold: default_final_review_consensus_threshold(),
             max_final_review_restarts: default_max_final_review_restarts(),
+            completion_backends: default_completion_backends(),
+            completion_min_completers: default_completion_min_completers(),
+            completion_consensus_threshold: default_completion_consensus_threshold(),
             qa_enabled: default_qa_enabled(),
             max_qa_iterations: default_max_qa_iterations(),
             planner_state_in_prompt: PlannerStateInPrompt::default(),
@@ -536,6 +653,7 @@ impl Default for TemplateConfig {
             implementer: default_implementer_template_path(),
             reviewer: default_reviewer_template_path(),
             prompt_reviewer: default_prompt_reviewer_template_path(),
+            prompt_review_validator: default_prompt_review_validator_template_path(),
             completer: default_completer_template_path(),
             qa: default_qa_template_path(),
             final_reviewer: default_final_reviewer_template_path(),
@@ -588,6 +706,7 @@ fn default_claude_backend_config() -> BackendConfig {
             "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
         ],
         timeout_seconds: default_backend_timeout_seconds(),
+        enabled: BackendEnabled::Auto,
         env: BTreeMap::new(),
         models: BackendRoleModels {
             planner: Some("opus".to_owned()),
@@ -613,6 +732,7 @@ fn default_codex_backend_config() -> BackendConfig {
             "-".to_owned(),
         ],
         timeout_seconds: default_backend_timeout_seconds(),
+        enabled: BackendEnabled::Auto,
         env: BTreeMap::new(),
         models: BackendRoleModels {
             planner: Some("gpt-5.3-codex-xhigh".to_owned()),
@@ -624,6 +744,33 @@ fn default_codex_backend_config() -> BackendConfig {
             completer: Some("gpt-5.3-codex-xhigh".to_owned()),
             acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
             reformatter: Some("gpt-5.3-codex-medium".to_owned()),
+        },
+        role_timeouts: RoleTimeouts::default(),
+    }
+}
+
+fn default_gemini_backend_config() -> BackendConfig {
+    BackendConfig {
+        command: "gemini".to_owned(),
+        args: vec![
+            "-p".to_owned(),
+            "--yolo".to_owned(),
+            "--output-format".to_owned(),
+            "stream-json".to_owned(),
+        ],
+        timeout_seconds: default_backend_timeout_seconds(),
+        enabled: BackendEnabled::Auto,
+        env: BTreeMap::new(),
+        models: BackendRoleModels {
+            planner: None,
+            implementer: None,
+            reviewer: None,
+            final_reviewer: Some("gemini-3-pro".to_owned()),
+            arbiter: Some("gemini-3-pro".to_owned()),
+            qa: None,
+            completer: Some("gemini-3-pro".to_owned()),
+            acceptance_qa: None,
+            reformatter: None,
         },
         role_timeouts: RoleTimeouts::default(),
     }
@@ -794,7 +941,11 @@ fn default_final_review_enabled() -> bool {
 }
 
 fn default_final_review_backends() -> Vec<String> {
-    vec!["claude".to_owned(), "codex".to_owned()]
+    vec![
+        "claude".to_owned(),
+        "codex".to_owned(),
+        "?gemini".to_owned(),
+    ]
 }
 
 fn default_final_review_arbiter_backend() -> String {
@@ -813,6 +964,22 @@ fn default_max_final_review_restarts() -> u32 {
     3
 }
 
+fn default_completion_backends() -> Vec<String> {
+    vec![
+        "claude".to_owned(),
+        "codex".to_owned(),
+        "?gemini".to_owned(),
+    ]
+}
+
+fn default_completion_min_completers() -> u32 {
+    2
+}
+
+fn default_completion_consensus_threshold() -> f64 {
+    1.0
+}
+
 fn default_prompt_review_enabled() -> bool {
     true
 }
@@ -821,12 +988,20 @@ fn default_prompt_review_backend() -> String {
     "codex(gpt-5.3-codex-xhigh)".to_owned()
 }
 
+fn default_prompt_review_min_reviewers() -> u32 {
+    1
+}
+
 fn default_max_qa_iterations() -> u32 {
     3
 }
 
 fn default_prompt_reviewer_template_path() -> String {
     "templates/prompt_reviewer.md".to_owned()
+}
+
+fn default_prompt_review_validator_template_path() -> String {
+    "templates/prompt_review_validator.md".to_owned()
 }
 
 fn default_qa_template_path() -> String {
@@ -874,6 +1049,16 @@ impl GlobalConfig {
             .codex
             .role_timeouts
             .fill_from(&defaults.backends.codex.role_timeouts);
+        config
+            .backends
+            .gemini
+            .models
+            .fill_from(&defaults.backends.gemini.models);
+        config
+            .backends
+            .gemini
+            .role_timeouts
+            .fill_from(&defaults.backends.gemini.role_timeouts);
         Ok(config)
     }
 
@@ -887,6 +1072,7 @@ impl GlobalConfig {
         match name {
             "claude" => Some(&self.backends.claude),
             "codex" => Some(&self.backends.codex),
+            "gemini" => Some(&self.backends.gemini),
             _ => None,
         }
     }
@@ -895,8 +1081,8 @@ impl GlobalConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendConfig, BackendRoleModels, GlobalConfig, PartialBackendConfig, PlannerStateInPrompt,
-        PreviousSpecsInPrompt, RoleTimeouts,
+        BackendConfig, BackendEnabled, BackendRoleModels, GlobalConfig, PartialBackendConfig,
+        PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
     };
 
     #[test]
@@ -1024,6 +1210,12 @@ command = "claude-custom"
             config.workflow.prompt_review_backend,
             "codex(gpt-5.3-codex-xhigh)"
         );
+        assert!(config.workflow.prompt_review_backends.is_none());
+        assert_eq!(
+            config.workflow.prompt_review_backends_or_default(),
+            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
         assert_eq!(
             config.backends.claude.models.qa.as_deref(),
             Some("opus"),
@@ -1038,6 +1230,10 @@ command = "claude-custom"
         assert_eq!(
             config.templates.prompt_reviewer,
             "templates/prompt_reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/prompt_review_validator.md"
         );
         assert_eq!(
             config.templates.final_reviewer,
@@ -1062,6 +1258,98 @@ command = "claude-custom"
         assert!(models.qa.is_none());
         assert!(models.completer.is_none());
         assert!(models.reformatter.is_none());
+    }
+
+    #[test]
+    fn gemini_defaults_match_expected_values() {
+        let config = GlobalConfig::default();
+        assert_eq!(config.backends.gemini.command, "gemini");
+        assert_eq!(
+            config.backends.gemini.args,
+            vec![
+                "-p".to_owned(),
+                "--yolo".to_owned(),
+                "--output-format".to_owned(),
+                "stream-json".to_owned()
+            ]
+        );
+        assert_eq!(
+            config.backends.gemini.models.final_reviewer.as_deref(),
+            Some("gemini-3-pro")
+        );
+        assert_eq!(
+            config.backends.gemini.models.arbiter.as_deref(),
+            Some("gemini-3-pro")
+        );
+        assert_eq!(
+            config.backends.gemini.models.completer.as_deref(),
+            Some("gemini-3-pro")
+        );
+        assert!(config.backends.gemini.models.planner.is_none());
+        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Auto);
+        assert_eq!(
+            config.workflow.final_review_backends,
+            vec![
+                "claude".to_owned(),
+                "codex".to_owned(),
+                "?gemini".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_enabled_accepts_bool_and_auto_string() {
+        let enabled_raw = r#"
+[backends.gemini]
+enabled = true
+"#;
+        let enabled_cfg: GlobalConfig =
+            toml::from_str(enabled_raw).expect("enabled=true should deserialize");
+        assert_eq!(enabled_cfg.backends.gemini.enabled, BackendEnabled::Enabled);
+
+        let disabled_raw = r#"
+[backends.gemini]
+enabled = false
+"#;
+        let disabled_cfg: GlobalConfig =
+            toml::from_str(disabled_raw).expect("enabled=false should deserialize");
+        assert_eq!(
+            disabled_cfg.backends.gemini.enabled,
+            BackendEnabled::Disabled
+        );
+
+        let auto_raw = r#"
+[backends.gemini]
+enabled = "auto"
+"#;
+        let auto_cfg: GlobalConfig =
+            toml::from_str(auto_raw).expect("enabled=\"auto\" should deserialize");
+        assert_eq!(auto_cfg.backends.gemini.enabled, BackendEnabled::Auto);
+    }
+
+    #[test]
+    fn backend_enabled_serde_roundtrip_preserves_values() {
+        for (source, expected) in [
+            (
+                "[backends.gemini]\nenabled = true\n",
+                BackendEnabled::Enabled,
+            ),
+            (
+                "[backends.gemini]\nenabled = false\n",
+                BackendEnabled::Disabled,
+            ),
+            (
+                "[backends.gemini]\nenabled = \"auto\"\n",
+                BackendEnabled::Auto,
+            ),
+        ] {
+            let config: GlobalConfig = toml::from_str(source).expect("deserialize backend enabled");
+            assert_eq!(config.backends.gemini.enabled, expected);
+            let encoded = toml::to_string(&config).expect("serialize backend enabled");
+            let reparsed: GlobalConfig =
+                toml::from_str(&encoded).expect("roundtrip deserialize backend enabled");
+            assert_eq!(reparsed.backends.gemini.enabled, expected);
+        }
     }
 
     #[test]
@@ -1137,7 +1425,11 @@ base_branch = "master"
         assert!(!config.workflow.final_review_enabled);
         assert_eq!(
             config.workflow.final_review_backends,
-            vec!["claude".to_owned(), "codex".to_owned()]
+            vec![
+                "claude".to_owned(),
+                "codex".to_owned(),
+                "?gemini".to_owned()
+            ]
         );
         assert_eq!(config.workflow.final_review_arbiter_backend, "claude");
         assert_eq!(config.workflow.final_review_min_reviewers, 2);
@@ -1152,10 +1444,20 @@ base_branch = "master"
             config.workflow.prompt_review_backend,
             "codex(gpt-5.3-codex-xhigh)"
         );
+        assert!(config.workflow.prompt_review_backends.is_none());
+        assert_eq!(
+            config.workflow.prompt_review_backends_or_default(),
+            vec!["codex(gpt-5.3-codex-xhigh)".to_owned()]
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 1);
         assert_eq!(config.templates.qa, "templates/qa.md");
         assert_eq!(
             config.templates.prompt_reviewer,
             "templates/prompt_reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/prompt_review_validator.md"
         );
     }
 
@@ -1278,12 +1580,15 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = false
 prompt_review_backend = "claude(opus)"
+prompt_review_backends = ["claude(opus)", "codex"]
+prompt_review_min_reviewers = 2
 
 [templates]
 planner = "templates/spec.md"
 implementer = "templates/implementation.md"
 reviewer = "templates/review.md"
 prompt_reviewer = "templates/custom-prompt-reviewer.md"
+prompt_review_validator = "templates/custom-prompt-review-validator.md"
 completer = "templates/completion.md"
 
 [git]
@@ -1297,8 +1602,17 @@ base_branch = "master"
         assert!(!config.workflow.prompt_review_enabled);
         assert_eq!(config.workflow.prompt_review_backend, "claude(opus)");
         assert_eq!(
+            config.workflow.prompt_review_backends,
+            Some(vec!["claude(opus)".to_owned(), "codex".to_owned()])
+        );
+        assert_eq!(config.workflow.prompt_review_min_reviewers, 2);
+        assert_eq!(
             config.templates.prompt_reviewer,
             "templates/custom-prompt-reviewer.md"
+        );
+        assert_eq!(
+            config.templates.prompt_review_validator,
+            "templates/custom-prompt-review-validator.md"
         );
     }
 
@@ -1743,6 +2057,18 @@ base_branch = "master"
         assert_eq!(
             config.backends.codex.models.reformatter.as_deref(),
             defaults.backends.codex.models.reformatter.as_deref(),
+        );
+        assert_eq!(
+            config.backends.gemini.models.final_reviewer.as_deref(),
+            defaults.backends.gemini.models.final_reviewer.as_deref(),
+        );
+        assert_eq!(
+            config.backends.gemini.models.arbiter.as_deref(),
+            defaults.backends.gemini.models.arbiter.as_deref(),
+        );
+        assert_eq!(
+            config.backends.gemini.models.completer.as_deref(),
+            defaults.backends.gemini.models.completer.as_deref(),
         );
     }
 

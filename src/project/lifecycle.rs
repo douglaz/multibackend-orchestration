@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ProjectConfig;
+use crate::config::{effective_completion_consensus, GlobalConfig, ProjectConfig};
 use crate::git::branch::{branch_exists, create_branch, resolve_branch_name};
 use crate::git::is_git_repo;
 use crate::git::ralph_commit::{derive_position, list_ralph_commits};
@@ -141,6 +141,7 @@ pub fn reconstruct_project_state(workspace: &Workspace, project_id: &str) -> Res
         project_id,
         git.as_ref().map(|ctx| ctx.repo_root.as_path()),
         git.as_ref().map(|ctx| ctx.branch.as_str()),
+        Some(&workspace.config),
     )
 }
 
@@ -157,20 +158,27 @@ pub fn reconstruct_project_state_from_project_dir(project_dir: &Path) -> Result<
 
     let repo_root = find_repo_root(project_dir);
 
-    // Try loading workspace config for branch_format.  The project dir lives
-    // at `.ralph/projects/<id>/`, so the workspace root is two levels up.
-    let branch = project_dir
+    // Try loading workspace config for branch_format and global completion
+    // settings.  The project dir lives at `.ralph/projects/<id>/`, so the
+    // workspace root is two levels up.
+    let workspace = project_dir
         .parent()
         .and_then(|p| p.parent())
-        .and_then(|ws_root| Workspace::load(ws_root.to_path_buf()).ok())
+        .and_then(|ws_root| Workspace::load(ws_root.to_path_buf()).ok());
+
+    let branch = workspace
+        .as_ref()
         .map(|ws| resolve_branch_name(&ws.config.git.branch_format, project_id))
         .unwrap_or_else(|| format!("ralph/{project_id}"));
+
+    let global_config = workspace.as_ref().map(|ws| &ws.config);
 
     reconstruct_project_state_internal(
         project_dir,
         project_id,
         repo_root.as_deref(),
         Some(branch.as_str()),
+        global_config,
     )
 }
 
@@ -218,6 +226,7 @@ fn reconstruct_project_state_internal(
     project_id: &str,
     repo_root: Option<&Path>,
     branch: Option<&str>,
+    global_config: Option<&GlobalConfig>,
 ) -> Result<ProjectState> {
     let prompt_path = project_dir.join("prompt.md");
     let prompt_content = fs::read_to_string(&prompt_path).unwrap_or_default();
@@ -265,10 +274,26 @@ fn reconstruct_project_state_internal(
     let mut loop_dirs = collect_loop_directories(project_dir)?;
     loop_dirs.sort_by_key(|(number, _, _)| *number);
 
+    // Compute effective completion consensus parameters by merging global
+    // workflow defaults with optional project overrides — matching the same
+    // resolution that `resolve_effective_config` applies at runtime.  When no
+    // global config is available (e.g. standalone project dir reconstruction)
+    // fall back to GlobalConfig::default().
+    let project_config = ProjectConfig::load(&project_dir.join("config.toml")).ok();
+    let fallback_global = GlobalConfig::default();
+    let effective_global = global_config.unwrap_or(&fallback_global);
+    let (completion_min_completers, completion_consensus_threshold) =
+        effective_completion_consensus(effective_global, project_config.as_ref());
+
     for (loop_number, loop_slug, loop_path) in loop_dirs {
         let artifacts = collect_loop_artifacts(project_dir, &loop_path)?;
         if loop_slug == "completion" {
-            let completion = reconstruct_completion_attempt(loop_number, artifacts);
+            let completion = reconstruct_completion_attempt(
+                loop_number,
+                artifacts,
+                completion_min_completers,
+                completion_consensus_threshold,
+            );
             state.completion_attempts.push(completion);
         } else {
             let feature = reconstruct_feature_loop(
@@ -638,6 +663,8 @@ fn reconstruct_feature_loop(
 fn reconstruct_completion_attempt(
     loop_number: u32,
     artifacts: Vec<ArtifactEntry>,
+    min_completers: u32,
+    consensus_threshold: f64,
 ) -> CompletionLoopState {
     let now = Utc::now();
     let started_at = artifacts
@@ -649,9 +676,97 @@ fn reconstruct_completion_attempt(
     let termination = latest_artifact(&artifacts, |artifact| {
         artifact.base_name == "termination-request.md"
     });
-    let verdict = latest_artifact(&artifacts, |artifact| {
+
+    // Collect per-backend verdict artifacts (new panel layout).
+    // Deduplicate by backend: if retries produced multiple verdict files for
+    // the same backend, keep only the latest one per backend to avoid
+    // inflating the consensus vote count.
+    let per_backend_verdicts: Vec<&ArtifactEntry> = {
+        let mut by_backend: std::collections::BTreeMap<String, &ArtifactEntry> =
+            std::collections::BTreeMap::new();
+        for artifact in &artifacts {
+            if artifact.base_name.starts_with("completer-verdict-")
+                && artifact.base_name != "completer-verdict.md"
+            {
+                let backend = artifact
+                    .frontmatter
+                    .get("backend")
+                    .cloned()
+                    .unwrap_or_else(|| artifact.base_name.clone());
+                match by_backend.get(&backend) {
+                    Some(prev) if artifact.observed_at > prev.observed_at => {
+                        by_backend.insert(backend, artifact);
+                    }
+                    None => {
+                        by_backend.insert(backend, artifact);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        by_backend.into_values().collect()
+    };
+
+    // Legacy single verdict artifact.
+    let legacy_verdict = latest_artifact(&artifacts, |artifact| {
         artifact.base_name == "completer-verdict.md"
     });
+
+    // Determine completers and effective verdict.
+    let (completers, effective_verdict_artifact, panel_verdict) =
+        if !per_backend_verdicts.is_empty() {
+            // New per-backend verdict layout: extract completers from each verdict artifact.
+            let mut completers = Vec::new();
+            let mut complete_votes: u32 = 0;
+            let mut any_verdict = false;
+            let mut latest_verdict: Option<&ArtifactEntry> = None;
+            for v in &per_backend_verdicts {
+                let backend = v
+                    .frontmatter
+                    .get("backend")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned());
+                completers.push(backend);
+                if let Some(pv) = parse_completion_verdict(&v.body) {
+                    any_verdict = true;
+                    if pv == CompletionVerdict::Complete {
+                        complete_votes += 1;
+                    }
+                }
+                latest_verdict = Some(match latest_verdict {
+                    Some(prev) if v.observed_at > prev.observed_at => v,
+                    Some(prev) => prev,
+                    None => v,
+                });
+            }
+            // Apply the same consensus formula as the runtime orchestrator:
+            // complete_votes >= min_completers AND ratio >= threshold.
+            let total = per_backend_verdicts.len() as u32;
+            let verdict = if any_verdict {
+                let consensus_reached = complete_votes >= min_completers
+                    && total > 0
+                    && (complete_votes as f64 / total as f64) >= consensus_threshold;
+                if consensus_reached {
+                    Some(CompletionVerdict::Complete)
+                } else {
+                    Some(CompletionVerdict::Continue)
+                }
+            } else {
+                None
+            };
+            (completers, latest_verdict, verdict)
+        } else if let Some(single) = legacy_verdict {
+            // Legacy single-verdict layout: map to single completer.
+            let backend = single
+                .frontmatter
+                .get("backend")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            let verdict = parse_completion_verdict(&single.body);
+            (vec![backend], Some(single), verdict)
+        } else {
+            (Vec::new(), None, None)
+        };
 
     let mut acceptance_results = Vec::new();
     for artifact in &artifacts {
@@ -685,48 +800,43 @@ fn reconstruct_completion_attempt(
         }
     }
 
-    let completion_verdict = verdict.and_then(|artifact| parse_completion_verdict(&artifact.body));
-
-    // Apply acceptance gate: if the completer said COMPLETE but any acceptance
+    // Apply acceptance gate: if the panel said COMPLETE but any acceptance
     // result failed, the effective verdict is CONTINUE.
-    let completion_verdict = match completion_verdict {
+    let panel_verdict = match panel_verdict {
         Some(CompletionVerdict::Complete) if acceptance_results.iter().any(|r| !r.passed) => {
             Some(CompletionVerdict::Continue)
         }
         other => other,
     };
 
-    let completed_at = verdict.map(|artifact| artifact.observed_at);
+    let completed_at = effective_verdict_artifact.map(|artifact| artifact.observed_at);
+
+    let planner_backend = termination
+        .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
+        .unwrap_or_else(|| "unknown".to_owned());
 
     CompletionLoopState {
         loop_number,
         slug: "completion".to_owned(),
         loop_type: LoopType::Completion,
-        status: if completion_verdict.is_some() {
+        status: if panel_verdict.is_some() {
             LoopStatus::Completed
         } else {
             LoopStatus::InProgress
         },
-        backends: CompletionLoopBackends {
-            planner: termination
-                .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-                .unwrap_or_else(|| "unknown".to_owned()),
-            completer: verdict
-                .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-                .unwrap_or_else(|| "unknown".to_owned()),
-        },
+        backends: CompletionLoopBackends::new(planner_backend, completers),
         artifacts: CompletionLoopArtifacts {
             termination_request: termination
                 .map(|artifact| artifact.rel_path.clone())
                 .unwrap_or_else(|| {
                     format!("loops/{loop_number:03}-completion/termination-request.md")
                 }),
-            verdict: verdict.map(|artifact| artifact.rel_path.clone()),
+            verdict: effective_verdict_artifact.map(|artifact| artifact.rel_path.clone()),
             acceptance_results,
             acceptance_result: None,
             acceptance_passed: None,
         },
-        verdict: completion_verdict,
+        verdict: panel_verdict,
         started_at,
         completed_at,
     }
@@ -871,7 +981,11 @@ where
 }
 
 fn state_has_prompt_review(project_dir: &Path) -> bool {
-    project_dir.join("prompt-review.md").exists()
+    // A completed prompt review always writes both the canonical review
+    // artifact and the original prompt backup.  Requiring both prevents
+    // validator-rejected runs (which may still write prompt-review.md) from
+    // being reconstructed as completed.
+    project_dir.join("prompt-review.md").exists() && project_dir.join("prompt-original.md").exists()
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
@@ -896,4 +1010,154 @@ fn read_project_metadata(project_dir: &Path) -> Option<ProjectMetadata> {
     let path = project_dir.join("project.toml");
     let raw = fs::read_to_string(path).ok()?;
     toml::from_str(&raw).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Helper: write a minimal verdict artifact in the completion loop directory.
+    fn write_verdict_artifact(
+        project_dir: &Path,
+        loop_number: u32,
+        file_name: &str,
+        backend: &str,
+        verdict: &str,
+    ) {
+        let loop_dir = project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}-completion"));
+        fs::create_dir_all(&loop_dir).unwrap();
+        let body = format!(
+            "---\nartifact: completer-verdict\nloop: {loop_number}\nproject: test\nbackend: {backend}\nrole: completer\ncreated_at: 2026-01-01T00:00:00Z\n---\n\n# Verdict: {verdict}\n"
+        );
+        fs::write(loop_dir.join(file_name), body).unwrap();
+    }
+
+    /// Helper: write a termination-request artifact in the completion loop directory.
+    fn write_termination_artifact(project_dir: &Path, loop_number: u32) {
+        let loop_dir = project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}-completion"));
+        fs::create_dir_all(&loop_dir).unwrap();
+        let body = format!(
+            "---\nartifact: termination-request\nloop: {loop_number}\nproject: test\nbackend: claude\nrole: planner\ncreated_at: 2026-01-01T00:00:00Z\n---\n\n# Project Completion Request\n"
+        );
+        fs::write(loop_dir.join("20260101000000-termination-request.md"), body).unwrap();
+    }
+
+    #[test]
+    fn reconstruction_uses_global_completion_threshold_override() {
+        // When the global config sets completion_consensus_threshold=0.5 and
+        // the project config has no override, reconstruction should use 0.5
+        // (not a hardcoded default of 1.0).  With threshold=0.5 and
+        // min_completers=1, 1/2 COMPLETE votes should yield consensus.
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("projects").join("test-proj");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Write prompt so reconstruction doesn't fail
+        fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
+        // Write project.toml metadata
+        fs::write(project_dir.join("project.toml"), "name = \"test-proj\"\n").unwrap();
+        // No project config.toml → no project-level completion overrides
+
+        // Write per-backend verdict artifacts: one COMPLETE, one CONTINUE
+        write_termination_artifact(&project_dir, 1);
+        write_verdict_artifact(
+            &project_dir,
+            1,
+            "20260101000001-completer-verdict-claude.md",
+            "claude",
+            "COMPLETE",
+        );
+        write_verdict_artifact(
+            &project_dir,
+            1,
+            "20260101000002-completer-verdict-codex.md",
+            "codex",
+            "CONTINUE",
+        );
+
+        // Create a global config with threshold=0.5, min_completers=1
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_consensus_threshold = 0.5;
+        global.workflow.completion_min_completers = 1;
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            None,
+            None,
+            Some(&global),
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(state.completion_attempts.len(), 1);
+        let attempt = &state.completion_attempts[0];
+        // With threshold=0.5 and min=1: 1/2 COMPLETE >= 0.5 and 1 >= 1 → COMPLETE
+        assert_eq!(
+            attempt.verdict,
+            Some(CompletionVerdict::Complete),
+            "reconstruction with global threshold=0.5 should yield Complete for 1/2 votes"
+        );
+    }
+
+    #[test]
+    fn reconstruction_project_override_takes_precedence_over_global() {
+        // When the global config sets threshold=0.5 but the project config
+        // sets threshold=1.0, reconstruction should use 1.0 and yield
+        // CONTINUE for 1/2 COMPLETE votes.
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("projects").join("test-proj2");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
+        fs::write(project_dir.join("project.toml"), "name = \"test-proj2\"\n").unwrap();
+        // Project config overrides threshold to 1.0
+        fs::write(
+            project_dir.join("config.toml"),
+            "[workflow]\ncompletion_consensus_threshold = 1.0\ncompletion_min_completers = 2\n",
+        )
+        .unwrap();
+
+        write_termination_artifact(&project_dir, 1);
+        write_verdict_artifact(
+            &project_dir,
+            1,
+            "20260101000001-completer-verdict-claude.md",
+            "claude",
+            "COMPLETE",
+        );
+        write_verdict_artifact(
+            &project_dir,
+            1,
+            "20260101000002-completer-verdict-codex.md",
+            "codex",
+            "CONTINUE",
+        );
+
+        let mut global = GlobalConfig::default();
+        global.workflow.completion_consensus_threshold = 0.5;
+        global.workflow.completion_min_completers = 1;
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj2",
+            None,
+            None,
+            Some(&global),
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(state.completion_attempts.len(), 1);
+        let attempt = &state.completion_attempts[0];
+        // Project override: threshold=1.0 and min=2 → 1/2 COMPLETE < 1.0 and 1 < 2 → CONTINUE
+        assert_eq!(
+            attempt.verdict,
+            Some(CompletionVerdict::Continue),
+            "project override threshold=1.0 should yield Continue for 1/2 votes"
+        );
+    }
 }

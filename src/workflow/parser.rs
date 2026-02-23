@@ -45,6 +45,12 @@ pub struct PromptReviewerDecision {
     pub refined_prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptReviewValidatorVerdict {
+    Accept,
+    Reject { reason: String },
+}
+
 pub fn parse_planner_output(raw: &str) -> Result<PlannerDecision> {
     let body = strip_frontmatter(raw);
     let Some(first_h1) = first_h1_line(&body) else {
@@ -298,6 +304,44 @@ pub fn parse_prompt_reviewer_output(raw: &str) -> Result<PromptReviewerDecision>
         body,
         refined_prompt,
     })
+}
+
+pub fn parse_prompt_review_validator_output(raw: &str) -> Result<PromptReviewValidatorVerdict> {
+    let body = strip_frontmatter(raw);
+
+    for line in body.lines() {
+        let verdict = line.trim();
+        if verdict.is_empty() {
+            continue;
+        }
+
+        if verdict == "ACCEPT" {
+            return Ok(PromptReviewValidatorVerdict::Accept);
+        }
+
+        if let Some(reason) = verdict
+            .strip_prefix("REJECT(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            let reason = reason.trim();
+            if reason.is_empty() {
+                return Err(RalphError::ParseError(
+                    "prompt review validator reject reason must not be empty".to_owned(),
+                ));
+            }
+            return Ok(PromptReviewValidatorVerdict::Reject {
+                reason: reason.to_owned(),
+            });
+        }
+
+        return Err(RalphError::ParseError(format!(
+            "unsupported prompt review validator verdict: {verdict}"
+        )));
+    }
+
+    Err(RalphError::ParseError(
+        "prompt review validator output is empty".to_owned(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -804,8 +848,9 @@ fn validate_required_line(body: &str, line: &str, scope: &str) -> Result<()> {
 mod tests {
     use super::{
         extract_commit_message, parse_completer_output, parse_implementer_output,
-        parse_planner_output, parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output,
-        ImplementerDecision, PlannerDecision, QaDecision, ReviewerDecision,
+        parse_planner_output, parse_prompt_review_validator_output, parse_prompt_reviewer_output,
+        parse_qa_output, parse_reviewer_output, ImplementerDecision, PlannerDecision,
+        PromptReviewValidatorVerdict, QaDecision, ReviewerDecision,
     };
     use crate::project::state::CompletionVerdict;
 
@@ -1106,6 +1151,40 @@ mod tests {
             .expect_err("expected error")
             .to_string()
             .contains("must appear before"));
+    }
+
+    #[test]
+    fn prompt_review_validator_accepts_accept_verdict() {
+        let parsed = parse_prompt_review_validator_output("ACCEPT").expect("parse should succeed");
+        assert_eq!(parsed, PromptReviewValidatorVerdict::Accept);
+    }
+
+    #[test]
+    fn prompt_review_validator_accepts_reject_verdict_with_reason() {
+        let parsed = parse_prompt_review_validator_output("REJECT(missing constraints)")
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            PromptReviewValidatorVerdict::Reject {
+                reason: "missing constraints".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn prompt_review_validator_rejects_empty_reason() {
+        let err = parse_prompt_review_validator_output("REJECT(   )")
+            .expect_err("empty reject reason should fail");
+        assert!(err.to_string().contains("reject reason must not be empty"));
+    }
+
+    #[test]
+    fn prompt_review_validator_rejects_unknown_verdict() {
+        let err = parse_prompt_review_validator_output("# ACCEPT")
+            .expect_err("unknown verdict format should fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported prompt review validator verdict"));
     }
 
     // -----------------------------------------------------------------------

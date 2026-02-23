@@ -116,6 +116,8 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 project_config.clone(),
                 RunWorkflowOverrides::default(),
             )?;
+            let prompt_review_backend_alias =
+                effective.workflow.prompt_review_backends.first().cloned();
 
             let value = serde_json::json!({
                 "scope": {
@@ -127,7 +129,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
                     "prompt_review_enabled": effective.workflow.prompt_review_enabled,
-                    "prompt_review_backend": effective.workflow.prompt_review_backend,
+                    "prompt_review_backend": prompt_review_backend_alias,
+                    "prompt_review_backends": effective.workflow.prompt_review_backends,
+                    "prompt_review_min_reviewers": effective.workflow.prompt_review_min_reviewers,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -139,6 +143,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
                     "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
                     "max_final_review_restarts": effective.workflow.max_final_review_restarts,
+                    "completion_backends": effective.workflow.completion_backends,
+                    "completion_min_completers": effective.workflow.completion_min_completers,
+                    "completion_consensus_threshold": effective.workflow.completion_consensus_threshold,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -175,6 +182,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "prompt_reviewer": effective.templates.prompt_reviewer,
+                    "prompt_review_validator": effective.templates.prompt_review_validator,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                     "final_reviewer": effective.templates.final_reviewer,
@@ -214,6 +222,8 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 project_config,
                 RunWorkflowOverrides::default(),
             )?;
+            let prompt_review_backend_alias =
+                effective.workflow.prompt_review_backends.first().cloned();
 
             serde_json::json!({
                 "workspace": effective.global.workspace,
@@ -221,7 +231,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                 "workflow": {
                     "starting_backend": effective.workflow.starting_backend,
                     "prompt_review_enabled": effective.workflow.prompt_review_enabled,
-                    "prompt_review_backend": effective.workflow.prompt_review_backend,
+                    "prompt_review_backend": prompt_review_backend_alias,
+                    "prompt_review_backends": effective.workflow.prompt_review_backends,
+                    "prompt_review_min_reviewers": effective.workflow.prompt_review_min_reviewers,
                     "planner_backend": effective.workflow.planner_backend,
                     "implementer_backend": effective.workflow.implementer_backend,
                     "reviewer_backend": effective.workflow.reviewer_backend,
@@ -233,6 +245,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "final_review_min_reviewers": effective.workflow.final_review_min_reviewers,
                     "final_review_consensus_threshold": effective.workflow.final_review_consensus_threshold,
                     "max_final_review_restarts": effective.workflow.max_final_review_restarts,
+                    "completion_backends": effective.workflow.completion_backends,
+                    "completion_min_completers": effective.workflow.completion_min_completers,
+                    "completion_consensus_threshold": effective.workflow.completion_consensus_threshold,
                     "qa_enabled": effective.workflow.qa_enabled,
                     "max_qa_iterations": effective.workflow.max_qa_iterations,
                     "max_review_iterations": effective.workflow.max_review_iterations,
@@ -269,6 +284,7 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "implementer": effective.templates.implementer,
                     "reviewer": effective.templates.reviewer,
                     "prompt_reviewer": effective.templates.prompt_reviewer,
+                    "prompt_review_validator": effective.templates.prompt_review_validator,
                     "completer": effective.templates.completer,
                     "qa": effective.templates.qa,
                     "final_reviewer": effective.templates.final_reviewer,
@@ -437,8 +453,14 @@ fn set_global_value(
             config.workflow.prompt_review_enabled = parse_bool(raw_value, key)?;
         }
         "workflow.prompt_review_backend" => {
-            ensure_backend(raw_value)?;
+            ensure_required_backend(raw_value, "workflow.prompt_review_backend")?;
             config.workflow.prompt_review_backend = raw_value.to_owned();
+        }
+        "workflow.prompt_review_backends" => {
+            config.workflow.prompt_review_backends = Some(parse_string_list(raw_value)?);
+        }
+        "workflow.prompt_review_min_reviewers" => {
+            config.workflow.prompt_review_min_reviewers = parse_u32(raw_value, key)?;
         }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
@@ -476,6 +498,18 @@ fn set_global_value(
         }
         "workflow.max_final_review_restarts" => {
             config.workflow.max_final_review_restarts = parse_u32(raw_value, key)?;
+        }
+        "workflow.completion_backends" => {
+            config.workflow.completion_backends = parse_string_list(raw_value)?;
+        }
+        "workflow.completion_min_completers" => {
+            config.workflow.completion_min_completers = parse_u32(raw_value, key)?;
+        }
+        "workflow.completion_consensus_threshold" => {
+            let v: f64 = raw_value
+                .parse()
+                .map_err(|_| RalphError::Validation(format!("key '{key}' expects float value")))?;
+            config.workflow.completion_consensus_threshold = v;
         }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_bool(raw_value, key)?;
@@ -519,6 +553,9 @@ fn set_global_value(
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
         "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
         "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
+        "templates.prompt_review_validator" => {
+            config.templates.prompt_review_validator = raw_value.to_owned()
+        }
         "templates.completer" => config.templates.completer = raw_value.to_owned(),
         "templates.qa" => config.templates.qa = raw_value.to_owned(),
         "templates.final_reviewer" => config.templates.final_reviewer = raw_value.to_owned(),
@@ -531,11 +568,24 @@ fn set_global_value(
         "git.base_branch" => config.git.base_branch = raw_value.to_owned(),
         "backends.claude.command" => config.backends.claude.command = raw_value.to_owned(),
         "backends.codex.command" => config.backends.codex.command = raw_value.to_owned(),
+        "backends.gemini.command" => config.backends.gemini.command = raw_value.to_owned(),
         "backends.claude.timeout_seconds" => {
             config.backends.claude.timeout_seconds = parse_u64(raw_value, key)?;
         }
         "backends.codex.timeout_seconds" => {
             config.backends.codex.timeout_seconds = parse_u64(raw_value, key)?;
+        }
+        "backends.gemini.timeout_seconds" => {
+            config.backends.gemini.timeout_seconds = parse_u64(raw_value, key)?;
+        }
+        "backends.claude.enabled" => {
+            config.backends.claude.enabled = parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.codex.enabled" => {
+            config.backends.codex.enabled = parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.gemini.enabled" => {
+            config.backends.gemini.enabled = parse_backend_enabled(raw_value, key)?;
         }
         _ if key.starts_with("backends.claude.role_timeouts.") => {
             let role = key.trim_start_matches("backends.claude.role_timeouts.");
@@ -545,8 +595,13 @@ fn set_global_value(
             let role = key.trim_start_matches("backends.codex.role_timeouts.");
             set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
         }
+        _ if key.starts_with("backends.gemini.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.gemini.role_timeouts.");
+            set_role_timeout(&mut config.backends.gemini.role_timeouts, role, raw_value)?;
+        }
         "backends.claude.args" => config.backends.claude.args = parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = parse_string_list(raw_value)?,
+        "backends.gemini.args" => config.backends.gemini.args = parse_string_list(raw_value)?,
         _ if key.starts_with("backends.claude.models.") => {
             let role = key.trim_start_matches("backends.claude.models.");
             set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
@@ -554,6 +609,10 @@ fn set_global_value(
         _ if key.starts_with("backends.codex.models.") => {
             let role = key.trim_start_matches("backends.codex.models.");
             set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.gemini.models.") => {
+            let role = key.trim_start_matches("backends.gemini.models.");
+            set_backend_model(&mut config.backends.gemini.models, role, raw_value)?;
         }
         _ if key.starts_with("backends.claude.env.") => {
             let env_key = key.trim_start_matches("backends.claude.env.");
@@ -568,6 +627,14 @@ fn set_global_value(
             config
                 .backends
                 .codex
+                .env
+                .insert(env_key.to_owned(), raw_value.to_owned());
+        }
+        _ if key.starts_with("backends.gemini.env.") => {
+            let env_key = key.trim_start_matches("backends.gemini.env.");
+            config
+                .backends
+                .gemini
                 .env
                 .insert(env_key.to_owned(), raw_value.to_owned());
         }
@@ -602,7 +669,14 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
             config.workflow.prompt_review_enabled = parse_optional_bool(raw_value, key)?;
         }
         "workflow.prompt_review_backend" => {
-            config.workflow.prompt_review_backend = parse_optional_backend(raw_value)?;
+            config.workflow.prompt_review_backend =
+                parse_optional_required_backend(raw_value, "workflow.prompt_review_backend")?;
+        }
+        "workflow.prompt_review_backends" => {
+            config.workflow.prompt_review_backends = parse_optional_string_list(raw_value)?;
+        }
+        "workflow.prompt_review_min_reviewers" => {
+            config.workflow.prompt_review_min_reviewers = parse_optional_u32(raw_value, key)?;
         }
         "workflow.planner_backend" => {
             config.workflow.planner_backend = parse_optional_backend(raw_value)?;
@@ -643,6 +717,22 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.max_final_review_restarts" => {
             config.workflow.max_final_review_restarts = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.completion_backends" => {
+            config.workflow.completion_backends = parse_optional_string_list(raw_value)?;
+        }
+        "workflow.completion_min_completers" => {
+            config.workflow.completion_min_completers = parse_optional_u32(raw_value, key)?;
+        }
+        "workflow.completion_consensus_threshold" => {
+            if raw_value == "null" {
+                config.workflow.completion_consensus_threshold = None;
+            } else {
+                let v: f64 = raw_value.parse().map_err(|_| {
+                    RalphError::Validation(format!("key '{key}' expects float value"))
+                })?;
+                config.workflow.completion_consensus_threshold = Some(v);
+            }
         }
         "workflow.qa_enabled" => {
             config.workflow.qa_enabled = parse_optional_bool(raw_value, key)?;
@@ -692,6 +782,9 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         "templates.reviewer" => config.templates.reviewer = parse_optional_string(raw_value),
         "templates.prompt_reviewer" => {
             config.templates.prompt_reviewer = parse_optional_string(raw_value)
+        }
+        "templates.prompt_review_validator" => {
+            config.templates.prompt_review_validator = parse_optional_string(raw_value)
         }
         "templates.completer" => config.templates.completer = parse_optional_string(raw_value),
         "templates.qa" => config.templates.qa = parse_optional_string(raw_value),
@@ -747,6 +840,17 @@ fn parse_bool(raw: &str, key: &str) -> Result<bool> {
     raw.parse::<bool>().map_err(|_| {
         RalphError::Validation(format!("key '{key}' expects boolean value (true/false)"))
     })
+}
+
+fn parse_backend_enabled(raw: &str, key: &str) -> Result<crate::config::global::BackendEnabled> {
+    match raw {
+        "true" => Ok(crate::config::global::BackendEnabled::Enabled),
+        "false" => Ok(crate::config::global::BackendEnabled::Disabled),
+        "auto" => Ok(crate::config::global::BackendEnabled::Auto),
+        _ => Err(RalphError::Validation(format!(
+            "key '{key}' expects true, false, or auto"
+        ))),
+    }
 }
 
 fn parse_u32(raw: &str, key: &str) -> Result<u32> {
@@ -892,8 +996,26 @@ fn parse_optional_backend(raw: &str) -> Result<Option<String>> {
     Ok(Some(raw.to_owned()))
 }
 
+fn parse_optional_required_backend(raw: &str, label: &str) -> Result<Option<String>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    ensure_required_backend(raw, label)?;
+    Ok(Some(raw.to_owned()))
+}
+
 fn ensure_backend(raw: &str) -> Result<()> {
     crate::cli::backend_spec::validate_backend_spec_name(raw)
+}
+
+fn ensure_required_backend(raw: &str, label: &str) -> Result<()> {
+    let parsed = crate::backend::parse_backend_spec(raw)?;
+    if parsed.optional {
+        return Err(RalphError::Validation(format!(
+            "optional backend specs (?backend) are not supported for {label}; optional syntax is allowed only in panel backend lists"
+        )));
+    }
+    ensure_backend(raw)
 }
 
 const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
@@ -1091,6 +1213,15 @@ mod tests {
     }
 
     #[test]
+    fn ensure_required_backend_rejects_optional_syntax() {
+        let err = ensure_required_backend("?gemini", "workflow.prompt_review_backend")
+            .expect_err("optional syntax should be rejected for required surfaces");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
+    }
+
+    #[test]
     fn parse_optional_backend_accepts_claude_with_model() {
         let result = parse_optional_backend("claude(opus)").expect("should parse successfully");
         assert_eq!(result, Some("claude(opus)".to_owned()));
@@ -1100,6 +1231,13 @@ mod tests {
     fn parse_optional_backend_accepts_bare_name() {
         let result = parse_optional_backend("codex").expect("should parse successfully");
         assert_eq!(result, Some("codex".to_owned()));
+    }
+
+    #[test]
+    fn parse_optional_backend_accepts_optional_gemini() {
+        let result = parse_optional_backend("?gemini(gemini-3-pro)")
+            .expect("optional gemini should parse successfully");
+        assert_eq!(result, Some("?gemini(gemini-3-pro)".to_owned()));
     }
 
     #[test]
@@ -1116,6 +1254,30 @@ mod tests {
     #[test]
     fn parse_optional_backend_rejects_malformed() {
         parse_optional_backend("claude()").expect_err("malformed spec should fail");
+    }
+
+    #[test]
+    fn set_global_value_rejects_optional_prompt_review_backend_alias() {
+        let mut config = crate::config::GlobalConfig::default();
+        let err = set_global_value(
+            &mut config,
+            "workflow.prompt_review_backend",
+            "?gemini(gemini-3-pro)",
+        )
+        .expect_err("optional syntax should be rejected for singular alias");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
+    }
+
+    #[test]
+    fn set_project_value_rejects_optional_prompt_review_backend_alias() {
+        let mut config = crate::config::ProjectConfig::default();
+        let err = set_project_value(&mut config, "workflow.prompt_review_backend", "?claude")
+            .expect_err("optional syntax should be rejected for project singular alias");
+        assert!(err.to_string().contains(
+            "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
+        ));
     }
 
     #[test]

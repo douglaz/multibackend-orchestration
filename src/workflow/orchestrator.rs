@@ -25,22 +25,23 @@ use crate::git::commit::{
 use crate::git::{is_git_repo, run_git};
 use crate::output_log::LogWriter;
 use crate::project::artifacts::{
-    artifact_relative_path, resolve_artifact_path_by_suffix, write_artifact,
+    artifact_relative_path, resolve_artifact_path_by_suffix, slugify_backend, write_artifact,
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
-    AcceptanceQaResult, CompletionVerdict, FeatureLoopState, LoopStatus, Phase, ProjectState,
-    ProjectStatus, QaExchange, ReviewExchange,
+    AcceptanceQaResult, CompletionLoopBackends, CompletionVerdict, FeatureLoopState, LoopStatus,
+    Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
 use crate::prompts::template_introspection::{load_template_source, template_uses_var};
 use crate::prompts::templates::{
     default_arbiter_template, default_completer_template, default_final_reviewer_template,
     default_implementer_template, default_planner_position_template, default_planner_template,
-    default_prompt_reviewer_template, default_qa_template, default_reviewer_template,
-    default_vote_template, render_template_with_fallback,
+    default_prompt_review_validator_template, default_prompt_reviewer_template,
+    default_qa_template, default_reviewer_template, default_vote_template,
+    render_template_with_fallback,
 };
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
@@ -48,9 +49,10 @@ use crate::util::slug::slugify_feature_name;
 use crate::workflow::parser::{
     parse_arbiter_output, parse_completer_output, parse_final_reviewer_output,
     parse_implementer_output, parse_planner_output, parse_planner_position_output,
-    parse_prompt_reviewer_output, parse_qa_output, parse_reviewer_output, parse_vote_output,
-    ArbiterDecision, CompleterDecision, FinalReviewerDecision, ImplementerDecision,
-    PlannerDecision, PlannerPositionsDecision, QaDecision, ReviewerDecision, VoteDecision,
+    parse_prompt_review_validator_output, parse_prompt_reviewer_output, parse_qa_output,
+    parse_reviewer_output, parse_vote_output, ArbiterDecision, CompleterDecision,
+    FinalReviewerDecision, ImplementerDecision, PlannerDecision, PlannerPositionsDecision,
+    PromptReviewValidatorVerdict, QaDecision, ReviewerDecision, VoteDecision,
 };
 use crate::workspace::Workspace;
 use crate::Result;
@@ -284,10 +286,29 @@ impl Orchestrator {
                 ))
             })?;
 
+            let (effective_prompt_review_backends, refiner_index) =
+                resolve_effective_prompt_review_backends(
+                    &mut registry,
+                    &effective.workflow.prompt_review_backends,
+                )
+                .await?;
+            let refiner_backend_spec = effective_prompt_review_backends[0].clone();
+
+            // Validate that prompt-original.md does not already exist before
+            // writing prompt-review artifacts or executing validators.
+            let backup_path = project_dir.join("prompt-original.md");
+            if backup_path.exists() {
+                return Err(RalphError::Validation(
+                    "prompt-original.md already exists in project directory; \
+                     remove or rename it before running prompt review"
+                        .to_owned(),
+                ));
+            }
+
             let prompt_reviewer_prompt = build_prompt_reviewer_prompt(&effective, &prompt_content)?;
 
-            let pr_backend_spec = &effective.workflow.prompt_review_backend;
-            let pr_backend = registry.get_or_create_for_role(pr_backend_spec, "prompt_reviewer")?;
+            let pr_backend =
+                registry.get_or_create_for_role(&refiner_backend_spec, "prompt_reviewer")?;
 
             registry
                 .set_tmux_context(TmuxExecutionContext {
@@ -298,7 +319,10 @@ impl Orchestrator {
                 })
                 .await;
 
-            info!(backend = pr_backend.name(), "invoking prompt reviewer...");
+            info!(
+                backend = pr_backend.name(),
+                "invoking prompt review refiner..."
+            );
             let mut pr_log = LogWriter::open(&log_dir, &project_id, None, "prompt-reviewer");
             let _retry_result = execute_with_parse_retries(
                 pr_backend,
@@ -311,7 +335,7 @@ impl Orchestrator {
                 parse_prompt_reviewer_output,
                 &expected_format_template_for("prompt_reviewer", None),
                 registry
-                    .timeout_for_role(pr_backend_spec, "prompt_reviewer")
+                    .timeout_for_role(&refiner_backend_spec, "prompt_reviewer")
                     .as_secs(),
                 &mut pr_log,
                 None,
@@ -320,14 +344,116 @@ impl Orchestrator {
             .await?;
             let decision = _retry_result.parsed;
 
-            // Validate that prompt-original.md does not already exist.
-            let backup_path = project_dir.join("prompt-original.md");
-            if backup_path.exists() {
-                return Err(RalphError::Validation(
-                    "prompt-original.md already exists in project directory; \
-                     remove or rename it before running prompt review"
-                        .to_owned(),
-                ));
+            // Preserve canonical prompt-review artifact from refiner output
+            // even if later validators reject.
+            write_project_scoped_artifact(
+                &project_dir,
+                ProjectScopedArtifactWriteInput {
+                    artifact: "prompt-review",
+                    file_name: "prompt-review.md",
+                    project_id: &state.project_id,
+                    backend: &refiner_backend_spec,
+                    role: "prompt_reviewer",
+                    body: &decision.body,
+                },
+            )?;
+
+            let mut validators_run = 0_usize;
+            let mut reject_reasons = Vec::new();
+            for validator_backend_spec in effective_prompt_review_backends.iter().skip(1) {
+                validators_run += 1;
+                let validator_backend =
+                    registry.get_or_create_for_role(validator_backend_spec, "prompt_reviewer")?;
+                let validator_prompt = build_prompt_review_validator_prompt(
+                    &effective,
+                    &prompt_content,
+                    &decision.refined_prompt,
+                )?;
+
+                registry
+                    .set_tmux_context(TmuxExecutionContext {
+                        loop_number: None,
+                        role: Some("prompt_reviewer".to_owned()),
+                        loop_dir: None,
+                        session_id: None,
+                    })
+                    .await;
+
+                info!(
+                    backend = validator_backend.name(),
+                    "invoking prompt review validator..."
+                );
+                let log_name = format!(
+                    "prompt-review-validator-{}",
+                    slugify_backend(validator_backend_spec)
+                );
+                let mut validator_log = LogWriter::open(&log_dir, &project_id, None, &log_name);
+                let _retry_result: ParseRetryResult<PromptReviewValidatorVerdict> =
+                    execute_with_parse_retries(
+                        validator_backend,
+                        &registry,
+                        "prompt_reviewer",
+                        "prompt_review",
+                        0,
+                        &validator_prompt,
+                        None,
+                        parse_prompt_review_validator_output,
+                        &expected_format_template_for("prompt_review_validator", None),
+                        registry
+                            .timeout_for_role(validator_backend_spec, "prompt_reviewer")
+                            .as_secs(),
+                        &mut validator_log,
+                        None,
+                        repo_root_ref,
+                    )
+                    .await?;
+                let verdict = _retry_result.parsed;
+                let verdict_body = match &verdict {
+                    PromptReviewValidatorVerdict::Accept => "ACCEPT".to_owned(),
+                    PromptReviewValidatorVerdict::Reject { reason } => {
+                        format!("REJECT({reason})")
+                    }
+                };
+                let validator_file_name = format!(
+                    "prompt-review-validator-{}.md",
+                    slugify_backend(validator_backend_spec)
+                );
+                write_project_scoped_artifact(
+                    &project_dir,
+                    ProjectScopedArtifactWriteInput {
+                        artifact: "prompt-review-validator",
+                        file_name: &validator_file_name,
+                        project_id: &state.project_id,
+                        backend: validator_backend_spec,
+                        role: "prompt_review_validator",
+                        body: &verdict_body,
+                    },
+                )?;
+
+                if let PromptReviewValidatorVerdict::Reject { reason } = verdict {
+                    reject_reasons.push(format!("{validator_backend_spec}: {reason}"));
+                }
+            }
+
+            let configured_validators = effective
+                .workflow
+                .prompt_review_backends
+                .len()
+                .saturating_sub(refiner_index + 1);
+            if configured_validators > 0
+                && validators_run < effective.workflow.prompt_review_min_reviewers as usize
+            {
+                return Err(RalphError::Orchestration(format!(
+                    "only {validators_run} prompt review validator(s) available after optional filtering, but prompt_review_min_reviewers requires {}",
+                    effective.workflow.prompt_review_min_reviewers
+                )));
+            }
+
+            if !reject_reasons.is_empty() {
+                return Err(RalphError::Orchestration(format!(
+                    "prompt review rejected by validator(s): {}",
+                    reject_reasons.join("; ")
+                )));
             }
 
             // Write backup of original prompt.
@@ -335,19 +461,6 @@ impl Orchestrator {
 
             // Overwrite prompt file with refined prompt.
             fs::write(&prompt_path, &decision.refined_prompt)?;
-
-            // Write prompt-review.md artifact.
-            write_project_scoped_artifact(
-                &project_dir,
-                ProjectScopedArtifactWriteInput {
-                    artifact: "prompt-review",
-                    file_name: "prompt-review.md",
-                    project_id: &state.project_id,
-                    backend: pr_backend_spec,
-                    role: "prompt_reviewer",
-                    body: &decision.body,
-                },
-            )?;
 
             // Update prompt hashes.
             let new_hash = sha256_hex(&decision.refined_prompt);
@@ -512,11 +625,24 @@ impl Orchestrator {
                         }
                         PlannerDecision::CompletionRequest { body } => {
                             info!(loop = loop_number, "planner requested project completion");
-                            let completion_backends = registry.assign_completion_backends(
+                            let base_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
                                 &role_overrides,
                             )?;
+                            // Resolve effective completers from the panel config.
+                            // Optional backends are skipped inside resolve_completion_panel;
+                            // required-backend failures and min-completer violations propagate.
+                            let effective_completers = registry
+                                .resolve_completion_panel(
+                                    &effective.workflow.completion_backends,
+                                    effective.workflow.completion_min_completers,
+                                )
+                                .await?;
+                            let completion_backends = CompletionLoopBackends::new(
+                                base_backends.planner.clone(),
+                                effective_completers,
+                            );
                             let termination_path = write_artifact(
                                 &project_dir,
                                 ArtifactWriteInput {
@@ -1601,7 +1727,7 @@ impl Orchestrator {
                     let (
                         loop_number,
                         planner_backend_name,
-                        completer_backend_name,
+                        mut effective_completers,
                         termination_rel,
                     ) = {
                         let completion = state.current_completion_attempt().ok_or_else(|| {
@@ -1614,89 +1740,150 @@ impl Orchestrator {
                         (
                             completion.loop_number,
                             completion.backends.planner.clone(),
-                            completion.backends.completer.clone(),
+                            completion.backends.completers.clone(),
                             completion.artifacts.termination_request.clone(),
                         )
                     };
 
-                    let completer_backend =
-                        registry.get_or_create_for_role(&completer_backend_name, "completer")?;
+                    // If reconstructed completers list is empty (e.g. process
+                    // stopped after writing termination-request but before any
+                    // completer verdict), re-resolve from config so the
+                    // completing phase doesn't silently skip all completers.
+                    if effective_completers.is_empty() {
+                        effective_completers = registry
+                            .resolve_completion_panel(
+                                &effective.workflow.completion_backends,
+                                effective.workflow.completion_min_completers,
+                            )
+                            .await?;
+                        // Persist the resolved completers back into state.
+                        if let Some(completion) = state.current_completion_attempt_mut() {
+                            completion.backends.completers = effective_completers.clone();
+                        }
+                    }
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
 
-                    let completer_prompt = build_completer_prompt(
-                        &effective,
-                        &state,
-                        &prompt_content,
-                        completer_backend.name(),
-                        &planner_backend_name,
-                        &termination_content,
-                        &project_dir,
-                    )?;
+                    // Run all effective completers, collect verdicts
+                    let mut complete_votes: u32 = 0;
+                    let total_completers = effective_completers.len() as u32;
+                    let mut last_verdict_rel: Option<String> = None;
 
-                    // Session reuse: exercise role policy for completer (will warn+skip for v1)
-                    let _completer_session_id = resolve_session_for_role(
-                        &effective,
-                        &mut state,
-                        "completer",
-                        &completer_backend_name,
-                        loop_number,
-                        "", // completer has no bootstrap hash
+                    for completer_backend_name in &effective_completers {
+                        let completer_backend =
+                            registry.get_or_create_for_role(completer_backend_name, "completer")?;
+
+                        let completer_prompt = build_completer_prompt(
+                            &effective,
+                            &state,
+                            &prompt_content,
+                            completer_backend.name(),
+                            &planner_backend_name,
+                            &termination_content,
+                            &project_dir,
+                        )?;
+
+                        // Session reuse: exercise role policy for completer (will warn+skip for v1)
+                        let _completer_session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "completer",
+                            completer_backend_name,
+                            loop_number,
+                            "", // completer has no bootstrap hash
+                        );
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("completer".to_owned()),
+                                loop_dir: Some(
+                                    project_dir
+                                        .join("loops")
+                                        .join(format!("{loop_number:03}-completion")),
+                                ),
+                                session_id: None,
+                            })
+                            .await;
+
+                        info!(
+                            loop = loop_number,
+                            backend = completer_backend.name(),
+                            "invoking completer..."
+                        );
+                        let mut completer_log =
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
+                        let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
+                            completer_backend,
+                            &registry,
+                            "completer",
+                            "completing",
+                            loop_number,
+                            &completer_prompt,
+                            None,
+                            parse_completer_output,
+                            &expected_format_template_for("completer", None),
+                            registry.timeout_for_role(completer_backend_name, "completer").as_secs(),
+                            &mut completer_log,
+                            None,
+                            repo_root_ref,
+                        )
+                        .await?;
+                        let completer_decision = _retry_result.parsed;
+                        debug!(loop = loop_number, backend = completer_backend_name, "completer responded");
+
+                        // Write per-backend verdict artifact
+                        let verdict_kind = if effective_completers.len() == 1 {
+                            ArtifactKind::CompleterVerdict
+                        } else {
+                            ArtifactKind::CompleterVerdictBackend {
+                                backend: completer_backend_name.clone(),
+                            }
+                        };
+                        let verdict_path = write_artifact(
+                            &project_dir,
+                            ArtifactWriteInput {
+                                project_id: &state.project_id,
+                                loop_number,
+                                loop_slug: "completion",
+                                backend: completer_backend_name,
+                                role: "completer",
+                                kind: verdict_kind,
+                                body: &completer_decision.body,
+                            },
+                        )?;
+                        last_verdict_rel = Some(artifact_relative_path(&project_dir, &verdict_path));
+
+                        if completer_decision.verdict == CompletionVerdict::Complete {
+                            complete_votes += 1;
+                        }
+                    }
+
+                    // Compute consensus with inclusive thresholds
+                    let consensus_threshold = effective.workflow.completion_consensus_threshold;
+                    let min_completers = effective.workflow.completion_min_completers;
+                    let consensus_reached = compute_completion_consensus(
+                        complete_votes,
+                        total_completers,
+                        min_completers,
+                        consensus_threshold,
                     );
-
-                    registry
-                        .set_tmux_context(TmuxExecutionContext {
-                            loop_number: Some(loop_number),
-                            role: Some("completer".to_owned()),
-                            loop_dir: Some(
-                                project_dir
-                                    .join("loops")
-                                    .join(format!("{loop_number:03}-completion")),
-                            ),
-                            session_id: None, // always None: completer not supported for v1 reuse
-                        })
-                        .await;
+                    let panel_verdict = if consensus_reached {
+                        CompletionVerdict::Complete
+                    } else {
+                        CompletionVerdict::Continue
+                    };
 
                     info!(
                         loop = loop_number,
-                        backend = completer_backend.name(),
-                        "invoking completer..."
+                        complete_votes = complete_votes,
+                        total = total_completers,
+                        threshold = consensus_threshold,
+                        min = min_completers,
+                        verdict = ?panel_verdict,
+                        "completion panel consensus computed"
                     );
-                    let mut completer_log =
-                        LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
-                    let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
-                        completer_backend,
-                        &registry,
-                        "completer",
-                        "completing",
-                        loop_number,
-                        &completer_prompt,
-                        None,
-                        parse_completer_output,
-                        &expected_format_template_for("completer", None),
-                        registry.timeout_for_role(&completer_backend_name, "completer").as_secs(),
-                        &mut completer_log,
-                        None,
-                        repo_root_ref,
-                    )
-                    .await?;
-                    let completer_decision = _retry_result.parsed;
-                    debug!(loop = loop_number, "completer responded");
-
-                    let verdict_path = write_artifact(
-                        &project_dir,
-                        ArtifactWriteInput {
-                            project_id: &state.project_id,
-                            loop_number,
-                            loop_slug: "completion",
-                            backend: &completer_backend_name,
-                            role: "completer",
-                            kind: ArtifactKind::CompleterVerdict,
-                            body: &completer_decision.body,
-                        },
-                    )?;
-                    let verdict_rel = artifact_relative_path(&project_dir, &verdict_path);
 
                     {
                         let completion =
@@ -1706,13 +1893,13 @@ impl Orchestrator {
                                         .to_owned(),
                                 )
                             })?;
-                        completion.artifacts.verdict = Some(verdict_rel);
-                        completion.verdict = Some(completer_decision.verdict.clone());
+                        completion.artifacts.verdict = last_verdict_rel;
+                        completion.verdict = Some(panel_verdict.clone());
                         completion.status = LoopStatus::Completed;
                         completion.completed_at = Some(Utc::now());
                     }
 
-                    match completer_decision.verdict {
+                    match panel_verdict {
                         CompletionVerdict::Complete => {
                             if effective.workflow.qa_enabled {
                                 let acceptance_backends = ["claude", "codex"]
@@ -2221,8 +2408,8 @@ fn dry_run_summary(
         "prompt_review: will be skipped (--skip-prompt-review)".to_owned()
     } else {
         format!(
-            "prompt_review: pending (backend: {})",
-            effective.workflow.prompt_review_backend
+            "prompt_review: pending (backends: {})",
+            effective.workflow.prompt_review_backends.join(", ")
         )
     };
 
@@ -2566,6 +2753,24 @@ fn build_prompt_reviewer_prompt(
         &effective.templates.prompt_reviewer,
         &vars,
         default_prompt_reviewer_template(),
+    )?;
+    Ok(rendered)
+}
+
+fn build_prompt_review_validator_prompt(
+    effective: &EffectiveConfig,
+    original_prompt: &str,
+    refined_prompt: &str,
+) -> Result<String> {
+    let mut vars = BTreeMap::new();
+    vars.insert("original_prompt".to_owned(), original_prompt.to_owned());
+    vars.insert("prompt_content".to_owned(), original_prompt.to_owned());
+    vars.insert("refined_prompt".to_owned(), refined_prompt.to_owned());
+
+    let rendered = render_template_with_fallback(
+        &effective.templates.prompt_review_validator,
+        &vars,
+        default_prompt_review_validator_template(),
     )?;
     Ok(rendered)
 }
@@ -3082,7 +3287,14 @@ async fn run_final_review_phase(
     let loop_slug = completion.slug.clone();
     let planner_backend_name = completion.backends.planner.clone();
 
-    let reviewers = normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let reviewer_specs =
+        normalize_final_review_backends(&effective.workflow.final_review_backends)?;
+    let reviewers = resolve_effective_final_review_backends(
+        registry,
+        &reviewer_specs,
+        effective.workflow.final_review_min_reviewers,
+    )
+    .await?;
     let arbiter_backend =
         canonicalize_backend_spec(&effective.workflow.final_review_arbiter_backend)?;
     let snapshot = FinalReviewConfigSnapshot {
@@ -3499,24 +3711,134 @@ async fn run_final_review_phase(
     Ok(Some((Phase::FinalReview, Phase::Planning)))
 }
 
-fn normalize_final_review_backends(backends: &[String]) -> Result<Vec<String>> {
-    let mut normalized = Vec::new();
-    let mut seen = HashSet::new();
+fn normalize_final_review_backends(
+    backends: &[String],
+) -> Result<Vec<crate::backend::BackendSpec>> {
+    let mut normalized: Vec<crate::backend::BackendSpec> = Vec::new();
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+
     for backend in backends {
-        let canonical = canonicalize_backend_spec(backend)?;
-        if seen.insert(canonical.clone()) {
-            normalized.push(canonical);
+        let parsed = crate::backend::parse_backend_spec(backend)?;
+        let key = canonicalize_parsed_backend_spec(&parsed);
+        if let Some(idx) = index_by_key.get(&key).copied() {
+            // Required entries win over optional duplicates.
+            if !parsed.optional && normalized[idx].optional {
+                normalized[idx].optional = false;
+            }
+            continue;
         }
+        index_by_key.insert(key, normalized.len());
+        normalized.push(parsed);
     }
     Ok(normalized)
 }
 
+async fn resolve_effective_final_review_backends(
+    registry: &mut BackendRegistry,
+    backends: &[crate::backend::BackendSpec],
+    min_reviewers: u32,
+) -> Result<Vec<String>> {
+    let mut effective = Vec::new();
+    let mut unavailable_optional = Vec::new();
+
+    for backend in backends {
+        let canonical = canonicalize_parsed_backend_spec(backend);
+        let available = registry
+            .backend_available_for_spec(&canonical, Some("final_reviewer"))
+            .await?;
+        if available {
+            effective.push(canonical);
+            continue;
+        }
+
+        if backend.optional {
+            warn!(
+                backend = %canonical,
+                "optional final review backend unavailable; skipping"
+            );
+            unavailable_optional.push(canonical);
+            continue;
+        }
+
+        return Err(RalphError::BackendUnavailable { backend: canonical });
+    }
+
+    if effective.len() < min_reviewers as usize {
+        let unavailable = if unavailable_optional.is_empty() {
+            "none".to_owned()
+        } else {
+            unavailable_optional.join(", ")
+        };
+        return Err(RalphError::Validation(format!(
+            "final_review_backends has {} available backend(s) after optional filtering; unavailable optional backends: {}; final_review_min_reviewers is {}",
+            effective.len(),
+            unavailable,
+            min_reviewers
+        )));
+    }
+
+    Ok(effective)
+}
+
+async fn resolve_effective_prompt_review_backends(
+    registry: &mut BackendRegistry,
+    backends: &[String],
+) -> Result<(Vec<String>, usize)> {
+    let mut effective = Vec::new();
+    let mut first_effective_index: Option<usize> = None;
+
+    for (idx, backend_spec) in backends.iter().enumerate() {
+        let parsed = crate::backend::parse_backend_spec(backend_spec)?;
+        let canonical = canonicalize_backend_spec(
+            &registry.resolve_backend_for_role(backend_spec, "prompt_reviewer"),
+        )?;
+        let available = match registry
+            .backend_available_for_spec(&canonical, Some("prompt_reviewer"))
+            .await
+        {
+            Ok(v) => v,
+            Err(_) if parsed.optional => false,
+            Err(e) => return Err(e),
+        };
+
+        if available {
+            if first_effective_index.is_none() {
+                first_effective_index = Some(idx);
+            }
+            effective.push(canonical);
+            continue;
+        }
+
+        if parsed.optional {
+            warn!(
+                backend = %backend_spec,
+                "optional prompt review backend unavailable; skipping"
+            );
+            continue;
+        }
+
+        return Err(RalphError::BackendUnavailable { backend: canonical });
+    }
+
+    if effective.is_empty() {
+        return Err(RalphError::Validation(
+            "prompt_review_backends has no available backends after optional filtering".to_owned(),
+        ));
+    }
+
+    Ok((effective, first_effective_index.unwrap_or(0)))
+}
+
 fn canonicalize_backend_spec(spec: &str) -> Result<String> {
     let parsed = crate::backend::parse_backend_spec(spec)?;
-    Ok(match parsed.model {
-        Some(model) => format!("{}({model})", parsed.name),
-        None => parsed.name,
-    })
+    Ok(canonicalize_parsed_backend_spec(&parsed))
+}
+
+fn canonicalize_parsed_backend_spec(spec: &crate::backend::BackendSpec) -> String {
+    match spec.model.as_deref() {
+        Some(model) => format!("{}({model})", spec.name),
+        None => spec.name.clone(),
+    }
 }
 
 fn final_review_restart_count_from_artifacts(project_dir: &Path) -> u32 {
@@ -4572,6 +4894,13 @@ OR\n\
 ## Issues Found\n\
 ## Refined Prompt"
             .to_owned(),
+        "prompt_review_validator" => "\
+ACCEPT\n\
+\n\
+OR\n\
+\n\
+REJECT(<reason>)"
+            .to_owned(),
         "final_reviewer" => "\
 # Final Review: NO AMENDMENTS\n\
 ## Summary\n\
@@ -5089,6 +5418,24 @@ async fn execute_with_timeout_retries(
     ))
 }
 
+/// Evaluate whether a completion panel has reached consensus.
+///
+/// Consensus requires both:
+/// - `complete_votes >= min_completers` (enough completers agree)
+/// - `complete_votes / total_completers >= consensus_threshold` (ratio meets threshold)
+///
+/// The threshold comparison is inclusive (>=).
+fn compute_completion_consensus(
+    complete_votes: u32,
+    total_completers: u32,
+    min_completers: u32,
+    consensus_threshold: f64,
+) -> bool {
+    complete_votes >= min_completers
+        && total_completers > 0
+        && (complete_votes as f64 / total_completers as f64) >= consensus_threshold
+}
+
 /// Compute the bootstrap hash for session reuse identity verification.
 #[allow(dead_code)]
 ///
@@ -5294,6 +5641,7 @@ mod tests {
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
+        assert!(registry.get("gemini(gemini-3-pro)").is_some());
     }
 
     #[test]
@@ -5301,6 +5649,7 @@ mod tests {
         let mut config = GlobalConfig::default();
         config.backends.claude.models = BackendRoleModels::default();
         config.backends.codex.models = BackendRoleModels::default();
+        config.backends.gemini.models = BackendRoleModels::default();
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         preload_role_model_backends(&mut registry)
@@ -5308,6 +5657,7 @@ mod tests {
 
         assert!(registry.get("claude(opus)").is_none());
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
+        assert!(registry.get("gemini(gemini-3-pro)").is_none());
     }
 
     #[test]
@@ -5335,6 +5685,17 @@ mod tests {
             acceptance_qa: Some("codex-acceptance-qa".to_owned()),
             reformatter: Some("codex-reformatter".to_owned()),
         };
+        config.backends.gemini.models = BackendRoleModels {
+            planner: Some("gemini-planner".to_owned()),
+            implementer: Some("gemini-implementer".to_owned()),
+            reviewer: Some("gemini-reviewer".to_owned()),
+            final_reviewer: Some("gemini-final-reviewer".to_owned()),
+            arbiter: Some("gemini-arbiter".to_owned()),
+            qa: Some("gemini-qa".to_owned()),
+            completer: Some("gemini-completer".to_owned()),
+            acceptance_qa: Some("gemini-acceptance-qa".to_owned()),
+            reformatter: Some("gemini-reformatter".to_owned()),
+        };
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         preload_role_model_backends(&mut registry)
@@ -5359,6 +5720,15 @@ mod tests {
             "codex(codex-completer)",
             "codex(codex-acceptance-qa)",
             "codex(codex-reformatter)",
+            "gemini(gemini-planner)",
+            "gemini(gemini-implementer)",
+            "gemini(gemini-reviewer)",
+            "gemini(gemini-final-reviewer)",
+            "gemini(gemini-arbiter)",
+            "gemini(gemini-qa)",
+            "gemini(gemini-completer)",
+            "gemini(gemini-acceptance-qa)",
+            "gemini(gemini-reformatter)",
         ] {
             assert!(
                 registry.get(expected_spec).is_some(),
@@ -6847,5 +7217,65 @@ mod tests {
         let hash = super::compute_bootstrap_hash("qa", "codex", "ph", "s", "t");
         assert!(!hash.is_empty());
         assert_eq!(hash.len(), 64, "sha256 hex output should be 64 chars");
+    }
+
+    // --- Completion panel consensus math tests ---
+
+    #[test]
+    fn consensus_unanimity_all_complete() {
+        // 2/2 complete, min=2, threshold=1.0 → true
+        assert!(super::compute_completion_consensus(2, 2, 2, 1.0));
+    }
+
+    #[test]
+    fn consensus_unanimity_one_missing() {
+        // 1/2 complete, min=2, threshold=1.0 → false (ratio 0.5 < 1.0)
+        assert!(!super::compute_completion_consensus(1, 2, 2, 1.0));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_half() {
+        // 1/2 complete, min=1, threshold=0.5 → true (1 >= 1, 0.5 >= 0.5)
+        assert!(super::compute_completion_consensus(1, 2, 1, 0.5));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_two_thirds() {
+        // 2/3 complete, min=1, threshold=0.67 → false (0.666... < 0.67)
+        assert!(!super::compute_completion_consensus(2, 3, 1, 0.67));
+        // 2/3 complete, min=1, threshold=0.66 → true (0.666... >= 0.66)
+        assert!(super::compute_completion_consensus(2, 3, 1, 0.66));
+    }
+
+    #[test]
+    fn consensus_partial_threshold_three_quarters() {
+        // 3/4 complete, min=1, threshold=0.75 → true (0.75 >= 0.75, inclusive)
+        assert!(super::compute_completion_consensus(3, 4, 1, 0.75));
+        // 2/4 complete, min=1, threshold=0.75 → false (0.5 < 0.75)
+        assert!(!super::compute_completion_consensus(2, 4, 1, 0.75));
+    }
+
+    #[test]
+    fn consensus_insufficient_min_completers() {
+        // 1/2 complete, min=2, threshold=0.5 → false (1 < min=2)
+        assert!(!super::compute_completion_consensus(1, 2, 2, 0.5));
+    }
+
+    #[test]
+    fn consensus_zero_total_completers() {
+        // 0/0 → false (total is 0)
+        assert!(!super::compute_completion_consensus(0, 0, 1, 1.0));
+    }
+
+    #[test]
+    fn consensus_single_completer_complete() {
+        // 1/1 complete, min=1, threshold=1.0 → true
+        assert!(super::compute_completion_consensus(1, 1, 1, 1.0));
+    }
+
+    #[test]
+    fn consensus_single_completer_continue() {
+        // 0/1 complete, min=1, threshold=1.0 → false
+        assert!(!super::compute_completion_consensus(0, 1, 1, 1.0));
     }
 }

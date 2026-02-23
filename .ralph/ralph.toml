@@ -9,6 +9,20 @@ daemon_max_concurrent = 5
 daemon_labels = ["ralph:ready"]
 daemon_refinement_enabled = true
 daemon_refinement_backend = "claude(sonnet)"
+daemon_auto_rebase_enabled = true
+daemon_rebase_interval_seconds = 1800
+daemon_max_rebases_per_cycle = 3
+daemon_rebase_timeout_seconds = 120
+daemon_rebase_agent_backend = "claude(opus)"
+daemon_prd_enabled = true
+daemon_prd_question_backends = [
+    "claude",
+    "codex",
+]
+daemon_prd_writer_backend = "claude"
+daemon_prd_reviewer_backend = "codex"
+daemon_prd_max_revisions = 3
+daemon_prd_backend_timeout_secs = 120
 
 [backends.claude]
 command = "claude"
@@ -20,6 +34,7 @@ args = [
     "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop",
 ]
 timeout_seconds = 7200
+enabled = "auto"
 
 [backends.claude.env]
 
@@ -27,11 +42,14 @@ timeout_seconds = 7200
 planner = "opus"
 implementer = "opus"
 reviewer = "opus"
+final_reviewer = "opus"
+arbiter = "opus"
 qa = "opus"
 completer = "opus"
 acceptance_qa = "opus"
-final_reviewer = "opus"
 reformatter = "sonnet"
+
+[backends.claude.role_timeouts]
 
 [backends.codex]
 command = "codex"
@@ -41,6 +59,7 @@ args = [
     "-",
 ]
 timeout_seconds = 7200
+enabled = "auto"
 
 [backends.codex.env]
 
@@ -48,11 +67,34 @@ timeout_seconds = 7200
 planner = "gpt-5.3-codex-xhigh"
 implementer = "gpt-5.3-codex-high"
 reviewer = "gpt-5.3-codex-high"
+final_reviewer = "gpt-5.3-codex-xhigh"
+arbiter = "gpt-5.3-codex-xhigh"
 qa = "gpt-5.3-codex-high"
 completer = "gpt-5.3-codex-xhigh"
 acceptance_qa = "gpt-5.3-codex-xhigh"
-final_reviewer = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
+
+[backends.codex.role_timeouts]
+
+[backends.gemini]
+command = "gemini"
+args = [
+    "-p",
+    "--yolo",
+    "--output-format",
+    "stream-json",
+]
+timeout_seconds = 7200
+enabled = false
+
+[backends.gemini.env]
+
+[backends.gemini.models]
+final_reviewer = "gemini-3-pro"
+arbiter = "gemini-3-pro"
+completer = "gemini-3-pro"
+
+[backends.gemini.role_timeouts]
 
 [workflow]
 max_review_iterations = 30
@@ -62,14 +104,31 @@ commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = true
 prompt_review_backend = "codex(gpt-5.3-codex-xhigh)"
-qa_enabled = false
-max_qa_iterations = 3
 final_review_enabled = true
-final_review_backends = ["claude", "codex"]
+final_review_backends = [
+    "claude",
+    "codex",
+]
 final_review_arbiter_backend = "claude"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
 max_final_review_restarts = 3
+qa_enabled = false
+max_qa_iterations = 3
+planner_state_in_prompt = "summary"
+planner_previous_specs_in_prompt = "titles"
+planner_max_prior_loops = 10
+max_review_history_entries_in_prompt = 3
+max_qa_history_entries_in_prompt = 2
+include_history_when_session_reuse_enabled = false
+session_reuse_enabled = false
+session_reuse_roles = [
+    "implementer",
+    "reviewer",
+    "qa",
+]
+session_reuse_reset_on_prompt_change = true
+session_reuse_reset_on_rollback = true
 
 [templates]
 planner = "templates/spec.md"

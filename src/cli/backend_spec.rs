@@ -20,11 +20,11 @@ pub fn validate_backend_spec(spec: &str, config: &GlobalConfig) -> Result<()> {
 }
 
 /// Validate a backend spec string using only the hardcoded known backend names
-/// (claude, codex). Use this when a `GlobalConfig` is not available.
+/// (claude, codex, gemini). Use this when a `GlobalConfig` is not available.
 pub fn validate_backend_spec_name(spec: &str) -> Result<()> {
     let parsed = parse_backend_spec(spec)?;
     match parsed.name.as_str() {
-        "claude" | "codex" => Ok(()),
+        "claude" | "codex" | "gemini" => Ok(()),
         _ => Err(RalphError::Validation(format!(
             "unknown backend: {}",
             parsed.name
@@ -122,5 +122,11 @@ mod tests {
         let err =
             validate_backend_spec_name("unknown(opus)").expect_err("unknown backend should fail");
         assert!(err.to_string().contains("unknown backend: unknown"));
+    }
+
+    #[test]
+    fn validate_name_only_accepts_optional_gemini_with_model() {
+        validate_backend_spec_name("?gemini(gemini-3-pro)")
+            .expect("optional gemini with model should be valid");
     }
 }

@@ -169,10 +169,10 @@ mod tests {
             slug: "completion".to_owned(),
             loop_type: LoopType::Completion,
             status: LoopStatus::Completed,
-            backends: CompletionLoopBackends {
-                planner: "planner".to_owned(),
-                completer: "completer".to_owned(),
-            },
+            backends: CompletionLoopBackends::new(
+                "planner".to_owned(),
+                vec!["completer".to_owned()],
+            ),
             artifacts: CompletionLoopArtifacts {
                 termination_request: "termination.md".to_owned(),
                 verdict: None,
