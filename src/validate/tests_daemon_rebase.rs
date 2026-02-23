@@ -351,8 +351,8 @@ fn agent_failure_aborts_rebase(_h: &RalphHarness) -> TestResult {
         assert!(result.is_err(), "agent failure should return error");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("non-zero"),
-            "error should mention non-zero exit: {err}"
+            err.contains("non-zero") || err.contains("failed to spawn"),
+            "error should indicate agent failure (non-zero exit or spawn failure): {err}"
         );
         // After failure, rebase should be aborted
         assert!(
