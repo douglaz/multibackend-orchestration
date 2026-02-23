@@ -29,6 +29,19 @@ pub fn checkout_branch(workdir: &Path, branch: &str) -> Result<()> {
 /// Merges `base_ref` into the current branch if the base has commits not on `HEAD`.
 pub fn merge_base_branch(workdir: &Path, base_ref: &str) -> Result<()> {
     ensure_git_repo(workdir)?;
+
+    // If the base ref doesn't exist (e.g. empty remote where the configured
+    // base branch was never created), skip silently — there's nothing to merge.
+    let base_exists = run_git_status(
+        workdir,
+        &["rev-parse", "--verify", base_ref],
+    )
+    .map(|s| s.success())
+    .unwrap_or(false);
+    if !base_exists {
+        return Ok(());
+    }
+
     let output = run_git(
         workdir,
         &["rev-list", "--count", &format!("HEAD..{base_ref}")],
@@ -71,7 +84,9 @@ fn detect_remote_default_branch(repo_root: &Path) -> Option<String> {
     if let Ok(refname) = run_git(repo_root, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
         let refname = refname.trim().to_owned();
         if let Some(branch) = refname.strip_prefix("refs/remotes/origin/") {
-            if !branch.is_empty() {
+            // Skip ralph/* branches — GitHub may set the default branch to a
+            // ralph project/issue branch if it's the only branch on the remote.
+            if !branch.is_empty() && !branch.starts_with("ralph/") {
                 return Some(branch.to_owned());
             }
         }
