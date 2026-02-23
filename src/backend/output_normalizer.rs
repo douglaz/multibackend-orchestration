@@ -204,6 +204,12 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 let item_type = event.pointer("/item/type").and_then(Value::as_str);
                 if item_type == Some("agent_message") {
                     if let Some(text) = event.pointer("/item/text").and_then(Value::as_str) {
+                        // Separate consecutive agent_message items with a newline
+                        // so that markdown headings in later messages remain on
+                        // their own line after concatenation.
+                        if !output.text.is_empty() && !output.text.ends_with('\n') {
+                            output.text.push('\n');
+                        }
                         output.text.push_str(text);
                     }
                 }
