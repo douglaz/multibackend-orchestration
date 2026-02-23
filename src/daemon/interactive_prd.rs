@@ -890,7 +890,7 @@ fn do_approval_transition(
 /// Pre-draft comments are ignored even if they were previously unprocessed.
 fn find_new_feedback_comments<'a>(
     comments: &'a [github::IssueComment],
-    bot_login: &str,
+    _bot_login: &str,
     last_processed_comment_id: Option<u64>,
     latest_draft_comment_id: Option<u64>,
 ) -> Vec<&'a github::IssueComment> {
@@ -904,7 +904,9 @@ fn find_new_feedback_comments<'a>(
     comments
         .iter()
         .filter(|comment| {
-            if comment.author_login == bot_login {
+            // Skip bot-posted comments (identified by PRD marker, not author,
+            // so the repo owner can provide feedback on their own PRD).
+            if is_prd_bot_comment(&comment.body) {
                 return false;
             }
             if let Some(bound) = boundary {
@@ -1069,11 +1071,13 @@ fn apply_transition_result(state: &mut InteractivePrdState, result: &Result<()>)
 fn find_first_answer_comment<'a>(
     comments: &'a [github::IssueComment],
     questions_posted_at: DateTime<Utc>,
-    bot_login: &str,
+    _bot_login: &str,
     last_processed_comment_id: Option<u64>,
 ) -> Option<&'a github::IssueComment> {
     comments.iter().find(|comment| {
-        if comment.author_login == bot_login {
+        // Skip bot-posted comments (identified by PRD marker, not author,
+        // so the repo owner can answer their own PRD questions).
+        if is_prd_bot_comment(&comment.body) {
             return false;
         }
         if comment.created_at <= questions_posted_at {
@@ -1086,6 +1090,13 @@ fn find_first_answer_comment<'a>(
         }
         true
     })
+}
+
+/// Returns true if the comment body contains a PRD bot marker.
+/// Used instead of author-based filtering so the repo owner can
+/// answer/review their own PRD when running the daemon under their account.
+fn is_prd_bot_comment(body: &str) -> bool {
+    body.contains("<!-- ralph:prd:")
 }
 
 fn extract_questions_text(
@@ -1612,7 +1623,7 @@ mod tests {
     #[test]
     fn answer_comment_detection_skips_bot_and_selects_first_valid_user_comment() {
         let comments = vec![
-            test_comment(10, "ralph-bot", "bot question", "2026-01-01T00:00:10Z"),
+            test_comment(10, "ralph-bot", "<!-- ralph:prd:7:questions-v1 -->\nbot question", "2026-01-01T00:00:10Z"),
             test_comment(11, "alice", "before question", "2025-12-31T23:59:59Z"),
             test_comment(12, "bob", "first answer", "2026-01-01T00:00:20Z"),
             test_comment(13, "carol", "later answer", "2026-01-01T00:00:30Z"),
@@ -1629,7 +1640,7 @@ mod tests {
     #[test]
     fn answer_comment_detection_returns_none_when_no_qualifying_comment() {
         let comments = vec![
-            test_comment(1, "ralph-bot", "bot response", "2026-01-01T00:00:20Z"),
+            test_comment(1, "ralph-bot", "<!-- ralph:prd:7:questions-v1 -->\nbot response", "2026-01-01T00:00:20Z"),
             test_comment(2, "alice", "old answer", "2026-01-01T00:00:05Z"),
         ];
 
@@ -1733,10 +1744,10 @@ mod tests {
     #[test]
     fn find_new_feedback_comments_filters_bot_and_old() {
         let comments = vec![
-            test_comment(100, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(100, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft v1", "2026-01-01T00:00:10Z"),
             test_comment(101, "alice", "old comment", "2026-01-01T00:00:20Z"),
             test_comment(102, "bob", "new feedback", "2026-01-01T00:00:30Z"),
-            test_comment(103, "ralph-bot", "bot reply", "2026-01-01T00:00:35Z"),
+            test_comment(103, "ralph-bot", "<!-- ralph:prd:7:draft-v2 -->\nbot reply", "2026-01-01T00:00:35Z"),
             test_comment(104, "carol", "more feedback", "2026-01-01T00:00:40Z"),
         ];
 
@@ -1749,7 +1760,7 @@ mod tests {
     #[test]
     fn find_new_feedback_comments_returns_all_non_bot_when_no_cursor() {
         let comments = vec![
-            test_comment(50, "ralph-bot", "draft", "2026-01-01T00:00:10Z"),
+            test_comment(50, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft", "2026-01-01T00:00:10Z"),
             test_comment(51, "alice", "feedback 1", "2026-01-01T00:00:20Z"),
             test_comment(52, "bob", "feedback 2", "2026-01-01T00:00:30Z"),
         ];
@@ -1763,8 +1774,8 @@ mod tests {
     #[test]
     fn find_new_feedback_comments_returns_empty_when_all_bot() {
         let comments = vec![
-            test_comment(60, "ralph-bot", "draft", "2026-01-01T00:00:10Z"),
-            test_comment(61, "ralph-bot", "followup", "2026-01-01T00:00:20Z"),
+            test_comment(60, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft", "2026-01-01T00:00:10Z"),
+            test_comment(61, "ralph-bot", "<!-- ralph:prd:7:questions-v1 -->\nfollowup", "2026-01-01T00:00:20Z"),
         ];
 
         let new = find_new_feedback_comments(&comments, "ralph-bot", None, None);
@@ -1786,12 +1797,12 @@ mod tests {
     fn find_new_feedback_comments_respects_draft_boundary() {
         // Pre-draft user comments should be excluded even if unprocessed
         let comments = vec![
-            test_comment(200, "ralph-bot", "questions", "2026-01-01T00:00:05Z"),
+            test_comment(200, "ralph-bot", "<!-- ralph:prd:7:questions-v1 -->\nquestions", "2026-01-01T00:00:05Z"),
             test_comment(201, "alice", "answers", "2026-01-01T00:00:10Z"),
-            test_comment(202, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(202, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             // Pre-draft user comment (id 203 < draft id 204) — should be excluded
             test_comment(203, "bob", "pre-draft feedback", "2026-01-01T00:00:20Z"),
-            test_comment(204, "ralph-bot", "draft-v2", "2026-01-01T00:00:25Z"),
+            test_comment(204, "ralph-bot", "<!-- ralph:prd:7:draft-v2 -->\ndraft-v2", "2026-01-01T00:00:25Z"),
             // Post-draft comments — should be included
             test_comment(205, "carol", "post-draft feedback", "2026-01-01T00:00:30Z"),
         ];
@@ -1807,7 +1818,7 @@ mod tests {
         // Even if cursor is behind the draft, draft boundary should win
         let comments = vec![
             test_comment(300, "alice", "old feedback", "2026-01-01T00:00:10Z"),
-            test_comment(301, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(301, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             test_comment(302, "bob", "new feedback", "2026-01-01T00:00:20Z"),
         ];
 
@@ -1860,7 +1871,7 @@ mod tests {
     #[test]
     fn mixed_comments_approval_plus_feedback_triggers_approval() {
         let comments = vec![
-            test_comment(200, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(200, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft v1", "2026-01-01T00:00:10Z"),
             test_comment(201, "alice", "old answer", "2026-01-01T00:00:15Z"),
             // New comments after cursor (id > 201):
             test_comment(
@@ -1887,7 +1898,7 @@ mod tests {
     #[test]
     fn all_feedback_comments_without_approval_triggers_revision() {
         let comments = vec![
-            test_comment(300, "ralph-bot", "draft v1", "2026-01-01T00:00:10Z"),
+            test_comment(300, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft v1", "2026-01-01T00:00:10Z"),
             test_comment(301, "alice", "answers", "2026-01-01T00:00:15Z"),
             // New feedback:
             test_comment(
@@ -1957,7 +1968,7 @@ mod tests {
     #[test]
     fn transition_path_awaiting_answers_selects_first_valid_answer() {
         let comments = vec![
-            test_comment(600, "ralph-bot", "questions", "2026-01-01T00:00:05Z"),
+            test_comment(600, "ralph-bot", "<!-- ralph:prd:7:questions-v1 -->\nquestions", "2026-01-01T00:00:05Z"),
             // Pre-questions comment (should be skipped)
             test_comment(601, "alice", "early comment", "2026-01-01T00:00:03Z"),
             // Post-questions answers
@@ -1975,7 +1986,7 @@ mod tests {
     #[test]
     fn transition_path_awaiting_feedback_approval() {
         let comments = vec![
-            test_comment(700, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(700, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             test_comment(701, "alice", "Approved!", "2026-01-01T00:00:25Z"),
         ];
 
@@ -1988,7 +1999,7 @@ mod tests {
     #[test]
     fn transition_path_awaiting_feedback_revision() {
         let comments = vec![
-            test_comment(800, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(800, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             test_comment(
                 801,
                 "alice",
@@ -2042,7 +2053,7 @@ mod tests {
     fn pre_draft_comments_ignored_for_approval_detection() {
         let comments = vec![
             test_comment(400, "alice", "Approved!", "2026-01-01T00:00:05Z"),
-            test_comment(401, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(401, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             test_comment(402, "bob", "Please fix typo.", "2026-01-01T00:00:25Z"),
         ];
 
@@ -2067,7 +2078,7 @@ mod tests {
                 "2026-01-01T00:00:05Z",
             ),
             test_comment(501, "bob", "more old feedback", "2026-01-01T00:00:08Z"),
-            test_comment(502, "ralph-bot", "draft-v1", "2026-01-01T00:00:15Z"),
+            test_comment(502, "ralph-bot", "<!-- ralph:prd:7:draft-v1 -->\ndraft-v1", "2026-01-01T00:00:15Z"),
             test_comment(503, "carol", "new feedback", "2026-01-01T00:00:25Z"),
         ];
 
