@@ -1104,8 +1104,10 @@ async fn dispatch_task(
     // Determine branch name for the child handle
     let branch_name = format!("ralph/daemon/{task_id}");
 
-    // Ignore stale artifacts left from prior runs.
-    let child_start_time = SystemTime::now();
+    // Ignore stale artifacts left from prior runs.  Subtract 2 seconds to
+    // tolerate filesystems that truncate mtime to whole-second granularity
+    // (e.g. tmpfs in nix build sandboxes).
+    let child_start_time = SystemTime::now() - Duration::from_secs(2);
 
     // Spawn child process
     let spawned = {
