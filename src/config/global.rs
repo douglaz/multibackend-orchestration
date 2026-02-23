@@ -961,7 +961,7 @@ fn default_final_review_consensus_threshold() -> f64 {
 }
 
 fn default_max_final_review_restarts() -> u32 {
-    3
+    15
 }
 
 fn default_completion_backends() -> Vec<String> {
@@ -1434,7 +1434,7 @@ base_branch = "master"
         assert_eq!(config.workflow.final_review_arbiter_backend, "claude");
         assert_eq!(config.workflow.final_review_min_reviewers, 2);
         assert_eq!(config.workflow.final_review_consensus_threshold, 1.0);
-        assert_eq!(config.workflow.max_final_review_restarts, 3);
+        assert_eq!(config.workflow.max_final_review_restarts, 15);
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
         assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
         assert!(!config.workflow.include_history_when_session_reuse_enabled);

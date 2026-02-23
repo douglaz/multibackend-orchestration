@@ -20,7 +20,7 @@ daemon_prd_question_backends = [
     "codex",
 ]
 daemon_prd_writer_backend = "claude"
-daemon_prd_reviewer_backend = "codex"
+daemon_prd_reviewer_backend = "gemini"
 daemon_prd_max_revisions = 3
 daemon_prd_backend_timeout_secs = 3600
 
@@ -85,7 +85,7 @@ args = [
     "stream-json",
 ]
 timeout_seconds = 7200
-enabled = false
+enabled = "auto"
 
 [backends.gemini.env]
 
@@ -108,11 +108,12 @@ final_review_enabled = true
 final_review_backends = [
     "claude",
     "codex",
+    "gemini",
 ]
 final_review_arbiter_backend = "claude"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
-max_final_review_restarts = 3
+max_final_review_restarts = 15
 qa_enabled = false
 max_qa_iterations = 3
 planner_state_in_prompt = "summary"
