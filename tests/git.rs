@@ -303,7 +303,7 @@ fn test_commit_feature_loop_without_tag() {
 }
 
 #[test]
-fn test_commit_feature_loop_includes_orchestration_state_files() {
+fn test_commit_feature_loop_excludes_orchestration_state_files() {
     let temp_dir = init_test_repo();
     fs::create_dir_all(temp_dir.path().join(".ralph")).unwrap();
 
@@ -325,8 +325,8 @@ fn test_commit_feature_loop_includes_orchestration_state_files() {
         "Feature file should be committed"
     );
     assert!(
-        files.lines().any(|line| line.trim() == ".ralph/index.json"),
-        "Orchestration runtime files should remain committable for project history"
+        !files.lines().any(|line| line.trim().starts_with(".ralph/")),
+        "Orchestration state files under .ralph/ should be excluded from feature commits"
     );
 }
 

@@ -119,6 +119,11 @@ pub fn commit_feature_loop(
     }
 
     run_git(workdir, &["add", "-A"])?;
+    // Unstage .ralph/ entries to avoid committing orchestration state.
+    let _ = run_git(
+        workdir,
+        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
+    );
 
     let mut commit_args = vec!["commit", "--allow-empty", "-m", message];
     if sign_commits {
