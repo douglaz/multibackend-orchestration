@@ -1767,7 +1767,7 @@ impl Orchestrator {
 
                     // Run all effective completers, collect verdicts
                     let mut complete_votes: u32 = 0;
-                    let total_completers = effective_completers.len() as u32;
+                    let mut total_completers = effective_completers.len() as u32;
                     let mut last_verdict_rel: Option<String> = None;
 
                     for completer_backend_name in &effective_completers {
@@ -1814,7 +1814,7 @@ impl Orchestrator {
                         );
                         let mut completer_log =
                             LogWriter::open(&log_dir, &project_id, Some(loop_number), "completer");
-                        let _retry_result: ParseRetryResult<CompleterDecision> = execute_with_parse_retries(
+                        let retry_result: std::result::Result<ParseRetryResult<CompleterDecision>, _> = execute_with_parse_retries(
                             completer_backend,
                             &registry,
                             "completer",
@@ -1829,8 +1829,25 @@ impl Orchestrator {
                             None,
                             repo_root_ref,
                         )
-                        .await?;
-                        let completer_decision = _retry_result.parsed;
+                        .await;
+
+                        // Treat parse-retry exhaustion for a single completer
+                        // backend as a skipped vote rather than a fatal error.
+                        // The panel can still reach consensus with remaining backends.
+                        let completer_decision = match retry_result {
+                            Ok(result) => result.parsed,
+                            Err(RalphError::ParseRetriesExhausted { attempts, .. }) => {
+                                warn!(
+                                    loop = loop_number,
+                                    backend = completer_backend_name,
+                                    attempts = attempts,
+                                    "completer backend parse retries exhausted; skipping vote"
+                                );
+                                total_completers = total_completers.saturating_sub(1);
+                                continue;
+                            }
+                            Err(other) => return Err(other),
+                        };
                         debug!(loop = loop_number, backend = completer_backend_name, "completer responded");
 
                         // Write per-backend verdict artifact
