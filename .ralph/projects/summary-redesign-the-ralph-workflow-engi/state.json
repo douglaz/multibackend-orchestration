@@ -1,0 +1,419 @@
+{
+  "project_id": "summary-redesign-the-ralph-workflow-engi",
+  "project_name": "## Summary\n\nRedesign the Ralph workflow engine to eliminate ",
+  "created_at": "2026-02-19T16:28:16.694709974Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
+  "prompt_hash_at_loop_start": "a75c0b11b158678dd3baec3ca8ed05d4e303a7d035167cffe0b9433191677c42",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 16,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "ralph-structured-commit-parser-and-builder",
+      "feature_name": "Ralph Structured Commit Parser and Builder",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-ralph-structured-commit-parser-and-builder/20260219163325-spec.md",
+        "impl_notes": "loops/001-ralph-structured-commit-parser-and-builder/20260219163724-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-ralph-structured-commit-parser-and-builder/20260219163814-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "08cca0407df5d663613c6fee1aa65c4ae54e7e28",
+      "started_at": "2026-02-19T16:33:25.761665483Z",
+      "completed_at": "2026-02-19T19:23:52.950108575Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "remote-first-project-branch-sync-for-daemon",
+      "feature_name": "Remote-First Project Branch Sync for Daemon Worktrees",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-remote-first-project-branch-sync-for-daemon/20260219192556-spec.md",
+        "impl_notes": "loops/002-remote-first-project-branch-sync-for-daemon/20260219193556-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-remote-first-project-branch-sync-for-daemon/20260219193802-review-001-feedback.md",
+            "response": "loops/002-remote-first-project-branch-sync-for-daemon/20260219194026-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-remote-first-project-branch-sync-for-daemon/20260219194215-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "6220bf9bfa00e92f86b9c82f821261638df499e3",
+      "started_at": "2026-02-19T19:25:56.283093760Z",
+      "completed_at": "2026-02-19T19:42:15.886611384Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "phase-transition-commit-and-push-checkpointing",
+      "feature_name": "Phase Transition Commit-and-Push Checkpointing",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-phase-transition-commit-and-push-checkpointing/20260219194523-spec.md",
+        "impl_notes": "loops/003-phase-transition-commit-and-push-checkpointing/20260219195525-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-phase-transition-commit-and-push-checkpointing/20260219195656-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "9e545f0594ad29931b5e699d5783e3ad1c0b9264",
+      "started_at": "2026-02-19T19:45:23.403833359Z",
+      "completed_at": "2026-02-19T19:56:56.290810268Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "daemon-in-memory-runtime-and-lifecycle-label",
+      "feature_name": "Daemon In-Memory Runtime and Lifecycle Label Reconciliation",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219200020-spec.md",
+        "impl_notes": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219203906-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219204053-review-001-feedback.md",
+            "response": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219204906-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219205230-review-002-feedback.md",
+            "response": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219210026-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219210435-review-003-feedback.md",
+            "response": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219211513-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/004-daemon-in-memory-runtime-and-lifecycle-label/20260219211720-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "779b674c0e58fb88b41ee47176433bf8e631037a",
+      "started_at": "2026-02-19T20:00:20.950812252Z",
+      "completed_at": "2026-02-19T21:17:20.345357019Z"
+    },
+    {
+      "loop_number": 5,
+      "slug": "remove-statejson-durable-persistence-single",
+      "feature_name": "Remove state.json Durable Persistence, Single Daemon Lock, and Git+Label CLI Derivation",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/005-remove-statejson-durable-persistence-single/20260219212056-spec.md",
+        "impl_notes": "loops/005-remove-statejson-durable-persistence-single/20260219214212-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/005-remove-statejson-durable-persistence-single/20260219214347-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "546518bd5305575aebd1eb642abf8b94969e6527",
+      "started_at": "2026-02-19T21:20:56.322875255Z",
+      "completed_at": "2026-02-19T21:43:47.609285037Z"
+    },
+    {
+      "loop_number": 6,
+      "slug": "state-free-test-suite-migration-and-legacy-state",
+      "feature_name": "State-Free Test Suite Migration and Legacy State API Cleanup",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219214851-spec.md",
+        "impl_notes": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219220029-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219220408-review-001-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219222555-impl-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219222954-review-002-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219230829-impl-response-002.md"
+          },
+          {
+            "iteration": 3,
+            "feedback": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231138-review-003-feedback.md",
+            "response": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231410-impl-response-003.md"
+          }
+        ],
+        "approval": "loops/006-state-free-test-suite-migration-and-legacy-state/20260219231704-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "6a43ed6e89f96ad753344193d3f78843c35b1a1f",
+      "started_at": "2026-02-19T21:48:51.281280979Z",
+      "completed_at": "2026-02-19T23:17:04.401983507Z"
+    },
+    {
+      "loop_number": 8,
+      "slug": "final-contract-alignment-for-checkpoint-defaults",
+      "feature_name": "Final Contract Alignment for Checkpoint Defaults and Temporary Log Routing",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219233015-spec.md",
+        "impl_notes": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234312-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234644-review-001-feedback.md",
+            "response": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219234823-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/008-final-contract-alignment-for-checkpoint-defaults/20260219235008-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "b70130ea745eacfda5ddfb2c9e97e1b7dcf19f83",
+      "started_at": "2026-02-19T23:30:15.955583445Z",
+      "completed_at": "2026-02-19T23:50:08.573296278Z"
+    },
+    {
+      "loop_number": 10,
+      "slug": "orchestrator-integration-test-contract-alignment",
+      "feature_name": "Orchestrator Integration Test Contract Alignment for Loop-1 Defaults",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/010-orchestrator-integration-test-contract-alignment/20260220000404-spec.md",
+        "impl_notes": "loops/010-orchestrator-integration-test-contract-alignment/20260220000811-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/010-orchestrator-integration-test-contract-alignment/20260220001009-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "10e3ff61e0085af6766571da0f9bdf8e983cf010",
+      "started_at": "2026-02-20T00:04:04.914453038Z",
+      "completed_at": "2026-02-20T00:10:09.260649401Z"
+    },
+    {
+      "loop_number": 12,
+      "slug": "recovery-test-contract-alignment-for-checkpoint",
+      "feature_name": "Recovery Test Contract Alignment for Checkpoint-Only Defaults",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/012-recovery-test-contract-alignment-for-checkpoint/20260220002140-spec.md",
+        "impl_notes": "loops/012-recovery-test-contract-alignment-for-checkpoint/20260220002433-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/012-recovery-test-contract-alignment-for-checkpoint/20260220002518-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "e349b9fa23fbeb2aacf4168aa6ca0e7295a131fc",
+      "started_at": "2026-02-20T00:21:40.612292969Z",
+      "completed_at": "2026-02-20T00:25:18.947900449Z"
+    },
+    {
+      "loop_number": 14,
+      "slug": "tmux-output-log-routing-contract-completion",
+      "feature_name": "Tmux Output Log Routing Contract Completion",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/014-tmux-output-log-routing-contract-completion/20260220003607-spec.md",
+        "impl_notes": "loops/014-tmux-output-log-routing-contract-completion/20260220004706-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/014-tmux-output-log-routing-contract-completion/20260220005124-review-001-feedback.md",
+            "response": "loops/014-tmux-output-log-routing-contract-completion/20260220005627-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/014-tmux-output-log-routing-contract-completion/20260220005832-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "ba9cb5b1a95f04b33374a3cb951c23ec6dbbaaa0",
+      "started_at": "2026-02-20T00:36:07.710720538Z",
+      "completed_at": "2026-02-20T00:58:32.814026294Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 7,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/007-completion/20260219231953-termination-request.md",
+        "verdict": "loops/007-completion/20260219232611-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-19T23:19:53.080249212Z",
+      "completed_at": "2026-02-19T23:26:11.281805702Z"
+    },
+    {
+      "loop_number": 9,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/009-completion/20260219235425-termination-request.md",
+        "verdict": "loops/009-completion/20260220000113-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-19T23:54:25.714295127Z",
+      "completed_at": "2026-02-20T00:01:13.177317921Z"
+    },
+    {
+      "loop_number": 11,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/011-completion/20260220001456-termination-request.md",
+        "verdict": "loops/011-completion/20260220002009-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-20T00:14:56.992327578Z",
+      "completed_at": "2026-02-20T00:20:09.740441814Z"
+    },
+    {
+      "loop_number": 13,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/013-completion/20260220002746-termination-request.md",
+        "verdict": "loops/013-completion/20260220003319-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-20T00:27:46.289119950Z",
+      "completed_at": "2026-02-20T00:33:19.442234819Z"
+    },
+    {
+      "loop_number": 15,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "completer": "codex(gpt-5.3-codex-xhigh)"
+      },
+      "artifacts": {
+        "termination_request": "loops/015-completion/20260220010236-termination-request.md",
+        "verdict": "loops/015-completion/20260220010926-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-20T01:02:36.895992518Z",
+      "completed_at": "2026-02-20T01:09:26.668249721Z"
+    },
+    {
+      "loop_number": 16,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/016-completion/20260220011155-termination-request.md",
+        "verdict": "loops/016-completion/20260220011514-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-20T01:11:55.228375876Z",
+      "completed_at": "2026-02-20T01:15:14.966979737Z"
+    }
+  ],
+  "session_store": {
+    "records": []
+  }
+}
