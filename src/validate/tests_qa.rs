@@ -538,6 +538,8 @@ fn acceptance_gate_pass(h: &RalphHarness) -> TestResult {
         setup_with_mock_script(h, project_id, "qa-accept-pass.sh", &qa_pass_mock_script());
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set workflow.final_review_enabled false failed");
 
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
@@ -592,6 +594,8 @@ fn acceptance_gate_fail_forces_continue(h: &RalphHarness) -> TestResult {
         setup_with_mock_script(h, project_id, "qa-accept-fail.sh", &script);
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set workflow.final_review_enabled false failed");
 
         let output = h
             .ralph(["run", "--until-complete"])
@@ -686,6 +690,8 @@ fn acceptance_gate_multi_backend_one_fails(h: &RalphHarness) -> TestResult {
         setup_with_mock_script(h, project_id, "qa-accept-one-fails.sh", &script);
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set workflow.final_review_enabled false failed");
 
         let output = h
             .ralph_env(["run", "--until-complete"], &[("RALPH_COMPLETE", "yes")])
@@ -811,6 +817,8 @@ fn acceptance_gate_qa_backend_override_no_duplicate(h: &RalphHarness) -> TestRes
         );
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set workflow.final_review_enabled false failed");
         h.ralph_ok(["config", "set", "workflow.completer_backend", "codex"])
             .expect("config set workflow.completer_backend failed");
         h.ralph_ok(["config", "set", "workflow.qa_backend", "codex"])
@@ -858,6 +866,8 @@ fn acceptance_gate_qa_backend_override_opposite_family(h: &RalphHarness) -> Test
         );
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set workflow.final_review_enabled false failed");
         h.ralph_ok(["config", "set", "workflow.completer_backend", "codex"])
             .expect("config set workflow.completer_backend failed");
         h.ralph_ok(["config", "set", "workflow.qa_backend", "claude"])
