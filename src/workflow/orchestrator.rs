@@ -22,7 +22,7 @@ use crate::git::commit::{
     reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
-use crate::git::{is_git_repo, run_git};
+use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, slugify_backend, write_artifact,
@@ -1940,10 +1940,6 @@ impl Orchestrator {
                                     serde_json::to_string_pretty(&state).unwrap_or_default();
                                 let completed_feature_summary =
                                     collect_completed_feature_loop_summary(&state)?;
-                                let git_diff_against_base = current_git_diff_against_base(
-                                    &self.workspace.root,
-                                    &effective.global.git.base_branch,
-                                )?;
                                 info!(
                                     loop = loop_number,
                                     backends = ?acceptance_backends,
@@ -1959,7 +1955,7 @@ impl Orchestrator {
                                         acceptance_qa_backend.name(),
                                         &planner_backend_name,
                                         &completed_feature_summary,
-                                        &git_diff_against_base,
+                                        &effective.global.git.base_branch,
                                     );
 
                                     registry
@@ -3231,7 +3227,7 @@ fn build_acceptance_prompt(
     backend: &str,
     opposite_backend: &str,
     completed_feature_summary: &str,
-    git_diff_against_base: &str,
+    base_branch: &str,
 ) -> String {
     format!(
         "You are a QA engineer validating overall project acceptance.
@@ -3241,7 +3237,7 @@ Run project-level acceptance validation before final completion is approved.
 CRITICAL REQUIREMENTS:
 - Verify overall project acceptance, not just a single feature.
 - Consider all completed feature loops together.
-- Use the full current git diff against the base branch as evidence.
+- Use your tools to explore the actual source code — run `git diff {base_branch}...HEAD`, read modified files, run tests, and check for side effects.
 - Return `# QA: PASS` only if project-wide acceptance is satisfied.
 - Return `# QA: FAIL` with concrete failures and fixes if anything is missing.
 
@@ -3271,11 +3267,6 @@ OR
 
 ### Completed Feature Loop Summary
 {completed_feature_summary}
-
-### Git Diff Against Base Branch
-```diff
-{git_diff_against_base}
-```
 
 ### Project State
 ```json
@@ -4822,23 +4813,6 @@ fn current_git_diff(workspace_root: &Path) -> Result<String> {
     }
 
     working_tree_diff_excluding_orchestration_state(repo_root)
-}
-
-fn current_git_diff_against_base(workspace_root: &Path, base_branch: &str) -> Result<String> {
-    let Some(repo_root) = workspace_root.parent() else {
-        return Ok(String::new());
-    };
-    if !is_git_repo(repo_root) {
-        return Ok(String::new());
-    }
-
-    let base_ref = format!("{base_branch}...HEAD");
-    let args = ["diff", base_ref.as_str(), "--", ".", ":(exclude).ralph/**"];
-
-    match run_git(repo_root, &args) {
-        Ok(diff) => Ok(diff),
-        Err(_) => current_git_diff(workspace_root),
-    }
 }
 
 fn stage_changes_for_review(workspace_root: &Path) -> Result<()> {

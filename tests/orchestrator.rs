@@ -2224,7 +2224,7 @@ fn setup_workspace_with_qa(
 }
 
 fn write_acceptance_pass_backend_script(path: &Path) {
-    let script = r###"#!/usr/bin/env bash
+    let script = r####"#!/usr/bin/env bash
 set -euo pipefail
 
 prompt="$(cat)"
@@ -2268,9 +2268,9 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
   echo "$qa_count" > "$qa_counter"
 
   missing=0
-  if [[ "$prompt" != *"## Master Prompt"* ]]; then missing=1; fi
-  if [[ "$prompt" != *"## Completed Feature Loop Summary"* ]]; then missing=1; fi
-  if [[ "$prompt" != *"## Git Diff Against Base Branch"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"### Master Prompt"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"### Completed Feature Loop Summary"* ]]; then missing=1; fi
+  if [[ "$prompt" != *"Use your tools to explore the actual source code"* ]]; then missing=1; fi
   if [[ "$prompt" != *"Verify overall project acceptance, not just a single feature."* ]]; then missing=1; fi
 
   if [ "$missing" -eq 0 ]; then
@@ -2284,7 +2284,7 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
 - acceptance verification checklist: passed
 
 ## Acceptance Criteria Verification
-Overall project acceptance verified from master prompt, completed-loop summary, and base-branch diff.
+Overall project acceptance verified from master prompt, completed-loop summary, and tool-based exploration.
 EOF
   else
     cat <<'EOF'
@@ -2294,7 +2294,7 @@ EOF
 1. Acceptance prompt is missing required context sections.
 
 ## Suggested Fixes
-1. Include master prompt, completed-loop summary, base diff, and global-acceptance instruction.
+1. Include master prompt, completed-loop summary, and tool-exploration instruction.
 EOF
   fi
 elif [[ "$prompt" == *"You are a prompt reviewer"* ]]; then
@@ -2311,7 +2311,7 @@ else
   echo "unrecognized prompt" >&2
   exit 1
 fi
-"###;
+"####;
 
     fs::write(path, script).expect("write acceptance-pass backend script");
     let status = Command::new("chmod")
