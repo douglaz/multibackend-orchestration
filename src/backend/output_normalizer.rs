@@ -41,16 +41,29 @@ const STREAM_EVENT_TYPES: &[&str] = &[
 ];
 
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
-    // Only attempt JSON routing if the first non-empty line looks like JSON.
-    // This prevents markdown responses containing embedded JSON examples
-    // (e.g. in code blocks) from being misrouted into JSON normalization.
+    let raw_len = raw.len();
     let first_content_line = raw.lines().map(str::trim).find(|l| !l.is_empty());
+    let first_preview: String = first_content_line.unwrap_or("").chars().take(80).collect();
+
     if !first_content_line.is_some_and(|l| l.starts_with('{')) {
         // Before returning raw text, check for multi-line JSON after preamble
         // (e.g. gemini CLI outputs "YOLO mode..." status lines before its JSON response).
         if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
+            tracing::debug!(
+                path = "preamble_multiline",
+                raw_len,
+                first_line = %first_preview,
+                extracted_len = output.text.len(),
+                "normalize_output: extracted multi-line JSON after preamble"
+            );
             return Ok(output);
         }
+        tracing::debug!(
+            path = "raw_text",
+            raw_len,
+            first_line = %first_preview,
+            "normalize_output: returning raw text (first line not JSON)"
+        );
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
             ..NormalizedOutput::default()
@@ -61,8 +74,21 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
         // First line starts with '{' but no single line parses as valid JSON —
         // the output is likely a multi-line pretty-printed JSON object.
         if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
+            tracing::debug!(
+                path = "multiline_json",
+                raw_len,
+                first_line = %first_preview,
+                extracted_len = output.text.len(),
+                "normalize_output: extracted multi-line JSON (no single-line match)"
+            );
             return Ok(output);
         }
+        tracing::debug!(
+            path = "raw_text_json_start",
+            raw_len,
+            first_line = %first_preview,
+            "normalize_output: returning raw text (JSON start but no parse)"
+        );
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
             ..NormalizedOutput::default()
@@ -312,18 +338,44 @@ fn try_extract_multiline_json_after_preamble(raw: &str) -> Option<NormalizedOutp
             continue;
         }
         if t.starts_with('#') || t.starts_with("```") {
+            tracing::debug!(
+                preamble_line = %t,
+                "try_extract_multiline_json: bailing out — preamble has markdown"
+            );
             return None;
         }
     }
 
     // Concatenate from the first '{' line onward and try to parse as JSON.
     let json_text: String = lines[json_start..].join("\n");
-    let value: Value = serde_json::from_str(&json_text).ok()?;
+    let value: Value = match serde_json::from_str(&json_text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                json_start,
+                total_lines = lines.len(),
+                json_len = json_text.len(),
+                error = %e,
+                "try_extract_multiline_json: serde parse failed"
+            );
+            return None;
+        }
+    };
     if !value.is_object() {
         return None;
     }
 
-    let text = extract_single_json_text(&value)?;
+    let text = match extract_single_json_text(&value) {
+        Some(t) => t,
+        None => {
+            let keys: Vec<&str> = value.as_object().map(|o| o.keys().map(|k| k.as_str()).collect()).unwrap_or_default();
+            tracing::debug!(
+                ?keys,
+                "try_extract_multiline_json: no text key found in JSON"
+            );
+            return None;
+        }
+    };
     let mut output = NormalizedOutput {
         text,
         session_id: value
