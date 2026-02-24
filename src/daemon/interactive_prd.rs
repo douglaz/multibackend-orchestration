@@ -235,6 +235,9 @@ pub struct PrdPollConfig {
     pub backend_timeout_secs: u64,
     pub global_config: GlobalConfig,
     pub verbose: bool,
+    /// Maximum number of issues to process concurrently within one tick.
+    /// `0` is treated as `1` (sequential).
+    pub max_concurrent: u32,
 }
 
 impl PrdPollConfig {
@@ -244,7 +247,6 @@ impl PrdPollConfig {
     }
 
     /// Fetch latest from origin and reset the clone to origin's default branch.
-    #[allow(dead_code)]
     fn refresh_repo_clone(&self) -> Result<()> {
         let repo = self.repo_clone_path();
         if !repo.join(".git").exists() {
@@ -381,37 +383,102 @@ pub const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
 ///
 /// Enforces the spec invariant "at most one state transition per issue per tick"
 /// by deduplicating issue numbers across both poll passes.
+///
+/// Issues are processed concurrently using a bounded thread pool controlled by
+/// `config.max_concurrent`. Each worker owns its own `bot_login_cache` and is
+/// isolated via `catch_unwind` so that a panic or error in one issue does not
+/// affect others.
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
-    let mut processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut bot_login_cache: Option<String> = None;
-
+    // Phase 1: sequential polls
     let labels = vec!["ralph:prd".to_owned()];
     let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
 
-    for issue in &issues {
-        if !processed.insert(issue.number) {
-            continue;
-        }
-        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
-            eprintln!(
-                "prd: failed to advance {}/{}#{}: {err}",
-                config.owner, config.repo, issue.number
-            );
-        }
-    }
-
-    // Also process issues that are in prd-active state (already picked up).
     let active_labels = vec!["ralph:prd-active".to_owned()];
     let (active_issues, _) = github::poll_issues(&config.owner, &config.repo, &active_labels)?;
 
-    for issue in &active_issues {
-        if !processed.insert(issue.number) {
-            continue; // already advanced in the ralph:prd pass
+    // Phase 2: deduplicate issues across both passes
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped_issues: Vec<GhIssue> = Vec::new();
+    for issue in issues.into_iter().chain(active_issues.into_iter()) {
+        if seen.insert(issue.number) {
+            deduped_issues.push(issue);
         }
-        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
+    }
+
+    // Early return when no work
+    if deduped_issues.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 3: once-per-tick repo refresh (before any per-issue work)
+    if let Err(err) = config.refresh_repo_clone() {
+        eprintln!(
+            "prd: warning: repo refresh failed for {}/{}: {err}",
+            config.owner, config.repo
+        );
+    }
+
+    // Phase 4: bounded concurrent per-issue processing
+    let worker_count = std::cmp::max(1, config.max_concurrent) as usize;
+    let work_queue = std::sync::Mutex::new(std::collections::VecDeque::from(deduped_issues));
+    let errors: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+    std::thread::scope(|s| {
+        for _ in 0..worker_count {
+            s.spawn(|| {
+                let mut bot_login_cache: Option<String> = None;
+
+                loop {
+                    let issue = {
+                        let mut queue = work_queue.lock().expect("work queue lock poisoned");
+                        queue.pop_front()
+                    };
+                    let Some(issue) = issue else { break };
+
+                    let issue_number = issue.number;
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        advance_issue(config, &issue, &mut bot_login_cache)
+                    }));
+
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            eprintln!(
+                                "prd: failed to advance {}/{}#{}: {err}",
+                                config.owner, config.repo, issue_number
+                            );
+                            let mut errs = errors.lock().expect("errors lock poisoned");
+                            errs.push((issue_number, err.to_string()));
+                        }
+                        Err(panic_payload) => {
+                            let msg = match panic_payload.downcast_ref::<&str>() {
+                                Some(s) => s.to_string(),
+                                None => match panic_payload.downcast_ref::<String>() {
+                                    Some(s) => s.clone(),
+                                    None => "unknown panic".to_string(),
+                                },
+                            };
+                            eprintln!(
+                                "prd: PANIC while advancing {}/{}#{}: {msg}",
+                                config.owner, config.repo, issue_number
+                            );
+                            let mut errs = errors.lock().expect("errors lock poisoned");
+                            errs.push((issue_number, format!("panic: {msg}")));
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // Phase 5: emit aggregated errors (informational, tick is not short-circuited)
+    let collected_errors = errors.into_inner().expect("errors lock poisoned");
+    if !collected_errors.is_empty() {
+        for (issue_num, msg) in &collected_errors {
             eprintln!(
-                "prd: failed to advance active {}/{}#{}: {err}",
-                config.owner, config.repo, issue.number
+                "prd: issue {}/{}#{} error: {msg}",
+                config.owner, config.repo, issue_num
             );
         }
     }
@@ -2464,6 +2531,7 @@ mod tests {
             backend_timeout_secs: 30,
             global_config: global,
             verbose: false,
+            max_concurrent: 1,
         }
     }
 
@@ -2938,6 +3006,7 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
         };
         assert_eq!(
             config.repo_clone_path(),
@@ -2960,6 +3029,7 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
         };
         // Create the dir but not .git — should succeed without error
         std::fs::create_dir_all(config.repo_clone_path()).unwrap();
@@ -3055,6 +3125,7 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
         };
 
         config.refresh_repo_clone().unwrap();

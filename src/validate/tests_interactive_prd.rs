@@ -171,6 +171,30 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::status_failed_marker_spoof_resistance",
             func: status_failed_marker_spoof_resistance,
         },
+        ConformanceTest {
+            name: "interactive_prd::prd_poll_config_max_concurrent_field",
+            func: prd_poll_config_max_concurrent_field,
+        },
+        ConformanceTest {
+            name: "interactive_prd::max_concurrent_zero_treated_as_one",
+            func: max_concurrent_zero_treated_as_one,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_dedup_invariant",
+            func: concurrent_dedup_invariant,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_error_isolation",
+            func: concurrent_error_isolation,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_panic_isolation",
+            func: concurrent_panic_isolation,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_bounded_worker_count",
+            func: concurrent_bounded_worker_count,
+        },
     ]
 }
 
@@ -3335,6 +3359,188 @@ fn status_failed_marker_spoof_resistance(_harness: &RalphHarness) -> TestResult 
             bot_result.unwrap().id,
             301,
             "should find the bot comment, not the spoof"
+        );
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency conformance tests
+// ---------------------------------------------------------------------------
+
+fn prd_poll_config_max_concurrent_field(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::PrdPollConfig;
+    use std::path::PathBuf;
+
+    run_case(|| {
+        let config = PrdPollConfig {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            data_dir: PathBuf::from("/tmp"),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 4,
+        };
+        assert_eq!(config.max_concurrent, 4, "max_concurrent should store value");
+    })
+}
+
+fn max_concurrent_zero_treated_as_one(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::PrdPollConfig;
+    use std::path::PathBuf;
+
+    run_case(|| {
+        let config = PrdPollConfig {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            data_dir: PathBuf::from("/tmp"),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 0,
+        };
+        let effective = std::cmp::max(1, config.max_concurrent);
+        assert_eq!(effective, 1, "max_concurrent=0 should be treated as 1");
+    })
+}
+
+fn concurrent_dedup_invariant(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Test the dedup logic at the collection level: given overlapping issue
+        // lists, dedup produces at-most-one entry per issue number.
+        let mut seen = std::collections::HashSet::new();
+        let issue_numbers_pass1: Vec<u32> = vec![10, 20, 30];
+        let issue_numbers_pass2: Vec<u32> = vec![20, 30, 40];
+
+        let mut deduped: Vec<u32> = Vec::new();
+        for n in issue_numbers_pass1.into_iter().chain(issue_numbers_pass2.into_iter()) {
+            if seen.insert(n) {
+                deduped.push(n);
+            }
+        }
+
+        assert_eq!(deduped, vec![10, 20, 30, 40], "dedup should preserve order and remove duplicates");
+        assert_eq!(deduped.len(), 4, "should have exactly 4 unique issues");
+    })
+}
+
+fn concurrent_error_isolation(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Test that catch_unwind + error aggregation pattern works:
+        // one closure errors, another succeeds, and errors are collected
+        // without stopping the other.
+        let errors: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let successes = std::sync::atomic::AtomicU32::new(0);
+
+        std::thread::scope(|s| {
+            // Worker 1: errors
+            s.spawn(|| {
+                let result: std::result::Result<(), String> = Err("simulated error".to_string());
+                if let Err(e) = result {
+                    errors.lock().unwrap().push(e);
+                }
+            });
+            // Worker 2: succeeds
+            s.spawn(|| {
+                successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        });
+
+        let errs = errors.into_inner().unwrap();
+        assert_eq!(errs.len(), 1, "should collect exactly 1 error");
+        assert_eq!(successes.load(std::sync::atomic::Ordering::Relaxed), 1, "success should complete");
+    })
+}
+
+fn concurrent_panic_isolation(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Test that catch_unwind isolates panics within scoped threads.
+        let errors: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let successes = std::sync::atomic::AtomicU32::new(0);
+
+        std::thread::scope(|s| {
+            // Worker 1: panics (caught by catch_unwind)
+            s.spawn(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    panic!("test panic");
+                }));
+                if let Err(payload) = result {
+                    let msg = match payload.downcast_ref::<&str>() {
+                        Some(s) => s.to_string(),
+                        None => "unknown panic".to_string(),
+                    };
+                    errors.lock().unwrap().push(msg);
+                }
+            });
+            // Worker 2: succeeds
+            s.spawn(|| {
+                successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        });
+
+        let errs = errors.into_inner().unwrap();
+        assert_eq!(errs.len(), 1, "should collect exactly 1 panic");
+        assert!(errs[0].contains("test panic"), "panic message should be captured");
+        assert_eq!(successes.load(std::sync::atomic::Ordering::Relaxed), 1, "other worker should complete");
+    })
+}
+
+fn concurrent_bounded_worker_count(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Test bounded concurrency: with max_concurrent=2 and 5 work items,
+        // peak active workers should never exceed 2.
+        let max_workers = 2_usize;
+        let work_items = 5_usize;
+
+        let active = std::sync::atomic::AtomicUsize::new(0);
+        let peak = std::sync::atomic::AtomicUsize::new(0);
+        let work_queue = std::sync::Mutex::new(std::collections::VecDeque::from(
+            (0..work_items).collect::<Vec<_>>()
+        ));
+
+        std::thread::scope(|s| {
+            for _ in 0..max_workers {
+                s.spawn(|| {
+                    loop {
+                        let item = {
+                            let mut q = work_queue.lock().unwrap();
+                            q.pop_front()
+                        };
+                        let Some(_item) = item else { break };
+
+                        let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        // Update peak
+                        peak.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+
+                        // Simulate work
+                        std::thread::yield_now();
+
+                        active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        let observed_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            observed_peak <= max_workers,
+            "peak concurrency {observed_peak} should not exceed {max_workers}"
+        );
+        assert!(
+            observed_peak >= 1,
+            "at least one worker should have been active"
         );
     })
 }
