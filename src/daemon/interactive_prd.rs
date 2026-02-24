@@ -237,6 +237,39 @@ pub struct PrdPollConfig {
     pub verbose: bool,
 }
 
+impl PrdPollConfig {
+    /// Path to the daemon's clone of the repo, used as cwd for backend calls.
+    fn repo_clone_path(&self) -> PathBuf {
+        self.data_dir.join(&self.owner).join(&self.repo)
+    }
+}
+
+/// RAII guard that sets the process cwd and restores it on drop.
+struct CwdGuard {
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn set(path: &Path) -> Result<Self> {
+        let original = std::env::current_dir().map_err(|e| {
+            RalphError::InteractivePrdFailed(format!("failed to get current dir: {e}"))
+        })?;
+        std::env::set_current_dir(path).map_err(|e| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to set cwd to {}: {e}",
+                path.display()
+            ))
+        })?;
+        Ok(Self { original })
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
+
 /// All PRD lifecycle label names.
 pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd",
@@ -949,6 +982,7 @@ fn generate_revision_from_feedback_with_timeout(
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
+    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
     let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
@@ -1194,6 +1228,7 @@ fn generate_draft_from_answers_with_timeout(
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
+    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
     let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
@@ -1319,6 +1354,7 @@ fn run_review_with_retry_sync(
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
 fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
+    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -2374,10 +2410,14 @@ mod tests {
         global.backends.codex.command = script_path.to_owned();
         global.backends.codex.args = vec![];
 
+        let data_dir = PathBuf::from("/tmp/ralph-test-prd-unit");
+        // Ensure repo clone directory exists so CwdGuard can chdir into it.
+        let _ = std::fs::create_dir_all(data_dir.join("test").join("repo"));
+
         PrdPollConfig {
             owner: "test".to_owned(),
             repo: "repo".to_owned(),
-            data_dir: PathBuf::from("/tmp/ralph-test-prd-unit"),
+            data_dir,
             prd_enabled: true,
             question_backends: vec!["claude".to_owned(), "codex".to_owned()],
             writer_backend: "claude".to_owned(),
