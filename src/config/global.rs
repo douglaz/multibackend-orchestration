@@ -1076,13 +1076,559 @@ impl GlobalConfig {
             _ => None,
         }
     }
+
+    pub fn backend_config_mut(&mut self, name: &str) -> Option<&mut BackendConfig> {
+        match name {
+            "claude" => Some(&mut self.backends.claude),
+            "codex" => Some(&mut self.backends.codex),
+            "gemini" => Some(&mut self.backends.gemini),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared global config mutation helpers
+// ---------------------------------------------------------------------------
+
+/// Apply a key/value mutation to a `GlobalConfig`, using the same key coverage
+/// and validation as `ralph config set --global`.
+///
+/// This is the single source of truth for global config key mutations, used by
+/// both the CLI `config set` path and fast test harness helpers.
+pub(crate) fn set_global_config_value(
+    config: &mut GlobalConfig,
+    key: &str,
+    raw_value: &str,
+) -> Result<()> {
+    match key {
+        "workspace.version" => config.workspace.version = raw_value.to_owned(),
+        "workspace.default_backend" => {
+            cfg_ensure_backend(raw_value)?;
+            config.workspace.default_backend = raw_value.to_owned();
+        }
+        "workspace.tmux" => {
+            config.workspace.tmux = cfg_parse_bool(raw_value, key)?;
+        }
+        "workspace.tmux_session" => {
+            config.workspace.tmux_session = raw_value.to_owned();
+        }
+        "workspace.tmux_window_keep_seconds" => {
+            config.workspace.tmux_window_keep_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_poll_seconds" => {
+            config.workspace.daemon_poll_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_max_concurrent" => {
+            config.workspace.daemon_max_concurrent = cfg_parse_u32(raw_value, key)?;
+        }
+        "workspace.daemon_labels" => {
+            config.workspace.daemon_labels = cfg_parse_string_list(raw_value)?;
+        }
+        "workspace.daemon_repo" => {
+            config.workspace.daemon_repo = cfg_parse_optional_string(raw_value);
+        }
+        "workspace.daemon_refinement_enabled" => {
+            config.workspace.daemon_refinement_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_refinement_backend" => {
+            cfg_ensure_backend(raw_value)?;
+            config.workspace.daemon_refinement_backend = raw_value.to_owned();
+        }
+        "workspace.daemon_auto_rebase_enabled" => {
+            config.workspace.daemon_auto_rebase_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_rebase_interval_seconds" => {
+            config.workspace.daemon_rebase_interval_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_max_rebases_per_cycle" => {
+            config.workspace.daemon_max_rebases_per_cycle = cfg_parse_u32(raw_value, key)?;
+        }
+        "workspace.daemon_rebase_timeout_seconds" => {
+            config.workspace.daemon_rebase_timeout_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "workspace.daemon_rebase_agent_backend" => {
+            crate::daemon::rebase_agent::parse_rebase_agent_backend(raw_value)?;
+            config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
+        }
+        "workspace.daemon_prd_enabled" => {
+            config.workspace.daemon_prd_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workspace.daemon_prd_question_backends" => {
+            config.workspace.daemon_prd_question_backends = cfg_parse_string_list(raw_value)?;
+        }
+        "workspace.daemon_prd_writer_backend" => {
+            cfg_ensure_backend(raw_value)?;
+            config.workspace.daemon_prd_writer_backend = raw_value.to_owned();
+        }
+        "workspace.daemon_prd_reviewer_backend" => {
+            cfg_ensure_backend(raw_value)?;
+            config.workspace.daemon_prd_reviewer_backend = raw_value.to_owned();
+        }
+        "workspace.daemon_prd_max_revisions" => {
+            config.workspace.daemon_prd_max_revisions = cfg_parse_u32(raw_value, key)?;
+        }
+        "workspace.daemon_prd_backend_timeout_secs" => {
+            config.workspace.daemon_prd_backend_timeout_secs = cfg_parse_u64(raw_value, key)?;
+        }
+        "workflow.max_review_iterations" => {
+            config.workflow.max_review_iterations = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.auto_commit" => {
+            config.workflow.auto_commit = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.commit_message_style" => {
+            config.workflow.commit_message_style = cfg_parse_commit_message_style(raw_value)?;
+        }
+        "workflow.commit_tag_format" => {
+            config.workflow.commit_tag_format = raw_value.to_owned();
+        }
+        "workflow.prompt_change_action" => {
+            config.workflow.prompt_change_action = cfg_parse_prompt_change_action(raw_value)?;
+        }
+        "workflow.prompt_review_enabled" => {
+            config.workflow.prompt_review_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.prompt_review_backend" => {
+            cfg_ensure_required_backend(raw_value, "workflow.prompt_review_backend")?;
+            config.workflow.prompt_review_backend = raw_value.to_owned();
+        }
+        "workflow.prompt_review_backends" => {
+            config.workflow.prompt_review_backends = Some(cfg_parse_string_list(raw_value)?);
+        }
+        "workflow.prompt_review_min_reviewers" => {
+            config.workflow.prompt_review_min_reviewers = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.planner_backend" => {
+            config.workflow.planner_backend = cfg_parse_optional_backend(raw_value)?;
+        }
+        "workflow.implementer_backend" => {
+            config.workflow.implementer_backend = cfg_parse_optional_backend(raw_value)?;
+        }
+        "workflow.reviewer_backend" => {
+            config.workflow.reviewer_backend = cfg_parse_optional_backend(raw_value)?;
+        }
+        "workflow.qa_backend" => {
+            config.workflow.qa_backend = cfg_parse_optional_backend(raw_value)?;
+        }
+        "workflow.completer_backend" => {
+            config.workflow.completer_backend = cfg_parse_optional_backend(raw_value)?;
+        }
+        "workflow.final_review_enabled" => {
+            config.workflow.final_review_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.final_review_backends" => {
+            config.workflow.final_review_backends = cfg_parse_string_list(raw_value)?;
+        }
+        "workflow.final_review_arbiter_backend" => {
+            cfg_ensure_backend(raw_value)?;
+            config.workflow.final_review_arbiter_backend = raw_value.to_owned();
+        }
+        "workflow.final_review_min_reviewers" => {
+            config.workflow.final_review_min_reviewers = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.final_review_consensus_threshold" => {
+            let v: f64 = raw_value
+                .parse()
+                .map_err(|_| crate::error::RalphError::Validation(format!("key '{key}' expects float value")))?;
+            config.workflow.final_review_consensus_threshold = v;
+        }
+        "workflow.max_final_review_restarts" => {
+            config.workflow.max_final_review_restarts = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.completion_backends" => {
+            config.workflow.completion_backends = cfg_parse_string_list(raw_value)?;
+        }
+        "workflow.completion_min_completers" => {
+            config.workflow.completion_min_completers = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.completion_consensus_threshold" => {
+            let v: f64 = raw_value
+                .parse()
+                .map_err(|_| crate::error::RalphError::Validation(format!("key '{key}' expects float value")))?;
+            config.workflow.completion_consensus_threshold = v;
+        }
+        "workflow.qa_enabled" => {
+            config.workflow.qa_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.max_qa_iterations" => {
+            config.workflow.max_qa_iterations = cfg_parse_u32(raw_value, key)?;
+        }
+        "workflow.planner_state_in_prompt" => {
+            config.workflow.planner_state_in_prompt = cfg_parse_planner_state_in_prompt(raw_value)?;
+        }
+        "workflow.planner_previous_specs_in_prompt" => {
+            config.workflow.planner_previous_specs_in_prompt =
+                cfg_parse_previous_specs_in_prompt(raw_value)?;
+        }
+        "workflow.planner_max_prior_loops" => {
+            config.workflow.planner_max_prior_loops =
+                cfg_parse_optional_usize_or_none(raw_value, key)?;
+        }
+        "workflow.max_review_history_entries_in_prompt" => {
+            config.workflow.max_review_history_entries_in_prompt = cfg_parse_usize(raw_value, key)?;
+        }
+        "workflow.max_qa_history_entries_in_prompt" => {
+            config.workflow.max_qa_history_entries_in_prompt = cfg_parse_usize(raw_value, key)?;
+        }
+        "workflow.include_history_when_session_reuse_enabled" => {
+            config.workflow.include_history_when_session_reuse_enabled =
+                cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_enabled" => {
+            config.workflow.session_reuse_enabled = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_roles" => {
+            config.workflow.session_reuse_roles = cfg_parse_session_reuse_roles(raw_value)?;
+        }
+        "workflow.session_reuse_reset_on_prompt_change" => {
+            config.workflow.session_reuse_reset_on_prompt_change = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.session_reuse_reset_on_rollback" => {
+            config.workflow.session_reuse_reset_on_rollback = cfg_parse_bool(raw_value, key)?;
+        }
+        "templates.planner" => config.templates.planner = raw_value.to_owned(),
+        "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
+        "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
+        "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
+        "templates.prompt_review_validator" => {
+            config.templates.prompt_review_validator = raw_value.to_owned()
+        }
+        "templates.completer" => config.templates.completer = raw_value.to_owned(),
+        "templates.qa" => config.templates.qa = raw_value.to_owned(),
+        "templates.final_reviewer" => config.templates.final_reviewer = raw_value.to_owned(),
+        "templates.planner_position" => config.templates.planner_position = raw_value.to_owned(),
+        "templates.vote" => config.templates.vote = raw_value.to_owned(),
+        "templates.arbiter" => config.templates.arbiter = raw_value.to_owned(),
+        "git.auto_branch" => config.git.auto_branch = cfg_parse_bool(raw_value, key)?,
+        "git.branch_format" => config.git.branch_format = raw_value.to_owned(),
+        "git.sign_commits" => config.git.sign_commits = cfg_parse_bool(raw_value, key)?,
+        "git.base_branch" => config.git.base_branch = raw_value.to_owned(),
+        "backends.claude.command" => config.backends.claude.command = raw_value.to_owned(),
+        "backends.codex.command" => config.backends.codex.command = raw_value.to_owned(),
+        "backends.gemini.command" => config.backends.gemini.command = raw_value.to_owned(),
+        "backends.claude.timeout_seconds" => {
+            config.backends.claude.timeout_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "backends.codex.timeout_seconds" => {
+            config.backends.codex.timeout_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "backends.gemini.timeout_seconds" => {
+            config.backends.gemini.timeout_seconds = cfg_parse_u64(raw_value, key)?;
+        }
+        "backends.claude.enabled" => {
+            config.backends.claude.enabled = cfg_parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.codex.enabled" => {
+            config.backends.codex.enabled = cfg_parse_backend_enabled(raw_value, key)?;
+        }
+        "backends.gemini.enabled" => {
+            config.backends.gemini.enabled = cfg_parse_backend_enabled(raw_value, key)?;
+        }
+        _ if key.starts_with("backends.claude.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.claude.role_timeouts.");
+            cfg_set_role_timeout(&mut config.backends.claude.role_timeouts, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.codex.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.codex.role_timeouts.");
+            cfg_set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.gemini.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.gemini.role_timeouts.");
+            cfg_set_role_timeout(&mut config.backends.gemini.role_timeouts, role, raw_value)?;
+        }
+        "backends.claude.args" => config.backends.claude.args = cfg_parse_string_list(raw_value)?,
+        "backends.codex.args" => config.backends.codex.args = cfg_parse_string_list(raw_value)?,
+        "backends.gemini.args" => config.backends.gemini.args = cfg_parse_string_list(raw_value)?,
+        _ if key.starts_with("backends.claude.models.") => {
+            let role = key.trim_start_matches("backends.claude.models.");
+            cfg_set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.codex.models.") => {
+            let role = key.trim_start_matches("backends.codex.models.");
+            cfg_set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.gemini.models.") => {
+            let role = key.trim_start_matches("backends.gemini.models.");
+            cfg_set_backend_model(&mut config.backends.gemini.models, role, raw_value)?;
+        }
+        _ if key.starts_with("backends.claude.env.") => {
+            let env_key = key.trim_start_matches("backends.claude.env.");
+            config
+                .backends
+                .claude
+                .env
+                .insert(env_key.to_owned(), raw_value.to_owned());
+        }
+        _ if key.starts_with("backends.codex.env.") => {
+            let env_key = key.trim_start_matches("backends.codex.env.");
+            config
+                .backends
+                .codex
+                .env
+                .insert(env_key.to_owned(), raw_value.to_owned());
+        }
+        _ if key.starts_with("backends.gemini.env.") => {
+            let env_key = key.trim_start_matches("backends.gemini.env.");
+            config
+                .backends
+                .gemini
+                .env
+                .insert(env_key.to_owned(), raw_value.to_owned());
+        }
+        _ => {
+            return Err(crate::error::RalphError::Validation(format!(
+                "unsupported global config key: {key}"
+            )))
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Parsing helpers used by set_global_config_value
+// ---------------------------------------------------------------------------
+
+fn cfg_parse_bool(raw: &str, key: &str) -> Result<bool> {
+    raw.parse::<bool>().map_err(|_| {
+        crate::error::RalphError::Validation(format!(
+            "key '{key}' expects boolean value (true/false)"
+        ))
+    })
+}
+
+fn cfg_parse_u32(raw: &str, key: &str) -> Result<u32> {
+    raw.parse::<u32>().map_err(|_| {
+        crate::error::RalphError::Validation(format!("key '{key}' expects unsigned integer value"))
+    })
+}
+
+fn cfg_parse_u64(raw: &str, key: &str) -> Result<u64> {
+    raw.parse::<u64>().map_err(|_| {
+        crate::error::RalphError::Validation(format!("key '{key}' expects unsigned integer value"))
+    })
+}
+
+fn cfg_parse_usize(raw: &str, key: &str) -> Result<usize> {
+    raw.parse::<usize>().map_err(|_| {
+        crate::error::RalphError::Validation(format!("key '{key}' expects unsigned integer value"))
+    })
+}
+
+fn cfg_parse_backend_enabled(raw: &str, key: &str) -> Result<BackendEnabled> {
+    match raw {
+        "true" => Ok(BackendEnabled::Enabled),
+        "false" => Ok(BackendEnabled::Disabled),
+        "auto" => Ok(BackendEnabled::Auto),
+        _ => Err(crate::error::RalphError::Validation(format!(
+            "key '{key}' expects true, false, or auto"
+        ))),
+    }
+}
+
+fn cfg_parse_commit_message_style(raw: &str) -> Result<CommitMessageStyle> {
+    match raw {
+        "conventional" => Ok(CommitMessageStyle::Conventional),
+        "descriptive" => Ok(CommitMessageStyle::Descriptive),
+        "minimal" => Ok(CommitMessageStyle::Minimal),
+        _ => Err(crate::error::RalphError::Validation(
+            "commit_message_style must be one of: conventional, descriptive, minimal".to_owned(),
+        )),
+    }
+}
+
+fn cfg_parse_prompt_change_action(raw: &str) -> Result<PromptChangeAction> {
+    match raw {
+        "continue" => Ok(PromptChangeAction::Continue),
+        "restart-loop" => Ok(PromptChangeAction::RestartLoop),
+        "abort" => Ok(PromptChangeAction::Abort),
+        _ => Err(crate::error::RalphError::Validation(
+            "prompt_change_action must be one of: continue, restart-loop, abort".to_owned(),
+        )),
+    }
+}
+
+fn cfg_parse_planner_state_in_prompt(raw: &str) -> Result<PlannerStateInPrompt> {
+    match raw {
+        "full-json" => Ok(PlannerStateInPrompt::FullJson),
+        "summary" => Ok(PlannerStateInPrompt::Summary),
+        _ => Err(crate::error::RalphError::Validation(
+            "planner_state_in_prompt must be one of: full-json, summary".to_owned(),
+        )),
+    }
+}
+
+fn cfg_parse_previous_specs_in_prompt(raw: &str) -> Result<PreviousSpecsInPrompt> {
+    match raw {
+        "none" => Ok(PreviousSpecsInPrompt::None),
+        "titles" => Ok(PreviousSpecsInPrompt::Titles),
+        "full-text" => Ok(PreviousSpecsInPrompt::FullText),
+        _ => Err(crate::error::RalphError::Validation(
+            "planner_previous_specs_in_prompt must be one of: none, titles, full-text".to_owned(),
+        )),
+    }
+}
+
+fn cfg_parse_optional_usize_or_none(raw: &str, key: &str) -> Result<Option<usize>> {
+    if raw == "none" {
+        return Ok(None);
+    }
+    let n = raw.parse::<usize>().map_err(|_| {
+        crate::error::RalphError::Validation(format!(
+            "key '{key}' expects unsigned integer or \"none\" for unlimited"
+        ))
+    })?;
+    Ok(Some(n))
+}
+
+fn cfg_parse_optional_backend(raw: &str) -> Result<Option<String>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    cfg_ensure_backend(raw)?;
+    Ok(Some(raw.to_owned()))
+}
+
+fn cfg_ensure_backend(raw: &str) -> Result<()> {
+    crate::cli::backend_spec::validate_backend_spec_name(raw)
+}
+
+fn cfg_ensure_required_backend(raw: &str, label: &str) -> Result<()> {
+    let parsed = crate::backend::parse_backend_spec(raw)?;
+    if parsed.optional {
+        return Err(crate::error::RalphError::Validation(format!(
+            "optional backend specs (?backend) are not supported for {label}; optional syntax is allowed only in panel backend lists"
+        )));
+    }
+    cfg_ensure_backend(raw)
+}
+
+const CFG_KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+
+fn cfg_parse_session_reuse_roles(raw: &str) -> Result<Vec<String>> {
+    let roles = cfg_parse_string_list(raw)?;
+    for role in &roles {
+        if !CFG_KNOWN_ROLES.contains(&role.as_str()) {
+            return Err(crate::error::RalphError::Validation(format!(
+                "unknown role '{}' in session_reuse_roles; valid roles: {}",
+                role,
+                CFG_KNOWN_ROLES.join(", ")
+            )));
+        }
+    }
+    Ok(roles)
+}
+
+fn cfg_parse_optional_string(raw: &str) -> Option<String> {
+    if raw == "null" {
+        None
+    } else {
+        Some(raw.to_owned())
+    }
+}
+
+fn cfg_parse_string_list(raw: &str) -> Result<Vec<String>> {
+    if raw.trim().starts_with('[') {
+        let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+            crate::error::RalphError::Validation(
+                "args must be JSON array (e.g. [\"--flag\"]) or comma-separated list".to_owned(),
+            )
+        })?;
+        let arr = value.as_array().ok_or_else(|| {
+            crate::error::RalphError::Validation(
+                "args must be JSON array (e.g. [\"--flag\"]) or comma-separated list".to_owned(),
+            )
+        })?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let Some(s) = item.as_str() else {
+                return Err(crate::error::RalphError::Validation(
+                    "args JSON array items must be strings".to_owned(),
+                ));
+            };
+            out.push(s.to_owned());
+        }
+        return Ok(out);
+    }
+
+    let parts = raw
+        .split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_owned())
+        .collect::<Vec<_>>();
+    Ok(parts)
+}
+
+fn cfg_set_backend_model(
+    models: &mut BackendRoleModels,
+    role: &str,
+    raw_value: &str,
+) -> Result<()> {
+    let value = if raw_value == "null" {
+        None
+    } else {
+        Some(raw_value.to_owned())
+    };
+    match role {
+        "planner" => models.planner = value,
+        "implementer" => models.implementer = value,
+        "reviewer" => models.reviewer = value,
+        "final_reviewer" => models.final_reviewer = value,
+        "arbiter" => models.arbiter = value,
+        "qa" => models.qa = value,
+        "completer" => models.completer = value,
+        "acceptance_qa" => models.acceptance_qa = value,
+        "reformatter" => models.reformatter = value,
+        _ => {
+            return Err(crate::error::RalphError::Validation(format!(
+                "unknown backend model role: {role}"
+            )))
+        }
+    }
+    Ok(())
+}
+
+fn cfg_parse_optional_u64(raw: &str, key: &str) -> Result<Option<u64>> {
+    if raw == "null" {
+        return Ok(None);
+    }
+    Ok(Some(cfg_parse_u64(raw, key)?))
+}
+
+fn cfg_set_role_timeout(
+    role_timeouts: &mut RoleTimeouts,
+    role: &str,
+    raw_value: &str,
+) -> Result<()> {
+    let parse_key = format!("backends.<backend>.role_timeouts.{role}");
+    let value = cfg_parse_optional_u64(raw_value, &parse_key)?;
+    match role {
+        "planner" => role_timeouts.planner = value,
+        "implementer" => role_timeouts.implementer = value,
+        "reviewer" => role_timeouts.reviewer = value,
+        "final_reviewer" => role_timeouts.final_reviewer = value,
+        "arbiter" => role_timeouts.arbiter = value,
+        "qa" => role_timeouts.qa = value,
+        "completer" => role_timeouts.completer = value,
+        "acceptance_qa" => role_timeouts.acceptance_qa = value,
+        "reformatter" => role_timeouts.reformatter = value,
+        "prompt_reviewer" => role_timeouts.prompt_reviewer = value,
+        _ => {
+            return Err(crate::error::RalphError::Validation(format!(
+                "unknown backend timeout role: {role}"
+            )))
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendConfig, BackendEnabled, BackendRoleModels, GlobalConfig, PartialBackendConfig,
-        PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
+        set_global_config_value, BackendConfig, BackendEnabled, BackendRoleModels, GlobalConfig,
+        PartialBackendConfig, PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
     };
 
     #[test]
@@ -2190,5 +2736,240 @@ planner_state_in_prompt = "summary"
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);
         assert_eq!(config.workflow.max_qa_history_entries_in_prompt, 2);
         assert!(!config.workflow.include_history_when_session_reuse_enabled);
+    }
+
+    // ── Shared global config mutator parity tests ──────────────────────
+
+    #[test]
+    fn shared_mutator_sets_workspace_fields() {
+        let mut config = GlobalConfig::default();
+
+        set_global_config_value(&mut config, "workspace.default_backend", "codex")
+            .expect("set default_backend");
+        assert_eq!(config.workspace.default_backend, "codex");
+
+        set_global_config_value(&mut config, "workspace.tmux", "true").expect("set tmux");
+        assert!(config.workspace.tmux);
+
+        set_global_config_value(&mut config, "workspace.tmux_session", "custom-session")
+            .expect("set tmux_session");
+        assert_eq!(config.workspace.tmux_session, "custom-session");
+
+        set_global_config_value(&mut config, "workspace.tmux_window_keep_seconds", "30")
+            .expect("set tmux_window_keep_seconds");
+        assert_eq!(config.workspace.tmux_window_keep_seconds, 30);
+
+        set_global_config_value(&mut config, "workspace.daemon_poll_seconds", "120")
+            .expect("set daemon_poll_seconds");
+        assert_eq!(config.workspace.daemon_poll_seconds, 120);
+
+        set_global_config_value(&mut config, "workspace.daemon_max_concurrent", "8")
+            .expect("set daemon_max_concurrent");
+        assert_eq!(config.workspace.daemon_max_concurrent, 8);
+
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_labels",
+            "[\"ralph:ready\",\"deploy\"]",
+        )
+        .expect("set daemon_labels");
+        assert_eq!(
+            config.workspace.daemon_labels,
+            vec!["ralph:ready".to_owned(), "deploy".to_owned()]
+        );
+
+        set_global_config_value(&mut config, "workspace.daemon_repo", "acme/repo")
+            .expect("set daemon_repo");
+        assert_eq!(config.workspace.daemon_repo.as_deref(), Some("acme/repo"));
+
+        set_global_config_value(&mut config, "workspace.daemon_repo", "null")
+            .expect("clear daemon_repo");
+        assert!(config.workspace.daemon_repo.is_none());
+    }
+
+    #[test]
+    fn shared_mutator_sets_workflow_fields() {
+        let mut config = GlobalConfig::default();
+
+        set_global_config_value(&mut config, "workflow.max_review_iterations", "7")
+            .expect("set max_review_iterations");
+        assert_eq!(config.workflow.max_review_iterations, 7);
+
+        set_global_config_value(&mut config, "workflow.auto_commit", "false")
+            .expect("set auto_commit");
+        assert!(!config.workflow.auto_commit);
+
+        set_global_config_value(&mut config, "workflow.commit_message_style", "minimal")
+            .expect("set commit_message_style");
+        assert_eq!(
+            config.workflow.commit_message_style,
+            super::CommitMessageStyle::Minimal
+        );
+
+        set_global_config_value(&mut config, "workflow.prompt_change_action", "restart-loop")
+            .expect("set prompt_change_action");
+        assert_eq!(
+            config.workflow.prompt_change_action,
+            super::PromptChangeAction::RestartLoop
+        );
+
+        set_global_config_value(&mut config, "workflow.qa_enabled", "false")
+            .expect("set qa_enabled");
+        assert!(!config.workflow.qa_enabled);
+
+        set_global_config_value(&mut config, "workflow.max_qa_iterations", "5")
+            .expect("set max_qa_iterations");
+        assert_eq!(config.workflow.max_qa_iterations, 5);
+
+        set_global_config_value(
+            &mut config,
+            "workflow.planner_state_in_prompt",
+            "full-json",
+        )
+        .expect("set planner_state_in_prompt");
+        assert_eq!(
+            config.workflow.planner_state_in_prompt,
+            PlannerStateInPrompt::FullJson
+        );
+
+        set_global_config_value(
+            &mut config,
+            "workflow.planner_previous_specs_in_prompt",
+            "full-text",
+        )
+        .expect("set planner_previous_specs_in_prompt");
+        assert_eq!(
+            config.workflow.planner_previous_specs_in_prompt,
+            PreviousSpecsInPrompt::FullText
+        );
+
+        set_global_config_value(&mut config, "workflow.planner_max_prior_loops", "5")
+            .expect("set planner_max_prior_loops");
+        assert_eq!(config.workflow.planner_max_prior_loops, Some(5));
+
+        set_global_config_value(&mut config, "workflow.planner_max_prior_loops", "none")
+            .expect("set planner_max_prior_loops to none (unlimited)");
+        assert_eq!(config.workflow.planner_max_prior_loops, None);
+
+        set_global_config_value(&mut config, "workflow.session_reuse_enabled", "true")
+            .expect("set session_reuse_enabled");
+        assert!(config.workflow.session_reuse_enabled);
+
+        set_global_config_value(
+            &mut config,
+            "workflow.session_reuse_roles",
+            "[\"planner\",\"implementer\"]",
+        )
+        .expect("set session_reuse_roles");
+        assert_eq!(
+            config.workflow.session_reuse_roles,
+            vec!["planner".to_owned(), "implementer".to_owned()]
+        );
+    }
+
+    #[test]
+    fn shared_mutator_sets_backend_fields() {
+        let mut config = GlobalConfig::default();
+
+        set_global_config_value(&mut config, "backends.claude.command", "/usr/local/bin/claude")
+            .expect("set claude command");
+        assert_eq!(config.backends.claude.command, "/usr/local/bin/claude");
+
+        set_global_config_value(&mut config, "backends.claude.timeout_seconds", "3600")
+            .expect("set claude timeout");
+        assert_eq!(config.backends.claude.timeout_seconds, 3600);
+
+        set_global_config_value(&mut config, "backends.codex.args", "[\"--flag\",\"value\"]")
+            .expect("set codex args");
+        assert_eq!(
+            config.backends.codex.args,
+            vec!["--flag".to_owned(), "value".to_owned()]
+        );
+
+        set_global_config_value(&mut config, "backends.gemini.enabled", "false")
+            .expect("set gemini enabled");
+        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Disabled);
+
+        set_global_config_value(&mut config, "backends.gemini.enabled", "auto")
+            .expect("set gemini enabled auto");
+        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Auto);
+
+        set_global_config_value(&mut config, "backends.claude.models.planner", "sonnet")
+            .expect("set claude planner model");
+        assert_eq!(
+            config.backends.claude.models.planner.as_deref(),
+            Some("sonnet")
+        );
+
+        set_global_config_value(&mut config, "backends.claude.models.planner", "null")
+            .expect("clear claude planner model");
+        assert!(config.backends.claude.models.planner.is_none());
+
+        set_global_config_value(
+            &mut config,
+            "backends.claude.role_timeouts.planner",
+            "120",
+        )
+        .expect("set claude planner timeout");
+        assert_eq!(config.backends.claude.role_timeouts.planner, Some(120));
+
+        set_global_config_value(
+            &mut config,
+            "backends.claude.role_timeouts.planner",
+            "null",
+        )
+        .expect("clear claude planner timeout");
+        assert!(config.backends.claude.role_timeouts.planner.is_none());
+    }
+
+    #[test]
+    fn shared_mutator_sets_template_and_git_fields() {
+        let mut config = GlobalConfig::default();
+
+        set_global_config_value(&mut config, "templates.planner", "custom/spec.md")
+            .expect("set templates.planner");
+        assert_eq!(config.templates.planner, "custom/spec.md");
+
+        set_global_config_value(&mut config, "templates.qa", "custom/qa.md")
+            .expect("set templates.qa");
+        assert_eq!(config.templates.qa, "custom/qa.md");
+
+        set_global_config_value(&mut config, "git.base_branch", "main")
+            .expect("set git.base_branch");
+        assert_eq!(config.git.base_branch, "main");
+
+        set_global_config_value(&mut config, "git.auto_branch", "false")
+            .expect("set git.auto_branch");
+        assert!(!config.git.auto_branch);
+
+        set_global_config_value(&mut config, "git.sign_commits", "true")
+            .expect("set git.sign_commits");
+        assert!(config.git.sign_commits);
+
+        set_global_config_value(&mut config, "git.branch_format", "feature/{project_id}")
+            .expect("set git.branch_format");
+        assert_eq!(config.git.branch_format, "feature/{project_id}");
+    }
+
+    #[test]
+    fn shared_mutator_rejects_unknown_key() {
+        let mut config = GlobalConfig::default();
+        let result = set_global_config_value(&mut config, "nonexistent.key", "value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_mutator_rejects_invalid_bool() {
+        let mut config = GlobalConfig::default();
+        let result = set_global_config_value(&mut config, "workflow.auto_commit", "maybe");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_mutator_rejects_invalid_integer() {
+        let mut config = GlobalConfig::default();
+        let result =
+            set_global_config_value(&mut config, "workflow.max_review_iterations", "abc");
+        assert!(result.is_err());
     }
 }

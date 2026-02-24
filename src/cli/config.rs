@@ -384,268 +384,7 @@ fn set_global_value(
     key: &str,
     raw_value: &str,
 ) -> Result<()> {
-    match key {
-        "workspace.version" => config.workspace.version = raw_value.to_owned(),
-        "workspace.default_backend" => {
-            ensure_backend(raw_value)?;
-            config.workspace.default_backend = raw_value.to_owned();
-        }
-        "workspace.tmux" => {
-            config.workspace.tmux = parse_bool(raw_value, key)?;
-        }
-        "workspace.tmux_session" => {
-            config.workspace.tmux_session = raw_value.to_owned();
-        }
-        "workspace.tmux_window_keep_seconds" => {
-            config.workspace.tmux_window_keep_seconds = parse_u64(raw_value, key)?;
-        }
-        "workspace.daemon_poll_seconds" => {
-            config.workspace.daemon_poll_seconds = parse_u64(raw_value, key)?;
-        }
-        "workspace.daemon_max_concurrent" => {
-            config.workspace.daemon_max_concurrent = parse_u32(raw_value, key)?;
-        }
-        "workspace.daemon_labels" => {
-            config.workspace.daemon_labels = parse_string_list(raw_value)?;
-        }
-        "workspace.daemon_repo" => {
-            config.workspace.daemon_repo = parse_optional_string(raw_value);
-        }
-        "workspace.daemon_refinement_enabled" => {
-            config.workspace.daemon_refinement_enabled = parse_bool(raw_value, key)?;
-        }
-        "workspace.daemon_refinement_backend" => {
-            ensure_backend(raw_value)?;
-            config.workspace.daemon_refinement_backend = raw_value.to_owned();
-        }
-        "workspace.daemon_auto_rebase_enabled" => {
-            config.workspace.daemon_auto_rebase_enabled = parse_bool(raw_value, key)?;
-        }
-        "workspace.daemon_rebase_interval_seconds" => {
-            config.workspace.daemon_rebase_interval_seconds = parse_u64(raw_value, key)?;
-        }
-        "workspace.daemon_max_rebases_per_cycle" => {
-            config.workspace.daemon_max_rebases_per_cycle = parse_u32(raw_value, key)?;
-        }
-        "workspace.daemon_rebase_timeout_seconds" => {
-            config.workspace.daemon_rebase_timeout_seconds = parse_u64(raw_value, key)?;
-        }
-        "workspace.daemon_rebase_agent_backend" => {
-            parse_rebase_agent_backend(raw_value)?;
-            config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
-        }
-        "workflow.max_review_iterations" => {
-            config.workflow.max_review_iterations = parse_u32(raw_value, key)?;
-        }
-        "workflow.auto_commit" => {
-            config.workflow.auto_commit = parse_bool(raw_value, key)?;
-        }
-        "workflow.commit_message_style" => {
-            config.workflow.commit_message_style = parse_commit_message_style(raw_value)?;
-        }
-        "workflow.commit_tag_format" => {
-            config.workflow.commit_tag_format = raw_value.to_owned();
-        }
-        "workflow.prompt_change_action" => {
-            config.workflow.prompt_change_action = parse_prompt_change_action(raw_value)?;
-        }
-        "workflow.prompt_review_enabled" => {
-            config.workflow.prompt_review_enabled = parse_bool(raw_value, key)?;
-        }
-        "workflow.prompt_review_backend" => {
-            ensure_required_backend(raw_value, "workflow.prompt_review_backend")?;
-            config.workflow.prompt_review_backend = raw_value.to_owned();
-        }
-        "workflow.prompt_review_backends" => {
-            config.workflow.prompt_review_backends = Some(parse_string_list(raw_value)?);
-        }
-        "workflow.prompt_review_min_reviewers" => {
-            config.workflow.prompt_review_min_reviewers = parse_u32(raw_value, key)?;
-        }
-        "workflow.planner_backend" => {
-            config.workflow.planner_backend = parse_optional_backend(raw_value)?;
-        }
-        "workflow.implementer_backend" => {
-            config.workflow.implementer_backend = parse_optional_backend(raw_value)?;
-        }
-        "workflow.reviewer_backend" => {
-            config.workflow.reviewer_backend = parse_optional_backend(raw_value)?;
-        }
-        "workflow.qa_backend" => {
-            config.workflow.qa_backend = parse_optional_backend(raw_value)?;
-        }
-        "workflow.completer_backend" => {
-            config.workflow.completer_backend = parse_optional_backend(raw_value)?;
-        }
-        "workflow.final_review_enabled" => {
-            config.workflow.final_review_enabled = parse_bool(raw_value, key)?;
-        }
-        "workflow.final_review_backends" => {
-            config.workflow.final_review_backends = parse_string_list(raw_value)?;
-        }
-        "workflow.final_review_arbiter_backend" => {
-            ensure_backend(raw_value)?;
-            config.workflow.final_review_arbiter_backend = raw_value.to_owned();
-        }
-        "workflow.final_review_min_reviewers" => {
-            config.workflow.final_review_min_reviewers = parse_u32(raw_value, key)?;
-        }
-        "workflow.final_review_consensus_threshold" => {
-            let v: f64 = raw_value
-                .parse()
-                .map_err(|_| RalphError::Validation(format!("key '{key}' expects float value")))?;
-            config.workflow.final_review_consensus_threshold = v;
-        }
-        "workflow.max_final_review_restarts" => {
-            config.workflow.max_final_review_restarts = parse_u32(raw_value, key)?;
-        }
-        "workflow.completion_backends" => {
-            config.workflow.completion_backends = parse_string_list(raw_value)?;
-        }
-        "workflow.completion_min_completers" => {
-            config.workflow.completion_min_completers = parse_u32(raw_value, key)?;
-        }
-        "workflow.completion_consensus_threshold" => {
-            let v: f64 = raw_value
-                .parse()
-                .map_err(|_| RalphError::Validation(format!("key '{key}' expects float value")))?;
-            config.workflow.completion_consensus_threshold = v;
-        }
-        "workflow.qa_enabled" => {
-            config.workflow.qa_enabled = parse_bool(raw_value, key)?;
-        }
-        "workflow.max_qa_iterations" => {
-            config.workflow.max_qa_iterations = parse_u32(raw_value, key)?;
-        }
-        "workflow.planner_state_in_prompt" => {
-            config.workflow.planner_state_in_prompt = parse_planner_state_in_prompt(raw_value)?;
-        }
-        "workflow.planner_previous_specs_in_prompt" => {
-            config.workflow.planner_previous_specs_in_prompt =
-                parse_previous_specs_in_prompt(raw_value)?;
-        }
-        "workflow.planner_max_prior_loops" => {
-            config.workflow.planner_max_prior_loops = parse_optional_usize_or_none(raw_value, key)?;
-        }
-        "workflow.max_review_history_entries_in_prompt" => {
-            config.workflow.max_review_history_entries_in_prompt = parse_usize(raw_value, key)?;
-        }
-        "workflow.max_qa_history_entries_in_prompt" => {
-            config.workflow.max_qa_history_entries_in_prompt = parse_usize(raw_value, key)?;
-        }
-        "workflow.include_history_when_session_reuse_enabled" => {
-            config.workflow.include_history_when_session_reuse_enabled =
-                parse_bool(raw_value, key)?;
-        }
-        "workflow.session_reuse_enabled" => {
-            config.workflow.session_reuse_enabled = parse_bool(raw_value, key)?;
-        }
-        "workflow.session_reuse_roles" => {
-            config.workflow.session_reuse_roles = parse_session_reuse_roles(raw_value)?;
-        }
-        "workflow.session_reuse_reset_on_prompt_change" => {
-            config.workflow.session_reuse_reset_on_prompt_change = parse_bool(raw_value, key)?;
-        }
-        "workflow.session_reuse_reset_on_rollback" => {
-            config.workflow.session_reuse_reset_on_rollback = parse_bool(raw_value, key)?;
-        }
-        "templates.planner" => config.templates.planner = raw_value.to_owned(),
-        "templates.implementer" => config.templates.implementer = raw_value.to_owned(),
-        "templates.reviewer" => config.templates.reviewer = raw_value.to_owned(),
-        "templates.prompt_reviewer" => config.templates.prompt_reviewer = raw_value.to_owned(),
-        "templates.prompt_review_validator" => {
-            config.templates.prompt_review_validator = raw_value.to_owned()
-        }
-        "templates.completer" => config.templates.completer = raw_value.to_owned(),
-        "templates.qa" => config.templates.qa = raw_value.to_owned(),
-        "templates.final_reviewer" => config.templates.final_reviewer = raw_value.to_owned(),
-        "templates.planner_position" => config.templates.planner_position = raw_value.to_owned(),
-        "templates.vote" => config.templates.vote = raw_value.to_owned(),
-        "templates.arbiter" => config.templates.arbiter = raw_value.to_owned(),
-        "git.auto_branch" => config.git.auto_branch = parse_bool(raw_value, key)?,
-        "git.branch_format" => config.git.branch_format = raw_value.to_owned(),
-        "git.sign_commits" => config.git.sign_commits = parse_bool(raw_value, key)?,
-        "git.base_branch" => config.git.base_branch = raw_value.to_owned(),
-        "backends.claude.command" => config.backends.claude.command = raw_value.to_owned(),
-        "backends.codex.command" => config.backends.codex.command = raw_value.to_owned(),
-        "backends.gemini.command" => config.backends.gemini.command = raw_value.to_owned(),
-        "backends.claude.timeout_seconds" => {
-            config.backends.claude.timeout_seconds = parse_u64(raw_value, key)?;
-        }
-        "backends.codex.timeout_seconds" => {
-            config.backends.codex.timeout_seconds = parse_u64(raw_value, key)?;
-        }
-        "backends.gemini.timeout_seconds" => {
-            config.backends.gemini.timeout_seconds = parse_u64(raw_value, key)?;
-        }
-        "backends.claude.enabled" => {
-            config.backends.claude.enabled = parse_backend_enabled(raw_value, key)?;
-        }
-        "backends.codex.enabled" => {
-            config.backends.codex.enabled = parse_backend_enabled(raw_value, key)?;
-        }
-        "backends.gemini.enabled" => {
-            config.backends.gemini.enabled = parse_backend_enabled(raw_value, key)?;
-        }
-        _ if key.starts_with("backends.claude.role_timeouts.") => {
-            let role = key.trim_start_matches("backends.claude.role_timeouts.");
-            set_role_timeout(&mut config.backends.claude.role_timeouts, role, raw_value)?;
-        }
-        _ if key.starts_with("backends.codex.role_timeouts.") => {
-            let role = key.trim_start_matches("backends.codex.role_timeouts.");
-            set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
-        }
-        _ if key.starts_with("backends.gemini.role_timeouts.") => {
-            let role = key.trim_start_matches("backends.gemini.role_timeouts.");
-            set_role_timeout(&mut config.backends.gemini.role_timeouts, role, raw_value)?;
-        }
-        "backends.claude.args" => config.backends.claude.args = parse_string_list(raw_value)?,
-        "backends.codex.args" => config.backends.codex.args = parse_string_list(raw_value)?,
-        "backends.gemini.args" => config.backends.gemini.args = parse_string_list(raw_value)?,
-        _ if key.starts_with("backends.claude.models.") => {
-            let role = key.trim_start_matches("backends.claude.models.");
-            set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
-        }
-        _ if key.starts_with("backends.codex.models.") => {
-            let role = key.trim_start_matches("backends.codex.models.");
-            set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
-        }
-        _ if key.starts_with("backends.gemini.models.") => {
-            let role = key.trim_start_matches("backends.gemini.models.");
-            set_backend_model(&mut config.backends.gemini.models, role, raw_value)?;
-        }
-        _ if key.starts_with("backends.claude.env.") => {
-            let env_key = key.trim_start_matches("backends.claude.env.");
-            config
-                .backends
-                .claude
-                .env
-                .insert(env_key.to_owned(), raw_value.to_owned());
-        }
-        _ if key.starts_with("backends.codex.env.") => {
-            let env_key = key.trim_start_matches("backends.codex.env.");
-            config
-                .backends
-                .codex
-                .env
-                .insert(env_key.to_owned(), raw_value.to_owned());
-        }
-        _ if key.starts_with("backends.gemini.env.") => {
-            let env_key = key.trim_start_matches("backends.gemini.env.");
-            config
-                .backends
-                .gemini
-                .env
-                .insert(env_key.to_owned(), raw_value.to_owned());
-        }
-        _ => {
-            return Err(RalphError::Validation(format!(
-                "unsupported global config key: {key}"
-            )))
-        }
-    }
-
-    Ok(())
+    crate::config::set_global_config_value(config, key, raw_value)
 }
 
 fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> Result<()> {
@@ -842,16 +581,6 @@ fn parse_bool(raw: &str, key: &str) -> Result<bool> {
     })
 }
 
-fn parse_backend_enabled(raw: &str, key: &str) -> Result<crate::config::global::BackendEnabled> {
-    match raw {
-        "true" => Ok(crate::config::global::BackendEnabled::Enabled),
-        "false" => Ok(crate::config::global::BackendEnabled::Disabled),
-        "auto" => Ok(crate::config::global::BackendEnabled::Auto),
-        _ => Err(RalphError::Validation(format!(
-            "key '{key}' expects true, false, or auto"
-        ))),
-    }
-}
 
 fn parse_u32(raw: &str, key: &str) -> Result<u32> {
     raw.parse::<u32>()
@@ -1064,61 +793,6 @@ fn parse_optional_string_list(raw: &str) -> Result<Option<Vec<String>>> {
     Ok(Some(parse_string_list(raw)?))
 }
 
-fn set_backend_model(
-    models: &mut crate::config::global::BackendRoleModels,
-    role: &str,
-    raw_value: &str,
-) -> Result<()> {
-    let value = if raw_value == "null" {
-        None
-    } else {
-        Some(raw_value.to_owned())
-    };
-    match role {
-        "planner" => models.planner = value,
-        "implementer" => models.implementer = value,
-        "reviewer" => models.reviewer = value,
-        "final_reviewer" => models.final_reviewer = value,
-        "arbiter" => models.arbiter = value,
-        "qa" => models.qa = value,
-        "completer" => models.completer = value,
-        "acceptance_qa" => models.acceptance_qa = value,
-        "reformatter" => models.reformatter = value,
-        _ => {
-            return Err(RalphError::Validation(format!(
-                "unknown backend model role: {role}"
-            )))
-        }
-    }
-    Ok(())
-}
-
-fn set_role_timeout(
-    role_timeouts: &mut crate::config::global::RoleTimeouts,
-    role: &str,
-    raw_value: &str,
-) -> Result<()> {
-    let parse_key = format!("backends.<backend>.role_timeouts.{role}");
-    let value = parse_optional_u64(raw_value, &parse_key)?;
-    match role {
-        "planner" => role_timeouts.planner = value,
-        "implementer" => role_timeouts.implementer = value,
-        "reviewer" => role_timeouts.reviewer = value,
-        "final_reviewer" => role_timeouts.final_reviewer = value,
-        "arbiter" => role_timeouts.arbiter = value,
-        "qa" => role_timeouts.qa = value,
-        "completer" => role_timeouts.completer = value,
-        "acceptance_qa" => role_timeouts.acceptance_qa = value,
-        "reformatter" => role_timeouts.reformatter = value,
-        "prompt_reviewer" => role_timeouts.prompt_reviewer = value,
-        _ => {
-            return Err(RalphError::Validation(format!(
-                "unknown backend timeout role: {role}"
-            )))
-        }
-    }
-    Ok(())
-}
 
 fn parse_string_list(raw: &str) -> Result<Vec<String>> {
     if raw.trim().starts_with('[') {
@@ -1286,22 +960,34 @@ mod tests {
     }
 
     #[test]
-    fn set_role_timeout_sets_and_clears_supported_role() {
-        let mut role_timeouts = crate::config::global::RoleTimeouts::default();
-        set_role_timeout(&mut role_timeouts, "acceptance_qa", "42")
-            .expect("acceptance_qa timeout should set");
-        assert_eq!(role_timeouts.acceptance_qa, Some(42));
+    fn set_global_value_sets_and_clears_role_timeout() {
+        let mut config = crate::config::GlobalConfig::default();
+        set_global_value(
+            &mut config,
+            "backends.claude.role_timeouts.acceptance_qa",
+            "42",
+        )
+        .expect("acceptance_qa timeout should set");
+        assert_eq!(config.backends.claude.role_timeouts.acceptance_qa, Some(42));
 
-        set_role_timeout(&mut role_timeouts, "acceptance_qa", "null")
-            .expect("acceptance_qa timeout should clear");
-        assert_eq!(role_timeouts.acceptance_qa, None);
+        set_global_value(
+            &mut config,
+            "backends.claude.role_timeouts.acceptance_qa",
+            "null",
+        )
+        .expect("acceptance_qa timeout should clear");
+        assert_eq!(config.backends.claude.role_timeouts.acceptance_qa, None);
     }
 
     #[test]
-    fn set_role_timeout_rejects_unknown_role() {
-        let mut role_timeouts = crate::config::global::RoleTimeouts::default();
-        let err = set_role_timeout(&mut role_timeouts, "bogus", "42")
-            .expect_err("unknown timeout role should fail");
+    fn set_global_value_rejects_unknown_role_timeout() {
+        let mut config = crate::config::GlobalConfig::default();
+        let err = set_global_value(
+            &mut config,
+            "backends.claude.role_timeouts.bogus",
+            "42",
+        )
+        .expect_err("unknown timeout role should fail");
         assert!(err.to_string().contains("unknown backend timeout role"));
     }
 

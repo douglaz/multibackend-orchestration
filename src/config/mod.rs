@@ -14,6 +14,7 @@ pub use global::{
     CommitMessageStyle, GlobalConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
     PromptChangeAction,
 };
+pub(crate) use global::set_global_config_value;
 pub use project::{ProjectConfig, ProjectDaemonOverrides};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
