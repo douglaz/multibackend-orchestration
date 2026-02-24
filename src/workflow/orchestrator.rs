@@ -5390,8 +5390,9 @@ async fn execute_with_timeout_retries(
     }
 
     let retry_started = Instant::now();
+    let max_retries = max_backend_retries();
 
-    for attempt in 1..=3_u8 {
+    for attempt in 1..=max_retries {
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
 
@@ -5405,7 +5406,7 @@ async fn execute_with_timeout_retries(
                 timeout_kind,
             }) => {
                 let total_elapsed_secs = retry_started.elapsed().as_secs();
-                if attempt == 3 {
+                if attempt >= max_retries {
                     warn!(
                         role = role,
                         backend = %backend_name,
@@ -5443,6 +5444,25 @@ async fn execute_with_timeout_retries(
     Err(RalphError::Orchestration(
         "unexpected timeout retry control-flow error".to_owned(),
     ))
+}
+
+fn max_backend_retries() -> u8 {
+    const DEFAULT_RETRIES: u8 = 3;
+    const MAX_RETRIES: u32 = 10;
+
+    let raw = match std::env::var("RALPH_MAX_BACKEND_RETRIES") {
+        Ok(value) => value,
+        Err(_) => return DEFAULT_RETRIES,
+    };
+    let parsed = match raw.parse::<u32>() {
+        Ok(value) => value,
+        Err(_) => return DEFAULT_RETRIES,
+    };
+    if parsed == 0 {
+        return DEFAULT_RETRIES;
+    }
+
+    parsed.min(MAX_RETRIES) as u8
 }
 
 /// Evaluate whether a completion panel has reached consensus.
@@ -5617,6 +5637,7 @@ mod tests {
     use std::sync::Once;
 
     use async_trait::async_trait;
+    use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
     use tracing::field::{Field, Visit};
@@ -5652,6 +5673,95 @@ mod tests {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
             let _ = tracing::subscriber::set_global_default(Registry::default());
+        });
+    }
+
+    fn with_retry_env_var<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var("RALPH_MAX_BACKEND_RETRIES").ok();
+        match value {
+            Some(raw) => std::env::set_var("RALPH_MAX_BACKEND_RETRIES", raw),
+            None => std::env::remove_var("RALPH_MAX_BACKEND_RETRIES"),
+        }
+
+        let result = f();
+
+        match previous {
+            Some(raw) => std::env::set_var("RALPH_MAX_BACKEND_RETRIES", raw),
+            None => std::env::remove_var("RALPH_MAX_BACKEND_RETRIES"),
+        }
+
+        result
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_unset_defaults_to_three() {
+        with_retry_env_var(None, || {
+            assert_eq!(super::max_backend_retries(), 3);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_accepts_one() {
+        with_retry_env_var(Some("1"), || {
+            assert_eq!(super::max_backend_retries(), 1);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_accepts_five() {
+        with_retry_env_var(Some("5"), || {
+            assert_eq!(super::max_backend_retries(), 5);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_accepts_ten() {
+        with_retry_env_var(Some("10"), || {
+            assert_eq!(super::max_backend_retries(), 10);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_rejects_zero() {
+        with_retry_env_var(Some("0"), || {
+            assert_eq!(super::max_backend_retries(), 3);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_rejects_non_numeric_value() {
+        with_retry_env_var(Some("abc"), || {
+            assert_eq!(super::max_backend_retries(), 3);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_rejects_empty_value() {
+        with_retry_env_var(Some(""), || {
+            assert_eq!(super::max_backend_retries(), 3);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_clamps_eleven_to_ten() {
+        with_retry_env_var(Some("11"), || {
+            assert_eq!(super::max_backend_retries(), 10);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn max_backend_retries_clamps_large_numeric_value() {
+        with_retry_env_var(Some("256"), || {
+            assert_eq!(super::max_backend_retries(), 10);
         });
     }
 
