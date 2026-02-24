@@ -1927,10 +1927,11 @@ async fn handle_pr_flow(
         }
     };
 
-    // Step 1: Check if there's a diff
+    // Step 1: Check if there's a diff against the configured base branch
     let has_changes = {
         let wt = wt_path.to_path_buf();
-        match spawn_blocking_op(move || github::has_diff(&wt)).await {
+        let base = config.base_branch.clone();
+        match spawn_blocking_op(move || github::has_diff_with_base(&wt, Some(&base))).await {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("warning: failed to check diff for {task_id}: {err}");
@@ -2087,8 +2088,16 @@ async fn handle_pr_flow(
             let br = branch.clone();
             let title_clone = title.clone();
             let body_path = body_file.path().to_path_buf();
+            let base = config.base_branch.clone();
             match spawn_blocking_op(move || {
-                github::create_pr_with_body_file(&owner, &repo, &br, &title_clone, &body_path)
+                github::create_pr_with_body_file(
+                    &owner,
+                    &repo,
+                    &br,
+                    &title_clone,
+                    &body_path,
+                    Some(&base),
+                )
             })
             .await
             {

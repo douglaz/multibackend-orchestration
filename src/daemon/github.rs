@@ -585,22 +585,30 @@ pub fn create_pr_with_body_file(
     branch: &str,
     title: &str,
     body_file: &std::path::Path,
+    base_branch: Option<&str>,
 ) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
     let body_file_str = body_file.to_string_lossy();
+    let mut args = vec![
+        "pr",
+        "create",
+        "--repo",
+        &full_repo,
+        "--head",
+        branch,
+        "--title",
+        title,
+        "--body-file",
+        &body_file_str,
+    ];
+    let base_owned;
+    if let Some(base) = base_branch {
+        base_owned = base.to_owned();
+        args.push("--base");
+        args.push(&base_owned);
+    }
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--repo",
-            &full_repo,
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body-file",
-            &body_file_str,
-        ])
+        .args(&args)
         .output()
         .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
@@ -747,6 +755,15 @@ pub fn has_origin_remote(worktree_path: &std::path::Path) -> Result<bool> {
 /// default branch with the current HEAD. This ensures that committed changes
 /// on the task branch are detected even when the working tree is clean.
 pub fn has_diff(worktree_path: &std::path::Path) -> Result<bool> {
+    has_diff_with_base(worktree_path, None)
+}
+
+/// Check whether the task branch has diverged from the given base branch
+/// (or an auto-detected default if `base_branch` is `None`).
+pub fn has_diff_with_base(
+    worktree_path: &std::path::Path,
+    base_branch: Option<&str>,
+) -> Result<bool> {
     // 1. Check uncommitted changes (working tree + index vs HEAD)
     let wt_status = Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
@@ -758,9 +775,25 @@ pub fn has_diff(worktree_path: &std::path::Path) -> Result<bool> {
         return Ok(true);
     }
 
-    // 2. Detect the default/base branch via symbolic-ref of origin/HEAD,
-    //    falling back to common names.
-    let base = detect_base_branch(worktree_path);
+    // 2. Use the provided base branch, or auto-detect via symbolic-ref of
+    //    origin/HEAD falling back to common names.
+    // If the provided base doesn't exist as a remote ref, fall back to
+    // auto-detection so we don't falsely report "no diff".
+    let base = match base_branch {
+        Some(b) => {
+            let candidate = format!("origin/{b}");
+            let check = Command::new("git")
+                .args(["rev-parse", "--verify", &candidate])
+                .current_dir(worktree_path)
+                .output();
+            if check.map(|o| o.status.success()).unwrap_or(false) {
+                candidate
+            } else {
+                detect_base_branch(worktree_path)
+            }
+        }
+        None => detect_base_branch(worktree_path),
+    };
 
     // 3. Compare committed changes: merge-base of base..HEAD
     let diff_output = Command::new("git")
@@ -803,7 +836,13 @@ fn detect_base_branch(worktree_path: &std::path::Path) -> String {
     {
         if output.status.success() {
             let refname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !refname.is_empty() {
+            // Skip ralph/* branches — on new repos GitHub may set the only
+            // pushed branch (a project branch) as the default, which would
+            // cause us to diff the project branch against itself.
+            let branch_name = refname
+                .strip_prefix("refs/remotes/origin/")
+                .unwrap_or(&refname);
+            if !refname.is_empty() && !branch_name.starts_with("ralph/") {
                 return refname;
             }
         }
