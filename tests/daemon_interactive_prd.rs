@@ -3386,25 +3386,12 @@ exit 0
 // Concurrency: panic isolation
 // ---------------------------------------------------------------------------
 
-/// Force a panic in one issue's processing path and verify the tick
-/// completes and other issues still advance.
+/// Force a real panic in one issue's processing path via
+/// `RALPH_TEST_INJECT_PANIC` and verify the tick completes and the other
+/// issue still advances.
 ///
-/// Uses RALPH_TEST_INJECT_SAVE_FAILURE for issue #110 to trigger an error
-/// path, plus seeds issue #111 at a state where advance_issue panics
-/// (by writing malformed state JSON that causes serde to fail, which we
-/// handle differently). Instead, we use a custom approach: seed issue
-/// #120 with a Pending state, and mock the gh script so that bot-login
-/// lookup for the specific processing path triggers a panic via a
-/// specially crafted env.
-///
-/// Actually, the simplest deterministic approach: we invoke
-/// poll_and_advance_prd directly and rely on the existing catch_unwind.
-/// We can trigger a panic by writing invalid state JSON that will cause
-/// `serde_json::from_str` to return Err (not a panic). Instead, we'll use
-/// the `RALPH_TEST_INJECT_PANIC` env var pattern — but since that doesn't
-/// exist yet, we'll just use the fact that errors are already isolated.
-///
-/// For a true panic test, we add a test-only panic injection hook.
+/// Issue #110 panics deterministically (env-var injection in advance_issue).
+/// Issue #111 processes normally and its label edit creates a flag file.
 #[test]
 #[serial]
 fn panic_isolation_tick_completes_despite_panic() {
@@ -3417,22 +3404,6 @@ fn panic_isolation_tick_completes_despite_panic() {
     let issue111_flag = tmp.path().join("issue111_processed");
     let issue111_str = issue111_flag.to_string_lossy().into_owned();
 
-    // gh mock: two issues #110 and #111
-    // - Issue #110: writing invalid JSON as its persisted state causes
-    //   deserialization to fail (error, not panic). We need a real panic.
-    //   Use the gh script to trigger a panic via an impossible code path?
-    //   Actually, let's write a state file with valid JSON but place a
-    //   non-terminal state, and have the gh script for issue 110 produce
-    //   output that causes an unwrap to panic somewhere. The simplest is:
-    //   make the "api user" call return empty string for issue 110's thread,
-    //   which will make `get_or_fetch_bot_login` return Ok(""), and then
-    //   downstream code may not panic.
-    //
-    //   Better approach: since we can't easily inject panics through mock
-    //   scripts alone, let's put corrupt non-JSON bytes in the state file
-    //   for issue #110. The `InteractivePrdState::load` will fail (Error),
-    //   which is caught by catch_unwind. Meanwhile issue #111 processes
-    //   normally.
     let gh_script = format!(
         r#"#!/bin/sh
 ISSUE111_FLAG="{issue111_str}"
@@ -3514,18 +3485,6 @@ exit 0
     let clone_dir = data_dir.join("acme").join("widgets");
     fs::create_dir_all(&clone_dir).expect("create clone dir");
 
-    // Write corrupt state for issue #110 to cause a deserialization error
-    // (caught by catch_unwind). This proves panic/error isolation — the
-    // error from #110 does not prevent #111 from processing.
-    let state_dir = data_dir
-        .join("acme")
-        .join("widgets")
-        .join(".ralph")
-        .join("interactive-prd");
-    fs::create_dir_all(&state_dir).expect("create state dir");
-    fs::write(state_dir.join("110.json"), "THIS IS NOT VALID JSON {{{{")
-        .expect("write corrupt state");
-
     let global = GlobalConfig::default();
     let config = PrdPollConfig {
         owner: "acme".to_string(),
@@ -3536,24 +3495,27 @@ exit 0
         writer_backend: "claude".to_string(),
         reviewer_backend: "codex".to_string(),
         max_revisions: 1,
-        backend_timeout_secs: 30,
+        backend_timeout_secs: 5,
         global_config: global,
         verbose: false,
         max_concurrent: 2,
     };
 
+    // Inject a real panic for issue #110 via env var
     let old_path = std::env::var("PATH").unwrap_or_default();
     unsafe { std::env::set_var("PATH", &path_env) };
+    unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
     let result = poll_and_advance_prd(&config);
+    unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
     unsafe { std::env::set_var("PATH", &old_path) };
 
-    // Tick completes despite issue #110 erroring from corrupt state
-    assert!(result.is_ok(), "tick should succeed despite issue error/panic: {:?}", result);
+    // Tick completes despite issue #110 panicking
+    assert!(result.is_ok(), "tick should succeed despite issue #110 panic: {:?}", result);
 
     // Issue #111 still advanced (its label edit was reached)
     assert!(
         issue111_flag.exists(),
-        "issue #111 should have advanced despite issue #110 failing"
+        "issue #111 should have advanced despite issue #110 panicking"
     );
 }
 

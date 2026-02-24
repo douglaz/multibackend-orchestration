@@ -1,6 +1,7 @@
 use super::*;
 
 use std::fs;
+use std::sync::Mutex;
 
 use crate::daemon::github;
 use crate::daemon::interactive_prd::{
@@ -12,6 +13,12 @@ use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
+
+/// Serializes access to process-global PATH (and other env vars) across
+/// conformance tests that call `poll_and_advance_prd` with mock scripts.
+/// The validate runner executes tests in parallel via `thread::scope`, so
+/// without this lock, concurrent `set_var("PATH", ...)` calls race.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -3493,10 +3500,12 @@ exit 0
             max_concurrent: 2,
         };
 
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("PATH").unwrap_or_default();
         unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed");
         let count: u32 = fs::read_to_string(&counter).unwrap().trim().parse().unwrap();
@@ -3583,19 +3592,21 @@ exit 0
             max_concurrent: 2,
         };
 
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("PATH").unwrap_or_default();
         unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
 
         assert!(result.is_ok(), "tick should return Ok despite issue #60 error");
         assert!(success_flag.exists(), "issue #70 should advance despite #60 error");
     })
 }
 
-/// Conformance: panic/error isolation via real poll_and_advance_prd path.
-/// Issue #110 has corrupt persisted state (deserialization error caught by
-/// catch_unwind), issue #111 proceeds normally.
+/// Conformance: panic isolation via real poll_and_advance_prd path.
+/// Issue #110 panics deterministically via `RALPH_TEST_INJECT_PANIC`.
+/// Issue #111 proceeds normally and its label edit creates a flag file.
 fn concurrent_panic_isolation(_harness: &RalphHarness) -> TestResult {
     use crate::config::GlobalConfig;
     use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
@@ -3617,7 +3628,7 @@ case "$1" in
         has_prd=0
         for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
         if [ "$has_prd" = "1" ]; then
-          printf '[{{"number":110,"title":"Corrupt","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":111,"title":"Good","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+          printf '[{{"number":110,"title":"Panic","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":111,"title":"Good","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
         else
           printf '[]'
         fi
@@ -3653,13 +3664,6 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        // Write corrupt state for issue #110
-        let state_dir = data_dir
-            .join("acme").join("widgets")
-            .join(".ralph").join("interactive-prd");
-        fs::create_dir_all(&state_dir).unwrap();
-        fs::write(state_dir.join("110.json"), "NOT VALID JSON").unwrap();
-
         let path_env = format!("{}:{}", scripts_dir.display(), std::env::var("PATH").unwrap_or_default());
         let config = PrdPollConfig {
             owner: "acme".to_string(),
@@ -3676,13 +3680,18 @@ exit 0
             max_concurrent: 2,
         };
 
+        // Inject a real panic for issue #110
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("PATH").unwrap_or_default();
         unsafe { std::env::set_var("PATH", &path_env) };
+        unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
         let result = poll_and_advance_prd(&config);
+        unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
         unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
 
-        assert!(result.is_ok(), "tick should succeed despite corrupt state on #110");
-        assert!(success_flag.exists(), "issue #111 should advance despite #110 error");
+        assert!(result.is_ok(), "tick should succeed despite #110 panic");
+        assert!(success_flag.exists(), "issue #111 should advance despite #110 panic");
     })
 }
 
@@ -3768,10 +3777,12 @@ exit 0
             max_concurrent: 2,
         };
 
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("PATH").unwrap_or_default();
         unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed");
         let peak: u32 = fs::read_to_string(&peak_file).unwrap().trim().parse().unwrap();

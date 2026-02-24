@@ -498,6 +498,23 @@ fn advance_issue(
         return Ok(());
     }
 
+    // Test-only panic injection: when RALPH_TEST_INJECT_PANIC is set to a
+    // comma-separated list of issue numbers, advance_issue panics for those
+    // issues.  This allows integration and conformance tests to verify that
+    // `catch_unwind` isolation works for real panics (not just errors).
+    if let Some(val) = std::env::var_os("RALPH_TEST_INJECT_PANIC") {
+        let val = val.to_string_lossy();
+        let should_panic = val
+            .split(',')
+            .any(|n| n.trim().parse::<u32>().ok() == Some(issue.number));
+        if should_panic {
+            panic!(
+                "injected panic for issue #{} (RALPH_TEST_INJECT_PANIC)",
+                issue.number
+            );
+        }
+    }
+
     match state.state.clone() {
         PrdWorkflowState::Pending => {
             transition_pending_to_awaiting_answers(config, issue, &mut state, bot_login_cache)
