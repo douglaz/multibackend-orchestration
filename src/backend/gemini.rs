@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::backend::CliBackend;
@@ -66,6 +67,7 @@ pub fn backend_from_config(
     config: &GlobalConfig,
     model: Option<&str>,
     role: Option<&str>,
+    cwd: Option<PathBuf>,
 ) -> CliBackend {
     let backend = &config.backends.gemini;
     let mut args = backend.args.clone();
@@ -89,6 +91,7 @@ pub fn backend_from_config(
         timeout,
         backend.env.clone(),
     )
+    .with_cwd(cwd)
 }
 
 #[cfg(test)]

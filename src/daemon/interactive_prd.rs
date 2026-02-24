@@ -244,6 +244,7 @@ impl PrdPollConfig {
     }
 
     /// Fetch latest from origin and reset the clone to origin's default branch.
+    #[allow(dead_code)]
     fn refresh_repo_clone(&self) -> Result<()> {
         let repo = self.repo_clone_path();
         if !repo.join(".git").exists() {
@@ -278,32 +279,6 @@ impl PrdPollConfig {
     }
 }
 
-/// RAII guard that sets the process cwd and restores it on drop.
-struct CwdGuard {
-    original: PathBuf,
-}
-
-impl CwdGuard {
-    fn set(path: &Path) -> Result<Self> {
-        let original = std::env::current_dir().map_err(|e| {
-            RalphError::InteractivePrdFailed(format!("failed to get current dir: {e}"))
-        })?;
-        std::env::set_current_dir(path).map_err(|e| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to set cwd to {}: {e}",
-                path.display()
-            ))
-        })?;
-        Ok(Self { original })
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
-}
-
 /// All PRD lifecycle label names.
 pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd",
@@ -323,12 +298,16 @@ pub fn has_prd_label(labels: &[String]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Create a CLI backend from a backend spec string and global config.
-fn create_backend(backend_spec: &str, global_config: &GlobalConfig) -> Result<CliBackend> {
+fn create_backend(
+    backend_spec: &str,
+    global_config: &GlobalConfig,
+    cwd: Option<PathBuf>,
+) -> Result<CliBackend> {
     let spec = parse_backend_spec(backend_spec)?;
     let model = spec.model.as_deref();
     match spec.name.as_str() {
-        "claude" => Ok(claude::backend_from_config(global_config, model, None)),
-        "codex" => Ok(codex::backend_from_config(global_config, model, None)),
+        "claude" => Ok(claude::backend_from_config(global_config, model, None, cwd)),
+        "codex" => Ok(codex::backend_from_config(global_config, model, None, cwd)),
         _ => Err(RalphError::Validation(format!(
             "unknown PRD backend: {backend_spec}"
         ))),
@@ -1016,11 +995,18 @@ fn generate_revision_from_feedback_with_timeout(
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let writer = create_backend(&config.writer_backend, &config.global_config)?;
-    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+    let repo_clone = config.repo_clone_path();
+    let writer = create_backend(
+        &config.writer_backend,
+        &config.global_config,
+        Some(repo_clone.clone()),
+    )?;
+    let reviewer = create_backend(
+        &config.reviewer_backend,
+        &config.global_config,
+        Some(repo_clone),
+    )?;
 
     // Build feedback revision prompt
     let revision_prompt = render_prompt(
@@ -1263,11 +1249,18 @@ fn generate_draft_from_answers_with_timeout(
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let writer = create_backend(&config.writer_backend, &config.global_config)?;
-    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+    let repo_clone = config.repo_clone_path();
+    let writer = create_backend(
+        &config.writer_backend,
+        &config.global_config,
+        Some(repo_clone.clone()),
+    )?;
+    let reviewer = create_backend(
+        &config.reviewer_backend,
+        &config.global_config,
+        Some(repo_clone),
+    )?;
 
     let idea_context = INTERACTIVE_DRAFT_CONTEXT_TEMPLATE
         .replace("{issue}", issue_text)
@@ -1390,8 +1383,6 @@ fn run_review_with_retry_sync(
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
 fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -1403,13 +1394,22 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
     let deadline = std::time::Instant::now() + timeout;
 
     let prompt = format!("{QUESTION_GEN_PROMPT}{issue_text}");
+    let repo_clone = config.repo_clone_path();
 
     // Backend A
-    let backend_a = create_backend(&config.question_backends[0], &config.global_config)?;
+    let backend_a = create_backend(
+        &config.question_backends[0],
+        &config.global_config,
+        Some(repo_clone.clone()),
+    )?;
     let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
 
     // Backend B
-    let backend_b = create_backend(&config.question_backends[1], &config.global_config)?;
+    let backend_b = create_backend(
+        &config.question_backends[1],
+        &config.global_config,
+        Some(repo_clone),
+    )?;
     let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
 
     // Synthesis: merge/dedupe/prioritize
@@ -1589,9 +1589,9 @@ mod tests {
         find_first_answer_comment, find_new_feedback_comments,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
         prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, CwdGuard, InteractivePrdState, PrdPollConfig,
-        PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
-        PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
+        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2449,7 +2449,7 @@ mod tests {
         global.backends.codex.args = vec![];
 
         let data_dir = PathBuf::from("/tmp/ralph-test-prd-unit");
-        // Ensure repo clone directory exists so CwdGuard can chdir into it.
+        // Ensure repo clone directory exists for backend current_dir usage.
         let _ = std::fs::create_dir_all(data_dir.join("test").join("repo"));
 
         PrdPollConfig {
@@ -2921,7 +2921,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CwdGuard and refresh_repo_clone tests
+    // repo_clone_path and refresh_repo_clone tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2939,28 +2939,10 @@ mod tests {
             global_config: GlobalConfig::default(),
             verbose: false,
         };
-        assert_eq!(config.repo_clone_path(), PathBuf::from("/data/acme/widgets"));
-    }
-
-    #[test]
-    fn cwd_guard_sets_and_restores_directory() {
-        let original = std::env::current_dir().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        {
-            let _guard = CwdGuard::set(tmp.path()).unwrap();
-            assert_eq!(
-                std::env::current_dir().unwrap().canonicalize().unwrap(),
-                tmp.path().canonicalize().unwrap(),
-            );
-        }
-        // After drop, cwd should be restored
-        assert_eq!(std::env::current_dir().unwrap(), original);
-    }
-
-    #[test]
-    fn cwd_guard_fails_for_nonexistent_path() {
-        let result = CwdGuard::set(std::path::Path::new("/nonexistent/path/xyz"));
-        assert!(result.is_err());
+        assert_eq!(
+            config.repo_clone_path(),
+            PathBuf::from("/data/acme/widgets")
+        );
     }
 
     #[test]
@@ -3010,7 +2992,12 @@ mod tests {
         // Create a bare clone to act as "origin"
         let origin_dir = tmp.path().join("origin.git");
         std::process::Command::new("git")
-            .args(["clone", "--bare", repo_dir.to_str().unwrap(), origin_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                repo_dir.to_str().unwrap(),
+                origin_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
@@ -3022,7 +3009,11 @@ mod tests {
         // Add a new commit to origin (via a separate checkout)
         let work = tmp.path().join("work");
         std::process::Command::new("git")
-            .args(["clone", origin_dir.to_str().unwrap(), work.to_str().unwrap()])
+            .args([
+                "clone",
+                origin_dir.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         std::fs::write(work.join("file.txt"), "v2").unwrap();
@@ -3047,7 +3038,10 @@ mod tests {
             .unwrap();
 
         // repo_dir is still at v1
-        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(),
+            "v1"
+        );
 
         let config = PrdPollConfig {
             owner: "owner".to_owned(),
@@ -3066,7 +3060,10 @@ mod tests {
         config.refresh_repo_clone().unwrap();
 
         // After refresh, repo_dir should have v2
-        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v2");
+        assert_eq!(
+            std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(),
+            "v2"
+        );
     }
 
     #[test]
@@ -3097,7 +3094,7 @@ mod tests {
                 "backend output should contain repo clone path, got: {output}"
             );
         }
-        // If it errored (e.g. synthesis failure), that's fine — the cwd
-        // change and restore are already tested by cwd_guard_sets_and_restores_directory.
+        // If it errored (e.g. synthesis failure), that's fine — this test
+        // still verifies backend execution used the clone directory as cwd.
     }
 }
