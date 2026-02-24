@@ -324,15 +324,31 @@ fn first_valid_json_object(raw: &str) -> Option<Value> {
 /// Attempt to extract a multi-line JSON object from output that may have
 /// non-JSON preamble lines (e.g. gemini CLI's "YOLO mode is enabled" status
 /// messages before the pretty-printed JSON response body).
+///
+/// When the output contains multiple JSON-like blocks (e.g. a 429 error JSON
+/// followed by the actual response JSON), we try each `{`-starting line from
+/// **last to first** so we pick up the final (actual) response rather than
+/// an intermediate error object.
 fn try_extract_multiline_json_after_preamble(raw: &str) -> Option<NormalizedOutput> {
     let lines: Vec<&str> = raw.lines().collect();
-    // Find the first line whose trimmed content starts with '{'.
-    let json_start = lines.iter().position(|l| l.trim().starts_with('{'))?;
 
-    // Sanity-check the preamble: if it contains markdown indicators the output
-    // is likely a markdown document with embedded JSON, not a JSON response with
-    // preamble.  Bail out so the caller returns the raw text instead.
-    for line in &lines[..json_start] {
+    // Collect all line indices where trimmed content starts with '{'.
+    let brace_positions: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim().starts_with('{'))
+        .map(|(i, _)| i)
+        .collect();
+
+    if brace_positions.is_empty() {
+        return None;
+    }
+
+    // Check the very first brace position's preamble for markdown indicators.
+    // If the content before the first '{' line has markdown, this is a markdown
+    // document with embedded JSON — bail out.
+    let first_brace = brace_positions[0];
+    for line in &lines[..first_brace] {
         let t = line.trim();
         if t.is_empty() {
             continue;
@@ -346,52 +362,55 @@ fn try_extract_multiline_json_after_preamble(raw: &str) -> Option<NormalizedOutp
         }
     }
 
-    // Concatenate from the first '{' line onward and try to parse as JSON.
-    let json_text: String = lines[json_start..].join("\n");
-    let value: Value = match serde_json::from_str(&json_text) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(
-                json_start,
-                total_lines = lines.len(),
-                json_len = json_text.len(),
-                error = %e,
-                "try_extract_multiline_json: serde parse failed"
-            );
-            return None;
+    // Try each '{' position from last to first — the final JSON block in the
+    // output is most likely the actual response (earlier ones may be error
+    // JSON from 429 retries, etc.).
+    for &start in brace_positions.iter().rev() {
+        let json_text: String = lines[start..].join("\n");
+        let value: Value = match serde_json::from_str(&json_text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !value.is_object() {
+            continue;
         }
-    };
-    if !value.is_object() {
-        return None;
+
+        let text = match extract_single_json_text(&value) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let mut output = NormalizedOutput {
+            text,
+            session_id: value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    value
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                }),
+            ..NormalizedOutput::default()
+        };
+        merge_usage_from_event(&value, &mut output);
+
+        tracing::debug!(
+            json_start = start,
+            total_lines = lines.len(),
+            extracted_len = output.text.len(),
+            "try_extract_multiline_json: found valid JSON block"
+        );
+        return Some(output);
     }
 
-    let text = match extract_single_json_text(&value) {
-        Some(t) => t,
-        None => {
-            let keys: Vec<&str> = value.as_object().map(|o| o.keys().map(|k| k.as_str()).collect()).unwrap_or_default();
-            tracing::debug!(
-                ?keys,
-                "try_extract_multiline_json: no text key found in JSON"
-            );
-            return None;
-        }
-    };
-    let mut output = NormalizedOutput {
-        text,
-        session_id: value
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                value
-                    .pointer("/message/id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }),
-        ..NormalizedOutput::default()
-    };
-    merge_usage_from_event(&value, &mut output);
-    Some(output)
+    tracing::debug!(
+        candidates = brace_positions.len(),
+        total_lines = lines.len(),
+        "try_extract_multiline_json: no candidate parsed as valid JSON with text key"
+    );
+    None
 }
 
 fn extract_single_json_text(value: &Value) -> Option<String> {
@@ -850,5 +869,31 @@ Done."#;
         let raw = "# Review\n\nHere is the config:\n\n```json\n{\"response\": \"fake\"}\n```\n\nDone.";
         let normalized = normalize_output(raw).expect("markdown with json block");
         assert_eq!(normalized.text, raw);
+    }
+
+    #[test]
+    fn normalize_output_gemini_429_error_before_response_json() {
+        // Gemini CLI outputs 429 retry error messages (including error JSON +
+        // stack traces) on stdout before the actual response JSON.
+        let raw = "Attempt 1 failed with status 429. Retrying with backoff... GaxiosError: [{\n\
+                    \x20 \"error\": {\n\
+                    \x20   \"code\": 429,\n\
+                    \x20   \"message\": \"No capacity available for model\",\n\
+                    \x20   \"status\": \"RESOURCE_EXHAUSTED\"\n\
+                    \x20 }\n\
+                    }]\n\
+                    \x20   at Gaxios._request (/usr/lib/node_modules/gaxios/src/gaxios.ts:200:15)\n\
+                    \x20   at process.processTicksAndRejections (node:internal/process/task_queues:105:5)\n\
+                    {\n\
+                    \x20 \"session_id\": \"gem-429-test\",\n\
+                    \x20 \"response\": \"# Verdict: COMPLETE\\n\\nAll requirements met.\",\n\
+                    \x20 \"stats\": { \"models\": {} }\n\
+                    }";
+        let normalized = normalize_output(raw).expect("gemini 429 then response");
+        assert_eq!(normalized.session_id.as_deref(), Some("gem-429-test"));
+        assert_eq!(
+            normalized.text,
+            "# Verdict: COMPLETE\n\nAll requirements met."
+        );
     }
 }
