@@ -20,7 +20,7 @@ daemon_prd_question_backends = [
     "codex",
 ]
 daemon_prd_writer_backend = "claude"
-daemon_prd_reviewer_backend = "gemini"
+daemon_prd_reviewer_backend = "codex"
 daemon_prd_max_revisions = 3
 daemon_prd_backend_timeout_secs = 3600
 
