@@ -242,6 +242,40 @@ impl PrdPollConfig {
     fn repo_clone_path(&self) -> PathBuf {
         self.data_dir.join(&self.owner).join(&self.repo)
     }
+
+    /// Fetch latest from origin and reset the clone to origin's default branch.
+    fn refresh_repo_clone(&self) -> Result<()> {
+        let repo = self.repo_clone_path();
+        if !repo.join(".git").exists() {
+            return Ok(());
+        }
+        let fetch = std::process::Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&repo)
+            .output();
+        if let Ok(out) = &fetch {
+            if !out.status.success() {
+                eprintln!(
+                    "prd: warning: git fetch failed in {}: {}",
+                    repo.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        // Try origin/HEAD, then origin/main, then origin/master
+        for target in &["origin/HEAD", "origin/main", "origin/master"] {
+            let reset = std::process::Command::new("git")
+                .args(["reset", "--hard", target])
+                .current_dir(&repo)
+                .output();
+            if let Ok(out) = &reset {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// RAII guard that sets the process cwd and restores it on drop.
@@ -982,6 +1016,7 @@ fn generate_revision_from_feedback_with_timeout(
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
+    config.refresh_repo_clone()?;
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
@@ -1228,6 +1263,7 @@ fn generate_draft_from_answers_with_timeout(
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
+    config.refresh_repo_clone()?;
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
@@ -1354,6 +1390,7 @@ fn run_review_with_retry_sync(
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
 fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
+    config.refresh_repo_clone()?;
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
