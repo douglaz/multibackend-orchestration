@@ -794,6 +794,33 @@ Done."#;
     }
 
     #[test]
+    fn normalize_output_codex_cli_separates_multiple_agent_messages() {
+        // When codex returns multiple agent_message items, a newline must be
+        // inserted between them so that an H1 heading in a later message
+        // stays on its own line and is found by first_h1_line().
+        let raw = concat!(
+            r#"{"type":"thread.started","thread_id":"t-multi"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"All tests pass and clippy is clean."}}"#,
+            "\n",
+            "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"# Verdict: COMPLETE\\n\\nEverything looks good.\"}}",
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":60}}"#,
+        );
+        let normalized = normalize_output(raw).expect("codex multi agent_message");
+        // The H1 must start on its own line, not glued to the previous message.
+        assert!(
+            normalized.text.contains("\n# Verdict: COMPLETE"),
+            "H1 heading must be on its own line; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(
+            normalized.text,
+            "All tests pass and clippy is clean.\n# Verdict: COMPLETE\n\nEverything looks good."
+        );
+    }
+
+    #[test]
     fn normalize_output_gemini_stream_extracts_session_and_text() {
         let raw = concat!(
             r#"{"type":"init","session_id":"gem-sess-1"}"#,
