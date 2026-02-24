@@ -1280,7 +1280,8 @@ mod tests {
 
     #[test]
     fn parse_backend_spec_accepts_optional_name_with_model() {
-        let parsed = parse_backend_spec("?gemini(gemini-3-pro-preview)").expect("optional modeled backend");
+        let parsed =
+            parse_backend_spec("?gemini(gemini-3-pro-preview)").expect("optional modeled backend");
         assert_eq!(
             parsed,
             BackendSpec {

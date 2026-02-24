@@ -866,7 +866,8 @@ Done."#;
     #[test]
     fn normalize_output_markdown_with_json_block_still_returns_raw() {
         // Markdown starting with H1 that contains JSON — must NOT be parsed as JSON.
-        let raw = "# Review\n\nHere is the config:\n\n```json\n{\"response\": \"fake\"}\n```\n\nDone.";
+        let raw =
+            "# Review\n\nHere is the config:\n\n```json\n{\"response\": \"fake\"}\n```\n\nDone.";
         let normalized = normalize_output(raw).expect("markdown with json block");
         assert_eq!(normalized.text, raw);
     }

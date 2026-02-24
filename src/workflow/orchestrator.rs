@@ -3328,6 +3328,23 @@ async fn run_final_review_phase(
 
     let restart_count = final_review_restart_count_from_artifacts(project_dir);
     let round = restart_count.saturating_add(1);
+    if restart_count >= effective.workflow.max_final_review_restarts {
+        write_force_complete_artifact(
+            project_dir,
+            round,
+            restart_count,
+            effective.workflow.max_final_review_restarts,
+            &BTreeSet::new(),
+        )?;
+        state.status = ProjectStatus::Completed;
+        state.current_phase = Phase::Completing;
+        state.phase_iteration = 1;
+        logs.push(format!(
+            "loop {loop_number}: final review reached restart cap ({restart_count}/{}); skipping deliberation and force-completing project",
+            effective.workflow.max_final_review_restarts
+        ));
+        return Ok(Some((Phase::FinalReview, Phase::Completing)));
+    }
 
     let mut reviewer_decisions: Vec<(String, FinalReviewerDecision)> = Vec::new();
     for reviewer_backend in &reviewers {
@@ -3684,24 +3701,6 @@ async fn run_final_review_phase(
         state.phase_iteration = 1;
         logs.push(format!(
             "loop {loop_number}: final review round {round} accepted no amendments; project finished"
-        ));
-        return Ok(Some((Phase::FinalReview, Phase::Completing)));
-    }
-
-    if restart_count >= effective.workflow.max_final_review_restarts {
-        write_force_complete_artifact(
-            project_dir,
-            round,
-            restart_count,
-            effective.workflow.max_final_review_restarts,
-            &final_accepted,
-        )?;
-        state.status = ProjectStatus::Completed;
-        state.current_phase = Phase::Completing;
-        state.phase_iteration = 1;
-        logs.push(format!(
-            "loop {loop_number}: final review reached restart cap ({restart_count}/{}); force-completing project",
-            effective.workflow.max_final_review_restarts
         ));
         return Ok(Some((Phase::FinalReview, Phase::Completing)));
     }

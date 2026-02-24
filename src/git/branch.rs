@@ -32,12 +32,9 @@ pub fn merge_base_branch(workdir: &Path, base_ref: &str) -> Result<()> {
 
     // If the base ref doesn't exist (e.g. empty remote where the configured
     // base branch was never created), skip silently — there's nothing to merge.
-    let base_exists = run_git_status(
-        workdir,
-        &["rev-parse", "--verify", base_ref],
-    )
-    .map(|s| s.success())
-    .unwrap_or(false);
+    let base_exists = run_git_status(workdir, &["rev-parse", "--verify", base_ref])
+        .map(|s| s.success())
+        .unwrap_or(false);
     if !base_exists {
         return Ok(());
     }
@@ -209,7 +206,11 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
         // default branch.
         let local_base_exists = run_git_status(
             repo_root,
-            &["rev-parse", "--verify", &format!("refs/heads/{base_branch}")],
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{base_branch}"),
+            ],
         )
         .map(|s| s.success())
         .unwrap_or(false);
@@ -278,7 +279,11 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
         // has no default branch at all), fall back to HEAD.
         let local_base_exists = run_git_status(
             repo_root,
-            &["rev-parse", "--verify", &format!("refs/heads/{base_branch}")],
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{base_branch}"),
+            ],
         )
         .map(|s| s.success())
         .unwrap_or(false);
@@ -703,10 +708,7 @@ mod tests {
         git_ok(&setup_dir, &["push", "-u", "origin", "main"]);
 
         // Point bare remote's HEAD to "main" so clone works correctly
-        git_ok(
-            &bare_dir,
-            &["symbolic-ref", "HEAD", "refs/heads/main"],
-        );
+        git_ok(&bare_dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
         // Clone from bare
         git_ok_abs(
@@ -731,9 +733,8 @@ mod tests {
 
         // Call sync_project_branch with "master" as configured base —
         // should auto-detect "main" and succeed.
-        sync_project_branch(&clone_dir, 77, "master").expect(
-            "sync should succeed by auto-detecting 'main' when 'master' is missing",
-        );
+        sync_project_branch(&clone_dir, 77, "master")
+            .expect("sync should succeed by auto-detecting 'main' when 'master' is missing");
 
         let branch = git_output(&clone_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
         assert_eq!(branch, "ralph/issue-77");
@@ -766,7 +767,12 @@ mod tests {
         git_ok(&work_dir, &["config", "user.name", "Test User"]);
         git_ok(
             &work_dir,
-            &["commit", "--allow-empty", "-m", "ralph: bootstrap empty commit"],
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "ralph: bootstrap empty commit",
+            ],
         );
         git_ok(
             &work_dir,
@@ -783,9 +789,8 @@ mod tests {
         // Call sync_project_branch with "master" as configured base.
         // The remote is empty — should create "master" locally from HEAD
         // and push it.
-        sync_project_branch(&work_dir, 1, "master").expect(
-            "sync should succeed by bootstrapping master on empty remote",
-        );
+        sync_project_branch(&work_dir, 1, "master")
+            .expect("sync should succeed by bootstrapping master on empty remote");
 
         let branch = git_output(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
         assert_eq!(branch, "ralph/issue-1");

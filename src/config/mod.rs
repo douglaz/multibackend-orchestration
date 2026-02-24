@@ -1147,8 +1147,10 @@ mod tests {
     #[test]
     fn validate_prd_config_rejects_gemini_backend_specs() {
         let mut global = GlobalConfig::default();
-        global.workspace.daemon_prd_question_backends =
-            vec!["claude(opus)".to_owned(), "gemini(gemini-3-pro-preview)".to_owned()];
+        global.workspace.daemon_prd_question_backends = vec![
+            "claude(opus)".to_owned(),
+            "gemini(gemini-3-pro-preview)".to_owned(),
+        ];
 
         let error = validate_interactive_prd_workspace_config(&global)
             .expect_err("gemini should be rejected on daemon PRD surfaces");

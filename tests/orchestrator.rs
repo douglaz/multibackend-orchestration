@@ -3318,7 +3318,7 @@ async fn final_review_disputed_amendments_invokes_arbiter_only_for_disputed_ids(
 #[tokio::test]
 async fn final_review_resume_skips_completed_proposal_step() {
     let (_temp, workspace_root, project_id, counter_dir) =
-        setup_workspace_for_final_review("fail-after-proposals-once", 0);
+        setup_workspace_for_final_review("fail-after-proposals-once", 1);
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     let mut orchestrator = Orchestrator::new(workspace);
@@ -3350,7 +3350,7 @@ async fn final_review_resume_skips_completed_proposal_step() {
 #[tokio::test]
 async fn final_review_config_mismatch_invalidates_and_restarts_round() {
     let (_temp, workspace_root, project_id, counter_dir) =
-        setup_workspace_for_final_review("config-mismatch", 0);
+        setup_workspace_for_final_review("config-mismatch", 1);
     let project_dir = workspace_root.join("projects").join(&project_id);
 
     let workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
@@ -3385,7 +3385,7 @@ async fn final_review_config_mismatch_invalidates_and_restarts_round() {
     );
     assert!(
         project_dir.join("final-review-force-complete.md").exists(),
-        "force-complete artifact should exist when max restart cap is 0"
+        "force-complete artifact should exist after reaching max restart cap"
     );
 }
 
