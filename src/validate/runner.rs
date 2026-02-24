@@ -122,27 +122,28 @@ impl TestRunner {
 
         std::thread::scope(|s| {
             for _ in 0..self.jobs {
-                s.spawn(|| {
-                    loop {
-                        let (idx, test) = {
-                            let mut q = work.lock().unwrap();
-                            match q.next() {
-                                Some((i, t)) => (i, *t),
-                                None => break,
-                            }
-                        };
-                        let start = Instant::now();
-                        let harness = match RalphHarness::new(&self.ralph_bin) {
-                            Ok(h) => h,
-                            Err(e) => {
-                                *harness_error.lock().unwrap() = Some(e);
-                                break;
-                            }
-                        };
-                        let result = (test.func)(&harness);
-                        let elapsed = start.elapsed();
-                        results.lock().unwrap().push((idx, test.name, result, elapsed));
-                    }
+                s.spawn(|| loop {
+                    let (idx, test) = {
+                        let mut q = work.lock().unwrap();
+                        match q.next() {
+                            Some((i, t)) => (i, *t),
+                            None => break,
+                        }
+                    };
+                    let start = Instant::now();
+                    let harness = match RalphHarness::new(&self.ralph_bin) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            *harness_error.lock().unwrap() = Some(e);
+                            break;
+                        }
+                    };
+                    let result = (test.func)(&harness);
+                    let elapsed = start.elapsed();
+                    results
+                        .lock()
+                        .unwrap()
+                        .push((idx, test.name, result, elapsed));
                 });
             }
         });
@@ -167,11 +168,7 @@ impl TestRunner {
                     println!("test {} ... ok ({})", name, format_duration(elapsed));
                 }
                 TestResult::Skip(reason) => {
-                    println!(
-                        "test {} ... skipped ({})",
-                        name,
-                        format_duration(elapsed)
-                    );
+                    println!("test {} ... skipped ({})", name, format_duration(elapsed));
                     if self.verbose {
                         for line in reason.lines() {
                             println!("  {line}");
@@ -180,11 +177,7 @@ impl TestRunner {
                     skipped.push((name, reason));
                 }
                 TestResult::Fail(message) => {
-                    println!(
-                        "test {} ... FAILED ({})",
-                        name,
-                        format_duration(elapsed)
-                    );
+                    println!("test {} ... FAILED ({})", name, format_duration(elapsed));
                     if self.verbose {
                         for line in message.lines() {
                             println!("  {line}");

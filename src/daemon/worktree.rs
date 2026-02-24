@@ -63,7 +63,10 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
             .args(["remote", "set-head", "origin", "--auto"])
             .current_dir(repo_root)
             .output();
-        if auto_set.as_ref().map(|o| o.status.success()).unwrap_or(false)
+        if auto_set
+            .as_ref()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
             && revision_exists(repo_root, "origin/HEAD")?
         {
             "origin/HEAD".to_string()
