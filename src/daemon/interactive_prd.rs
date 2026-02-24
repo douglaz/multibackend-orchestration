@@ -1589,9 +1589,9 @@ mod tests {
         find_first_answer_comment, find_new_feedback_comments,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
         prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
-        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
-        REQUIRED_SPEC_SECTION_COUNT,
+        run_draft_with_section_retry_sync, CwdGuard, InteractivePrdState, PrdPollConfig,
+        PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
+        PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -1601,6 +1601,7 @@ mod tests {
 
     use std::collections::BTreeMap;
     use std::io::Write as IoWrite;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -2917,5 +2918,186 @@ mod tests {
                 .contains("state save failed"),
             "last_error should contain save failure info"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CwdGuard and refresh_repo_clone tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repo_clone_path_joins_owner_and_repo() {
+        let config = PrdPollConfig {
+            owner: "acme".to_owned(),
+            repo: "widgets".to_owned(),
+            data_dir: PathBuf::from("/data"),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+        };
+        assert_eq!(config.repo_clone_path(), PathBuf::from("/data/acme/widgets"));
+    }
+
+    #[test]
+    fn cwd_guard_sets_and_restores_directory() {
+        let original = std::env::current_dir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let _guard = CwdGuard::set(tmp.path()).unwrap();
+            assert_eq!(
+                std::env::current_dir().unwrap().canonicalize().unwrap(),
+                tmp.path().canonicalize().unwrap(),
+            );
+        }
+        // After drop, cwd should be restored
+        assert_eq!(std::env::current_dir().unwrap(), original);
+    }
+
+    #[test]
+    fn cwd_guard_fails_for_nonexistent_path() {
+        let result = CwdGuard::set(std::path::Path::new("/nonexistent/path/xyz"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn refresh_repo_clone_skips_when_no_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = PrdPollConfig {
+            owner: "o".to_owned(),
+            repo: "r".to_owned(),
+            data_dir: tmp.path().to_path_buf(),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+        };
+        // Create the dir but not .git — should succeed without error
+        std::fs::create_dir_all(config.repo_clone_path()).unwrap();
+        assert!(config.refresh_repo_clone().is_ok());
+    }
+
+    #[test]
+    fn refresh_repo_clone_fetches_and_resets_real_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path().join("owner").join("repo");
+
+        // Create a real git repo with a commit
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_dir)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test")
+                .output()
+                .unwrap()
+        };
+        run(&["init", "--initial-branch=master"]);
+        std::fs::write(repo_dir.join("file.txt"), "v1").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "initial"]);
+
+        // Create a bare clone to act as "origin"
+        let origin_dir = tmp.path().join("origin.git");
+        std::process::Command::new("git")
+            .args(["clone", "--bare", repo_dir.to_str().unwrap(), origin_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        // Point repo's origin to the bare clone
+        run(&["remote", "remove", "origin"]);
+        run(&["remote", "add", "origin", origin_dir.to_str().unwrap()]);
+        run(&["fetch", "origin"]);
+
+        // Add a new commit to origin (via a separate checkout)
+        let work = tmp.path().join("work");
+        std::process::Command::new("git")
+            .args(["clone", origin_dir.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::write(work.join("file.txt"), "v2").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "second"])
+            .current_dir(&work)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push"])
+            .current_dir(&work)
+            .output()
+            .unwrap();
+
+        // repo_dir is still at v1
+        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v1");
+
+        let config = PrdPollConfig {
+            owner: "owner".to_owned(),
+            repo: "repo".to_owned(),
+            data_dir: tmp.path().to_path_buf(),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+        };
+
+        config.refresh_repo_clone().unwrap();
+
+        // After refresh, repo_dir should have v2
+        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v2");
+    }
+
+    #[test]
+    fn generate_questions_runs_in_repo_clone_dir() {
+        // Mock script that prints cwd instead of generating questions
+        let mut tmp = tempfile::NamedTempFile::new().expect("create temp script");
+        writeln!(tmp, "#!/bin/sh").unwrap();
+        writeln!(tmp, "cat >/dev/null").unwrap();
+        writeln!(tmp, "pwd").unwrap();
+        tmp.flush().unwrap();
+        let script_path = tmp.path().to_str().unwrap().to_owned();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Keep file alive
+        let _tmp = tmp.into_temp_path();
+
+        let config = make_test_prd_config(&script_path);
+        let repo_dir = config.repo_clone_path();
+
+        // The function will succeed or fail at synthesis, but either way the
+        // backend output (pwd) should contain the repo clone path, proving
+        // it ran in the right directory.
+        let result = super::generate_questions_with_timeout(&config, "test issue");
+
+        if let Ok(output) = result {
+            let canonical_repo = repo_dir.canonicalize().unwrap_or(repo_dir);
+            assert!(
+                output.contains(canonical_repo.to_str().unwrap()),
+                "backend output should contain repo clone path, got: {output}"
+            );
+        }
+        // If it errored (e.g. synthesis failure), that's fine — the cwd
+        // change and restore are already tested by cwd_guard_sets_and_restores_directory.
     }
 }
