@@ -1,0 +1,32 @@
+---
+artifact: completer-verdict
+loop: 4
+project: task-enable-real-time-streaming-of-backe
+backend: claude(opus)
+role: completer
+created_at: 2026-02-16T04:56:24Z
+---
+
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+
+- **Deterministic log paths** (Req 1): `log_path_for_role()` in `src/output_log.rs:8-17` derives paths from `(project_dir, loop_number, role)` only. With `loop_number`: `{project_dir}/loops/{NNN}/agent-output-{role}.log`. Without (prompt-reviewer): `{project_dir}/agent-output-prompt-reviewer.log`. `ensure_log_parent()` creates parent dirs. No `loop_slug` or backend name in filenames — verified by exhaustive grep of the codebase.
+
+- **Retry attribution and append semantics** (Req 2): `LogWriter` struct opens files in `create(true).append(true)` mode (line 105). `write_attempt_separator()` appends separator with attempt number, sanitized backend label, fallback flag, and timestamp before each attempt. All retry and fallback paths (`execute_with_timeout_retries`, `execute_with_parse_retries`) share the same `&mut LogWriter`, verified at 9 call sites in the orchestrator.
+
+- **Streaming semantics / byte preservation** (Req 3): `CliBackend::execute_streaming()` (lines 187-316) uses `AsyncReadExt::read_buf` into `BytesMut` chunks, appends raw bytes to both `Vec<u8>` accumulator and `LogWriter::write_bytes()` per-chunk. `String::from_utf8_lossy` is called exactly once at the final return (line 298). Unit test `cli_backend_streaming_preserves_exact_bytes_in_log` confirms `\r` and partial lines are preserved.
+
+- **Timeout and process cleanup** (Req 4): `kill_and_reap_child()` (lines 155-172) calls `child.kill().await` then `child.wait().await`. Called on both timeout (line 306) and fatal I/O error (line 301). Timeout footer written to log via `write_timeout_footer()` (line 309). Returns `BackendTimeout` error. Unit test `cli_backend_timeout_kills_and_reaps_child_and_writes_footer` verifies child is dead via `libc::kill(pid, 0)` with `ESRCH`.
+
+- **Path safety and logging failure policy** (Req 5): `sanitize_for_filename()` replaces non-alphanumeric/non-hyphen chars with `_`, collapses consecutive underscores, trims leading/trailing. `LogWriter` is best-effort: on open failure, writer is disabled with `tracing::warn!` (lines 88-91); on write/flush failure, disables further writes with `tracing::warn!` (lines 133-136); execution continues unaffected. Unit test `log_writer_disabled_on_bad_path_continues_silently` confirms.
+
+- **Conformance tests** (Test Req 1): `src/validate/tests_streaming.rs` contains all 4 required tests: `mid_execution_visibility`, `retry_append_behavior`, `timeout_cleanup`, `prompt_reviewer_path`. Registered in `src/validate/mod.rs:91` via `tests_streaming::tests()`.
+
+- **Unit tests** (Test Req 2): CR/partial-line preservation (`log_writer_preserves_cr_and_partial_line_bytes`, `cli_backend_streaming_preserves_exact_bytes_in_log`). `sanitize_for_filename` behavior for unsafe chars (5 test cases). Log write/open failure resilience (`log_writer_disabled_on_bad_path_continues_silently`). Child kill/reap verification (`cli_backend_timeout_kills_and_reaps_child_and_writes_footer`).
+
+- **`cargo test` passes**: 599+ tests across all suites, 0 failures.
+
+- **No `loop_slug` in log path derivation**: Confirmed via codebase-wide search — `loop_slug` is only used for artifact directory naming, never for log paths.
+
+---
