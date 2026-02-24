@@ -46,6 +46,11 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
     // (e.g. in code blocks) from being misrouted into JSON normalization.
     let first_content_line = raw.lines().map(str::trim).find(|l| !l.is_empty());
     if !first_content_line.is_some_and(|l| l.starts_with('{')) {
+        // Before returning raw text, check for multi-line JSON after preamble
+        // (e.g. gemini CLI outputs "YOLO mode..." status lines before its JSON response).
+        if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
+            return Ok(output);
+        }
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
             ..NormalizedOutput::default()
@@ -53,6 +58,11 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
     }
 
     let Some(first_json) = first_valid_json_object(raw) else {
+        // First line starts with '{' but no single line parses as valid JSON —
+        // the output is likely a multi-line pretty-printed JSON object.
+        if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
+            return Ok(output);
+        }
         return Ok(NormalizedOutput {
             text: raw.to_owned(),
             ..NormalizedOutput::default()
@@ -285,8 +295,55 @@ fn first_valid_json_object(raw: &str) -> Option<Value> {
         .find(|value| value.is_object())
 }
 
+/// Attempt to extract a multi-line JSON object from output that may have
+/// non-JSON preamble lines (e.g. gemini CLI's "YOLO mode is enabled" status
+/// messages before the pretty-printed JSON response body).
+fn try_extract_multiline_json_after_preamble(raw: &str) -> Option<NormalizedOutput> {
+    let lines: Vec<&str> = raw.lines().collect();
+    // Find the first line whose trimmed content starts with '{'.
+    let json_start = lines.iter().position(|l| l.trim().starts_with('{'))?;
+
+    // Sanity-check the preamble: if it contains markdown indicators the output
+    // is likely a markdown document with embedded JSON, not a JSON response with
+    // preamble.  Bail out so the caller returns the raw text instead.
+    for line in &lines[..json_start] {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with('#') || t.starts_with("```") {
+            return None;
+        }
+    }
+
+    // Concatenate from the first '{' line onward and try to parse as JSON.
+    let json_text: String = lines[json_start..].join("\n");
+    let value: Value = serde_json::from_str(&json_text).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+
+    let text = extract_single_json_text(&value)?;
+    let mut output = NormalizedOutput {
+        text,
+        session_id: value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                value
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
+        ..NormalizedOutput::default()
+    };
+    merge_usage_from_event(&value, &mut output);
+    Some(output)
+}
+
 fn extract_single_json_text(value: &Value) -> Option<String> {
-    for key in ["result", "output", "text", "completion"] {
+    for key in ["result", "response", "output", "text", "completion"] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
             return Some(text.to_owned());
         }
@@ -485,12 +542,12 @@ not-json
     }
 
     #[test]
-    fn normalize_output_returns_raw_when_first_line_is_not_json() {
-        // First non-empty line is plain text, so even though later lines
-        // contain valid JSON, the response is treated as raw text.
+    fn normalize_output_extracts_json_after_non_json_preamble() {
+        // Non-JSON preamble lines followed by a single-line JSON object.
+        // The multi-line JSON fallback should extract the JSON text.
         let raw = "nope\nstill nope\n{\"result\":\"from-json\"}";
         let normalized = normalize_output(raw).expect("normalize_output");
-        assert_eq!(normalized.text, raw);
+        assert_eq!(normalized.text, "from-json");
     }
 
     #[test]
@@ -697,5 +754,49 @@ Done."#;
         let normalized = normalize_output(raw).expect("gemini stream parse");
         assert_eq!(normalized.session_id.as_deref(), Some("gem-sess-2"));
         assert_eq!(normalized.text, "assistant final");
+    }
+
+    // --- Gemini CLI pipe-mode: multi-line JSON with preamble ---
+
+    #[test]
+    fn normalize_output_gemini_pipe_multiline_json_with_preamble() {
+        // Gemini CLI -p mode outputs status lines then a pretty-printed JSON summary.
+        let raw = "YOLO mode is enabled. All tool calls will be automatically approved.\n\
+                    Loaded cached credentials.\n\
+                    YOLO mode is enabled. All tool calls will be automatically approved.\n\
+                    {\n\
+                    \x20 \"session_id\": \"gem-pipe-1\",\n\
+                    \x20 \"response\": \"# Verdict: COMPLETE\\n\\nAll requirements satisfied.\",\n\
+                    \x20 \"stats\": { \"models\": {} }\n\
+                    }";
+        let normalized = normalize_output(raw).expect("gemini pipe mode");
+        assert_eq!(normalized.session_id.as_deref(), Some("gem-pipe-1"));
+        assert_eq!(
+            normalized.text,
+            "# Verdict: COMPLETE\n\nAll requirements satisfied."
+        );
+    }
+
+    #[test]
+    fn normalize_output_multiline_json_without_preamble() {
+        // Multi-line pretty-printed JSON with no preamble lines.
+        let raw = "{\n\
+                    \x20 \"session_id\": \"s1\",\n\
+                    \x20 \"response\": \"# Verdict: CONTINUE\\n\\n## Issues\\n- bug found\"\n\
+                    }";
+        let normalized = normalize_output(raw).expect("multiline json no preamble");
+        assert_eq!(normalized.session_id.as_deref(), Some("s1"));
+        assert_eq!(
+            normalized.text,
+            "# Verdict: CONTINUE\n\n## Issues\n- bug found"
+        );
+    }
+
+    #[test]
+    fn normalize_output_markdown_with_json_block_still_returns_raw() {
+        // Markdown starting with H1 that contains JSON — must NOT be parsed as JSON.
+        let raw = "# Review\n\nHere is the config:\n\n```json\n{\"response\": \"fake\"}\n```\n\nDone.";
+        let normalized = normalize_output(raw).expect("markdown with json block");
+        assert_eq!(normalized.text, raw);
     }
 }
