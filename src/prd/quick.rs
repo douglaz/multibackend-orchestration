@@ -92,6 +92,7 @@ Your response must be a markdown document with the following exact section headi
 ## Out of Scope
 
 Each section should be concise, specific, and implementation-ready.
+Start your response directly with the Summary heading — do not include any preamble, reasoning, or introductory text before it.
 "#;
 
 /// Review prompt used by the reviewer backend.
@@ -135,6 +136,8 @@ pub const REVISION_PROMPT: &str = r#"You are a senior software engineer revising
 **Task:**
 Address each review issue and produce an updated specification. You MUST preserve the same 6 required section headings:
 ## Summary, ## Acceptance Criteria, ## Technical Approach, ## Files & Modules, ## Testing Strategy, ## Out of Scope
+
+Start your response directly with the Summary heading — do not include any preamble, reasoning, or introductory text before it.
 "#;
 
 /// Simple inline placeholder replacement.
@@ -146,9 +149,21 @@ pub fn render_prompt(template: &str, replacements: &[(&str, &str)]) -> String {
     result
 }
 
-/// Checks quick PRD spec output for required sections after frontmatter removal.
+/// Strip any text before the first `## ` heading.
+fn strip_preamble(text: &str) -> String {
+    if text.starts_with("## ") {
+        return text.to_string();
+    }
+    if let Some(pos) = text.find("\n## ") {
+        return text[pos + 1..].to_string();
+    }
+    text.to_string()
+}
+
+/// Checks quick PRD spec output for required sections after frontmatter and preamble removal.
 pub fn check_spec_sections(raw: &str) -> (String, Vec<String>) {
     let cleaned = strip_frontmatter(raw);
+    let cleaned = strip_preamble(&cleaned);
     let mut missing_sections = Vec::new();
 
     for section in REQUIRED_SECTIONS {
