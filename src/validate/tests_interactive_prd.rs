@@ -202,6 +202,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::concurrent_bounded_worker_count",
             func: concurrent_bounded_worker_count,
         },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_refresh_ordering",
+            func: concurrent_refresh_ordering,
+        },
     ]
 }
 
@@ -3788,6 +3792,145 @@ exit 0
         let peak: u32 = fs::read_to_string(&peak_file).unwrap().trim().parse().unwrap();
         assert!(peak <= 2, "peak {peak} must not exceed max_concurrent=2");
         assert!(peak >= 1, "at least one worker should have been active");
+    })
+}
+
+/// Conformance: refresh_repo_clone runs exactly once per non-empty tick,
+/// and before any per-issue backend processing (label edits).
+/// Uses mock git (logs "refresh" on fetch) and mock gh (logs "edit:<N>" on
+/// label edits) writing to a shared event log file.
+fn concurrent_refresh_ordering(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let event_log = data_dir.join("event_log");
+        let event_log_str = event_log.to_string_lossy().into_owned();
+
+        // Create a repo clone dir WITH a .git dir so refresh_repo_clone runs
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+        // Mock git: logs "refresh" on fetch
+        let git_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch)
+    printf 'refresh\n' >> "$EVENT_LOG"
+    exit 0
+    ;;
+  reset) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+        );
+
+        // Mock gh: logs "edit:<issue>" on label edits
+        let gh_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":400,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":401,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            400) printf 'edit:400\n' >> "$EVENT_LOG" ;;
+            401) printf 'edit:401\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        let git_path = scripts_dir.join("git");
+        fs::write(&git_path, git_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path_env = format!("{}:{}", scripts_dir.display(), std::env::var("PATH").unwrap_or_default());
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+        };
+
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("PATH").unwrap_or_default();
+        unsafe { std::env::set_var("PATH", &path_env) };
+        let result = poll_and_advance_prd(&config);
+        unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
+
+        assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+        let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+        let events: Vec<&str> = log_content.lines().collect();
+
+        // Refresh must appear exactly once
+        let refresh_count = events.iter().filter(|e| **e == "refresh").count();
+        assert_eq!(
+            refresh_count, 1,
+            "refresh_repo_clone should be called exactly once, got {refresh_count}"
+        );
+
+        // Refresh must be the first event (before any per-issue edit)
+        assert_eq!(
+            events.first().copied(),
+            Some("refresh"),
+            "refresh must occur before any per-issue processing; events: {:?}",
+            events
+        );
+
+        // All non-refresh events must be per-issue edits (after refresh)
+        for event in &events[1..] {
+            assert!(
+                event.starts_with("edit:"),
+                "expected per-issue edit event after refresh, got: {event}"
+            );
+        }
     })
 }
 
