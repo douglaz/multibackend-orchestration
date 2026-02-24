@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::InitArgs;
@@ -34,13 +33,6 @@ pub(crate) const TEMPLATE_FILES: &[(&str, TemplateContentFn)] = &[
     ("arbiter.md", default_arbiter_template),
 ];
 
-pub(crate) const LEGACY_LINKS: &[(&str, &str)] = &[
-    ("spec.md", "planner.md"),
-    ("implementation.md", "implementer.md"),
-    ("review.md", "reviewer.md"),
-    ("completion.md", "completer.md"),
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitAction {
     CreateDir {
@@ -53,11 +45,6 @@ pub(crate) enum InitAction {
         path: PathBuf,
         content: &'static str,
     },
-    CreateLegacyLink {
-        canonical_path: PathBuf,
-        canonical_name: &'static str,
-        legacy_path: PathBuf,
-    },
 }
 
 impl InitAction {
@@ -66,15 +53,6 @@ impl InitAction {
             Self::CreateDir { path } => format!("create-dir {}", path.display()),
             Self::WriteConfig { path } => format!("write-config {}", path.display()),
             Self::WriteTemplate { path, .. } => format!("write-template {}", path.display()),
-            Self::CreateLegacyLink {
-                canonical_name,
-                legacy_path,
-                ..
-            } => format!(
-                "create-legacy-link {} -> {}",
-                legacy_path.display(),
-                canonical_name
-            ),
         }
     }
 }
@@ -165,14 +143,6 @@ pub(crate) fn plan_actions(root: &Path) -> Vec<InitAction> {
         });
     }
 
-    for (canonical, legacy) in LEGACY_LINKS {
-        actions.push(InitAction::CreateLegacyLink {
-            canonical_path: templates_dir.join(canonical),
-            canonical_name: canonical,
-            legacy_path: templates_dir.join(legacy),
-        });
-    }
-
     actions
 }
 
@@ -186,17 +156,6 @@ pub(crate) fn execute_actions(actions: &[InitAction]) -> Result<()> {
             InitAction::WriteTemplate { path, content } => {
                 fs::write(path, content)?;
             }
-            InitAction::CreateLegacyLink {
-                canonical_path,
-                canonical_name,
-                legacy_path,
-            } => match unix_fs::symlink(canonical_name, legacy_path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
-                Err(_) => {
-                    let _ = fs::copy(canonical_path, legacy_path);
-                }
-            },
         }
     }
 
@@ -243,7 +202,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        create_workspace, plan_actions, validate_target, InitAction, LEGACY_LINKS, TEMPLATE_FILES,
+        create_workspace, plan_actions, validate_target, InitAction, TEMPLATE_FILES,
     };
     use crate::error::RalphError;
     use crate::prompts::templates::{
@@ -314,17 +273,6 @@ mod tests {
             default_arbiter_template()
         );
 
-        for legacy in &[
-            "planner.md",
-            "implementer.md",
-            "reviewer.md",
-            "completer.md",
-        ] {
-            assert!(
-                templates_dir.join(legacy).exists(),
-                "legacy template path should exist: {legacy}"
-            );
-        }
     }
 
     #[test]
@@ -345,13 +293,8 @@ mod tests {
             .iter()
             .filter(|action| matches!(action, InitAction::WriteTemplate { .. }))
             .count();
-        let legacy_actions = actions
-            .iter()
-            .filter(|action| matches!(action, InitAction::CreateLegacyLink { .. }))
-            .count();
 
         assert_eq!(template_actions, TEMPLATE_FILES.len());
-        assert_eq!(legacy_actions, LEGACY_LINKS.len());
     }
 
     #[test]

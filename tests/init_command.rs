@@ -232,25 +232,7 @@ fn test_init_creates_template_files_with_cli_execute() {
         "qa template should exist"
     );
 
-    // Verify legacy symlinks exist for backward compatibility
-    assert!(
-        workspace_root.join("templates/planner.md").exists(),
-        "legacy planner.md symlink should exist"
-    );
-    assert!(
-        workspace_root.join("templates/implementer.md").exists(),
-        "legacy implementer.md symlink should exist"
-    );
-    assert!(
-        workspace_root.join("templates/reviewer.md").exists(),
-        "legacy reviewer.md symlink should exist"
-    );
-    assert!(
-        workspace_root.join("templates/completer.md").exists(),
-        "legacy completer.md symlink should exist"
-    );
-
-    // Verify template content is correct (read via canonical names)
+    // Verify template content is correct
     let planner_content =
         fs::read_to_string(workspace_root.join("templates/spec.md")).expect("read spec");
     assert!(planner_content.contains("software architect"));

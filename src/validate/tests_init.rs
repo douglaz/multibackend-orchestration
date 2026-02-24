@@ -196,10 +196,6 @@ dry-run: write-template .ralph/templates/final_reviewer.md
 dry-run: write-template .ralph/templates/planner_position.md
 dry-run: write-template .ralph/templates/vote.md
 dry-run: write-template .ralph/templates/arbiter.md
-dry-run: create-legacy-link .ralph/templates/planner.md -> spec.md
-dry-run: create-legacy-link .ralph/templates/implementer.md -> implementation.md
-dry-run: create-legacy-link .ralph/templates/reviewer.md -> review.md
-dry-run: create-legacy-link .ralph/templates/completer.md -> completion.md
 "#;
         assert_stdout_eq(&output, expected);
 
