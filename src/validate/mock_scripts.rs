@@ -2335,10 +2335,10 @@ set -euo pipefail
 INPUT="$(cat)"
 
 if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
-  # Emit output every 0.3s for ~2.4s total (> 1s timeout configured in test)
+  # Emit output every 0.2s for ~1.2s total (> 1s timeout configured in test)
   printf '# Feature: Active Stream Feature\n'
-  for i in $(seq 1 8); do
-    sleep 0.3
+  for i in $(seq 1 6); do
+    sleep 0.2
     printf 'chunk-%d\n' "$i"
   done
   cat <<'EOF'

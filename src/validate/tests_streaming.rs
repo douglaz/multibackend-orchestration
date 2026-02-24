@@ -62,16 +62,16 @@ fn retry_append_behavior(h: &RalphHarness) -> TestResult {
         let project_id = "issue-601";
         let counter_file = h.temp_dir.path().join("planner-counter.txt");
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "parse-fail-mock.sh",
                 &planner_parse_fail_then_pass_mock_script(&counter_file),
             )
             .expect("failed to write parse-fail mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Streaming Retry Project",
             "Streaming retry test prompt",
@@ -201,13 +201,13 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-603";
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script("slow-streaming.sh", &slow_streaming_planner_mock_script())
             .expect("failed to write slow streaming mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Streaming Mid-Execution Visibility",
             "Streaming visibility test prompt",
@@ -265,26 +265,26 @@ fn mid_execution_visibility(h: &RalphHarness) -> TestResult {
 }
 
 /// Verify timeout behavior: partial output is preserved, timeout footer exists,
-/// and the hanging planner child process is dead after retries.
+/// and the hanging planner child process is dead after timeout handling.
 fn timeout_cleanup(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-604";
         let pid_file = h.temp_dir.path().join("streaming-timeout.pid");
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "timeout-hanging.sh",
                 &timeout_hanging_planner_mock_script(&pid_file),
             )
             .expect("failed to write timeout mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Streaming Timeout Cleanup",
             "Streaming timeout cleanup prompt",
@@ -292,7 +292,10 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
         .expect("create_project failed");
 
         let output = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
+            )
             .expect("ralph run should execute");
         assert_exit_code(&output, 1);
 
@@ -330,31 +333,31 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
 }
 
 /// Active streaming beyond timeout_seconds without timeout: the planner mock
-/// emits output at intervals shorter than timeout_seconds (0.3s < 1s), with total
-/// runtime exceeding timeout_seconds (~2.4s > 1s). Must succeed (no timeout).
+/// emits output at intervals shorter than timeout_seconds (0.2s < 1s), with total
+/// runtime exceeding timeout_seconds (~1.2s > 1s). Must succeed (no timeout).
 fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-605";
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "active-streaming.sh",
                 &active_streaming_planner_mock_script(),
             )
             .expect("failed to write active streaming mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
             .expect("config set workflow.prompt_review_enabled failed");
-        // Set timeout to 1s -- total planner runtime ~2.4s > 1s, but each
-        // chunk arrives every 0.3s < 1s, so inactivity timeout must NOT fire.
+        // Set timeout to 1s -- total planner runtime ~1.2s > 1s, but each
+        // chunk arrives every 0.2s < 1s, so inactivity timeout must NOT fire.
         h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Active Stream No Timeout",
             "Active stream inactivity test",
@@ -375,9 +378,9 @@ fn active_stream_no_timeout(h: &RalphHarness) -> TestResult {
             planner_log.display()
         );
         let content = fs::read_to_string(&planner_log).expect("read planner log");
-        // All 8 chunks should be present
+        // All 6 chunks should be present
         assert!(
-            content.contains("chunk-8"),
+            content.contains("chunk-6"),
             "planner log should contain all chunks: {content}"
         );
         // No timeout footer should appear
@@ -396,14 +399,14 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         let project_id = "issue-606";
         let pid_file = h.temp_dir.path().join("hanging-stall.pid");
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "hanging-stall.sh",
                 &hanging_after_partial_planner_mock_script(&pid_file),
             )
             .expect("failed to write hanging stall mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
@@ -412,7 +415,7 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Hanging Stall Timeout",
             "Hanging stall inactivity timeout test",
@@ -421,14 +424,17 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
 
         let start = Instant::now();
         let output = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
+            )
             .expect("ralph run should execute");
         let elapsed = start.elapsed();
         assert_exit_code(&output, 1);
 
-        // The timeout is 1s and the mock sleeps for 30s. With retries (up to 3
-        // attempts), the run should finish well under 30s if the idle timeout
-        // actually kills the process promptly.
+        // The timeout is 1s and the mock sleeps for 30s. This test forces one
+        // backend timeout attempt, so the run should still finish well under
+        // 30s if the idle timeout kills the process promptly.
         assert!(
             elapsed < Duration::from_secs(20),
             "hanging stall should be killed by idle timeout, not run for full 30s; elapsed={elapsed:?}"
@@ -474,20 +480,20 @@ fn idle_timeout_reset(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-607";
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "idle-timeout-reset.sh",
                 &idle_timeout_reset_planner_mock_script(),
             )
             .expect("failed to write idle-timeout-reset mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Streaming Idle Timeout Reset",
             "Streaming idle-timeout reset prompt",
@@ -537,14 +543,14 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-608";
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "codex-active-streaming.sh",
                 &active_streaming_planner_mock_script(),
             )
             .expect("failed to write active streaming mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         // Force planner backend to Codex
         h.ralph_ok(["config", "set", "workspace.default_backend", "codex"])
@@ -552,13 +558,13 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
         // Disable prompt review so mock scripts don't need to handle the prompt-reviewer prompt.
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
             .expect("config set workflow.prompt_review_enabled failed");
-        // Set timeout to 1s -- total planner runtime ~2.4s > 1s, but each
-        // chunk arrives every 0.3s < 1s, so inactivity timeout must NOT fire.
+        // Set timeout to 1s -- total planner runtime ~1.2s > 1s, but each
+        // chunk arrives every 0.2s < 1s, so inactivity timeout must NOT fire.
         h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Codex Active Stream No Timeout",
             "Codex active stream inactivity test",
@@ -594,9 +600,9 @@ fn codex_active_stream_no_timeout(h: &RalphHarness) -> TestResult {
             content.contains("backend=codex"),
             "planner log attempt separator should show backend=codex: {content}"
         );
-        // All 8 chunks should be present
+        // All 6 chunks should be present
         assert!(
-            content.contains("chunk-8"),
+            content.contains("chunk-6"),
             "planner log should contain all chunks: {content}"
         );
         // No timeout footer should appear
@@ -616,14 +622,14 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         let project_id = "issue-609";
         let pid_file = h.temp_dir.path().join("codex-hanging-stall.pid");
 
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
         let script = h
             .write_mock_script(
                 "codex-hanging-stall.sh",
                 &hanging_after_partial_planner_mock_script(&pid_file),
             )
             .expect("failed to write hanging stall mock script");
-        h.setup_mock_backends(&script)
+        h.setup_mock_backends_fast(&script)
             .expect("setup_mock_backends failed");
         // Force planner backend to Codex
         h.ralph_ok(["config", "set", "workspace.default_backend", "codex"])
@@ -635,7 +641,7 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
             .expect("set claude timeout");
         h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
             .expect("set codex timeout");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Codex Hanging Stall Timeout",
             "Codex hanging stall inactivity timeout test",
@@ -646,14 +652,17 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         // run, since state is written during execution)
         let start = Instant::now();
         let output = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
+            )
             .expect("ralph run should execute");
         let elapsed = start.elapsed();
         assert_exit_code(&output, 1);
 
-        // The timeout is 1s and the mock sleeps for 30s. With retries (up to 3
-        // attempts), the run should finish well under 30s if the idle timeout
-        // actually kills the process promptly.
+        // The timeout is 1s and the mock sleeps for 30s. This test forces one
+        // backend timeout attempt, so the run should still finish well under
+        // 30s if the idle timeout kills the process promptly.
         assert!(
             elapsed < Duration::from_secs(20),
             "codex hanging stall should be killed by idle timeout, not run for full 30s; elapsed={elapsed:?}"
@@ -713,13 +722,13 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
 }
 
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
-    h.init_workspace().expect("init failed");
+    h.init_workspace_fast().expect("init failed");
     let script = h
         .write_mock_script("standard-mock.sh", &standard_mock_script())
         .expect("failed to write standard mock script");
-    h.setup_mock_backends(&script)
+    h.setup_mock_backends_fast(&script)
         .expect("setup_mock_backends failed");
-    h.create_project(
+    h.create_project_fast(
         project_id,
         "Streaming Conformance Project",
         "Streaming suite test prompt",

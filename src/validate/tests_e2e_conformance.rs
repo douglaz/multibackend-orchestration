@@ -17,6 +17,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: backend_timeout_exhausted_fails_task,
         },
         ConformanceTest {
+            name: "e2e_conformance::retry_override_unset_defaults_to_three",
+            func: retry_override_unset_defaults_to_three,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::retry_override_set_to_one",
+            func: retry_override_set_to_one,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::retry_override_zero_defaults_to_three",
+            func: retry_override_zero_defaults_to_three,
+        },
+        ConformanceTest {
+            name: "e2e_conformance::retry_override_invalid_string_defaults_to_three",
+            func: retry_override_invalid_string_defaults_to_three,
+        },
+        ConformanceTest {
             name: "e2e_conformance::backend_command_failed_no_reformatter",
             func: backend_command_failed_no_reformatter,
         },
@@ -42,29 +58,7 @@ pub fn tests() -> Vec<ConformanceTest> {
 fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-801";
-        h.init_workspace().expect("init failed");
-
-        let script = h
-            .write_mock_script("sleep-timeout.sh", &sleeping_backend_script())
-            .expect("failed to write sleeping backend script");
-        h.setup_mock_backends(&script)
-            .expect("setup_mock_backends failed");
-
-        // Backend timeout settings are global config keys.
-        h.ralph_ok(["config", "set", "backends.claude.timeout_seconds", "1"])
-            .expect("config set backends.claude.timeout_seconds failed");
-        h.ralph_ok(["config", "set", "backends.codex.timeout_seconds", "1"])
-            .expect("config set backends.codex.timeout_seconds failed");
-
-        h.create_project(
-            project_id,
-            "E2E Timeout Project",
-            "Backend timeout test prompt",
-        )
-        .expect("create_project failed");
-        // Keep the test focused on orchestration timeout handling during planning.
-        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
-            .expect("config set workflow.prompt_review_enabled failed");
+        setup_timeout_failure_project(h, project_id);
 
         let output = h
             .ralph(["run", "--loops", "1"])
@@ -98,10 +92,91 @@ fn backend_timeout_exhausted_fails_task(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn retry_override_unset_defaults_to_three(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-804";
+        setup_timeout_failure_project(h, project_id);
+
+        let output = h
+            .ralph_env_with_removals(["run", "--loops", "1"], &[], &["RALPH_MAX_BACKEND_RETRIES"])
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit when backend times out"
+        );
+
+        assert_planner_attempt_count(h, project_id, 3);
+    })
+}
+
+fn retry_override_set_to_one(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-805";
+        setup_timeout_failure_project(h, project_id);
+
+        let output = h
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
+            )
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit when backend times out"
+        );
+
+        assert_planner_attempt_count(h, project_id, 1);
+    })
+}
+
+fn retry_override_zero_defaults_to_three(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-806";
+        setup_timeout_failure_project(h, project_id);
+
+        let output = h
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "0")],
+            )
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit when backend times out"
+        );
+
+        assert_planner_attempt_count(h, project_id, 3);
+    })
+}
+
+fn retry_override_invalid_string_defaults_to_three(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-807";
+        setup_timeout_failure_project(h, project_id);
+
+        let output = h
+            .ralph_env(
+                ["run", "--loops", "1"],
+                &[("RALPH_MAX_BACKEND_RETRIES", "abc")],
+            )
+            .expect("ralph run should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "expected non-zero exit when backend times out"
+        );
+
+        assert_planner_attempt_count(h, project_id, 3);
+    })
+}
+
 fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-802";
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
 
         let claude_script = h
             .write_mock_script("backend-nonzero.sh", &nonzero_exit_backend_script())
@@ -117,12 +192,11 @@ fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
                 ),
             )
             .expect("failed to write codex marker script");
-        h.setup_separate_mock_backends(&claude_script, &codex_script)
-            .expect("setup_separate_mock_backends failed");
-
-        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+        set_separate_mock_backends_fast(h, &claude_script, &codex_script)
+            .expect("setup_separate_mock_backends_fast failed");
+        h.set_config_fast("workflow.prompt_review_enabled", "false")
             .expect("config set workflow.prompt_review_enabled failed");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Backend Command Failed Project",
             "Backend command failure reformatter boundary test prompt",
@@ -164,7 +238,7 @@ fn backend_command_failed_no_reformatter(h: &RalphHarness) -> TestResult {
 fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-803";
-        h.init_workspace().expect("init failed");
+        h.init_workspace_fast().expect("init failed");
 
         let claude_script = h
             .write_mock_script("backend-empty-output.sh", &empty_output_backend_script())
@@ -175,43 +249,29 @@ fn empty_output_retries_then_reformatter(h: &RalphHarness) -> TestResult {
                 &nonzero_exit_backend_script(),
             )
             .expect("failed to write nonzero reformatter backend script");
-        h.setup_separate_mock_backends(&claude_script, &codex_script)
-            .expect("setup_separate_mock_backends failed");
+        set_separate_mock_backends_fast(h, &claude_script, &codex_script)
+            .expect("setup_separate_mock_backends_fast failed");
 
         let call_log = h.temp_dir.path().join("backend-call-order.log");
         let call_log_str = call_log.to_string_lossy().into_owned();
-        h.ralph_ok([
-            "config",
-            "set",
+        h.set_config_fast(
             "backends.claude.env.RALPH_VALIDATE_BACKEND_LOG",
             &call_log_str,
-        ])
+        )
         .expect("config set claude log path failed");
-        h.ralph_ok([
-            "config",
-            "set",
-            "backends.claude.env.RALPH_VALIDATE_BACKEND_LABEL",
-            "claude",
-        ])
-        .expect("config set claude label failed");
-        h.ralph_ok([
-            "config",
-            "set",
+        h.set_config_fast("backends.claude.env.RALPH_VALIDATE_BACKEND_LABEL", "claude")
+            .expect("config set claude label failed");
+        h.set_config_fast(
             "backends.codex.env.RALPH_VALIDATE_BACKEND_LOG",
             &call_log_str,
-        ])
+        )
         .expect("config set codex log path failed");
-        h.ralph_ok([
-            "config",
-            "set",
-            "backends.codex.env.RALPH_VALIDATE_BACKEND_LABEL",
-            "codex",
-        ])
-        .expect("config set codex label failed");
+        h.set_config_fast("backends.codex.env.RALPH_VALIDATE_BACKEND_LABEL", "codex")
+            .expect("config set codex label failed");
 
-        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+        h.set_config_fast("workflow.prompt_review_enabled", "false")
             .expect("config set workflow.prompt_review_enabled failed");
-        h.create_project(
+        h.create_project_fast(
             project_id,
             "Empty Output Retry Project",
             "Empty backend output should retry and then attempt reformatter",
@@ -274,19 +334,14 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
         // Use a daemon harness so repo_root matches the data-dir layout
         // (data_dir/acme/widgets/) that daemon start expects.
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
-        dh.init_workspace().expect("init failed");
+        dh.init_workspace_fast().expect("init failed");
         let auto_backend = dh
             .write_mock_script("auto-mock.sh", &auto_mock_script())
             .expect("failed to write auto mock backend");
         dh.setup_mock_backends_stable(&auto_backend)
             .expect("setup_mock_backends_stable failed");
-        dh.ralph_ok([
-            "config",
-            "set",
-            "workspace.daemon_refinement_enabled",
-            "false",
-        ])
-        .expect("config set workspace.daemon_refinement_enabled failed");
+        dh.set_config_fast("workspace.daemon_refinement_enabled", "false")
+            .expect("config set workspace.daemon_refinement_enabled failed");
 
         let gh_script = dh
             .write_mock_script("gh", &e2e_mock_gh_logging_script())
@@ -525,6 +580,61 @@ fn e2e_mock_gh_logging_script_captures_pr_create(h: &RalphHarness) -> TestResult
             "log should capture --body-file content, got:\n{log_content}"
         );
     })
+}
+
+fn setup_timeout_failure_project(h: &RalphHarness, project_id: &str) {
+    h.init_workspace_fast().expect("init failed");
+
+    let script = h
+        .write_mock_script("sleep-timeout.sh", &sleeping_backend_script())
+        .expect("failed to write sleeping backend script");
+    h.setup_mock_backends_fast(&script)
+        .expect("setup_mock_backends_fast failed");
+
+    h.set_config_fast("backends.claude.timeout_seconds", "1")
+        .expect("config set backends.claude.timeout_seconds failed");
+    h.set_config_fast("backends.codex.timeout_seconds", "1")
+        .expect("config set backends.codex.timeout_seconds failed");
+    h.set_config_fast("workflow.prompt_review_enabled", "false")
+        .expect("config set workflow.prompt_review_enabled failed");
+
+    h.create_project_fast(
+        project_id,
+        "E2E Timeout Project",
+        "Backend timeout test prompt",
+    )
+    .expect("create_project_fast failed");
+}
+
+fn set_separate_mock_backends_fast(
+    h: &RalphHarness,
+    claude_script: &std::path::Path,
+    codex_script: &std::path::Path,
+) -> crate::Result<()> {
+    h.set_config_fast("backends.claude.command", &claude_script.to_string_lossy())?;
+    h.set_config_fast("backends.codex.command", &codex_script.to_string_lossy())?;
+    h.set_config_fast("backends.gemini.enabled", "false")
+}
+
+fn planner_attempt_count(h: &RalphHarness, project_id: &str) -> usize {
+    let planner_log = h
+        .tmp_log_dir()
+        .join(format!("{project_id}-001-planner.log"));
+    assert!(
+        planner_log.exists(),
+        "planner log should exist at {}",
+        planner_log.display()
+    );
+    let content = fs::read_to_string(&planner_log).expect("read planner log");
+    content.matches("--- attempt=").count()
+}
+
+fn assert_planner_attempt_count(h: &RalphHarness, project_id: &str, expected: usize) {
+    let attempts = planner_attempt_count(h, project_id);
+    assert_eq!(
+        attempts, expected,
+        "unexpected planner attempt count for project {project_id}"
+    );
 }
 
 fn sleeping_backend_script() -> String {

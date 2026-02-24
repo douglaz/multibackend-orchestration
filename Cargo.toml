@@ -26,3 +26,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tempfile = "3"
 which = "7"
+
+[dev-dependencies]
+serial_test = "3"

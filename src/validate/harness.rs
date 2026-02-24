@@ -9,8 +9,11 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+use crate::config::set_global_config_value;
 use crate::error::RalphError;
+use crate::project::lifecycle::{CreateProjectOptions, PromptSource};
 use crate::validate::assertions::assert_exit_code;
+use crate::workspace::Workspace;
 use crate::Result;
 
 #[derive(Debug)]
@@ -308,6 +311,74 @@ impl RalphHarness {
         Ok(())
     }
 
+    /// Run a CLI command with extra environment variables and explicit removals.
+    /// `env_removals` lists variable names to remove from the child process environment.
+    pub fn ralph_env_with_removals<I, S>(
+        &self,
+        args: I,
+        env_vars: &[(&str, &str)],
+        env_removals: &[&str],
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = self.prepare_cli_args(args);
+        let mut command = Command::new(&self.ralph_bin);
+        command.args(args).current_dir(&self.repo_root);
+        for (key, value) in env_vars {
+            command.env(key, value);
+        }
+        for key in env_removals {
+            command.env_remove(key);
+        }
+        Ok(command.output()?)
+    }
+
+    /// Initialise a workspace using production Rust APIs instead of spawning
+    /// the `ralph init` CLI subprocess. Faster and avoids process overhead.
+    pub fn init_workspace_fast(&self) -> Result<Workspace> {
+        let ralph_root = self.repo_root.join(".ralph");
+        crate::cli::init::create_workspace(&ralph_root)
+    }
+
+    /// Create a project via the production API instead of `ralph project new`.
+    pub fn create_project_fast(&self, id: &str, name: &str, prompt: &str) -> Result<()> {
+        let prompt_path = self.temp_dir.path().join(format!("{id}-prompt.md"));
+        fs::write(&prompt_path, prompt)?;
+
+        let ralph_root = self.repo_root.join(".ralph");
+        let workspace = Workspace::load(ralph_root)?;
+
+        crate::project::lifecycle::create_project(
+            &workspace,
+            CreateProjectOptions {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                source: PromptSource::File(prompt_path),
+                starting_backend: None,
+            },
+        )
+    }
+
+    /// Set a global config value using the shared mutator instead of
+    /// spawning `ralph config set --global`.
+    pub fn set_config_fast(&self, key: &str, value: &str) -> Result<()> {
+        let ralph_root = self.repo_root.join(".ralph");
+        let mut workspace = Workspace::load(ralph_root)?;
+        set_global_config_value(&mut workspace.config, key, value)?;
+        workspace.save_config()
+    }
+
+    /// Configure mock backends via production APIs instead of CLI subprocesses.
+    /// Sets claude and codex commands to the given script and disables gemini.
+    pub fn setup_mock_backends_fast<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+        let script = script.as_ref().to_string_lossy().into_owned();
+        self.set_config_fast("backends.claude.command", &script)?;
+        self.set_config_fast("backends.codex.command", &script)?;
+        self.set_config_fast("backends.gemini.enabled", "false")
+    }
+
     fn prepare_cli_args<I, S>(&self, args: I) -> Vec<OsString>
     where
         I: IntoIterator<Item = S>,
@@ -470,6 +541,25 @@ fn inject_daemon_data_dir_arg(data_dir: &Path, args: &mut Vec<OsString>) {
     args.insert(2, OsString::from("--data-dir"));
 }
 
+/// Build a `Command` that dumps its environment via `sh -c env`.
+/// This is portable across sandboxed and Nix environments (no `/usr/bin/env`
+/// dependency) since `/bin/sh` is effectively always available.
+#[cfg(test)]
+fn build_env_dump_command_with_removals(
+    env_vars: &[(&str, &str)],
+    env_removals: &[&str],
+) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg("env");
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    for key in env_removals {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git")
         .args(args)
@@ -486,4 +576,49 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
         args.join(" "),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_env_dump_command_with_removals;
+
+    /// Verify that `env_remove` prevents the variable from appearing in the
+    /// child process environment. Uses `sh -c env` for portability across
+    /// sandboxed and Nix environments (no `/usr/bin/env` dependency).
+    #[test]
+    fn env_removal_removes_variable_from_child() {
+        // Set RALPH_TEST_VAR and then remove it in the same command.
+        let mut cmd = build_env_dump_command_with_removals(
+            &[("RALPH_TEST_VAR", "should_be_gone")],
+            &["RALPH_TEST_VAR"],
+        );
+        let output = cmd.output().expect("run sh -c env");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("RALPH_TEST_VAR="),
+            "RALPH_TEST_VAR should have been removed from environment, but found it in output"
+        );
+    }
+
+    /// Verify that env vars that are NOT removed still appear.
+    #[test]
+    fn env_removal_preserves_non_removed_variables() {
+        let mut cmd = build_env_dump_command_with_removals(
+            &[
+                ("RALPH_KEEP_VAR", "kept"),
+                ("RALPH_REMOVE_VAR", "removed"),
+            ],
+            &["RALPH_REMOVE_VAR"],
+        );
+        let output = cmd.output().expect("run sh -c env");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("RALPH_KEEP_VAR=kept"),
+            "RALPH_KEEP_VAR should be present"
+        );
+        assert!(
+            !stdout.contains("RALPH_REMOVE_VAR="),
+            "RALPH_REMOVE_VAR should be absent"
+        );
+    }
 }
