@@ -1151,26 +1151,6 @@ pub(crate) fn set_global_config_value(
             crate::daemon::rebase_agent::parse_rebase_agent_backend(raw_value)?;
             config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
         }
-        "workspace.daemon_prd_enabled" => {
-            config.workspace.daemon_prd_enabled = cfg_parse_bool(raw_value, key)?;
-        }
-        "workspace.daemon_prd_question_backends" => {
-            config.workspace.daemon_prd_question_backends = cfg_parse_string_list(raw_value)?;
-        }
-        "workspace.daemon_prd_writer_backend" => {
-            cfg_ensure_backend(raw_value)?;
-            config.workspace.daemon_prd_writer_backend = raw_value.to_owned();
-        }
-        "workspace.daemon_prd_reviewer_backend" => {
-            cfg_ensure_backend(raw_value)?;
-            config.workspace.daemon_prd_reviewer_backend = raw_value.to_owned();
-        }
-        "workspace.daemon_prd_max_revisions" => {
-            config.workspace.daemon_prd_max_revisions = cfg_parse_u32(raw_value, key)?;
-        }
-        "workspace.daemon_prd_backend_timeout_secs" => {
-            config.workspace.daemon_prd_backend_timeout_secs = cfg_parse_u64(raw_value, key)?;
-        }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = cfg_parse_u32(raw_value, key)?;
         }
@@ -2971,5 +2951,35 @@ planner_state_in_prompt = "summary"
         let result =
             set_global_config_value(&mut config, "workflow.max_review_iterations", "abc");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_mutator_rejects_daemon_prd_keys() {
+        // These keys were not supported by `ralph config set --global` before
+        // the shared-mutator refactor and must remain unsupported to preserve
+        // CLI key-coverage parity.
+        let unsupported = [
+            "workspace.daemon_prd_enabled",
+            "workspace.daemon_prd_question_backends",
+            "workspace.daemon_prd_writer_backend",
+            "workspace.daemon_prd_reviewer_backend",
+            "workspace.daemon_prd_max_revisions",
+            "workspace.daemon_prd_backend_timeout_secs",
+        ];
+        for key in &unsupported {
+            let mut config = GlobalConfig::default();
+            let result = set_global_config_value(&mut config, key, "test");
+            assert!(
+                result.is_err(),
+                "key '{key}' should be rejected by the shared mutator"
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported global config key"),
+                "key '{key}' should produce 'unsupported global config key' error"
+            );
+        }
     }
 }

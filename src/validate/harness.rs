@@ -541,16 +541,16 @@ fn inject_daemon_data_dir_arg(data_dir: &Path, args: &mut Vec<OsString>) {
     args.insert(2, OsString::from("--data-dir"));
 }
 
-/// Build a `Command` that demonstrates env-removal works. This is a
-/// free function so the `#[cfg(test)]` unit tests below can exercise
-/// the removal logic without a full `RalphHarness`.
+/// Build a `Command` that dumps its environment via `sh -c env`.
+/// This is portable across sandboxed and Nix environments (no `/usr/bin/env`
+/// dependency) since `/bin/sh` is effectively always available.
 #[cfg(test)]
-fn build_command_with_removals(
-    bin: &Path,
+fn build_env_dump_command_with_removals(
     env_vars: &[(&str, &str)],
     env_removals: &[&str],
 ) -> Command {
-    let mut command = Command::new(bin);
+    let mut command = Command::new("sh");
+    command.arg("-c").arg("env");
     for (key, value) in env_vars {
         command.env(key, value);
     }
@@ -580,28 +580,19 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use super::build_command_with_removals;
+    use super::build_env_dump_command_with_removals;
 
     /// Verify that `env_remove` prevents the variable from appearing in the
-    /// child process environment. We use `env` (or `printenv`) as the "binary"
-    /// so we can inspect the child's environment without needing the ralph binary.
+    /// child process environment. Uses `sh -c env` for portability across
+    /// sandboxed and Nix environments (no `/usr/bin/env` dependency).
     #[test]
     fn env_removal_removes_variable_from_child() {
-        let env_bin = Path::new("/usr/bin/env");
-        if !env_bin.exists() {
-            // Skip gracefully in sandboxed environments.
-            return;
-        }
-
         // Set RALPH_TEST_VAR and then remove it in the same command.
-        let mut cmd = build_command_with_removals(
-            env_bin,
+        let mut cmd = build_env_dump_command_with_removals(
             &[("RALPH_TEST_VAR", "should_be_gone")],
             &["RALPH_TEST_VAR"],
         );
-        let output = cmd.output().expect("run env command");
+        let output = cmd.output().expect("run sh -c env");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             !stdout.contains("RALPH_TEST_VAR="),
@@ -612,20 +603,14 @@ mod tests {
     /// Verify that env vars that are NOT removed still appear.
     #[test]
     fn env_removal_preserves_non_removed_variables() {
-        let env_bin = Path::new("/usr/bin/env");
-        if !env_bin.exists() {
-            return;
-        }
-
-        let mut cmd = build_command_with_removals(
-            env_bin,
+        let mut cmd = build_env_dump_command_with_removals(
             &[
                 ("RALPH_KEEP_VAR", "kept"),
                 ("RALPH_REMOVE_VAR", "removed"),
             ],
             &["RALPH_REMOVE_VAR"],
         );
-        let output = cmd.output().expect("run env command");
+        let output = cmd.output().expect("run sh -c env");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains("RALPH_KEEP_VAR=kept"),
