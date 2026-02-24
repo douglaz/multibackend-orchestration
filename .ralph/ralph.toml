@@ -92,6 +92,7 @@ enabled = "auto"
 [backends.gemini.models]
 final_reviewer = "gemini-3-pro-preview"
 arbiter = "gemini-3-pro-preview"
+completer = "gemini-3-pro-preview"
 
 [backends.gemini.role_timeouts]
 
