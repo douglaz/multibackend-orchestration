@@ -444,10 +444,6 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
-                            eprintln!(
-                                "prd: failed to advance {}/{}#{}: {err}",
-                                config.owner, config.repo, issue_number
-                            );
                             let mut errs = errors.lock().expect("errors lock poisoned");
                             errs.push((issue_number, err.to_string()));
                         }
@@ -459,10 +455,6 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                                     None => "unknown panic".to_string(),
                                 },
                             };
-                            eprintln!(
-                                "prd: PANIC while advancing {}/{}#{}: {msg}",
-                                config.owner, config.repo, issue_number
-                            );
                             let mut errs = errors.lock().expect("errors lock poisoned");
                             errs.push((issue_number, format!("panic: {msg}")));
                         }
@@ -472,12 +464,18 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
         }
     });
 
-    // Phase 5: emit aggregated errors (informational, tick is not short-circuited)
+    // Phase 5: emit aggregated errors once after all workers complete
     let collected_errors = errors.into_inner().expect("errors lock poisoned");
-    if !collected_errors.is_empty() {
-        for (issue_num, msg) in &collected_errors {
+    for (issue_num, msg) in &collected_errors {
+        if msg.starts_with("panic: ") {
             eprintln!(
-                "prd: issue {}/{}#{} error: {msg}",
+                "prd: PANIC while advancing {}/{}#{}: {}",
+                config.owner, config.repo, issue_num,
+                &msg["panic: ".len()..]
+            );
+        } else {
+            eprintln!(
+                "prd: failed to advance {}/{}#{}: {msg}",
                 config.owner, config.repo, issue_num
             );
         }
