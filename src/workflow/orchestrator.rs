@@ -1846,6 +1846,17 @@ impl Orchestrator {
                                 total_completers = total_completers.saturating_sub(1);
                                 continue;
                             }
+                            Err(RalphError::BackendCommandFailed { ref backend, ref details }) => {
+                                warn!(
+                                    loop = loop_number,
+                                    backend = completer_backend_name,
+                                    error_backend = backend.as_str(),
+                                    details = details.as_str(),
+                                    "completer backend command failed; skipping vote"
+                                );
+                                total_completers = total_completers.saturating_sub(1);
+                                continue;
+                            }
                             Err(other) => return Err(other),
                         };
                         debug!(loop = loop_number, backend = completer_backend_name, "completer responded");
