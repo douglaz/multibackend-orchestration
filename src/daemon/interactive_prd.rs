@@ -274,6 +274,13 @@ fn create_backend(backend_spec: &str, global_config: &GlobalConfig) -> Result<Cl
 
 const QUESTION_GEN_PROMPT: &str = r#"You are an engineering specification analyst. Given the following GitHub issue that describes a feature idea, generate 3-5 clarifying questions that will help produce a complete engineering specification.
 
+Before generating questions, explore the project to understand its structure and context:
+1. List the top-level directory tree to understand the project layout
+2. Read key documentation files (README, AGENTS.md, docs/, etc.) if they exist
+3. Browse relevant source files to understand existing architecture, data models, and patterns
+
+Use this understanding to ask informed, specific questions that go beyond what could be asked from the issue text alone. Avoid asking about details that are already evident from the codebase.
+
 Focus on:
 - Missing technical details (API design, data models, error handling)
 - Scope ambiguities (what's in/out of scope)
