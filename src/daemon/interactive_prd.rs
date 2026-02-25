@@ -235,6 +235,13 @@ pub struct PrdPollConfig {
     pub backend_timeout_secs: u64,
     pub global_config: GlobalConfig,
     pub verbose: bool,
+    /// Maximum number of PRD issues to advance concurrently.
+    /// Sourced from `daemon_max_concurrent` in the workspace config.
+    pub max_concurrent: usize,
+    /// When true, the repo clone has already been refreshed (e.g. by the
+    /// concurrent entry point) so per-task backend helpers skip their own
+    /// `refresh_repo_clone()` call to avoid racing on the shared clone.
+    pub repo_pre_refreshed: bool,
 }
 
 impl PrdPollConfig {
@@ -434,6 +441,106 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                 "prd: failed to advance active {}/{}#{}: {err}",
                 config.owner, config.repo, issue.number
             );
+        }
+    }
+
+    Ok(())
+}
+
+/// Poll for `ralph:prd` issues and advance them **concurrently**.
+///
+/// Each issue is advanced in its own `spawn_blocking` task, bounded by
+/// `config.max_concurrent`.  Long-running backend calls on one issue
+/// (e.g. draft generation) no longer block state transitions on others.
+///
+/// The bot login is pre-fetched once and shared across all tasks so that
+/// concurrent issues don't race on `gh api user`.
+pub async fn poll_and_advance_prd_concurrent(mut config: PrdPollConfig) -> Result<()> {
+    // Refresh the repo clone once upfront so concurrent tasks don't race
+    // on `git fetch` / `git reset --hard` against the shared clone dir.
+    {
+        let cfg = config.clone();
+        crate::daemon::runtime::spawn_blocking_op(move || cfg.refresh_repo_clone()).await?;
+    }
+    config.repo_pre_refreshed = true;
+    let config = Arc::new(config);
+
+    // Step 1: Collect and deduplicate issues (blocking GitHub CLI calls).
+    let all_issues = {
+        let cfg = config.clone();
+        crate::daemon::runtime::spawn_blocking_op(move || {
+            let mut seen = std::collections::HashSet::<u32>::new();
+            let mut deduped: Vec<GhIssue> = Vec::new();
+
+            let labels = vec!["ralph:prd".to_owned()];
+            let (issues, _) = github::poll_issues(&cfg.owner, &cfg.repo, &labels)?;
+            for issue in issues {
+                if seen.insert(issue.number) {
+                    deduped.push(issue);
+                }
+            }
+
+            let active_labels = vec!["ralph:prd-active".to_owned()];
+            let (active_issues, _) = github::poll_issues(&cfg.owner, &cfg.repo, &active_labels)?;
+            for issue in active_issues {
+                if seen.insert(issue.number) {
+                    deduped.push(issue);
+                }
+            }
+
+            Ok(deduped)
+        })
+        .await?
+    };
+
+    if all_issues.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Pre-fetch bot login so concurrent tasks don't race on `gh api user`.
+    let bot_login: Option<String> = {
+        crate::daemon::runtime::spawn_blocking_op(|| {
+            match github::fetch_authenticated_login() {
+                Ok(login) => Ok(Some(login)),
+                Err(err) => {
+                    eprintln!("prd: warning: failed to pre-fetch bot login: {err}");
+                    Ok(None)
+                }
+            }
+        })
+        .await?
+    };
+
+    // Step 3: Advance each issue concurrently, bounded by max_concurrent.
+    let max_concurrent = config.max_concurrent.max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for issue in all_issues {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| RalphError::InteractivePrdFailed(format!("semaphore closed: {e}")))?;
+        let cfg = config.clone();
+        let bot_login_pre = bot_login.clone();
+
+        join_set.spawn_blocking(move || {
+            let _permit = permit; // held until this task completes
+            let mut bot_login_cache = bot_login_pre;
+            if let Err(err) = advance_issue(&cfg, &issue, &mut bot_login_cache) {
+                eprintln!(
+                    "prd: failed to advance {}/{}#{}: {err}",
+                    cfg.owner, cfg.repo, issue.number
+                );
+            }
+        });
+    }
+
+    // Collect results (individual issue errors are already logged above).
+    while let Some(result) = join_set.join_next().await {
+        if let Err(join_err) = result {
+            eprintln!("prd: task join error: {join_err}");
         }
     }
 
@@ -1016,7 +1123,9 @@ fn generate_revision_from_feedback_with_timeout(
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
+    if !config.repo_pre_refreshed {
+        config.refresh_repo_clone()?;
+    }
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
@@ -1263,7 +1372,9 @@ fn generate_draft_from_answers_with_timeout(
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
+    if !config.repo_pre_refreshed {
+        config.refresh_repo_clone()?;
+    }
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let writer = create_backend(&config.writer_backend, &config.global_config)?;
@@ -1390,7 +1501,9 @@ fn run_review_with_retry_sync(
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
 fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
-    config.refresh_repo_clone()?;
+    if !config.repo_pre_refreshed {
+        config.refresh_repo_clone()?;
+    }
     let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
@@ -2464,6 +2577,8 @@ mod tests {
             backend_timeout_secs: 30,
             global_config: global,
             verbose: false,
+            max_concurrent: 1,
+            repo_pre_refreshed: false,
         }
     }
 
@@ -2938,6 +3053,8 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            repo_pre_refreshed: false,
         };
         assert_eq!(config.repo_clone_path(), PathBuf::from("/data/acme/widgets"));
     }
@@ -2978,6 +3095,8 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            repo_pre_refreshed: false,
         };
         // Create the dir but not .git — should succeed without error
         std::fs::create_dir_all(config.repo_clone_path()).unwrap();
@@ -3061,6 +3180,8 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            repo_pre_refreshed: false,
         };
 
         config.refresh_repo_clone().unwrap();
