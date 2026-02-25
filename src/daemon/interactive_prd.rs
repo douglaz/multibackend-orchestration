@@ -262,6 +262,35 @@ impl PrdPollConfig {
             .unwrap_or_else(|| self.repo_clone_path())
     }
 
+    /// Reset the worker directory to a clean state (HEAD of base repo).
+    ///
+    /// Called before each issue so that leftover files from a previous issue
+    /// in the same worker do not leak into the next one.
+    fn reset_worker_dir(&self) {
+        let Some(ref wdir) = self.worker_cwd else { return };
+        if !wdir.join(".git").exists() {
+            return;
+        }
+        let base = self.repo_clone_path();
+        if let Ok(head_out) = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&base)
+            .output()
+        {
+            if head_out.status.success() {
+                let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+                let _ = std::process::Command::new("git")
+                    .args(["reset", "--hard", &head])
+                    .current_dir(wdir)
+                    .output();
+                let _ = std::process::Command::new("git")
+                    .args(["clean", "-fd"])
+                    .current_dir(wdir)
+                    .output();
+            }
+        }
+    }
+
     /// Create a per-worker clone of the repo checkout via `git worktree add`.
     ///
     /// Falls back to a simple directory copy if git worktree fails (e.g. the
@@ -326,9 +355,9 @@ impl PrdPollConfig {
             }
         }
 
-        // Fallback: just create the directory so backends have a cwd
-        let _ = fs::create_dir_all(&worker_dir);
-        worker_dir
+        // Fallback: use the base repo path so backends still have a valid cwd
+        // (an empty directory would lack the repo content they need).
+        base
     }
 
     /// Fetch latest from origin and reset the clone to origin's default branch.
@@ -536,6 +565,10 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                     let Some(issue) = issue else { break };
 
                     let issue_number = issue.number;
+
+                    // Reset the worktree to a clean state before each issue
+                    // so leftover files from the previous issue don't leak.
+                    worker_config.reset_worker_dir();
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         advance_issue(&worker_config, &issue, &mut bot_login_cache)

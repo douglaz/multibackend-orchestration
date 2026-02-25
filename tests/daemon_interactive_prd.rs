@@ -2309,6 +2309,7 @@ esac; exit 0
 /// marker text), the bot should still post its own marker comment and hydrate
 /// state from the bot-authored comment, not the user spoof.
 #[test]
+#[serial]
 fn user_marker_spoof_does_not_block_bot_marker_posting() {
     let h =
         RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
@@ -3369,42 +3370,46 @@ FIFO_A="{fifo_a_str}"
 FIFO_B="{fifo_b_str}"
 FLAGS="{flags_str}"
 
-# flock-based atomic counter operations
+# mkdir-based spinlock (portable — no flock dependency)
+_lock() {{
+  while ! mkdir "$LOCK.d" 2>/dev/null; do :; done
+}}
+_unlock() {{
+  rmdir "$LOCK.d"
+}}
+
 inc_active() {{
-  (
-    flock 9
-    cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
-    cur=$((cur + 1))
-    printf '%d' "$cur" > "$ACTIVE"
-    pk=$(cat "$PEAK" 2>/dev/null || printf '0')
-    if [ "$cur" -gt "$pk" ]; then
-      printf '%d' "$cur" > "$PEAK"
-    fi
-  ) 9>"$LOCK"
+  _lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur + 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  pk=$(cat "$PEAK" 2>/dev/null || printf '0')
+  if [ "$cur" -gt "$pk" ]; then
+    printf '%d' "$cur" > "$PEAK"
+  fi
+  _unlock
 }}
 
 dec_active() {{
-  (
-    flock 9
-    cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
-    cur=$((cur - 1))
-    printf '%d' "$cur" > "$ACTIVE"
-  ) 9>"$LOCK"
+  _lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur - 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  _unlock
 }}
 
 # Atomically claim a slot number (1 or 2), cycling per pair.
 claim_slot() {{
-  (
-    flock 9
-    s=$(cat "$SLOT" 2>/dev/null || printf '0')
-    s=$((s + 1))
-    printf '%d' "$s" > "$SLOT"
-    if [ $((s % 2)) -eq 1 ]; then
-      printf '1'
-    else
-      printf '2'
-    fi
-  ) 9>"$LOCK"
+  _lock
+  s=$(cat "$SLOT" 2>/dev/null || printf '0')
+  s=$((s + 1))
+  printf '%d' "$s" > "$SLOT"
+  if [ $((s % 2)) -eq 1 ]; then
+    printf '1'
+  else
+    printf '2'
+  fi
+  _unlock
 }}
 
 case "$1" in
@@ -3739,7 +3744,10 @@ fn refresh_repo_clone_once_before_processing() {
     let clone_dir = data_dir.join("acme").join("widgets");
     fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
 
-    // Mock git: logs "refresh" on fetch
+    // Mock git: logs "refresh" on fetch.  Only handle commands the test and
+    // poll_and_advance_prd actually need; exit 1 for anything else so that
+    // a stale PATH leak doesn't make `git rev-parse --show-toplevel` succeed
+    // in a concurrently running test (guard_not_git_repo calls rev-parse).
     let git_script = format!(
         r#"#!/bin/sh
 EVENT_LOG="{event_log_str}"
@@ -3748,11 +3756,11 @@ case "$1" in
     printf 'refresh\n' >> "$EVENT_LOG"
     exit 0
     ;;
-  reset)
+  reset|checkout|worktree|clean)
     exit 0
     ;;
   *)
-    exit 0
+    exit 1
     ;;
 esac
 "#
