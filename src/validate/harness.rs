@@ -604,10 +604,7 @@ mod tests {
     #[test]
     fn env_removal_preserves_non_removed_variables() {
         let mut cmd = build_env_dump_command_with_removals(
-            &[
-                ("RALPH_KEEP_VAR", "kept"),
-                ("RALPH_REMOVE_VAR", "removed"),
-            ],
+            &[("RALPH_KEEP_VAR", "kept"), ("RALPH_REMOVE_VAR", "removed")],
             &["RALPH_REMOVE_VAR"],
         );
         let output = cmd.output().expect("run sh -c env");

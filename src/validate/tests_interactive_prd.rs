@@ -14,10 +14,9 @@ use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
 
-/// Serializes access to process-global PATH (and other env vars) across
-/// conformance tests that call `poll_and_advance_prd` with mock scripts.
-/// The validate runner executes tests in parallel via `thread::scope`, so
-/// without this lock, concurrent `set_var("PATH", ...)` calls race.
+/// Serializes access to process-global env vars in tests that inject
+/// `RALPH_TEST_INJECT_PANIC`. The validate runner executes tests in parallel
+/// via `thread::scope`, so env mutation must be guarded.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -3400,6 +3399,8 @@ fn prd_poll_config_max_concurrent_field(_harness: &RalphHarness) -> TestResult {
             owner: "o".to_string(),
             repo: "r".to_string(),
             data_dir: PathBuf::from("/tmp"),
+            git_bin: "git".to_string(),
+            gh_bin: "gh".to_string(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -3428,6 +3429,8 @@ fn max_concurrent_zero_treated_as_one(_harness: &RalphHarness) -> TestResult {
             owner: "o".to_string(),
             repo: "r".to_string(),
             data_dir: PathBuf::from("/tmp"),
+            git_bin: "git".to_string(),
+            gh_bin: "gh".to_string(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -3505,15 +3508,12 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -3526,12 +3526,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed");
         let count: u32 = fs::read_to_string(&counter)
@@ -3609,15 +3604,12 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -3630,12 +3622,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(
             result.is_ok(),
@@ -3709,15 +3696,12 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -3732,12 +3716,9 @@ exit 0
 
         // Inject a real panic for issue #110
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
         let result = poll_and_advance_prd(&config);
         unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
-        unsafe { std::env::set_var("PATH", &old) };
         drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed despite #110 panic");
@@ -3884,15 +3865,12 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -3905,12 +3883,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed");
         let peak: u32 = fs::read_to_string(&peak_file)
@@ -4009,15 +3982,12 @@ exit 0
             fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -4030,12 +4000,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed: {:?}", result);
 
@@ -4182,15 +4147,12 @@ exit 0
         let clone_dir = data_dir.join("acme").join("widgets");
         fs::create_dir_all(&clone_dir).unwrap();
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         let config = PrdPollConfig {
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -4202,10 +4164,6 @@ exit 0
             max_concurrent: 2,
             worker_cwd: None,
         };
-
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
 
         // Bounded watchdog: run poll_and_advance_prd on a spawned thread
         // with a join timeout so a regression (FIFO deadlock under sequential
@@ -4222,9 +4180,6 @@ exit 0
             .recv_timeout(watchdog_timeout)
             .expect("slow/fast conformance test timed out — possible FIFO deadlock regression");
         let _ = handle.join();
-
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should complete: {:?}", result);
         assert!(
@@ -4350,6 +4305,8 @@ exit 0
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -4362,17 +4319,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed: {:?}", result);
         let log_content = fs::read_to_string(&event_log).unwrap_or_default();
@@ -4534,6 +4481,8 @@ exit 0
             owner: "acme".to_string(),
             repo: "widgets".to_string(),
             data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_string(), "codex".to_string()],
             writer_backend: "claude".to_string(),
@@ -4546,17 +4495,7 @@ exit 0
             worker_cwd: None,
         };
 
-        let path_env = format!(
-            "{}:{}",
-            scripts_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var("PATH").unwrap_or_default();
-        unsafe { std::env::set_var("PATH", &path_env) };
         let result = poll_and_advance_prd(&config);
-        unsafe { std::env::set_var("PATH", &old) };
-        drop(_guard);
 
         assert!(result.is_ok(), "tick should succeed: {:?}", result);
         let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
