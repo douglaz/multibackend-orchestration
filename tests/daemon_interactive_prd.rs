@@ -3093,7 +3093,10 @@ fn concurrent_advancement_slow_and_fast() {
         .arg(&gate_fifo)
         .status()
         .expect("mkfifo should succeed");
-    assert!(mkfifo_status.success(), "mkfifo failed with status: {mkfifo_status}");
+    assert!(
+        mkfifo_status.success(),
+        "mkfifo failed with status: {mkfifo_status}"
+    );
 
     // Event log with flock-based atomic append to capture ordering.
     let event_log = tmp.path().join("event_log");
@@ -3256,8 +3259,9 @@ exit 0
         let r = poll_and_advance_prd(&config_clone);
         let _ = tx.send(r);
     });
-    let result = rx.recv_timeout(watchdog_timeout)
-        .expect("concurrent_advancement_slow_and_fast timed out — possible FIFO deadlock regression");
+    let result = rx.recv_timeout(watchdog_timeout).expect(
+        "concurrent_advancement_slow_and_fast timed out — possible FIFO deadlock regression",
+    );
     let _ = handle.join();
 
     unsafe { std::env::set_var("PATH", &old_path) };
@@ -3536,7 +3540,8 @@ exit 0
         let r = poll_and_advance_prd(&config_clone);
         let _ = tx.send(r);
     });
-    let result = rx.recv_timeout(watchdog_timeout)
+    let result = rx
+        .recv_timeout(watchdog_timeout)
         .expect("bounded_concurrency_peak test timed out — possible FIFO deadlock regression");
     let _ = handle.join();
 
@@ -3688,7 +3693,11 @@ exit 0
     unsafe { std::env::set_var("PATH", &old_path) };
 
     // Tick completes despite issue #110 panicking
-    assert!(result.is_ok(), "tick should succeed despite issue #110 panic: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "tick should succeed despite issue #110 panic: {:?}",
+        result
+    );
 
     // Issue #111 still advanced (its label edit was reached)
     assert!(
@@ -3704,8 +3713,7 @@ exit 0
         "panicking issue #110 should have persisted failure state"
     );
     let state_raw = fs::read_to_string(&state_path).expect("read state #110");
-    let state: InteractivePrdState =
-        serde_json::from_str(&state_raw).expect("parse state #110");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state #110");
     assert!(
         state.error_count >= 1,
         "issue #110 error_count should be >= 1 after panic, got {}",
@@ -3886,6 +3894,361 @@ exit 0
         Some("refresh"),
         "refresh must occur before any per-issue processing; events: {:?}",
         events
+    );
+}
+
+/// With `max_concurrent=1` and multiple issues, a reset must run before each issue.
+#[test]
+#[serial]
+fn single_worker_reset_runs_before_each_issue() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let event_log = tmp.path().join("event_log");
+    let event_log_str = event_log.to_string_lossy().into_owned();
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+    let git_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch) printf 'refresh\n' >> "$EVENT_LOG"; exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset)
+    case "$3" in
+      origin/HEAD|origin/main|origin/master) printf 'refresh-reset\n' >> "$EVENT_LOG" ;;
+      *) printf 'worker-reset\n' >> "$EVENT_LOG" ;;
+    esac
+    exit 0
+    ;;
+  clean) printf 'worker-clean\n' >> "$EVENT_LOG"; exit 0 ;;
+  checkout|worktree) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+    );
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":501,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":502,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            501) printf 'edit:501\n' >> "$EVENT_LOG" ;;
+            502) printf 'edit:502\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in comments) want_comments=1 ;; esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    let git_path = scripts_dir.join("git");
+    fs::write(&git_path, git_script).expect("write git script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+        fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let config = PrdPollConfig {
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        data_dir: data_dir.to_path_buf(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+        writer_backend: "claude".to_owned(),
+        reviewer_backend: "codex".to_owned(),
+        max_revisions: 1,
+        backend_timeout_secs: 2,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 1,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+    let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+    let events: Vec<&str> = log_content.lines().collect();
+    let reset_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| (*e == "worker-reset").then_some(idx))
+        .collect();
+    assert_eq!(
+        reset_positions.len(),
+        2,
+        "expected one reset per issue in single-worker mode; events: {:?}",
+        events
+    );
+    let edit_501 = events
+        .iter()
+        .position(|e| *e == "edit:501")
+        .expect("missing edit:501");
+    let edit_502 = events
+        .iter()
+        .position(|e| *e == "edit:502")
+        .expect("missing edit:502");
+    assert!(
+        reset_positions[0] < edit_501,
+        "first reset must happen before issue 501 edit; events: {:?}",
+        events
+    );
+    assert!(
+        reset_positions[1] < edit_502 && edit_501 < reset_positions[1],
+        "second reset must happen between issue 501 and 502 processing; events: {:?}",
+        events
+    );
+}
+
+/// When worktree setup fails for parallel mode, processing should degrade to
+/// sequential execution rather than running multiple workers on a shared checkout.
+#[test]
+#[serial]
+fn worktree_setup_failure_falls_back_to_sequential() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+    let git_log = tmp.path().join("git_events");
+    let git_log_str = git_log.to_string_lossy().into_owned();
+    let peak_file = tmp.path().join("peak");
+    let active_file = tmp.path().join("active");
+    let lock_dir = tmp.path().join("counter-lock");
+    let flags_dir = tmp.path().join("flags");
+    fs::write(&peak_file, "0").expect("init peak");
+    fs::write(&active_file, "0").expect("init active");
+    fs::create_dir_all(&flags_dir).expect("create flags dir");
+    let peak_str = peak_file.to_string_lossy().into_owned();
+    let active_str = active_file.to_string_lossy().into_owned();
+    let lock_dir_str = lock_dir.to_string_lossy().into_owned();
+    let flags_str = flags_dir.to_string_lossy().into_owned();
+
+    let git_script = format!(
+        r#"#!/bin/sh
+LOG="{git_log_str}"
+case "$1" in
+  fetch) exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset|clean|checkout) exit 0 ;;
+  worktree)
+    printf 'worktree_fail\n' >> "$LOG"
+    exit 1
+    ;;
+  *) exit 0 ;;
+esac
+"#
+    );
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+PEAK="{peak_str}"
+ACTIVE="{active_str}"
+LOCKDIR="{lock_dir_str}"
+FLAGS="{flags_str}"
+
+lock() {{
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do :; done
+}}
+unlock() {{
+  rmdir "$LOCKDIR"
+}}
+inc_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur + 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  pk=$(cat "$PEAK" 2>/dev/null || printf '0')
+  if [ "$cur" -gt "$pk" ]; then
+    printf '%d' "$cur" > "$PEAK"
+  fi
+  unlock
+}}
+dec_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur - 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  unlock
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":610,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":611,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        ISSUE=""
+        for arg in "$@"; do
+          case "$arg" in 610|611) ISSUE="$arg" ;; esac
+        done
+        if [ -n "$ISSUE" ] && [ ! -f "$FLAGS/$ISSUE" ]; then
+          touch "$FLAGS/$ISSUE"
+          inc_active
+          sleep 1
+          dec_active
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in comments) want_comments=1 ;; esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    let git_path = scripts_dir.join("git");
+    fs::write(&git_path, git_script).expect("write git script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+        fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let config = PrdPollConfig {
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        data_dir: data_dir.to_path_buf(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+        writer_backend: "claude".to_owned(),
+        reviewer_backend: "codex".to_owned(),
+        max_revisions: 1,
+        backend_timeout_secs: 5,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+    let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        git_log_content.contains("worktree_fail"),
+        "worktree setup failure should be observed"
+    );
+    let peak: u32 = fs::read_to_string(&peak_file)
+        .expect("read peak")
+        .trim()
+        .parse()
+        .expect("parse peak");
+    assert_eq!(
+        peak, 1,
+        "peak concurrency should be 1 after sequential fallback, got {peak}"
     );
 }
 

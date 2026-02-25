@@ -262,45 +262,178 @@ impl PrdPollConfig {
             .unwrap_or_else(|| self.repo_clone_path())
     }
 
-    /// Reset the worker directory to a clean state (HEAD of base repo).
+    fn copy_dir_contents_recursive(src: &Path, dst: &Path) -> Result<()> {
+        if !src.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(dst).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to create directory {}: {err}",
+                dst.display()
+            ))
+        })?;
+
+        for entry in fs::read_dir(src).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to read directory {}: {err}",
+                src.display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to read directory entry in {}: {err}",
+                    src.display()
+                ))
+            })?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            let file_type = entry.file_type().map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to inspect {}: {err}",
+                    src_path.display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                Self::copy_dir_contents_recursive(&src_path, &dst_path)?;
+            } else if file_type.is_file() {
+                if let Some(parent) = dst_path.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        RalphError::InteractivePrdFailed(format!(
+                            "failed to create directory {}: {err}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                fs::copy(&src_path, &dst_path).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to copy {} -> {}: {err}",
+                        src_path.display(),
+                        dst_path.display()
+                    ))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reset the effective working directory to a clean state (HEAD of base repo).
     ///
     /// Called before each issue so that leftover files from a previous issue
-    /// in the same worker do not leak into the next one.
-    fn reset_worker_dir(&self) {
-        let Some(ref wdir) = self.worker_cwd else { return };
-        if !wdir.join(".git").exists() {
-            return;
-        }
+    /// do not leak into the next one.
+    fn reset_effective_repo_dir(&self) -> Result<()> {
+        let wdir = self.effective_repo_cwd();
         let base = self.repo_clone_path();
-        if let Ok(head_out) = std::process::Command::new("git")
+
+        // Non-git fallback for tests/dev environments: keep per-worker
+        // directories isolated by re-syncing from base directory each issue.
+        if !base.join(".git").exists() {
+            if wdir == base {
+                // Single-worker non-git mode cannot clone from itself; keep as-is.
+                fs::create_dir_all(&wdir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to ensure working directory {}: {err}",
+                        wdir.display()
+                    ))
+                })?;
+                return Ok(());
+            }
+
+            if wdir.exists() {
+                fs::remove_dir_all(&wdir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to remove worker directory {}: {err}",
+                        wdir.display()
+                    ))
+                })?;
+            }
+            fs::create_dir_all(&wdir).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to create worker directory {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+            Self::copy_dir_contents_recursive(&base, &wdir)?;
+            return Ok(());
+        }
+
+        if !wdir.join(".git").exists() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "working directory {} is not a git repository",
+                wdir.display()
+            )));
+        }
+
+        let head_out = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&base)
             .output()
-        {
-            if head_out.status.success() {
-                let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-                let _ = std::process::Command::new("git")
-                    .args(["reset", "--hard", &head])
-                    .current_dir(wdir)
-                    .output();
-                let _ = std::process::Command::new("git")
-                    .args(["clean", "-fd"])
-                    .current_dir(wdir)
-                    .output();
-            }
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to read HEAD from {}: {err}",
+                    base.display()
+                ))
+            })?;
+        if !head_out.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "failed to read HEAD from {}: {}",
+                base.display(),
+                String::from_utf8_lossy(&head_out.stderr).trim()
+            )));
         }
+        let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let reset = std::process::Command::new("git")
+            .args(["reset", "--hard", &head])
+            .current_dir(&wdir)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to reset {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+        if !reset.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git reset failed in {}: {}",
+                wdir.display(),
+                String::from_utf8_lossy(&reset.stderr).trim()
+            )));
+        }
+
+        // Default cleanup mode: remove untracked files/directories, keep ignored files.
+        // Exclude `.ralph/` so daemon runtime state (e.g. interactive PRD JSON)
+        // is not deleted between issues.
+        let clean = std::process::Command::new("git")
+            .args(["clean", "-fd", "-e", ".ralph/"])
+            .current_dir(&wdir)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to clean {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+        if !clean.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git clean failed in {}: {}",
+                wdir.display(),
+                String::from_utf8_lossy(&clean.stderr).trim()
+            )));
+        }
+
+        Ok(())
     }
 
     /// Create a per-worker clone of the repo checkout via `git worktree add`.
     ///
-    /// Falls back to a simple directory copy if git worktree fails (e.g. the
-    /// base is not a git repo).  Returns the worker-specific directory path.
-    fn setup_worker_dir(&self, worker_id: usize) -> PathBuf {
+    /// Returns the worker-specific directory path, or an error if setup fails.
+    /// This function never falls back to the shared base checkout.
+    fn setup_worker_dir(&self, worker_id: usize) -> Result<PathBuf> {
         let base = self.repo_clone_path();
-        let worker_dir = base.join("..").join(format!(
-            "{}-worker-{}",
-            self.repo, worker_id
-        ));
+        let worker_dir = base
+            .join("..")
+            .join(format!("{}-worker-{}", self.repo, worker_id));
         // Canonicalize parent to avoid `..` in the path
         let worker_dir = worker_dir
             .parent()
@@ -309,55 +442,60 @@ impl PrdPollConfig {
             .unwrap_or(worker_dir);
 
         if worker_dir.join(".git").exists() {
-            // Already set up from a previous tick — reset to base HEAD
-            // so the worktree isn't stale or dirty from prior use.
-            let _ = std::process::Command::new("git")
-                .args(["checkout", "--detach", "HEAD"])
-                .current_dir(&base)
-                .output();
-            // Read current HEAD from base repo
-            if let Ok(head_out) = std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&base)
-                .output()
-            {
-                if head_out.status.success() {
-                    let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-                    let _ = std::process::Command::new("git")
-                        .args(["reset", "--hard", &head])
-                        .current_dir(&worker_dir)
-                        .output();
-                    let _ = std::process::Command::new("git")
-                        .args(["clean", "-fd"])
-                        .current_dir(&worker_dir)
-                        .output();
-                }
-            }
-            return worker_dir;
+            return Ok(worker_dir);
         }
 
-        if base.join(".git").exists() {
-            // Try git worktree (lightweight, shares objects)
-            let wt = std::process::Command::new("git")
-                .args([
-                    "worktree",
-                    "add",
-                    "--detach",
-                    &worker_dir.to_string_lossy(),
-                    "HEAD",
-                ])
-                .current_dir(&base)
-                .output();
-            if let Ok(out) = &wt {
-                if out.status.success() {
-                    return worker_dir;
-                }
+        if !base.join(".git").exists() {
+            if worker_dir.exists() {
+                fs::remove_dir_all(&worker_dir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to remove worker directory {}: {err}",
+                        worker_dir.display()
+                    ))
+                })?;
             }
+            fs::create_dir_all(&worker_dir).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to create worker directory {}: {err}",
+                    worker_dir.display()
+                ))
+            })?;
+            Self::copy_dir_contents_recursive(&base, &worker_dir)?;
+            return Ok(worker_dir);
         }
 
-        // Fallback: use the base repo path so backends still have a valid cwd
-        // (an empty directory would lack the repo content they need).
-        base
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                &worker_dir.to_string_lossy(),
+                "HEAD",
+            ])
+            .current_dir(&base)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to run git worktree add for {}: {err}",
+                    worker_dir.display()
+                ))
+            })?;
+        if !out.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git worktree add failed for {}: {}",
+                worker_dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+
+        if !worker_dir.join(".git").exists() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git worktree add did not create git metadata in {}",
+                worker_dir.display()
+            )));
+        }
+
+        Ok(worker_dir)
     }
 
     /// Fetch latest from origin and reset the clone to origin's default branch.
@@ -534,10 +672,44 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
 
     // Phase 4: bounded concurrent per-issue processing
     let issue_count = deduped_issues.len();
-    let worker_count = std::cmp::min(
-        std::cmp::max(1, config.max_concurrent) as usize,
-        issue_count,
-    );
+    let requested_workers = std::cmp::max(1, config.max_concurrent) as usize;
+    let mut worker_count = std::cmp::min(requested_workers, issue_count);
+    let mut worker_dirs: Vec<PathBuf> = Vec::new();
+
+    if worker_count > 1 {
+        for worker_id in 0..worker_count {
+            match config.setup_worker_dir(worker_id) {
+                Ok(dir) => worker_dirs.push(dir),
+                Err(err) => {
+                    eprintln!(
+                        "prd: warning: failed to setup worker {worker_id} dir; \
+                         falling back to sequential mode: {err}"
+                    );
+                    worker_count = 1;
+                    worker_dirs.clear();
+                    break;
+                }
+            }
+        }
+    }
+    if worker_count > 1 {
+        let unique_count = worker_dirs
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if unique_count != worker_dirs.len() {
+            eprintln!(
+                "prd: warning: worker directory isolation check failed ({} unique for {} workers); \
+                 falling back to sequential mode",
+                unique_count,
+                worker_dirs.len()
+            );
+            worker_count = 1;
+            worker_dirs.clear();
+        }
+    }
+
     let work_queue = std::sync::Mutex::new(std::collections::VecDeque::from(deduped_issues));
     let errors: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
 
@@ -551,7 +723,11 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
             // (avoiding git lock contention and file interference).
             let mut worker_config = config.clone();
             if worker_count > 1 {
-                worker_config.worker_cwd = Some(config.setup_worker_dir(worker_id));
+                worker_config.worker_cwd = Some(worker_dirs[worker_id].clone());
+            } else {
+                // Sequential mode still gets a worker cwd so each issue reset
+                // runs against the base checkout.
+                worker_config.worker_cwd = Some(config.repo_clone_path());
             }
 
             s.spawn(move || {
@@ -568,7 +744,11 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
 
                     // Reset the worktree to a clean state before each issue
                     // so leftover files from the previous issue don't leak.
-                    worker_config.reset_worker_dir();
+                    if let Err(err) = worker_config.reset_effective_repo_dir() {
+                        let mut errs = errors.lock().expect("errors lock poisoned");
+                        errs.push((issue_number, format!("repo reset failed: {err}")));
+                        continue;
+                    }
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         advance_issue(&worker_config, &issue, &mut bot_login_cache)
@@ -612,9 +792,8 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                                 ),
                             };
                             if !state.is_terminal() {
-                                let panic_err = RalphError::InteractivePrdFailed(
-                                    format!("panic: {msg}"),
-                                );
+                                let panic_err =
+                                    RalphError::InteractivePrdFailed(format!("panic: {msg}"));
                                 let _ = finish_transition(
                                     &worker_config,
                                     &mut state,
