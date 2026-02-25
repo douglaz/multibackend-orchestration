@@ -280,7 +280,30 @@ impl PrdPollConfig {
             .unwrap_or(worker_dir);
 
         if worker_dir.join(".git").exists() {
-            // Already set up from a previous tick — reuse as-is
+            // Already set up from a previous tick — reset to base HEAD
+            // so the worktree isn't stale or dirty from prior use.
+            let _ = std::process::Command::new("git")
+                .args(["checkout", "--detach", "HEAD"])
+                .current_dir(&base)
+                .output();
+            // Read current HEAD from base repo
+            if let Ok(head_out) = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&base)
+                .output()
+            {
+                if head_out.status.success() {
+                    let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+                    let _ = std::process::Command::new("git")
+                        .args(["reset", "--hard", &head])
+                        .current_dir(&worker_dir)
+                        .output();
+                    let _ = std::process::Command::new("git")
+                        .args(["clean", "-fd"])
+                        .current_dir(&worker_dir)
+                        .output();
+                }
+            }
             return worker_dir;
         }
 
@@ -609,9 +632,8 @@ fn advance_issue(
     // comma-separated list of issue numbers, advance_issue panics for those
     // issues.  This allows integration and conformance tests to verify that
     // `catch_unwind` isolation works for real panics (not just errors).
-    // Gated behind the `test-hooks` feature so it's compiled only during
-    // `cargo test` (the feature is enabled in [dev-dependencies]).
-    #[cfg(feature = "test-hooks")]
+    // The env var is never set in production; the cost is a single
+    // env::var_os() call that returns None.
     if let Some(val) = std::env::var_os("RALPH_TEST_INJECT_PANIC") {
         let val = val.to_string_lossy();
         let should_panic = val

@@ -3619,6 +3619,7 @@ exit 0
 /// Conformance: panic isolation via real poll_and_advance_prd path.
 /// Issue #110 panics deterministically via `RALPH_TEST_INJECT_PANIC`.
 /// Issue #111 proceeds normally and its label edit creates a flag file.
+///
 fn concurrent_panic_isolation(_harness: &RalphHarness) -> TestResult {
     use crate::config::GlobalConfig;
     use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
