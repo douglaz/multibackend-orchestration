@@ -4758,7 +4758,7 @@ exit 0
 }
 
 // ---------------------------------------------------------------------------
-// PRD-done dispatch conformance tests
+// PRD-done dispatch conformance tests (daemon end-to-end)
 // ---------------------------------------------------------------------------
 
 fn make_test_issue_comment(id: u64, author: &str, body: &str, created_at: &str) -> IssueComment {
@@ -4772,38 +4772,254 @@ fn make_test_issue_comment(id: u64, author: &str, body: &str, created_at: &str) 
     }
 }
 
-/// PRD-done issue dispatches with approved spec as idea (pure parser test).
-fn prd_done_dispatch_uses_approved_spec(_harness: &RalphHarness) -> TestResult {
+/// Build a JSON comment object for embedding in mock gh scripts.
+fn json_comment(id: u64, login: &str, body: &str, created_at: &str) -> String {
+    // Escape body for JSON: replace \ " and newlines
+    let escaped_body = body
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!(
+        r#"{{"id":{id},"author":{{"login":"{login}"}},"body":"{escaped_body}","createdAt":"{created_at}"}}"#
+    )
+}
+
+/// Build a mock gh script for prd-done daemon tests.
+///
+/// - `issues_json`: JSON array for `gh issue list` response
+/// - `comments_json`: JSON for `gh issue view --json comments` response
+///   (should be `{"comments":[...]}` format, or empty string to simulate failure)
+/// - `api_user_response`: response for `gh api user` (empty string to simulate failure)
+fn prd_done_mock_gh_script(
+    issues_json: &str,
+    comments_json: &str,
+    api_user_response: &str,
+) -> String {
+    format!(
+        r####"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        cat <<'ISSUES_EOF'
+{issues_json}
+ISSUES_EOF
+        exit 0
+        ;;
+      edit)
+        if [ -n "${{MOCK_GH_LABEL_LOG:-}}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          cat <<'COMMENTS_EOF'
+{comments_json}
+COMMENTS_EOF
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"Mock issue","body":"Mock body"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf ''; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n'; exit 0 ;;
+      edit) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf '{api_user_response}\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view) printf 'acme/widgets\n'; exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+"####
+    )
+}
+
+/// Write mock gh + ralph scripts and run `daemon start --single-iteration`.
+/// Returns the daemon process output.
+fn run_prd_done_daemon(
+    harness: &RalphHarness,
+    gh_script: &str,
+) -> std::process::Output {
+    let dh =
+        RalphHarness::new_daemon(&harness.ralph_bin, "acme", "widgets").expect("daemon harness");
+    dh.init_workspace().expect("init failed");
+
+    let gh_script_path = dh.write_mock_script("gh", gh_script).expect("write mock gh");
+    let gh_dir = gh_script_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let gh_path = format!("{gh_dir}:{existing_path}");
+
+    let ralph_script = mock_scripts::daemon_mock_ralph_script();
+    let ralph_path_obj = dh
+        .write_mock_script("mock_ralph", &ralph_script)
+        .expect("write mock ralph");
+    let ralph_path = ralph_path_obj.to_string_lossy().into_owned();
+
+    dh.daemon_env(
+        [
+            "daemon",
+            "start",
+            "--repo",
+            "acme/widgets",
+            "--single-iteration",
+        ],
+        &[
+            ("PATH", &gh_path),
+            ("RALPH_DAEMON_BIN", &ralph_path),
+        ],
+    )
+    .expect("daemon start should execute")
+}
+
+/// PRD-done issue dispatches with approved spec and logs success message.
+fn prd_done_dispatch_uses_approved_spec(harness: &RalphHarness) -> TestResult {
     run_case(|| {
         let spec_body = "## Summary\nApproved feature spec.\n\n## Testing\nUnit tests.";
-        let draft_comment = format!(
+        let draft_body = format!(
             "{}\n{}",
             prd_marker(10, "draft", 1),
             format_draft_comment(1, spec_body)
         );
-        let approval_comment = format!(
+        let approval_body = format!(
             "{}\n## PRD Approved\nDraft revision 1 has been approved.",
             prd_marker(10, "status-approved", 1)
         );
 
-        let comments = vec![
-            make_test_issue_comment(100, "ralph-bot", &draft_comment, "2026-01-01T00:00:10Z"),
-            make_test_issue_comment(101, "ralph-bot", &approval_comment, "2026-01-01T00:00:20Z"),
-        ];
-
-        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 10);
-        assert!(result.is_some(), "should extract approved spec");
-        let extracted = result.unwrap();
-        assert_eq!(
-            extracted, spec_body,
-            "extracted spec should match original"
+        let comments_json = format!(
+            r#"{{"comments":[{},{}]}}"#,
+            json_comment(100, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
+            json_comment(101, "ralph-bot", &approval_body, "2026-01-01T00:00:20Z"),
         );
+        let issues_json = r#"[{"number":10,"title":"PRD done issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Test body."}]"#;
+
+        let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
+        let output = run_prd_done_daemon(harness, &gh_script);
+
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("prd-done: using approved spec"),
+            "expected 'prd-done: using approved spec' in stderr, got:\n{stderr}"
+        );
+
+        // Also verify the pure parser still produces correct output
+        let draft_body_2 = format!(
+            "{}\n{}",
+            prd_marker(10, "draft", 1),
+            format_draft_comment(1, spec_body)
+        );
+        let approval_body_2 = format!(
+            "{}\n## PRD Approved\nDraft revision 1 has been approved.",
+            prd_marker(10, "status-approved", 1)
+        );
+        let comments = vec![
+            make_test_issue_comment(100, "ralph-bot", &draft_body_2, "2026-01-01T00:00:10Z"),
+            make_test_issue_comment(101, "ralph-bot", &approval_body_2, "2026-01-01T00:00:20Z"),
+        ];
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 10);
+        assert!(result.is_some(), "parser should extract approved spec");
+        assert_eq!(result.unwrap(), spec_body, "extracted spec should match");
     })
 }
 
-/// Mixed labels (prd-done + prd-approved) are not blocked by has_in_progress_prd_label.
-fn prd_done_mixed_labels_not_blocked(_harness: &RalphHarness) -> TestResult {
+/// Mixed labels (prd-done + prd-approved) are not blocked — daemon claims and dispatches.
+fn prd_done_mixed_labels_not_blocked(harness: &RalphHarness) -> TestResult {
     run_case(|| {
+        let spec_body = "## Summary\nMixed label spec.";
+        let draft_body = format!(
+            "{}\n{}",
+            prd_marker(20, "draft", 1),
+            format_draft_comment(1, spec_body)
+        );
+        let approval_body = format!(
+            "{}\n## PRD Approved",
+            prd_marker(20, "status-approved", 1)
+        );
+
+        let comments_json = format!(
+            r#"{{"comments":[{},{}]}}"#,
+            json_comment(100, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
+            json_comment(101, "ralph-bot", &approval_body, "2026-01-01T00:00:20Z"),
+        );
+        // Issue has ralph:prd-done + ralph:prd-approved + ralph:ready
+        let issues_json = r#"[{"number":20,"title":"Mixed label issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"},{"name":"ralph:prd-approved"}],"body":"Mixed labels."}]"#;
+
+        let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
+        let output = run_prd_done_daemon(harness, &gh_script);
+
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should be dispatched (not blocked by prd-approved in-progress label)
+        assert!(
+            stderr.contains("prd-done: using approved spec"),
+            "mixed labels with prd-done should dispatch with approved spec, stderr:\n{stderr}"
+        );
+
+        // Also verify the label helper directly
         let labels = vec![
             "ralph:prd-approved".to_owned(),
             "ralph:prd-done".to_owned(),
@@ -4813,207 +5029,278 @@ fn prd_done_mixed_labels_not_blocked(_harness: &RalphHarness) -> TestResult {
             !has_in_progress_prd_label(&labels),
             "prd-done should have precedence — issue should not be blocked"
         );
-
-        // Also verify prd-done alone is not blocked
-        let labels2 = vec!["ralph:prd-done".to_owned(), "ralph:ready".to_owned()];
-        assert!(
-            !has_in_progress_prd_label(&labels2),
-            "prd-done + ready should not be blocked"
-        );
     })
 }
 
-/// Missing markers fall back to None and produce a clean result.
-fn prd_done_missing_markers_fallback(_harness: &RalphHarness) -> TestResult {
+/// Missing approved markers → daemon falls back to compose_raw_idea and warns.
+fn prd_done_missing_markers_fallback(harness: &RalphHarness) -> TestResult {
     run_case(|| {
-        // No approval marker at all
-        let draft_comment = format!(
+        // Comments exist but have no approval marker — only a draft
+        let draft_body = format!(
             "{}\n{}",
-            prd_marker(42, "draft", 1),
+            prd_marker(30, "draft", 1),
             format_draft_comment(1, "## Summary\nSpec body.")
         );
-        let comments = vec![make_test_issue_comment(
-            100,
-            "ralph-bot",
-            &draft_comment,
-            "2026-01-01T00:00:10Z",
-        )];
-        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
-        assert!(
-            result.is_none(),
-            "missing approval marker should return None"
+        let comments_json = format!(
+            r#"{{"comments":[{}]}}"#,
+            json_comment(100, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
         );
+        let issues_json = r#"[{"number":30,"title":"Missing markers issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Fallback body."}]"#;
 
-        // Empty comments
-        let result2 = parse_approved_spec_from_comments(&[], "ralph-bot", 42);
-        assert!(result2.is_none(), "empty comments should return None");
-    })
-}
+        let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
+        let output = run_prd_done_daemon(harness, &gh_script);
 
-/// Comments API failure: extract_approved_spec returns None for empty/missing data.
-fn prd_done_comments_api_failure_fallback(_harness: &RalphHarness) -> TestResult {
-    run_case(|| {
-        // When there are no comments (as would happen on API failure fallback),
-        // parse returns None
-        let result = parse_approved_spec_from_comments(&[], "ralph-bot", 42);
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            result.is_none(),
-            "API failure (no comments) should return None"
+            stderr.contains("approved spec not found, falling back"),
+            "expected fallback warning in stderr, got:\n{stderr}"
         );
-
-        // When bot_login doesn't match any comment authors
-        let comments = vec![make_test_issue_comment(
-            100,
-            "some-other-user",
-            &format!(
-                "{}\n## PRD Approved",
-                prd_marker(42, "status-approved", 1)
-            ),
-            "2026-01-01T00:00:10Z",
-        )];
-        let result2 = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        // Should NOT contain the success message
         assert!(
-            result2.is_none(),
-            "wrong bot login should return None"
+            !stderr.contains("prd-done: using approved spec"),
+            "should not use approved spec when markers are missing, stderr:\n{stderr}"
         );
     })
 }
 
-/// User-spoofed status-approved marker does not affect selected revision.
-fn prd_done_user_spoof_ignored(_harness: &RalphHarness) -> TestResult {
+/// Comments API failure (gh issue view returns error) → fallback + warning.
+fn prd_done_comments_api_failure_fallback(harness: &RalphHarness) -> TestResult {
     run_case(|| {
-        let spec_body = "## Summary\nReal spec.";
+        // Use a mock gh that fails on `issue view --json comments`
+        let issues_json = r#"[{"number":40,"title":"API fail issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"API fail body."}]"#;
+
+        // Custom gh script where comments fetch fails
+        let gh_script = format!(
+            r####"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        cat <<'ISSUES_EOF'
+{issues_json}
+ISSUES_EOF
+        exit 0
+        ;;
+      edit)
+        if [ -n "${{MOCK_GH_LABEL_LOG:-}}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          echo "gh: API error fetching comments" >&2
+          exit 1
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"API fail issue","body":"API fail body."}}'
+          exit 0
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf ''; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n'; exit 0 ;;
+      edit) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view) printf 'acme/widgets\n'; exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+"####
+        );
+
+        let output = run_prd_done_daemon(harness, &gh_script);
+
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("approved spec not found, falling back"),
+            "expected fallback warning when comments API fails, stderr:\n{stderr}"
+        );
+    })
+}
+
+/// User-spoofed status-approved marker is ignored — daemon uses bot-authored approval only.
+fn prd_done_user_spoof_ignored(harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let real_spec = "## Summary\nReal spec from bot.";
+        let draft_body = format!(
+            "{}\n{}",
+            prd_marker(50, "draft", 1),
+            format_draft_comment(1, real_spec)
+        );
+        // User spoofs a high-version approval
+        let spoof_body = format!(
+            "{}\n## PRD Approved (SPOOFED)",
+            prd_marker(50, "status-approved", 99)
+        );
+        let real_approval_body = format!(
+            "{}\n## PRD Approved",
+            prd_marker(50, "status-approved", 1)
+        );
+
+        let comments_json = format!(
+            r#"{{"comments":[{},{},{}]}}"#,
+            json_comment(100, "evil-user", &spoof_body, "2026-01-01T00:00:05Z"),
+            json_comment(101, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
+            json_comment(102, "ralph-bot", &real_approval_body, "2026-01-01T00:00:20Z"),
+        );
+        let issues_json = r#"[{"number":50,"title":"Spoof test issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Spoof test."}]"#;
+
+        let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
+        let output = run_prd_done_daemon(harness, &gh_script);
+
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should use the bot-authored v1 approval, not the user-spoofed v99
+        assert!(
+            stderr.contains("prd-done: using approved spec"),
+            "should dispatch with bot-authored approved spec despite user spoof, stderr:\n{stderr}"
+        );
+
+        // Also verify at parser level
         let comments = vec![
-            // User spoof: status-approved-v99 (should be ignored by bot-only filter)
-            make_test_issue_comment(
-                100,
-                "evil-user",
-                &format!(
-                    "{}\n## PRD Approved (SPOOFED)",
-                    prd_marker(42, "status-approved", 99)
-                ),
-                "2026-01-01T00:00:05Z",
-            ),
-            // Real bot draft v1
-            make_test_issue_comment(
-                101,
-                "ralph-bot",
-                &format!(
-                    "{}\n{}",
-                    prd_marker(42, "draft", 1),
-                    format_draft_comment(1, spec_body)
-                ),
-                "2026-01-01T00:00:10Z",
-            ),
-            // Real bot approval v1
-            make_test_issue_comment(
-                102,
-                "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(42, "status-approved", 1)
-                ),
-                "2026-01-01T00:00:20Z",
-            ),
+            make_test_issue_comment(100, "evil-user", &spoof_body, "2026-01-01T00:00:05Z"),
+            make_test_issue_comment(101, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
+            make_test_issue_comment(102, "ralph-bot", &real_approval_body, "2026-01-01T00:00:20Z"),
         ];
-
-        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
-        assert!(result.is_some(), "should extract from bot comments only");
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 50);
+        assert!(result.is_some(), "parser should find bot-authored approval");
         let extracted = result.unwrap();
         assert!(
-            extracted.contains("Real spec"),
-            "should use bot-authored approval, not user spoof; got: {extracted}"
+            extracted.contains("Real spec from bot"),
+            "should use v1 bot draft, got: {extracted}"
         );
     })
 }
 
-/// Highest approved revision wins in end-to-end parsing.
-fn prd_done_highest_revision_wins(_harness: &RalphHarness) -> TestResult {
+/// Highest approved revision wins in end-to-end daemon dispatch.
+fn prd_done_highest_revision_wins(harness: &RalphHarness) -> TestResult {
     run_case(|| {
         let spec_v1 = "## Summary\nDraft v1 spec.";
         let spec_v2 = "## Summary\nDraft v2 spec.";
         let spec_v3 = "## Summary\nDraft v3 spec.";
-        let comments = vec![
-            // Draft v1
-            make_test_issue_comment(
-                100,
-                "ralph-bot",
-                &format!(
-                    "{}\n{}",
-                    prd_marker(42, "draft", 1),
-                    format_draft_comment(1, spec_v1)
-                ),
-                "2026-01-01T00:00:10Z",
-            ),
-            // Approval v1
-            make_test_issue_comment(
-                101,
-                "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(42, "status-approved", 1)
-                ),
-                "2026-01-01T00:00:15Z",
-            ),
-            // Draft v2
-            make_test_issue_comment(
-                102,
-                "ralph-bot",
-                &format!(
-                    "{}\n{}",
-                    prd_marker(42, "draft", 2),
-                    format_draft_comment(2, spec_v2)
-                ),
-                "2026-01-01T00:00:20Z",
-            ),
-            // Approval v2
-            make_test_issue_comment(
-                103,
-                "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(42, "status-approved", 2)
-                ),
-                "2026-01-01T00:00:25Z",
-            ),
-            // Draft v3
-            make_test_issue_comment(
-                104,
-                "ralph-bot",
-                &format!(
-                    "{}\n{}",
-                    prd_marker(42, "draft", 3),
-                    format_draft_comment(3, spec_v3)
-                ),
-                "2026-01-01T00:00:30Z",
-            ),
-            // Approval for v3 (highest)
-            make_test_issue_comment(
-                105,
-                "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(42, "status-approved", 3)
-                ),
-                "2026-01-01T00:00:35Z",
-            ),
-        ];
 
-        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
-        assert!(result.is_some(), "should extract highest approved spec");
+        let draft_v1 = format!(
+            "{}\n{}",
+            prd_marker(60, "draft", 1),
+            format_draft_comment(1, spec_v1)
+        );
+        let approval_v1 = format!(
+            "{}\n## PRD Approved",
+            prd_marker(60, "status-approved", 1)
+        );
+        let draft_v2 = format!(
+            "{}\n{}",
+            prd_marker(60, "draft", 2),
+            format_draft_comment(2, spec_v2)
+        );
+        let approval_v2 = format!(
+            "{}\n## PRD Approved",
+            prd_marker(60, "status-approved", 2)
+        );
+        let draft_v3 = format!(
+            "{}\n{}",
+            prd_marker(60, "draft", 3),
+            format_draft_comment(3, spec_v3)
+        );
+        let approval_v3 = format!(
+            "{}\n## PRD Approved",
+            prd_marker(60, "status-approved", 3)
+        );
+
+        let comments_json = format!(
+            r#"{{"comments":[{},{},{},{},{},{}]}}"#,
+            json_comment(100, "ralph-bot", &draft_v1, "2026-01-01T00:00:10Z"),
+            json_comment(101, "ralph-bot", &approval_v1, "2026-01-01T00:00:15Z"),
+            json_comment(102, "ralph-bot", &draft_v2, "2026-01-01T00:00:20Z"),
+            json_comment(103, "ralph-bot", &approval_v2, "2026-01-01T00:00:25Z"),
+            json_comment(104, "ralph-bot", &draft_v3, "2026-01-01T00:00:30Z"),
+            json_comment(105, "ralph-bot", &approval_v3, "2026-01-01T00:00:35Z"),
+        );
+        let issues_json = r#"[{"number":60,"title":"Multi-revision issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Multi-revision body."}]"#;
+
+        let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
+        let output = run_prd_done_daemon(harness, &gh_script);
+
+        assert_exit_code(&output, 0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("prd-done: using approved spec"),
+            "expected approved spec dispatch for highest revision, stderr:\n{stderr}"
+        );
+
+        // Verify parser selects v3
+        let comments = vec![
+            make_test_issue_comment(100, "ralph-bot", &draft_v1, "2026-01-01T00:00:10Z"),
+            make_test_issue_comment(101, "ralph-bot", &approval_v1, "2026-01-01T00:00:15Z"),
+            make_test_issue_comment(102, "ralph-bot", &draft_v2, "2026-01-01T00:00:20Z"),
+            make_test_issue_comment(103, "ralph-bot", &approval_v2, "2026-01-01T00:00:25Z"),
+            make_test_issue_comment(104, "ralph-bot", &draft_v3, "2026-01-01T00:00:30Z"),
+            make_test_issue_comment(105, "ralph-bot", &approval_v3, "2026-01-01T00:00:35Z"),
+        ];
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 60);
+        assert!(result.is_some(), "parser should extract highest approved");
         let extracted = result.unwrap();
         assert!(
             extracted.contains("Draft v3 spec"),
-            "should select highest revision (v3), got: {extracted}"
+            "should select v3, got: {extracted}"
         );
-        assert!(
-            !extracted.contains("Draft v1 spec"),
-            "should not contain v1"
-        );
-        assert!(
-            !extracted.contains("Draft v2 spec"),
-            "should not contain v2"
-        );
+        assert!(!extracted.contains("Draft v1 spec"), "should not contain v1");
+        assert!(!extracted.contains("Draft v2 spec"), "should not contain v2");
     })
 }
 

@@ -2191,7 +2191,7 @@ pub fn clean_draft_body(raw: &str) -> Option<String> {
         }
     }
     if let Some(last) = lines.last() {
-        if last.trim() == DRAFT_FOOTER {
+        if *last == DRAFT_FOOTER {
             lines.pop();
         }
     }
