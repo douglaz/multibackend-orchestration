@@ -227,8 +227,8 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer evaluating a completed project for quality and correctness."* ]] \
-  || [[ "$prompt" == *"You are the project planner evaluating proposed amendments from final reviewers."* ]] \
+elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]] \
+  || [[ "$prompt" == *"You are a technical evaluator assessing proposed amendments from final reviewers."* ]] \
   || [[ "$prompt" == *"You are a reviewer voting on proposed amendments after considering the planner's positions."* ]] \
   || [[ "$prompt" == *"You are the arbiter resolving disputed amendments where reviewers and planner disagree."* ]]; then
   echo "final review deliberation should be skipped when restart cap is reached" >&2
@@ -280,7 +280,7 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer evaluating a completed project for quality and correctness."* ]]; then
+elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
