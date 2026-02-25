@@ -4,7 +4,7 @@
     "codex",
     "gemini"
   ],
-  "arbiter_backend": "claude",
+  "arbiter_backend": "codex",
   "min_reviewers": 2,
   "consensus_threshold": 1.0,
   "max_restarts": 15
