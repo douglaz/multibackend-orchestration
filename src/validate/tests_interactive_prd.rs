@@ -206,6 +206,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::concurrent_refresh_ordering",
             func: concurrent_refresh_ordering,
         },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_advancement_slow_fast",
+            func: concurrent_advancement_slow_fast,
+        },
     ]
 }
 
@@ -3931,6 +3935,165 @@ exit 0
                 "expected per-issue edit event after refresh, got: {event}"
             );
         }
+    })
+}
+
+/// Conformance: slow issue must not head-of-line block fast issue when
+/// `max_concurrent >= 2`. Uses FIFO (named pipe) for deterministic
+/// synchronization — no sleep or polling.
+///
+/// Issue #80 (slow) blocks on reading a FIFO. Issue #90 (fast) logs its
+/// edit, then writes to the FIFO, unblocking #80. Event log proves fast
+/// completes before slow. Under sequential execution the FIFO read would
+/// deadlock, so completion proves concurrent execution.
+fn concurrent_advancement_slow_fast(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let issue80_flag = data_dir.join("issue80_processed");
+        let issue90_flag = data_dir.join("issue90_processed");
+        let issue80_str = issue80_flag.to_string_lossy().into_owned();
+        let issue90_str = issue90_flag.to_string_lossy().into_owned();
+
+        // FIFO for deterministic handshake
+        let gate_fifo = data_dir.join("slow_gate");
+        let gate_str = gate_fifo.to_string_lossy().into_owned();
+        std::process::Command::new("mkfifo")
+            .arg(&gate_fifo)
+            .status()
+            .expect("mkfifo should succeed");
+
+        // Event log with flock-based atomic append
+        let event_log = data_dir.join("event_log");
+        let event_log_str = event_log.to_string_lossy().into_owned();
+        let lock_file = data_dir.join("event.lock");
+        let lock_str = lock_file.to_string_lossy().into_owned();
+
+        // Track that slow issue has been unblocked (subsequent edit calls pass through)
+        let slow_unblocked = data_dir.join("slow_unblocked");
+        let slow_unblocked_str = slow_unblocked.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+ISSUE80_FLAG="{issue80_str}"
+ISSUE90_FLAG="{issue90_str}"
+GATE="{gate_str}"
+EVENT_LOG="{event_log_str}"
+LOCK="{lock_str}"
+SLOW_UNBLOCKED="{slow_unblocked_str}"
+
+log_event() {{
+  (
+    flock 9
+    printf '%s\n' "$1" >> "$EVENT_LOG"
+  ) 9>"$LOCK"
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":80,"title":"Slow","labels":[{{"name":"ralph:prd"}}],"body":"S"}},{{"number":90,"title":"Fast","labels":[{{"name":"ralph:prd"}}],"body":"F"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        is80=0; is90=0
+        for arg in "$@"; do case "$arg" in 80) is80=1 ;; 90) is90=1 ;; esac; done
+        if [ "$is80" = "1" ]; then
+          if [ ! -f "$SLOW_UNBLOCKED" ]; then
+            read dummy < "$GATE"
+            touch "$SLOW_UNBLOCKED"
+            log_event "edit:80"
+            touch "$ISSUE80_FLAG"
+          fi
+        elif [ "$is90" = "1" ]; then
+          if [ ! -f "$ISSUE90_FLAG" ]; then
+            log_event "edit:90"
+            touch "$ISSUE90_FLAG"
+            printf 'go\n' > "$GATE"
+          fi
+        fi
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let path_env = format!("{}:{}", scripts_dir.display(), std::env::var("PATH").unwrap_or_default());
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 2,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+        };
+
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("PATH").unwrap_or_default();
+        unsafe { std::env::set_var("PATH", &path_env) };
+        let result = poll_and_advance_prd(&config);
+        unsafe { std::env::set_var("PATH", &old) };
+        drop(_guard);
+
+        assert!(result.is_ok(), "tick should complete: {:?}", result);
+        assert!(issue90_flag.exists(), "fast issue #90 should have been processed");
+        assert!(issue80_flag.exists(), "slow issue #80 should have been processed");
+
+        // Verify ordering: fast (edit:90) must precede slow (edit:80)
+        let log_content = fs::read_to_string(&event_log).expect("read event log");
+        let events: Vec<&str> = log_content.lines().collect();
+        assert!(events.len() >= 2, "expected at least 2 events, got: {:?}", events);
+        let fast_pos = events.iter().position(|e| *e == "edit:90");
+        let slow_pos = events.iter().position(|e| *e == "edit:80");
+        assert!(
+            fast_pos.is_some() && slow_pos.is_some(),
+            "both edit events must appear; events: {:?}",
+            events
+        );
+        assert!(
+            fast_pos.unwrap() < slow_pos.unwrap(),
+            "fast edit:90 (pos {}) must precede slow edit:80 (pos {}); events: {:?}",
+            fast_pos.unwrap(),
+            slow_pos.unwrap(),
+            events
+        );
     })
 }
 

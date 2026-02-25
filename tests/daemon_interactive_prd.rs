@@ -3057,9 +3057,15 @@ exit 0
 /// With `max_concurrent >= 2`, a slow issue must not block an immediately-
 /// advanceable issue from advancing in the same tick.
 ///
-/// Uses a mock that makes issue #80's bot-login lookup sleep briefly (via a
-/// file-based barrier) while issue #90 can proceed immediately. Both should
-/// complete within one tick.
+/// Uses FIFO (named pipe) based deterministic synchronization:
+/// - Issue #80 (slow) blocks on reading a FIFO until the fast issue signals.
+/// - Issue #90 (fast) records its advancement to an event log, then writes to
+///   the FIFO unblocking #80.
+/// - An event log captures ordering: fast must record its edit *before* slow
+///   records its edit, proving no head-of-line blocking.
+///
+/// Under sequential execution this would deadlock (issue #80 blocks on FIFO
+/// read, #90 never starts), so success proves true concurrent execution.
 #[test]
 #[serial]
 fn concurrent_advancement_slow_and_fast() {
@@ -3073,19 +3079,50 @@ fn concurrent_advancement_slow_and_fast() {
     let issue90_flag = tmp.path().join("issue90_processed");
     let issue80_str = issue80_flag.to_string_lossy().into_owned();
     let issue90_str = issue90_flag.to_string_lossy().into_owned();
-    let barrier = tmp.path().join("slow_barrier");
-    let barrier_str = barrier.to_string_lossy().into_owned();
+
+    // FIFO for deterministic handshake: fast issue writes, slow issue reads.
+    let gate_fifo = tmp.path().join("slow_gate");
+    let gate_str = gate_fifo.to_string_lossy().into_owned();
+    std::process::Command::new("mkfifo")
+        .arg(&gate_fifo)
+        .status()
+        .expect("mkfifo should succeed");
+
+    // Event log with flock-based atomic append to capture ordering.
+    let event_log = tmp.path().join("event_log");
+    let event_log_str = event_log.to_string_lossy().into_owned();
+    let lock_file = tmp.path().join("event.lock");
+    let lock_str = lock_file.to_string_lossy().into_owned();
+
+    // Tracking file: marks that the slow issue has already completed its
+    // FIFO handshake (so subsequent `issue edit 80` calls pass through).
+    let slow_unblocked = tmp.path().join("slow_unblocked");
+    let slow_unblocked_str = slow_unblocked.to_string_lossy().into_owned();
 
     // gh mock:
     // - Returns issues #80 and #90 (both Pending).
-    // - On `issue edit` for #80, waits for barrier file to appear (simulated slow).
-    // - On `issue edit` for #90, creates barrier file + marks processed immediately.
-    // - Both mark their flag files when their label edit is reached.
+    // - On first `issue edit` for #80 (slow): blocks on FIFO read until
+    //   #90 writes. Subsequent edit calls for #80 pass through immediately.
+    // - On first `issue edit` for #90 (fast): logs "edit:90", marks
+    //   processed, writes to FIFO (unblocking #80).
+    // - Under sequential processing, #80 would block forever on the FIFO
+    //   read, causing a timeout. Only concurrent execution allows completion.
     let gh_script = format!(
         r#"#!/bin/sh
 ISSUE80_FLAG="{issue80_str}"
 ISSUE90_FLAG="{issue90_str}"
-BARRIER="{barrier_str}"
+GATE="{gate_str}"
+EVENT_LOG="{event_log_str}"
+LOCK="{lock_str}"
+SLOW_UNBLOCKED="{slow_unblocked_str}"
+
+log_event() {{
+  (
+    flock 9
+    printf '%s\n' "$1" >> "$EVENT_LOG"
+  ) 9>"$LOCK"
+}}
+
 case "$1" in
   issue)
     case "$2" in
@@ -3113,17 +3150,20 @@ case "$1" in
           esac
         done
         if [ "$is80" = "1" ]; then
-          # Slow: wait for barrier (up to 5s, polling)
-          i=0
-          while [ ! -f "$BARRIER" ] && [ "$i" -lt 50 ]; do
-            sleep 0.1
-            i=$((i + 1))
-          done
-          touch "$ISSUE80_FLAG"
+          # Slow: block on FIFO only once (first edit call)
+          if [ ! -f "$SLOW_UNBLOCKED" ]; then
+            read dummy < "$GATE"
+            touch "$SLOW_UNBLOCKED"
+            log_event "edit:80"
+            touch "$ISSUE80_FLAG"
+          fi
         elif [ "$is90" = "1" ]; then
-          # Fast: signal barrier immediately, mark processed
-          touch "$BARRIER"
-          touch "$ISSUE90_FLAG"
+          if [ ! -f "$ISSUE90_FLAG" ]; then
+            # Fast: log, mark processed, then unblock slow via FIFO write
+            log_event "edit:90"
+            touch "$ISSUE90_FLAG"
+            printf 'go\n' > "$GATE"
+          fi
         fi
         exit 0
         ;;
@@ -3177,6 +3217,9 @@ exit 0
     fs::create_dir_all(&clone_dir).expect("create clone dir");
 
     let global = GlobalConfig::default();
+    // Use a short backend timeout: we only observe the concurrent gh calls
+    // (label edits) via the FIFO handshake; backend (claude/codex) commands
+    // are not mocked and will fail quickly with this timeout.
     let config = PrdPollConfig {
         owner: "acme".to_string(),
         repo: "widgets".to_string(),
@@ -3186,7 +3229,7 @@ exit 0
         writer_backend: "claude".to_string(),
         reviewer_backend: "codex".to_string(),
         max_revisions: 1,
-        backend_timeout_secs: 60,
+        backend_timeout_secs: 2,
         global_config: global,
         verbose: false,
         max_concurrent: 2,
@@ -3200,8 +3243,6 @@ exit 0
     assert!(result.is_ok(), "tick should complete: {:?}", result);
 
     // Both issues must have been processed in the same tick.
-    // With max_concurrent=2, the fast issue (#90) unblocks the slow one (#80)
-    // via the barrier, proving they ran concurrently.
     assert!(
         issue90_flag.exists(),
         "fast issue #90 should have been processed"
@@ -3209,6 +3250,33 @@ exit 0
     assert!(
         issue80_flag.exists(),
         "slow issue #80 should have been processed (unblocked by concurrent #90)"
+    );
+
+    // Verify explicit event ordering: fast issue (#90) must reach its
+    // advancement point (edit:90) before slow issue (#80) completes (edit:80).
+    // This ordering is impossible under sequential processing where #80
+    // would block on the FIFO before #90 ever starts.
+    let log_content = fs::read_to_string(&event_log).expect("read event log");
+    let events: Vec<&str> = log_content.lines().collect();
+    assert!(
+        events.len() >= 2,
+        "expected at least 2 events, got: {:?}",
+        events
+    );
+    let fast_pos = events.iter().position(|e| *e == "edit:90");
+    let slow_pos = events.iter().position(|e| *e == "edit:80");
+    assert!(
+        fast_pos.is_some() && slow_pos.is_some(),
+        "both edit events must appear in log; events: {:?}",
+        events
+    );
+    assert!(
+        fast_pos.unwrap() < slow_pos.unwrap(),
+        "fast issue edit:90 (pos {}) must precede slow issue edit:80 (pos {}); \
+         this ordering fails under sequential processing; events: {:?}",
+        fast_pos.unwrap(),
+        slow_pos.unwrap(),
+        events
     );
 }
 
