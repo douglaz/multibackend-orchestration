@@ -3706,6 +3706,12 @@ exit 0
 /// Conformance: bounded concurrency via real poll_and_advance_prd path.
 /// With max_concurrent=2 and 4 issues, peak active workers (measured via
 /// flock-based counter in mock gh script) must never exceed 2.
+///
+/// Uses FIFO-based deterministic rendezvous barrier (no sleep): two FIFOs
+/// create a paired handshake so concurrent workers must overlap. Each edit
+/// handler claims a slot (odd/even), increments active, then cross-writes/
+/// reads the FIFO pair. Both block until their peer writes, guaranteeing
+/// overlap and accurate peak measurement.
 fn concurrent_bounded_worker_count(_harness: &RalphHarness) -> TestResult {
     use crate::config::GlobalConfig;
     use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
@@ -3717,19 +3723,45 @@ fn concurrent_bounded_worker_count(_harness: &RalphHarness) -> TestResult {
         let active_file = data_dir.join("active");
         let peak_file = data_dir.join("peak");
         let lock_file = data_dir.join("counter.lock");
+        let slot_file = data_dir.join("slot_counter");
         fs::write(&active_file, "0").unwrap();
         fs::write(&peak_file, "0").unwrap();
+        fs::write(&slot_file, "0").unwrap();
         let active_str = active_file.to_string_lossy().into_owned();
         let peak_str = peak_file.to_string_lossy().into_owned();
         let lock_str = lock_file.to_string_lossy().into_owned();
+        let slot_str = slot_file.to_string_lossy().into_owned();
+
+        // Two FIFOs for the rendezvous barrier
+        let fifo_a = data_dir.join("barrier_a");
+        let fifo_b = data_dir.join("barrier_b");
+        let fifo_a_str = fifo_a.to_string_lossy().into_owned();
+        let fifo_b_str = fifo_b.to_string_lossy().into_owned();
+        for (fifo, name) in [(&fifo_a, "barrier_a"), (&fifo_b, "barrier_b")] {
+            let st = std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap_or_else(|e| panic!("mkfifo {name}: {e}"));
+            assert!(st.success(), "mkfifo {name} failed: {st}");
+        }
+
+        // Per-issue flag directory for first-edit tracking
+        let flags_dir = data_dir.join("edit_flags");
+        fs::create_dir_all(&flags_dir).unwrap();
+        let flags_str = flags_dir.to_string_lossy().into_owned();
 
         let gh_script = format!(
             r#"#!/bin/sh
 ACTIVE="{active_str}"
 PEAK="{peak_str}"
 LOCK="{lock_str}"
+SLOT="{slot_str}"
+FIFO_A="{fifo_a_str}"
+FIFO_B="{fifo_b_str}"
+FLAGS="{flags_str}"
 inc() {{ ( flock 9; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c+1)); printf '%d' "$c">"$ACTIVE"; p=$(cat "$PEAK" 2>/dev/null||printf '0'); [ "$c" -gt "$p" ] && printf '%d' "$c">"$PEAK" ) 9>"$LOCK"; }}
 dec() {{ ( flock 9; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c-1)); printf '%d' "$c">"$ACTIVE" ) 9>"$LOCK"; }}
+claim_slot() {{ ( flock 9; s=$(cat "$SLOT" 2>/dev/null||printf '0'); s=$((s+1)); printf '%d' "$s">"$SLOT"; if [ $((s % 2)) -eq 1 ]; then printf '1'; else printf '2'; fi ) 9>"$LOCK"; }}
 case "$1" in
   issue)
     case "$2" in
@@ -3742,7 +3774,23 @@ case "$1" in
           printf '[]'
         fi
         exit 0 ;;
-      edit) inc; sleep 0.1; dec; exit 0 ;;
+      edit)
+        ISSUE_NUM=""
+        for arg in "$@"; do case "$arg" in 300|301|302|303) ISSUE_NUM="$arg" ;; esac; done
+        if [ -n "$ISSUE_NUM" ] && [ ! -f "$FLAGS/$ISSUE_NUM" ]; then
+          touch "$FLAGS/$ISSUE_NUM"
+          MY_SLOT=$(claim_slot)
+          inc
+          if [ "$MY_SLOT" = "1" ]; then
+            read _dummy < "$FIFO_A"
+            printf 'go\n' > "$FIFO_B"
+          else
+            printf 'go\n' > "$FIFO_A"
+            read _dummy < "$FIFO_B"
+          fi
+          dec
+        fi
+        exit 0 ;;
       view)
         for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
         printf '{{}}'; exit 0 ;;
@@ -3779,7 +3827,7 @@ exit 0
             writer_backend: "claude".to_string(),
             reviewer_backend: "codex".to_string(),
             max_revisions: 1,
-            backend_timeout_secs: 60,
+            backend_timeout_secs: 2,
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
@@ -3962,10 +4010,11 @@ fn concurrent_advancement_slow_fast(_harness: &RalphHarness) -> TestResult {
         // FIFO for deterministic handshake
         let gate_fifo = data_dir.join("slow_gate");
         let gate_str = gate_fifo.to_string_lossy().into_owned();
-        std::process::Command::new("mkfifo")
+        let mkfifo_status = std::process::Command::new("mkfifo")
             .arg(&gate_fifo)
             .status()
             .expect("mkfifo should succeed");
+        assert!(mkfifo_status.success(), "mkfifo failed with status: {mkfifo_status}");
 
         // Event log with flock-based atomic append
         let event_log = data_dir.join("event_log");
@@ -4068,7 +4117,22 @@ exit 0
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("PATH").unwrap_or_default();
         unsafe { std::env::set_var("PATH", &path_env) };
-        let result = poll_and_advance_prd(&config);
+
+        // Bounded watchdog: run poll_and_advance_prd on a spawned thread
+        // with a join timeout so a regression (FIFO deadlock under sequential
+        // processing) fails with a clear assertion instead of hanging the
+        // full validate suite indefinitely.
+        let watchdog_timeout = std::time::Duration::from_secs(30);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config_clone = config.clone();
+        let handle = std::thread::spawn(move || {
+            let r = poll_and_advance_prd(&config_clone);
+            let _ = tx.send(r);
+        });
+        let result = rx.recv_timeout(watchdog_timeout)
+            .expect("slow/fast conformance test timed out — possible FIFO deadlock regression");
+        let _ = handle.join();
+
         unsafe { std::env::set_var("PATH", &old) };
         drop(_guard);
 

@@ -3083,10 +3083,11 @@ fn concurrent_advancement_slow_and_fast() {
     // FIFO for deterministic handshake: fast issue writes, slow issue reads.
     let gate_fifo = tmp.path().join("slow_gate");
     let gate_str = gate_fifo.to_string_lossy().into_owned();
-    std::process::Command::new("mkfifo")
+    let mkfifo_status = std::process::Command::new("mkfifo")
         .arg(&gate_fifo)
         .status()
         .expect("mkfifo should succeed");
+    assert!(mkfifo_status.success(), "mkfifo failed with status: {mkfifo_status}");
 
     // Event log with flock-based atomic append to capture ordering.
     let event_log = tmp.path().join("event_log");
@@ -3287,8 +3288,13 @@ exit 0
 /// With `max_concurrent = 2` and 4 issues, peak active concurrency (as
 /// measured by the mock) must never exceed 2.
 ///
-/// Uses a FIFO-based synchronization: each issue edit increments an atomic
-/// counter file on enter and decrements on exit, recording peak.
+/// Uses FIFO-based deterministic synchronization (no sleep): two FIFOs
+/// create a rendezvous barrier so paired workers must overlap. Each edit
+/// handler atomically claims a slot (odd/even), increments the active
+/// counter, then performs a cross-write/read on the FIFO pair — slot 1
+/// writes to FIFO_A and reads FIFO_B; slot 2 writes to FIFO_B and reads
+/// FIFO_A. Both block until their peer writes, guaranteeing overlap.
+/// Peak is captured while both are active.
 #[test]
 #[serial]
 fn bounded_concurrency_peak_never_exceeds_max() {
@@ -3301,21 +3307,47 @@ fn bounded_concurrency_peak_never_exceeds_max() {
     let active_file = tmp.path().join("active_count");
     let peak_file = tmp.path().join("peak_count");
     let lock_file = tmp.path().join("counter.lock");
+    let slot_file = tmp.path().join("slot_counter");
     fs::write(&active_file, "0").expect("init active");
     fs::write(&peak_file, "0").expect("init peak");
+    fs::write(&slot_file, "0").expect("init slot");
 
     let active_str = active_file.to_string_lossy().into_owned();
     let peak_str = peak_file.to_string_lossy().into_owned();
     let lock_str = lock_file.to_string_lossy().into_owned();
+    let slot_str = slot_file.to_string_lossy().into_owned();
 
-    // gh mock: 4 Pending issues. Each label-edit call atomically increments
-    // the active counter, sleeps briefly (to overlap), then decrements.
-    // Peak is tracked via the lock-protected peak file.
+    // Two FIFOs for the rendezvous barrier
+    let fifo_a = tmp.path().join("barrier_a");
+    let fifo_b = tmp.path().join("barrier_b");
+    let fifo_a_str = fifo_a.to_string_lossy().into_owned();
+    let fifo_b_str = fifo_b.to_string_lossy().into_owned();
+    for (fifo, name) in [(&fifo_a, "barrier_a"), (&fifo_b, "barrier_b")] {
+        let st = std::process::Command::new("mkfifo")
+            .arg(fifo)
+            .status()
+            .unwrap_or_else(|e| panic!("mkfifo {name}: {e}"));
+        assert!(st.success(), "mkfifo {name} failed: {st}");
+    }
+
+    // Tracking directory for per-issue first-edit flags
+    let flags_dir = tmp.path().join("edit_flags");
+    fs::create_dir_all(&flags_dir).expect("create flags dir");
+    let flags_str = flags_dir.to_string_lossy().into_owned();
+
+    // gh mock: 4 Pending issues. Uses a FIFO-based rendezvous barrier
+    // (no sleep) to guarantee overlap so the peak active counter captures
+    // true concurrent execution. Only the first edit call per issue enters
+    // the barrier; subsequent edit calls for the same issue pass through.
     let gh_script = format!(
         r#"#!/bin/sh
 ACTIVE="{active_str}"
 PEAK="{peak_str}"
 LOCK="{lock_str}"
+SLOT="{slot_str}"
+FIFO_A="{fifo_a_str}"
+FIFO_B="{fifo_b_str}"
+FLAGS="{flags_str}"
 
 # flock-based atomic counter operations
 inc_active() {{
@@ -3340,6 +3372,21 @@ dec_active() {{
   ) 9>"$LOCK"
 }}
 
+# Atomically claim a slot number (1 or 2), cycling per pair.
+claim_slot() {{
+  (
+    flock 9
+    s=$(cat "$SLOT" 2>/dev/null || printf '0')
+    s=$((s + 1))
+    printf '%d' "$s" > "$SLOT"
+    if [ $((s % 2)) -eq 1 ]; then
+      printf '1'
+    else
+      printf '2'
+    fi
+  ) 9>"$LOCK"
+}}
+
 case "$1" in
   issue)
     case "$2" in
@@ -3358,9 +3405,31 @@ case "$1" in
         exit 0
         ;;
       edit)
-        inc_active
-        sleep 0.1
-        dec_active
+        # Determine which issue this edit is for
+        ISSUE_NUM=""
+        for arg in "$@"; do
+          case "$arg" in
+            100|101|102|103) ISSUE_NUM="$arg" ;;
+          esac
+        done
+
+        # Only the first edit call per issue enters the barrier
+        if [ -n "$ISSUE_NUM" ] && [ ! -f "$FLAGS/$ISSUE_NUM" ]; then
+          touch "$FLAGS/$ISSUE_NUM"
+          MY_SLOT=$(claim_slot)
+          inc_active
+          # Rendezvous: slot 1 reads A then writes B; slot 2 writes A then reads B.
+          # Slot 1 blocks on the read until slot 2 writes, then slot 1 writes to
+          # unblock slot 2's read. Both are guaranteed active between the handshake.
+          if [ "$MY_SLOT" = "1" ]; then
+            read _dummy < "$FIFO_A"
+            printf 'go\n' > "$FIFO_B"
+          else
+            printf 'go\n' > "$FIFO_A"
+            read _dummy < "$FIFO_B"
+          fi
+          dec_active
+        fi
         exit 0
         ;;
       view)
@@ -3422,7 +3491,7 @@ exit 0
         writer_backend: "claude".to_string(),
         reviewer_backend: "codex".to_string(),
         max_revisions: 1,
-        backend_timeout_secs: 60,
+        backend_timeout_secs: 2,
         global_config: global,
         verbose: false,
         max_concurrent: 2,
