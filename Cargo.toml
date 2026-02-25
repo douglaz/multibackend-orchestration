@@ -27,5 +27,11 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tempfile = "3"
 which = "7"
 
+[features]
+# Enable test-only hooks (e.g. RALPH_TEST_INJECT_PANIC env-var panic injection).
+# Automatically enabled for tests via dev-dependency self-reference.
+test-hooks = []
+
 [dev-dependencies]
+ralph = { path = ".", features = ["test-hooks"] }
 serial_test = "3"

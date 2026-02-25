@@ -2754,6 +2754,7 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     // Run with mock PATH
@@ -2800,6 +2801,7 @@ fn max_concurrent_zero_treated_as_one() {
         global_config: GlobalConfig::default(),
         verbose: false,
         max_concurrent: 0,
+        worker_cwd: None,
     };
     // The effective worker count is max(1, max_concurrent) inside poll_and_advance_prd
     let effective = std::cmp::max(1, config.max_concurrent);
@@ -2825,6 +2827,7 @@ fn max_concurrent_preserves_configured_value() {
         global_config: GlobalConfig::default(),
         verbose: false,
         max_concurrent: 4,
+        worker_cwd: None,
     };
     assert_eq!(config.max_concurrent, 4);
 }
@@ -2953,6 +2956,7 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -3033,6 +3037,7 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -3234,11 +3239,26 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     unsafe { std::env::set_var("PATH", &path_env) };
-    let result = poll_and_advance_prd(&config);
+
+    // Bounded watchdog: run on a spawned thread with a join timeout so a
+    // regression (FIFO deadlock under sequential processing) fails with a
+    // clear assertion instead of hanging CI indefinitely.
+    let watchdog_timeout = std::time::Duration::from_secs(30);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let config_clone = config.clone();
+    let handle = std::thread::spawn(move || {
+        let r = poll_and_advance_prd(&config_clone);
+        let _ = tx.send(r);
+    });
+    let result = rx.recv_timeout(watchdog_timeout)
+        .expect("concurrent_advancement_slow_and_fast timed out — possible FIFO deadlock regression");
+    let _ = handle.join();
+
     unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should complete: {:?}", result);
@@ -3495,11 +3515,26 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
     unsafe { std::env::set_var("PATH", &path_env) };
-    let result = poll_and_advance_prd(&config);
+
+    // Bounded watchdog: run on a spawned thread with a join timeout so a
+    // regression (FIFO deadlock) fails with a clear assertion instead of
+    // hanging CI indefinitely.
+    let watchdog_timeout = std::time::Duration::from_secs(30);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let config_clone = config.clone();
+    let handle = std::thread::spawn(move || {
+        let r = poll_and_advance_prd(&config_clone);
+        let _ = tx.send(r);
+    });
+    let result = rx.recv_timeout(watchdog_timeout)
+        .expect("bounded_concurrency_peak test timed out — possible FIFO deadlock regression");
+    let _ = handle.join();
+
     unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
@@ -3636,6 +3671,7 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     // Inject a real panic for issue #110 via env var
@@ -3653,6 +3689,27 @@ exit 0
     assert!(
         issue111_flag.exists(),
         "issue #111 should have advanced despite issue #110 panicking"
+    );
+
+    // Issue #110 must have its failure state persisted (not silently stuck
+    // in its pre-panic state).
+    let state_path = data_dir.join("acme/widgets/.ralph/interactive-prd/110.json");
+    assert!(
+        state_path.exists(),
+        "panicking issue #110 should have persisted failure state"
+    );
+    let state_raw = fs::read_to_string(&state_path).expect("read state #110");
+    let state: InteractivePrdState =
+        serde_json::from_str(&state_raw).expect("parse state #110");
+    assert!(
+        state.error_count >= 1,
+        "issue #110 error_count should be >= 1 after panic, got {}",
+        state.error_count
+    );
+    assert!(
+        state.last_error.as_deref().unwrap_or("").contains("panic"),
+        "issue #110 last_error should mention panic, got {:?}",
+        state.last_error
     );
 }
 
@@ -3795,6 +3852,7 @@ exit 0
         global_config: global,
         verbose: false,
         max_concurrent: 2,
+        worker_cwd: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();

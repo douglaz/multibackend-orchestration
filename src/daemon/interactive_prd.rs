@@ -238,12 +238,74 @@ pub struct PrdPollConfig {
     /// Maximum number of issues to process concurrently within one tick.
     /// `0` is treated as `1` (sequential).
     pub max_concurrent: u32,
+    /// Per-worker override for the repo clone directory used as backend cwd.
+    /// When set, backends use this path instead of `repo_clone_path()`.
+    /// This field is not set by callers — it is populated internally by
+    /// `poll_and_advance_prd` to give each worker an isolated directory.
+    #[doc(hidden)]
+    pub worker_cwd: Option<PathBuf>,
 }
 
 impl PrdPollConfig {
     /// Path to the daemon's clone of the repo, used as cwd for backend calls.
     fn repo_clone_path(&self) -> PathBuf {
         self.data_dir.join(&self.owner).join(&self.repo)
+    }
+
+    /// Effective working directory for backend calls.
+    ///
+    /// Returns `worker_cwd` when set (per-worker isolation), otherwise falls
+    /// back to the shared `repo_clone_path()`.
+    fn effective_repo_cwd(&self) -> PathBuf {
+        self.worker_cwd
+            .clone()
+            .unwrap_or_else(|| self.repo_clone_path())
+    }
+
+    /// Create a per-worker clone of the repo checkout via `git worktree add`.
+    ///
+    /// Falls back to a simple directory copy if git worktree fails (e.g. the
+    /// base is not a git repo).  Returns the worker-specific directory path.
+    fn setup_worker_dir(&self, worker_id: usize) -> PathBuf {
+        let base = self.repo_clone_path();
+        let worker_dir = base.join("..").join(format!(
+            "{}-worker-{}",
+            self.repo, worker_id
+        ));
+        // Canonicalize parent to avoid `..` in the path
+        let worker_dir = worker_dir
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.join(format!("{}-worker-{}", self.repo, worker_id)))
+            .unwrap_or(worker_dir);
+
+        if worker_dir.join(".git").exists() {
+            // Already set up from a previous tick — reuse as-is
+            return worker_dir;
+        }
+
+        if base.join(".git").exists() {
+            // Try git worktree (lightweight, shares objects)
+            let wt = std::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &worker_dir.to_string_lossy(),
+                    "HEAD",
+                ])
+                .current_dir(&base)
+                .output();
+            if let Ok(out) = &wt {
+                if out.status.success() {
+                    return worker_dir;
+                }
+            }
+        }
+
+        // Fallback: just create the directory so backends have a cwd
+        let _ = fs::create_dir_all(&worker_dir);
+        worker_dir
     }
 
     /// Fetch latest from origin and reset the clone to origin's default branch.
@@ -419,13 +481,28 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     }
 
     // Phase 4: bounded concurrent per-issue processing
-    let worker_count = std::cmp::max(1, config.max_concurrent) as usize;
+    let issue_count = deduped_issues.len();
+    let worker_count = std::cmp::min(
+        std::cmp::max(1, config.max_concurrent) as usize,
+        issue_count,
+    );
     let work_queue = std::sync::Mutex::new(std::collections::VecDeque::from(deduped_issues));
     let errors: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
 
     std::thread::scope(|s| {
-        for _ in 0..worker_count {
-            s.spawn(|| {
+        let work_queue = &work_queue;
+        let errors = &errors;
+
+        for worker_id in 0..worker_count {
+            // Each worker gets its own config clone with an isolated cwd so
+            // concurrent backend processes do not share the same checkout
+            // (avoiding git lock contention and file interference).
+            let mut worker_config = config.clone();
+            if worker_count > 1 {
+                worker_config.worker_cwd = Some(config.setup_worker_dir(worker_id));
+            }
+
+            s.spawn(move || {
                 let mut bot_login_cache: Option<String> = None;
 
                 loop {
@@ -438,7 +515,7 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                     let issue_number = issue.number;
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        advance_issue(config, &issue, &mut bot_login_cache)
+                        advance_issue(&worker_config, &issue, &mut bot_login_cache)
                     }));
 
                     match result {
@@ -455,6 +532,41 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                                     None => "unknown panic".to_string(),
                                 },
                             };
+                            eprintln!(
+                                "prd: PANIC while advancing {}/{}#{}: {msg}",
+                                worker_config.owner, worker_config.repo, issue_number
+                            );
+
+                            // Persist failure state for the panicking issue so it
+                            // transitions to Failed rather than silently remaining
+                            // in its pre-panic state.  If no state file exists
+                            // yet (panic before first save), create a fresh one.
+                            let loaded = InteractivePrdState::load(
+                                &worker_config.data_dir,
+                                &worker_config.owner,
+                                &worker_config.repo,
+                                issue_number,
+                            );
+                            let mut state = match loaded {
+                                Ok(Some(s)) => s,
+                                _ => InteractivePrdState::new(
+                                    &worker_config.owner,
+                                    &worker_config.repo,
+                                    issue_number,
+                                ),
+                            };
+                            if !state.is_terminal() {
+                                let panic_err = RalphError::InteractivePrdFailed(
+                                    format!("panic: {msg}"),
+                                );
+                                let _ = finish_transition(
+                                    &worker_config,
+                                    &mut state,
+                                    Err(panic_err),
+                                    &mut bot_login_cache,
+                                );
+                            }
+
                             let mut errs = errors.lock().expect("errors lock poisoned");
                             errs.push((issue_number, format!("panic: {msg}")));
                         }
@@ -464,16 +576,11 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
         }
     });
 
-    // Phase 5: emit aggregated errors once after all workers complete
+    // Phase 5: emit aggregated non-panic errors once after all workers complete.
+    // Panic errors are already logged at the catch_unwind site above.
     let collected_errors = errors.into_inner().expect("errors lock poisoned");
     for (issue_num, msg) in &collected_errors {
-        if msg.starts_with("panic: ") {
-            eprintln!(
-                "prd: PANIC while advancing {}/{}#{}: {}",
-                config.owner, config.repo, issue_num,
-                &msg["panic: ".len()..]
-            );
-        } else {
+        if !msg.starts_with("panic: ") {
             eprintln!(
                 "prd: failed to advance {}/{}#{}: {msg}",
                 config.owner, config.repo, issue_num
@@ -502,6 +609,9 @@ fn advance_issue(
     // comma-separated list of issue numbers, advance_issue panics for those
     // issues.  This allows integration and conformance tests to verify that
     // `catch_unwind` isolation works for real panics (not just errors).
+    // Gated behind the `test-hooks` feature so it's compiled only during
+    // `cargo test` (the feature is enabled in [dev-dependencies]).
+    #[cfg(feature = "test-hooks")]
     if let Some(val) = std::env::var_os("RALPH_TEST_INJECT_PANIC") {
         let val = val.to_string_lossy();
         let should_panic = val
@@ -1078,16 +1188,16 @@ fn generate_revision_from_feedback_with_timeout(
     aggregated_feedback: &str,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let repo_clone = config.repo_clone_path();
+    let repo_cwd = config.effective_repo_cwd();
     let writer = create_backend(
         &config.writer_backend,
         &config.global_config,
-        Some(repo_clone.clone()),
+        Some(repo_cwd.clone()),
     )?;
     let reviewer = create_backend(
         &config.reviewer_backend,
         &config.global_config,
-        Some(repo_clone),
+        Some(repo_cwd),
     )?;
 
     // Build feedback revision prompt
@@ -1332,16 +1442,16 @@ fn generate_draft_from_answers_with_timeout(
     user_answers: &str,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let repo_clone = config.repo_clone_path();
+    let repo_cwd = config.effective_repo_cwd();
     let writer = create_backend(
         &config.writer_backend,
         &config.global_config,
-        Some(repo_clone.clone()),
+        Some(repo_cwd.clone()),
     )?;
     let reviewer = create_backend(
         &config.reviewer_backend,
         &config.global_config,
-        Some(repo_clone),
+        Some(repo_cwd),
     )?;
 
     let idea_context = INTERACTIVE_DRAFT_CONTEXT_TEMPLATE
@@ -1476,13 +1586,13 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
     let deadline = std::time::Instant::now() + timeout;
 
     let prompt = format!("{QUESTION_GEN_PROMPT}{issue_text}");
-    let repo_clone = config.repo_clone_path();
+    let repo_cwd = config.effective_repo_cwd();
 
     // Backend A
     let backend_a = create_backend(
         &config.question_backends[0],
         &config.global_config,
-        Some(repo_clone.clone()),
+        Some(repo_cwd.clone()),
     )?;
     let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
 
@@ -1490,7 +1600,7 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
     let backend_b = create_backend(
         &config.question_backends[1],
         &config.global_config,
-        Some(repo_clone),
+        Some(repo_cwd),
     )?;
     let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
 
@@ -2547,6 +2657,7 @@ mod tests {
             global_config: global,
             verbose: false,
             max_concurrent: 1,
+            worker_cwd: None,
         }
     }
 
@@ -3022,6 +3133,7 @@ mod tests {
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 1,
+            worker_cwd: None,
         };
         assert_eq!(
             config.repo_clone_path(),
@@ -3045,6 +3157,7 @@ mod tests {
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 1,
+            worker_cwd: None,
         };
         // Create the dir but not .git — should succeed without error
         std::fs::create_dir_all(config.repo_clone_path()).unwrap();
@@ -3141,6 +3254,7 @@ mod tests {
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 1,
+            worker_cwd: None,
         };
 
         config.refresh_repo_clone().unwrap();

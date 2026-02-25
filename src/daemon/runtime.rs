@@ -613,6 +613,7 @@ async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         global_config: config.global_config.clone(),
         verbose: config.verbose,
         max_concurrent: config.max_concurrent,
+        worker_cwd: None,
     };
 
     spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await

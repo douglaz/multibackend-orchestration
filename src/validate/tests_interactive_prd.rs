@@ -3401,6 +3401,7 @@ fn prd_poll_config_max_concurrent_field(_harness: &RalphHarness) -> TestResult {
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 4,
+            worker_cwd: None,
         };
         assert_eq!(config.max_concurrent, 4, "max_concurrent should store value");
     })
@@ -3425,6 +3426,7 @@ fn max_concurrent_zero_treated_as_one(_harness: &RalphHarness) -> TestResult {
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 0,
+            worker_cwd: None,
         };
         let effective = std::cmp::max(1, config.max_concurrent);
         assert_eq!(effective, 1, "max_concurrent=0 should be treated as 1");
@@ -3506,6 +3508,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -3598,6 +3601,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -3686,6 +3690,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         // Inject a real panic for issue #110
@@ -3700,6 +3705,26 @@ exit 0
 
         assert!(result.is_ok(), "tick should succeed despite #110 panic");
         assert!(success_flag.exists(), "issue #111 should advance despite #110 panic");
+
+        // Verify the panicking issue's failure state was persisted
+        let state_path = data_dir.join("acme/widgets/.ralph/interactive-prd/110.json");
+        assert!(
+            state_path.exists(),
+            "panicking issue #110 should have persisted failure state"
+        );
+        let state_raw = fs::read_to_string(&state_path).expect("read state #110");
+        let state: InteractivePrdState =
+            serde_json::from_str(&state_raw).expect("parse state #110");
+        assert!(
+            state.error_count >= 1,
+            "issue #110 error_count should be >= 1 after panic, got {}",
+            state.error_count
+        );
+        assert!(
+            state.last_error.as_deref().unwrap_or("").contains("panic"),
+            "issue #110 last_error should mention panic, got {:?}",
+            state.last_error
+        );
     })
 }
 
@@ -3831,6 +3856,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -3947,6 +3973,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -4112,6 +4139,7 @@ exit 0
             global_config: GlobalConfig::default(),
             verbose: false,
             max_concurrent: 2,
+            worker_cwd: None,
         };
 
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
