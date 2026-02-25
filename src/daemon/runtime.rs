@@ -769,12 +769,44 @@ async fn poll_and_claim(
             }
         }
 
-        // Dispatch
-        let raw_idea = format!(
-            "{}\n\n{}",
-            issue.title,
-            issue.body.as_deref().unwrap_or_default()
-        );
+        // Dispatch input selection: for prd-done issues, attempt to recover
+        // the approved spec from issue comments; otherwise use title/body.
+        let has_prd_done = issue.labels.iter().any(|l| l == "ralph:prd-done");
+        let raw_idea = if has_prd_done {
+            let gh_bin = config.gh_bin.clone();
+            let owner_c = config.owner.clone();
+            let repo_c = config.repo.clone();
+            let issue_number = issue.number;
+            let spec = spawn_blocking_op(move || {
+                Ok(interactive_prd::extract_approved_spec(
+                    &gh_bin,
+                    &owner_c,
+                    &repo_c,
+                    issue_number,
+                ))
+            })
+            .await
+            .unwrap_or(None);
+
+            match spec {
+                Some(s) => {
+                    eprintln!(
+                        "prd-done: using approved spec for issue #{}",
+                        issue.number
+                    );
+                    s
+                }
+                None => {
+                    eprintln!(
+                        "approved spec not found, falling back for issue #{}",
+                        issue.number
+                    );
+                    compose_raw_idea(&issue.title, issue.body.as_deref())
+                }
+            }
+        } else {
+            compose_raw_idea(&issue.title, issue.body.as_deref())
+        };
         if let Err(err) = dispatch_task(config, children, issue.number, &raw_idea).await {
             eprintln!("warning: failed to dispatch issue #{}: {err}", issue.number);
             // Mark as failed since we already claimed it

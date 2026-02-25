@@ -5,10 +5,12 @@ use std::sync::Mutex;
 
 use crate::daemon::github;
 use crate::daemon::interactive_prd::{
-    detect_approval, has_prd_label, prd_marker, prd_status_approved_marker,
+    detect_approval, format_draft_comment, has_in_progress_prd_label, has_prd_label,
+    parse_approved_spec_from_comments, prd_marker, prd_status_approved_marker,
     prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, DRAFT_SECTION_RETRIES,
     PRD_LABELS, PRD_LABEL_NAMES, REQUIRED_SPEC_SECTION_COUNT,
 };
+use crate::daemon::github::IssueComment;
 use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
@@ -220,6 +222,30 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "interactive_prd::hardening_stale_worker_dir_recovery",
             func: hardening_stale_worker_dir_recovery,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_dispatch_uses_approved_spec",
+            func: prd_done_dispatch_uses_approved_spec,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_mixed_labels_not_blocked",
+            func: prd_done_mixed_labels_not_blocked,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_missing_markers_fallback",
+            func: prd_done_missing_markers_fallback,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_comments_api_failure_fallback",
+            func: prd_done_comments_api_failure_fallback,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_user_spoof_ignored",
+            func: prd_done_user_spoof_ignored,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_done_highest_revision_wins",
+            func: prd_done_highest_revision_wins,
         },
     ]
 }
@@ -4727,6 +4753,266 @@ exit 0
         assert_eq!(
             worktree_add_count, 2,
             "expected one worktree add per worker, got {worktree_add_count}; log: {git_log_content}"
+        );
+    })
+}
+
+// ---------------------------------------------------------------------------
+// PRD-done dispatch conformance tests
+// ---------------------------------------------------------------------------
+
+fn make_test_issue_comment(id: u64, author: &str, body: &str, created_at: &str) -> IssueComment {
+    IssueComment {
+        id,
+        author_login: author.to_owned(),
+        body: body.to_owned(),
+        created_at: chrono::DateTime::parse_from_rfc3339(created_at)
+            .expect("timestamp should parse")
+            .with_timezone(&chrono::Utc),
+    }
+}
+
+/// PRD-done issue dispatches with approved spec as idea (pure parser test).
+fn prd_done_dispatch_uses_approved_spec(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let spec_body = "## Summary\nApproved feature spec.\n\n## Testing\nUnit tests.";
+        let draft_comment = format!(
+            "{}\n{}",
+            prd_marker(10, "draft", 1),
+            format_draft_comment(1, spec_body)
+        );
+        let approval_comment = format!(
+            "{}\n## PRD Approved\nDraft revision 1 has been approved.",
+            prd_marker(10, "status-approved", 1)
+        );
+
+        let comments = vec![
+            make_test_issue_comment(100, "ralph-bot", &draft_comment, "2026-01-01T00:00:10Z"),
+            make_test_issue_comment(101, "ralph-bot", &approval_comment, "2026-01-01T00:00:20Z"),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 10);
+        assert!(result.is_some(), "should extract approved spec");
+        let extracted = result.unwrap();
+        assert_eq!(
+            extracted, spec_body,
+            "extracted spec should match original"
+        );
+    })
+}
+
+/// Mixed labels (prd-done + prd-approved) are not blocked by has_in_progress_prd_label.
+fn prd_done_mixed_labels_not_blocked(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let labels = vec![
+            "ralph:prd-approved".to_owned(),
+            "ralph:prd-done".to_owned(),
+            "ralph:ready".to_owned(),
+        ];
+        assert!(
+            !has_in_progress_prd_label(&labels),
+            "prd-done should have precedence — issue should not be blocked"
+        );
+
+        // Also verify prd-done alone is not blocked
+        let labels2 = vec!["ralph:prd-done".to_owned(), "ralph:ready".to_owned()];
+        assert!(
+            !has_in_progress_prd_label(&labels2),
+            "prd-done + ready should not be blocked"
+        );
+    })
+}
+
+/// Missing markers fall back to None and produce a clean result.
+fn prd_done_missing_markers_fallback(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // No approval marker at all
+        let draft_comment = format!(
+            "{}\n{}",
+            prd_marker(42, "draft", 1),
+            format_draft_comment(1, "## Summary\nSpec body.")
+        );
+        let comments = vec![make_test_issue_comment(
+            100,
+            "ralph-bot",
+            &draft_comment,
+            "2026-01-01T00:00:10Z",
+        )];
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(
+            result.is_none(),
+            "missing approval marker should return None"
+        );
+
+        // Empty comments
+        let result2 = parse_approved_spec_from_comments(&[], "ralph-bot", 42);
+        assert!(result2.is_none(), "empty comments should return None");
+    })
+}
+
+/// Comments API failure: extract_approved_spec returns None for empty/missing data.
+fn prd_done_comments_api_failure_fallback(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // When there are no comments (as would happen on API failure fallback),
+        // parse returns None
+        let result = parse_approved_spec_from_comments(&[], "ralph-bot", 42);
+        assert!(
+            result.is_none(),
+            "API failure (no comments) should return None"
+        );
+
+        // When bot_login doesn't match any comment authors
+        let comments = vec![make_test_issue_comment(
+            100,
+            "some-other-user",
+            &format!(
+                "{}\n## PRD Approved",
+                prd_marker(42, "status-approved", 1)
+            ),
+            "2026-01-01T00:00:10Z",
+        )];
+        let result2 = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(
+            result2.is_none(),
+            "wrong bot login should return None"
+        );
+    })
+}
+
+/// User-spoofed status-approved marker does not affect selected revision.
+fn prd_done_user_spoof_ignored(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let spec_body = "## Summary\nReal spec.";
+        let comments = vec![
+            // User spoof: status-approved-v99 (should be ignored by bot-only filter)
+            make_test_issue_comment(
+                100,
+                "evil-user",
+                &format!(
+                    "{}\n## PRD Approved (SPOOFED)",
+                    prd_marker(42, "status-approved", 99)
+                ),
+                "2026-01-01T00:00:05Z",
+            ),
+            // Real bot draft v1
+            make_test_issue_comment(
+                101,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 1),
+                    format_draft_comment(1, spec_body)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            // Real bot approval v1
+            make_test_issue_comment(
+                102,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(42, "status-approved", 1)
+                ),
+                "2026-01-01T00:00:20Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(result.is_some(), "should extract from bot comments only");
+        let extracted = result.unwrap();
+        assert!(
+            extracted.contains("Real spec"),
+            "should use bot-authored approval, not user spoof; got: {extracted}"
+        );
+    })
+}
+
+/// Highest approved revision wins in end-to-end parsing.
+fn prd_done_highest_revision_wins(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let spec_v1 = "## Summary\nDraft v1 spec.";
+        let spec_v2 = "## Summary\nDraft v2 spec.";
+        let spec_v3 = "## Summary\nDraft v3 spec.";
+        let comments = vec![
+            // Draft v1
+            make_test_issue_comment(
+                100,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 1),
+                    format_draft_comment(1, spec_v1)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            // Approval v1
+            make_test_issue_comment(
+                101,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(42, "status-approved", 1)
+                ),
+                "2026-01-01T00:00:15Z",
+            ),
+            // Draft v2
+            make_test_issue_comment(
+                102,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 2),
+                    format_draft_comment(2, spec_v2)
+                ),
+                "2026-01-01T00:00:20Z",
+            ),
+            // Approval v2
+            make_test_issue_comment(
+                103,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(42, "status-approved", 2)
+                ),
+                "2026-01-01T00:00:25Z",
+            ),
+            // Draft v3
+            make_test_issue_comment(
+                104,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 3),
+                    format_draft_comment(3, spec_v3)
+                ),
+                "2026-01-01T00:00:30Z",
+            ),
+            // Approval for v3 (highest)
+            make_test_issue_comment(
+                105,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(42, "status-approved", 3)
+                ),
+                "2026-01-01T00:00:35Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(result.is_some(), "should extract highest approved spec");
+        let extracted = result.unwrap();
+        assert!(
+            extracted.contains("Draft v3 spec"),
+            "should select highest revision (v3), got: {extracted}"
+        );
+        assert!(
+            !extracted.contains("Draft v1 spec"),
+            "should not contain v1"
+        );
+        assert!(
+            !extracted.contains("Draft v2 spec"),
+            "should not contain v2"
         );
     })
 }
