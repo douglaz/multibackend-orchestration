@@ -162,6 +162,14 @@ pub fn prd_marker(issue_number: u32, kind: &str, version: u32) -> String {
     format!("<!-- ralph:prd:{issue_number}:{kind}-v{version} -->")
 }
 
+pub const DRAFT_HEADING_PREFIX: &str = "## Draft Engineering Specification (Revision ";
+pub const DRAFT_FOOTER: &str =
+    "*Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*";
+
+pub fn format_draft_comment(revision: u32, spec_body: &str) -> String {
+    format!("{DRAFT_HEADING_PREFIX}{revision})\n\n{spec_body}\n\n{DRAFT_FOOTER}")
+}
+
 pub const PRD_LABELS: &[(&str, &str, &str)] = &[
     (
         "ralph:prd",
@@ -572,9 +580,29 @@ pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd-failed",
 ];
 
+const IN_PROGRESS_PRD_LABEL_NAMES: &[&str] = &[
+    "ralph:prd",
+    "ralph:prd-active",
+    "ralph:prd-approved",
+    "ralph:prd-failed",
+];
+
 /// Returns `true` if any PRD lifecycle label is present on the issue.
 pub fn has_prd_label(labels: &[String]) -> bool {
     labels.iter().any(|l| PRD_LABEL_NAMES.contains(&l.as_str()))
+}
+
+/// Returns `true` if an in-progress PRD lifecycle label is present.
+///
+/// `ralph:prd-done` has precedence and always returns `false`, even if mixed
+/// with in-progress labels.
+pub fn has_in_progress_prd_label(labels: &[String]) -> bool {
+    if labels.iter().any(|l| l == "ralph:prd-done") {
+        return false;
+    }
+    labels
+        .iter()
+        .any(|l| IN_PROGRESS_PRD_LABEL_NAMES.contains(&l.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,10 +1206,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
 
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
-    let draft_comment_body = format!(
-        "## Draft Engineering Specification (Revision {next_revision})\n\n{draft_spec}\n\n\
-         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
-    );
+    let draft_comment_body = format_draft_comment(next_revision, &draft_spec);
     let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
@@ -1339,10 +1364,7 @@ fn do_awaiting_feedback(
     // Post new draft comment with incremented marker
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
-    let draft_comment_body = format!(
-        "## Draft Engineering Specification (Revision {next_revision})\n\n{revised_spec}\n\n\
-         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
-    );
+    let draft_comment_body = format_draft_comment(next_revision, &revised_spec);
     let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
@@ -2120,12 +2142,12 @@ mod tests {
 
     use super::{
         apply_transition_result, detect_approval, extract_questions_text,
-        find_first_answer_comment, find_new_feedback_comments,
+        find_first_answer_comment, find_new_feedback_comments, format_draft_comment,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
-        prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
-        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
-        REQUIRED_SPEC_SECTION_COUNT,
+        has_in_progress_prd_label, has_prd_label, prd_marker, prd_status_approved_marker,
+        render_answer_to_draft_prompt, run_draft_with_section_retry_sync, InteractivePrdState,
+        PrdPollConfig, PrdWorkflowState, DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES,
+        FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2258,6 +2280,55 @@ mod tests {
     fn prd_labels_alias_matches_lifecycle_labels() {
         assert_eq!(PRD_LABELS, PRD_LIFECYCLE_LABELS);
         assert_eq!(PRD_LABELS.len(), 5);
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_matches_each_in_progress_label() {
+        for label in [
+            "ralph:prd",
+            "ralph:prd-active",
+            "ralph:prd-approved",
+            "ralph:prd-failed",
+        ] {
+            assert!(
+                has_in_progress_prd_label(&[label.to_owned()]),
+                "expected {label} to be treated as in-progress"
+            );
+        }
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_rejects_done_empty_and_unrelated_labels() {
+        assert!(!has_in_progress_prd_label(&["ralph:prd-done".to_owned()]));
+        assert!(!has_in_progress_prd_label(&[]));
+        assert!(!has_in_progress_prd_label(&[
+            "bug".to_owned(),
+            "ralph:ready".to_owned()
+        ]));
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_done_precedence_overrides_mixed_labels() {
+        let labels = vec![
+            "ralph:prd-approved".to_owned(),
+            "ralph:prd-done".to_owned(),
+            "ralph:ready".to_owned(),
+        ];
+        assert!(!has_in_progress_prd_label(&labels));
+    }
+
+    #[test]
+    fn has_prd_label_still_matches_done_label() {
+        assert!(has_prd_label(&["ralph:prd-done".to_owned()]));
+    }
+
+    #[test]
+    fn format_draft_comment_round_trip_includes_shared_heading_body_and_footer() {
+        let spec_body = "## Summary\nShip it.\n";
+        let formatted = format_draft_comment(7, spec_body);
+        assert!(formatted.starts_with(&format!("{DRAFT_HEADING_PREFIX}7)")));
+        assert!(formatted.contains(spec_body));
+        assert!(formatted.ends_with(DRAFT_FOOTER));
     }
 
     #[test]

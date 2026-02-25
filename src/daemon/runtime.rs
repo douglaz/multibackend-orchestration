@@ -732,11 +732,11 @@ async fn poll_and_claim(
             continue;
         }
 
-        // Skip issues carrying any PRD label (prevents dual workflow ownership)
-        if interactive_prd::has_prd_label(&issue.labels) {
+        // Skip issues carrying in-progress PRD labels (prevents dual workflow ownership)
+        if interactive_prd::has_in_progress_prd_label(&issue.labels) {
             if config.verbose {
                 eprintln!(
-                    "verbose: skipping issue #{} — carries PRD label, handled by interactive PRD workflow",
+                    "verbose: skipping issue #{} — carries in-progress PRD label, handled by interactive PRD workflow",
                     issue.number
                 );
             }
