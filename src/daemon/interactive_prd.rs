@@ -319,6 +319,37 @@ impl PrdPollConfig {
         Ok(())
     }
 
+    fn remove_existing_path(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let metadata = fs::symlink_metadata(path).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to inspect existing path {}: {err}",
+                path.display()
+            ))
+        })?;
+
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(path).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to remove directory {}: {err}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            fs::remove_file(path).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to remove file {}: {err}",
+                    path.display()
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Reset the effective working directory to a clean state (HEAD of base repo).
     ///
     /// Called before each issue so that leftover files from a previous issue
@@ -342,12 +373,7 @@ impl PrdPollConfig {
             }
 
             if wdir.exists() {
-                fs::remove_dir_all(&wdir).map_err(|err| {
-                    RalphError::InteractivePrdFailed(format!(
-                        "failed to remove worker directory {}: {err}",
-                        wdir.display()
-                    ))
-                })?;
+                Self::remove_existing_path(&wdir)?;
             }
             fs::create_dir_all(&wdir).map_err(|err| {
                 RalphError::InteractivePrdFailed(format!(
@@ -449,12 +475,7 @@ impl PrdPollConfig {
 
         if !base.join(".git").exists() {
             if worker_dir.exists() {
-                fs::remove_dir_all(&worker_dir).map_err(|err| {
-                    RalphError::InteractivePrdFailed(format!(
-                        "failed to remove worker directory {}: {err}",
-                        worker_dir.display()
-                    ))
-                })?;
+                Self::remove_existing_path(&worker_dir)?;
             }
             fs::create_dir_all(&worker_dir).map_err(|err| {
                 RalphError::InteractivePrdFailed(format!(
@@ -464,6 +485,13 @@ impl PrdPollConfig {
             })?;
             Self::copy_dir_contents_recursive(&base, &worker_dir)?;
             return Ok(worker_dir);
+        }
+
+        // Recover from stale worker paths left on disk. `git worktree add`
+        // refuses to use an already-existing path, so stale non-git
+        // directories must be removed before worktree creation.
+        if worker_dir.exists() {
+            Self::remove_existing_path(&worker_dir)?;
         }
 
         let out = std::process::Command::new(&self.git_bin)

@@ -217,6 +217,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "interactive_prd::hardening_worktree_failure_fallback_sequential",
             func: hardening_worktree_failure_fallback_sequential,
         },
+        ConformanceTest {
+            name: "interactive_prd::hardening_stale_worker_dir_recovery",
+            func: hardening_stale_worker_dir_recovery,
+        },
     ]
 }
 
@@ -4511,6 +4515,218 @@ exit 0
         assert_eq!(
             peak, 1,
             "peak concurrency should be 1 after sequential fallback, got {peak}"
+        );
+    })
+}
+
+/// Hardening: if a stale non-git worker directory already exists, setup must
+/// recover by removing it and keep requested parallel execution.
+fn hardening_stale_worker_dir_recovery(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+        // Simulate a stale worker directory from a previous crashed run.
+        let stale_worker = data_dir.join("acme").join("widgets-worker-0");
+        fs::create_dir_all(&stale_worker).expect("create stale worker dir");
+        let stale_marker = stale_worker.join("stale-marker.txt");
+        fs::write(&stale_marker, "stale").expect("write stale marker");
+
+        let git_log = data_dir.join("git_events");
+        let git_log_str = git_log.to_string_lossy().into_owned();
+        let issue710_flag = data_dir.join("issue710_processed");
+        let issue711_flag = data_dir.join("issue711_processed");
+        let issue710_str = issue710_flag.to_string_lossy().into_owned();
+        let issue711_str = issue711_flag.to_string_lossy().into_owned();
+
+        let gate_fifo = data_dir.join("slow_gate");
+        let gate_str = gate_fifo.to_string_lossy().into_owned();
+        let mkfifo_status = std::process::Command::new("mkfifo")
+            .arg(&gate_fifo)
+            .status()
+            .expect("mkfifo should succeed");
+        assert!(
+            mkfifo_status.success(),
+            "mkfifo failed with status: {mkfifo_status}"
+        );
+        let slow_unblocked = data_dir.join("slow_unblocked");
+        let slow_unblocked_str = slow_unblocked.to_string_lossy().into_owned();
+
+        let git_script = format!(
+            r#"#!/bin/sh
+LOG="{git_log_str}"
+case "$1" in
+  fetch) exit 0 ;;
+  rev-parse)
+    if [ "$2" = "--is-inside-work-tree" ]; then
+      if [ -e ".git" ]; then
+        printf 'true\n'
+        exit 0
+      fi
+      printf 'fatal: not a git repository\n' >&2
+      exit 128
+    fi
+    printf 'deadbeef\n'
+    exit 0
+    ;;
+  reset|clean|checkout) exit 0 ;;
+  worktree)
+    if [ "$2" = "add" ]; then
+      TARGET="$4"
+      if [ -e "$TARGET" ]; then
+        printf 'worktree add target exists: %s\n' "$TARGET" >&2
+        exit 128
+      fi
+      mkdir -p "$TARGET" || exit 1
+      : > "$TARGET/.git" || exit 1
+      printf 'worktree_add:%s\n' "$TARGET" >> "$LOG"
+      exit 0
+    fi
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+"#
+        );
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+ISSUE710_FLAG="{issue710_str}"
+ISSUE711_FLAG="{issue711_str}"
+GATE="{gate_str}"
+SLOW_UNBLOCKED="{slow_unblocked_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":710,"title":"Slow","labels":[{{"name":"ralph:prd"}}],"body":"S"}},{{"number":711,"title":"Fast","labels":[{{"name":"ralph:prd"}}],"body":"F"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        is710=0
+        is711=0
+        for arg in "$@"; do
+          case "$arg" in
+            710) is710=1 ;;
+            711) is711=1 ;;
+          esac
+        done
+        if [ "$is710" = "1" ]; then
+          if [ ! -f "$SLOW_UNBLOCKED" ]; then
+            read _dummy < "$GATE"
+            touch "$SLOW_UNBLOCKED"
+            touch "$ISSUE710_FLAG"
+          fi
+        elif [ "$is711" = "1" ]; then
+          if [ ! -f "$ISSUE711_FLAG" ]; then
+            touch "$ISSUE711_FLAG"
+            printf 'go\n' > "$GATE"
+          fi
+        fi
+        exit 0
+        ;;
+      view)
+        for arg in "$@"; do
+          case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac
+        done
+        printf '{{}}'
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        let git_path = scripts_dir.join("git");
+        fs::write(&git_path, git_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 5,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let watchdog_timeout = std::time::Duration::from_secs(20);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config_clone = config.clone();
+        let handle = std::thread::spawn(move || {
+            let r = poll_and_advance_prd(&config_clone);
+            let _ = tx.send(r);
+        });
+        let result = rx.recv_timeout(watchdog_timeout).expect(
+            "stale worker-dir recovery test timed out — likely regressed to sequential fallback",
+        );
+        let _ = handle.join();
+
+        assert!(result.is_ok(), "tick should succeed: {:?}", result);
+        assert!(
+            issue711_flag.exists() && issue710_flag.exists(),
+            "both issues should have been processed in parallel mode"
+        );
+        assert!(
+            !stale_marker.exists(),
+            "stale worker contents should be removed before worktree add"
+        );
+        assert!(
+            stale_worker.join(".git").exists(),
+            "recovered worker should contain git metadata"
+        );
+
+        let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
+        let worktree_add_count = git_log_content
+            .lines()
+            .filter(|line| line.starts_with("worktree_add:"))
+            .count();
+        assert_eq!(
+            worktree_add_count, 2,
+            "expected one worktree add per worker, got {worktree_add_count}; log: {git_log_content}"
         );
     })
 }
