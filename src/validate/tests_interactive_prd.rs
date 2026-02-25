@@ -3824,9 +3824,11 @@ SLOT="{slot_str}"
 FIFO_A="{fifo_a_str}"
 FIFO_B="{fifo_b_str}"
 FLAGS="{flags_str}"
-inc() {{ ( flock 9; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c+1)); printf '%d' "$c">"$ACTIVE"; p=$(cat "$PEAK" 2>/dev/null||printf '0'); [ "$c" -gt "$p" ] && printf '%d' "$c">"$PEAK" ) 9>"$LOCK"; }}
-dec() {{ ( flock 9; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c-1)); printf '%d' "$c">"$ACTIVE" ) 9>"$LOCK"; }}
-claim_slot() {{ ( flock 9; s=$(cat "$SLOT" 2>/dev/null||printf '0'); s=$((s+1)); printf '%d' "$s">"$SLOT"; if [ $((s % 2)) -eq 1 ]; then printf '1'; else printf '2'; fi ) 9>"$LOCK"; }}
+_lock() {{ while ! mkdir "$LOCK.d" 2>/dev/null; do :; done; }}
+_unlock() {{ rmdir "$LOCK.d"; }}
+inc() {{ _lock; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c+1)); printf '%d' "$c">"$ACTIVE"; p=$(cat "$PEAK" 2>/dev/null||printf '0'); [ "$c" -gt "$p" ] && printf '%d' "$c">"$PEAK"; _unlock; }}
+dec() {{ _lock; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c-1)); printf '%d' "$c">"$ACTIVE"; _unlock; }}
+claim_slot() {{ _lock; s=$(cat "$SLOT" 2>/dev/null||printf '0'); s=$((s+1)); printf '%d' "$s">"$SLOT"; if [ $((s % 2)) -eq 1 ]; then printf '1'; else printf '2'; fi; _unlock; }}
 case "$1" in
   issue)
     case "$2" in
