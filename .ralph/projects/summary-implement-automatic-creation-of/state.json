@@ -1,0 +1,78 @@
+{
+  "project_id": "summary-implement-automatic-creation-of",
+  "project_name": "## Summary\nImplement automatic creation of required Ralph Gi",
+  "created_at": "2026-02-15T16:11:21.930277269Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "73772fad2bf2029087e5fd76a3c6a976eeb7e3eadc9f3802f10e5fb193b20508",
+  "prompt_hash_at_loop_start": "73772fad2bf2029087e5fd76a3c6a976eeb7e3eadc9f3802f10e5fb193b20508",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "startup-label-preflight-with-drift-guard-and-tests",
+      "feature_name": "Startup Label Preflight with Drift Guard and Tests",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-startup-label-preflight-with-drift-guard-and-tests/20260215161404-spec.md",
+        "impl_notes": "loops/001-startup-label-preflight-with-drift-guard-and-tests/20260215162546-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-startup-label-preflight-with-drift-guard-and-tests/20260215163436-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-startup-label-preflight-with-drift-guard-and-tests/20260215163405-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "7f52c4e1867ed62e5dceb4943c91641663a22daf",
+      "started_at": "2026-02-15T16:14:04.517768084Z",
+      "completed_at": "2026-02-15T16:34:36.024250564Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260215163445-termination-request.md",
+        "verdict": "loops/002-completion/20260215163619-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260215164344-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260215164951-acceptance-pass-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-15T16:34:45.717221818Z",
+      "completed_at": "2026-02-15T16:36:19.430600182Z"
+    }
+  ]
+}
