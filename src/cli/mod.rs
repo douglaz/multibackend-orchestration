@@ -578,6 +578,10 @@ mod tests {
             "/tmp/test",
             "--repo",
             "acme/widgets",
+            "--git-bin",
+            "/opt/tools/git",
+            "--gh-bin",
+            "/opt/tools/gh",
             "--poll-seconds",
             "30",
             "--max-concurrent",
@@ -596,6 +600,14 @@ mod tests {
 
         assert_eq!(start_args.data_dir, std::path::PathBuf::from("/tmp/test"));
         assert_eq!(start_args.repo, vec!["acme/widgets".to_owned()]);
+        assert_eq!(
+            start_args.git_bin,
+            Some(std::path::PathBuf::from("/opt/tools/git"))
+        );
+        assert_eq!(
+            start_args.gh_bin,
+            Some(std::path::PathBuf::from("/opt/tools/gh"))
+        );
         assert_eq!(start_args.poll_seconds, Some(30));
         assert_eq!(start_args.max_concurrent, Some(2));
         assert_eq!(

@@ -31,6 +31,10 @@ pub struct WorkspaceConfig {
     pub version: String,
     #[serde(default = "default_workspace_default_backend")]
     pub default_backend: String,
+    #[serde(default = "default_workspace_git_bin")]
+    pub git_bin: String,
+    #[serde(default = "default_workspace_gh_bin")]
+    pub gh_bin: String,
     #[serde(default)]
     pub tmux: bool,
     #[serde(default = "default_tmux_session")]
@@ -484,6 +488,8 @@ impl Default for WorkspaceConfig {
         Self {
             version: default_workspace_version(),
             default_backend: default_workspace_default_backend(),
+            git_bin: default_workspace_git_bin(),
+            gh_bin: default_workspace_gh_bin(),
             tmux: false,
             tmux_session: default_tmux_session(),
             tmux_window_keep_seconds: default_tmux_window_keep_seconds(),
@@ -681,6 +687,14 @@ fn default_workspace_version() -> String {
 
 fn default_workspace_default_backend() -> String {
     "claude".to_owned()
+}
+
+fn default_workspace_git_bin() -> String {
+    "git".to_owned()
+}
+
+fn default_workspace_gh_bin() -> String {
+    "gh".to_owned()
 }
 
 fn default_backend_command() -> String {
@@ -1107,6 +1121,12 @@ pub(crate) fn set_global_config_value(
             cfg_ensure_backend(raw_value)?;
             config.workspace.default_backend = raw_value.to_owned();
         }
+        "workspace.git_bin" => {
+            config.workspace.git_bin = raw_value.to_owned();
+        }
+        "workspace.gh_bin" => {
+            config.workspace.gh_bin = raw_value.to_owned();
+        }
         "workspace.tmux" => {
             config.workspace.tmux = cfg_parse_bool(raw_value, key)?;
         }
@@ -1208,9 +1228,9 @@ pub(crate) fn set_global_config_value(
             config.workflow.final_review_min_reviewers = cfg_parse_u32(raw_value, key)?;
         }
         "workflow.final_review_consensus_threshold" => {
-            let v: f64 = raw_value
-                .parse()
-                .map_err(|_| crate::error::RalphError::Validation(format!("key '{key}' expects float value")))?;
+            let v: f64 = raw_value.parse().map_err(|_| {
+                crate::error::RalphError::Validation(format!("key '{key}' expects float value"))
+            })?;
             config.workflow.final_review_consensus_threshold = v;
         }
         "workflow.max_final_review_restarts" => {
@@ -1223,9 +1243,9 @@ pub(crate) fn set_global_config_value(
             config.workflow.completion_min_completers = cfg_parse_u32(raw_value, key)?;
         }
         "workflow.completion_consensus_threshold" => {
-            let v: f64 = raw_value
-                .parse()
-                .map_err(|_| crate::error::RalphError::Validation(format!("key '{key}' expects float value")))?;
+            let v: f64 = raw_value.parse().map_err(|_| {
+                crate::error::RalphError::Validation(format!("key '{key}' expects float value"))
+            })?;
             config.workflow.completion_consensus_threshold = v;
         }
         "workflow.qa_enabled" => {
@@ -1701,6 +1721,8 @@ command = "claude-custom"
     fn default_workspace_tmux_settings_match_expected_values() {
         let config = GlobalConfig::default();
         assert!(!config.workspace.tmux);
+        assert_eq!(config.workspace.git_bin, "git");
+        assert_eq!(config.workspace.gh_bin, "gh");
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
@@ -1915,6 +1937,8 @@ base_branch = "master"
 
         let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
         assert!(!config.workspace.tmux);
+        assert_eq!(config.workspace.git_bin, "git");
+        assert_eq!(config.workspace.gh_bin, "gh");
         assert_eq!(config.workspace.tmux_session, "ralph");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 5);
         assert_eq!(config.workspace.daemon_poll_seconds, 60);
@@ -1993,6 +2017,8 @@ base_branch = "master"
 [workspace]
 version = "1.0"
 default_backend = "claude"
+git_bin = "/opt/custom/bin/git"
+gh_bin = "/opt/custom/bin/gh"
 tmux = true
 tmux_session = "demo"
 tmux_window_keep_seconds = 10
@@ -2044,6 +2070,8 @@ base_branch = "master"
 
         let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
         assert!(config.workspace.tmux);
+        assert_eq!(config.workspace.git_bin, "/opt/custom/bin/git");
+        assert_eq!(config.workspace.gh_bin, "/opt/custom/bin/gh");
         assert_eq!(config.workspace.tmux_session, "demo");
         assert_eq!(config.workspace.tmux_window_keep_seconds, 10);
         assert_eq!(config.workspace.daemon_poll_seconds, 30);
@@ -2728,6 +2756,14 @@ planner_state_in_prompt = "summary"
             .expect("set default_backend");
         assert_eq!(config.workspace.default_backend, "codex");
 
+        set_global_config_value(&mut config, "workspace.git_bin", "/usr/local/bin/git")
+            .expect("set git_bin");
+        assert_eq!(config.workspace.git_bin, "/usr/local/bin/git");
+
+        set_global_config_value(&mut config, "workspace.gh_bin", "/usr/local/bin/gh")
+            .expect("set gh_bin");
+        assert_eq!(config.workspace.gh_bin, "/usr/local/bin/gh");
+
         set_global_config_value(&mut config, "workspace.tmux", "true").expect("set tmux");
         assert!(config.workspace.tmux);
 
@@ -2801,12 +2837,8 @@ planner_state_in_prompt = "summary"
             .expect("set max_qa_iterations");
         assert_eq!(config.workflow.max_qa_iterations, 5);
 
-        set_global_config_value(
-            &mut config,
-            "workflow.planner_state_in_prompt",
-            "full-json",
-        )
-        .expect("set planner_state_in_prompt");
+        set_global_config_value(&mut config, "workflow.planner_state_in_prompt", "full-json")
+            .expect("set planner_state_in_prompt");
         assert_eq!(
             config.workflow.planner_state_in_prompt,
             PlannerStateInPrompt::FullJson
@@ -2851,8 +2883,12 @@ planner_state_in_prompt = "summary"
     fn shared_mutator_sets_backend_fields() {
         let mut config = GlobalConfig::default();
 
-        set_global_config_value(&mut config, "backends.claude.command", "/usr/local/bin/claude")
-            .expect("set claude command");
+        set_global_config_value(
+            &mut config,
+            "backends.claude.command",
+            "/usr/local/bin/claude",
+        )
+        .expect("set claude command");
         assert_eq!(config.backends.claude.command, "/usr/local/bin/claude");
 
         set_global_config_value(&mut config, "backends.claude.timeout_seconds", "3600")
@@ -2885,20 +2921,12 @@ planner_state_in_prompt = "summary"
             .expect("clear claude planner model");
         assert!(config.backends.claude.models.planner.is_none());
 
-        set_global_config_value(
-            &mut config,
-            "backends.claude.role_timeouts.planner",
-            "120",
-        )
-        .expect("set claude planner timeout");
+        set_global_config_value(&mut config, "backends.claude.role_timeouts.planner", "120")
+            .expect("set claude planner timeout");
         assert_eq!(config.backends.claude.role_timeouts.planner, Some(120));
 
-        set_global_config_value(
-            &mut config,
-            "backends.claude.role_timeouts.planner",
-            "null",
-        )
-        .expect("clear claude planner timeout");
+        set_global_config_value(&mut config, "backends.claude.role_timeouts.planner", "null")
+            .expect("clear claude planner timeout");
         assert!(config.backends.claude.role_timeouts.planner.is_none());
     }
 
@@ -2948,8 +2976,7 @@ planner_state_in_prompt = "summary"
     #[test]
     fn shared_mutator_rejects_invalid_integer() {
         let mut config = GlobalConfig::default();
-        let result =
-            set_global_config_value(&mut config, "workflow.max_review_iterations", "abc");
+        let result = set_global_config_value(&mut config, "workflow.max_review_iterations", "abc");
         assert!(result.is_err());
     }
 

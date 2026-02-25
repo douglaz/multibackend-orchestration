@@ -227,6 +227,8 @@ pub struct PrdPollConfig {
     pub owner: String,
     pub repo: String,
     pub data_dir: PathBuf,
+    pub git_bin: String,
+    pub gh_bin: String,
     pub prd_enabled: bool,
     pub question_backends: Vec<String>,
     pub writer_backend: String,
@@ -364,7 +366,7 @@ impl PrdPollConfig {
             )));
         }
 
-        let head_out = std::process::Command::new("git")
+        let head_out = std::process::Command::new(&self.git_bin)
             .args(["rev-parse", "HEAD"])
             .current_dir(&base)
             .output()
@@ -383,7 +385,7 @@ impl PrdPollConfig {
         }
         let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
-        let reset = std::process::Command::new("git")
+        let reset = std::process::Command::new(&self.git_bin)
             .args(["reset", "--hard", &head])
             .current_dir(&wdir)
             .output()
@@ -404,7 +406,7 @@ impl PrdPollConfig {
         // Default cleanup mode: remove untracked files/directories, keep ignored files.
         // Exclude `.ralph/` so daemon runtime state (e.g. interactive PRD JSON)
         // is not deleted between issues.
-        let clean = std::process::Command::new("git")
+        let clean = std::process::Command::new(&self.git_bin)
             .args(["clean", "-fd", "-e", ".ralph/"])
             .current_dir(&wdir)
             .output()
@@ -464,7 +466,7 @@ impl PrdPollConfig {
             return Ok(worker_dir);
         }
 
-        let out = std::process::Command::new("git")
+        let out = std::process::Command::new(&self.git_bin)
             .args([
                 "worktree",
                 "add",
@@ -504,7 +506,7 @@ impl PrdPollConfig {
         if !repo.join(".git").exists() {
             return Ok(());
         }
-        let fetch = std::process::Command::new("git")
+        let fetch = std::process::Command::new(&self.git_bin)
             .args(["fetch", "origin"])
             .current_dir(&repo)
             .output();
@@ -519,7 +521,7 @@ impl PrdPollConfig {
         }
         // Try origin/HEAD, then origin/main, then origin/master
         for target in &["origin/HEAD", "origin/main", "origin/master"] {
-            let reset = std::process::Command::new("git")
+            let reset = std::process::Command::new(&self.git_bin)
                 .args(["reset", "--hard", target])
                 .current_dir(&repo)
                 .output();
@@ -643,10 +645,16 @@ pub const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     // Phase 1: sequential polls
     let labels = vec!["ralph:prd".to_owned()];
-    let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
+    let (issues, _overflow) =
+        github::poll_issues_with_gh_bin(&config.gh_bin, &config.owner, &config.repo, &labels)?;
 
     let active_labels = vec!["ralph:prd-active".to_owned()];
-    let (active_issues, _) = github::poll_issues(&config.owner, &config.repo, &active_labels)?;
+    let (active_issues, _) = github::poll_issues_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        &active_labels,
+    )?;
 
     // Phase 2: deduplicate issues across both passes
     let mut seen = std::collections::HashSet::new();
@@ -898,7 +906,7 @@ fn transition_pending_to_awaiting_answers(
 
     eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
-    let result = get_or_fetch_bot_login(bot_login_cache)
+    let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
 }
@@ -921,21 +929,38 @@ fn do_pending_to_awaiting(
     let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
 
     if !has_active {
-        github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
-            |err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            },
-        )?;
+        github::add_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:prd-active",
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
     }
     if has_prd {
-        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+        let _ = github::remove_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:prd",
+        );
     }
 
     // 2. Remove ralph:ready if present (prevent dual workflow ownership)
     if issue.labels.iter().any(|l| l == "ralph:ready") {
-        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:ready");
+        let _ = github::remove_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:ready",
+        );
     }
 
     // 3. Check if questions marker already exists (idempotent restart/retry).
@@ -944,13 +969,19 @@ fn do_pending_to_awaiting(
     let next_revision = state.question_revision + 1;
     let marker = prd_marker(issue_number, "questions", next_revision);
 
-    let existing_marker_comment =
-        github::find_bot_comment_with_marker(owner, repo, issue_number, &marker, bot_login)
-            .map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            })?;
+    let existing_marker_comment = github::find_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        &marker,
+        bot_login,
+    )
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     let (comment_id, questions_posted_at) = if let Some(existing) = existing_marker_comment {
         // Marker already exists — hydrate timestamp from real comment time,
@@ -979,7 +1010,8 @@ fn do_pending_to_awaiting(
         // timestamp rather than local wall clock. This ensures answer-gating
         // compares against the real comment time consistently.
         // Uses bot-scoped posting so user-authored spoof markers are ignored.
-        let posted_meta = github::post_bot_comment_with_marker_metadata(
+        let posted_meta = github::post_bot_comment_with_marker_metadata_with_gh_bin(
+            &config.gh_bin,
             owner,
             repo,
             issue_number,
@@ -1009,12 +1041,15 @@ fn do_pending_to_awaiting(
     Ok(())
 }
 
-fn get_or_fetch_bot_login(bot_login_cache: &mut Option<String>) -> Result<String> {
+fn get_or_fetch_bot_login(
+    config: &PrdPollConfig,
+    bot_login_cache: &mut Option<String>,
+) -> Result<String> {
     if let Some(login) = bot_login_cache.clone() {
         return Ok(login);
     }
 
-    let login = github::fetch_authenticated_login().map_err(|err| {
+    let login = github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).map_err(|err| {
         RalphError::InteractivePrdFailed(format!("failed to resolve authenticated gh login: {err}"))
     })?;
     *bot_login_cache = Some(login.clone());
@@ -1038,7 +1073,7 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         config.owner, config.repo
     );
 
-    let result = get_or_fetch_bot_login(bot_login_cache).and_then(|bot_login| {
+    let result = get_or_fetch_bot_login(config, bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
     });
     finish_transition(config, state, result, bot_login_cache)
@@ -1060,11 +1095,13 @@ fn do_awaiting_answers_to_awaiting_feedback(
         ))
     })?;
 
-    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let comments =
+        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
 
     let Some(answer_comment) = find_first_answer_comment(
         &comments,
@@ -1117,7 +1154,8 @@ fn do_awaiting_answers_to_awaiting_feedback(
         "## Draft Engineering Specification (Revision {next_revision})\n\n{draft_spec}\n\n\
          *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
     );
-    let comment_id = github::post_bot_comment_with_marker(
+    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -1178,7 +1216,7 @@ fn transition_awaiting_feedback(
         config.owner, config.repo
     );
 
-    let result = get_or_fetch_bot_login(bot_login_cache)
+    let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
 }
@@ -1194,17 +1232,20 @@ fn do_awaiting_feedback(
     let repo = &config.repo;
 
     // Fetch current labels and comments
-    let labels = github::fetch_issue_labels(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let labels = github::fetch_issue_labels_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
 
-    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let comments =
+        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
 
     // Check approval by label
     if labels.iter().any(|l| l == "ralph:prd-approved") {
@@ -1274,7 +1315,8 @@ fn do_awaiting_feedback(
         "## Draft Engineering Specification (Revision {next_revision})\n\n{revised_spec}\n\n\
          *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
     );
-    let comment_id = github::post_bot_comment_with_marker(
+    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -1324,7 +1366,8 @@ fn do_approval_transition(
          *The interactive PRD workflow is now complete.*",
         state.draft_revision
     );
-    github::post_bot_comment_with_marker(
+    github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -1340,7 +1383,14 @@ fn do_approval_transition(
 
     // Add ralph:prd-done BEFORE removing ralph:prd-active. On partial failure
     // the issue retains ralph:prd-active (poll-visible) and gains ralph:prd-done.
-    github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done").map_err(|err| {
+    github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-done",
+    )
+    .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
         ))
@@ -1367,13 +1417,18 @@ fn do_approval_transition(
 
     // Save succeeded — now safe to remove ralph:prd-active (issue will be
     // polled via ralph:prd-done or terminal state file going forward).
-    github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
-        |err| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-            ))
-        },
-    )?;
+    github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-active",
+    )
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     Ok(())
 }
@@ -1932,7 +1987,8 @@ fn transition_to_failed(
     );
 
     if let Some(login) = bot_login {
-        let _ = github::post_bot_comment_with_marker(
+        let _ = github::post_bot_comment_with_marker_with_gh_bin(
+            &config.gh_bin,
             owner,
             repo,
             issue_number,
@@ -1944,11 +2000,23 @@ fn transition_to_failed(
         // No bot identity — post without idempotency check rather than using
         // body-only lookup (which a user spoof could suppress).
         let full_body = format!("{marker}\n{error_body}");
-        let _ = github::post_raw_issue_comment(owner, repo, issue_number, &full_body);
+        let _ = github::post_raw_issue_comment_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            &full_body,
+        );
     }
 
     // Add ralph:prd-failed BEFORE removing ralph:prd-active (boundary-safe ordering).
-    let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-failed");
+    let _ = github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-failed",
+    );
 
     // Set terminal state and persist BEFORE removing the poll-visible labels.
     let prev_state = state.state.clone();
@@ -1972,8 +2040,20 @@ fn transition_to_failed(
     }
 
     // Save succeeded — now safe to remove poll-visible labels
-    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active");
-    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+    let _ = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-active",
+    );
+    let _ = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd",
+    );
 
     Ok(())
 }
@@ -2882,6 +2962,8 @@ mod tests {
             owner: "test".to_owned(),
             repo: "repo".to_owned(),
             data_dir,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_owned(), "codex".to_owned()],
             writer_backend: "claude".to_owned(),
@@ -3358,6 +3440,8 @@ mod tests {
             owner: "acme".to_owned(),
             repo: "widgets".to_owned(),
             data_dir: PathBuf::from("/data"),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -3382,6 +3466,8 @@ mod tests {
             owner: "o".to_owned(),
             repo: "r".to_owned(),
             data_dir: tmp.path().to_path_buf(),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -3479,6 +3565,8 @@ mod tests {
             owner: "owner".to_owned(),
             repo: "repo".to_owned(),
             data_dir: tmp.path().to_path_buf(),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
