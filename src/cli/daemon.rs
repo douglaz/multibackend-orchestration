@@ -34,6 +34,10 @@ pub struct DaemonStartArgs {
     pub data_dir: PathBuf,
     #[arg(long = "repo")]
     pub repo: Vec<String>,
+    #[arg(long)]
+    pub git_bin: Option<PathBuf>,
+    #[arg(long)]
+    pub gh_bin: Option<PathBuf>,
     #[arg(long, value_parser = super::parse_positive_u64)]
     pub poll_seconds: Option<u64>,
     #[arg(long, value_parser = super::parse_positive_u32)]
@@ -113,10 +117,23 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         normalized_repos.push(normalized);
     }
 
-    // Guard: --data-dir must not be inside a git working tree
-    guard_not_git_repo(&args.data_dir)?;
+    let cli_git_bin = args
+        .git_bin
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let cli_gh_bin = args
+        .gh_bin
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let startup_git_bin = cli_git_bin.clone().unwrap_or_else(|| "git".to_owned());
+    let startup_gh_bin = cli_gh_bin.clone().unwrap_or_else(|| "gh".to_owned());
 
-    preflight_check_gh()?;
+    preflight_check_git(&startup_git_bin)?;
+
+    // Guard: --data-dir must not be inside a git working tree
+    guard_not_git_repo(&args.data_dir, &startup_git_bin)?;
+
+    preflight_check_gh(&startup_gh_bin)?;
 
     // Create data-dir after guard passes
     std::fs::create_dir_all(&args.data_dir).map_err(|err| {
@@ -144,16 +161,31 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         let repo_dir = args.data_dir.join(&owner).join(&repo_name);
 
         // Clone or bootstrap the repo
-        clone_or_bootstrap(&owner, &repo_name, &repo_dir)?;
-
-        // Ensure lifecycle labels exist (best-effort, non-blocking)
-        github::ensure_labels_best_effort(&owner, &repo_name);
-
-        // Ensure PRD lifecycle labels exist (best-effort, non-blocking)
-        github::ensure_prd_labels_best_effort(&owner, &repo_name);
+        clone_or_bootstrap(
+            &owner,
+            &repo_name,
+            &repo_dir,
+            &startup_gh_bin,
+            &startup_git_bin,
+        )?;
 
         // Load workspace from repo's .ralph/
         let workspace = Workspace::load(repo_dir.join(".ralph"))?;
+        let git_bin = cli_git_bin
+            .clone()
+            .unwrap_or_else(|| workspace.config.workspace.git_bin.clone());
+        let gh_bin = cli_gh_bin
+            .clone()
+            .unwrap_or_else(|| workspace.config.workspace.gh_bin.clone());
+
+        preflight_check_git(&git_bin)?;
+        preflight_check_gh(&gh_bin)?;
+
+        // Ensure lifecycle labels exist (best-effort, non-blocking)
+        github::ensure_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name);
+
+        // Ensure PRD lifecycle labels exist (best-effort, non-blocking)
+        github::ensure_prd_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name);
 
         // Load project config if an active project exists
         let project_config = match workspace.active_project_id() {
@@ -237,6 +269,8 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             prd_reviewer_backend: daemon_cfg.prd_reviewer_backend,
             prd_max_revisions: daemon_cfg.prd_max_revisions,
             prd_backend_timeout_secs: daemon_cfg.prd_backend_timeout_secs,
+            git_bin,
+            gh_bin,
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;
@@ -429,10 +463,10 @@ fn scan_repo_slugs(data_dir: &Path) -> Result<Vec<String>> {
 }
 
 /// Reject `--data-dir` paths inside a git working tree.
-fn guard_not_git_repo(data_dir: &Path) -> Result<()> {
+fn guard_not_git_repo(data_dir: &Path, git_bin: &str) -> Result<()> {
     let check_dir = nearest_existing_ancestor(data_dir);
 
-    let output = Command::new("git")
+    let output = Command::new(git_bin)
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(&check_dir)
         .stdout(std::process::Stdio::piped())
@@ -459,7 +493,13 @@ fn nearest_existing_ancestor(path: &Path) -> PathBuf {
     }
 }
 
-fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
+fn clone_or_bootstrap(
+    owner: &str,
+    repo: &str,
+    repo_dir: &Path,
+    gh_bin: &str,
+    git_bin: &str,
+) -> Result<()> {
     if repo_dir.join(".git").exists() {
         bootstrap::ensure_repo_ready_sync(repo_dir)?;
         return Ok(());
@@ -476,23 +516,23 @@ fn clone_or_bootstrap(owner: &str, repo: &str, repo_dir: &Path) -> Result<()> {
 
     let slug = format!("{owner}/{repo}");
     let repo_dir_str = repo_dir.to_string_lossy();
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args(["repo", "clone", &slug, &repo_dir_str])
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!("failed to run gh repo clone {slug}: {err}"))
+            RalphError::Orchestration(format!("failed to run {gh_bin} repo clone {slug}: {err}"))
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(RalphError::Orchestration(format!(
-            "gh repo clone {slug} failed: {}",
+            "{gh_bin} repo clone {slug} failed: {}",
             stderr.trim()
         )));
     }
 
     let ssh_url = format!("git@github.com:{owner}/{repo}.git");
-    let _ = Command::new("git")
+    let _ = Command::new(git_bin)
         .args(["remote", "set-url", "origin", &ssh_url])
         .current_dir(repo_dir)
         .output();
@@ -542,17 +582,31 @@ fn is_valid_repo_component(component: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
 }
 
-fn preflight_check_gh() -> Result<()> {
-    match Command::new("gh").arg("--version").output() {
+fn preflight_check_git(git_bin: &str) -> Result<()> {
+    match Command::new(git_bin).arg("--version").output() {
         Ok(_) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(RalphError::Validation(
-            "gh (GitHub CLI) not found in PATH. The daemon requires gh to poll issues, \
-                 post comments, and create PRs. Install it from https://cli.github.com/ \
-                 or run inside `nix develop`."
-                .to_owned(),
+            format!(
+                "git executable not found: {git_bin}. Set --git-bin or workspace.git_bin to a valid path."
+            ),
         )),
         Err(err) => Err(RalphError::Validation(format!(
-            "gh (GitHub CLI) check failed: {err}"
+            "git executable check failed ({git_bin}): {err}"
+        ))),
+    }
+}
+
+fn preflight_check_gh(gh_bin: &str) -> Result<()> {
+    match Command::new(gh_bin).arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(RalphError::Validation(format!(
+                "gh executable not found: {gh_bin}. The daemon requires gh to poll issues, \
+                 post comments, and create PRs. Set --gh-bin or workspace.gh_bin to a valid path."
+            )))
+        }
+        Err(err) => Err(RalphError::Validation(format!(
+            "gh executable check failed ({gh_bin}): {err}"
         ))),
     }
 }

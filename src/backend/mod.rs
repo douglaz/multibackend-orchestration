@@ -167,6 +167,7 @@ pub struct CliBackend {
     args: Vec<String>,
     timeout: Duration,
     env: BTreeMap<String, String>,
+    cwd: Option<PathBuf>,
     /// Shared invocation context for session-aware arg rewriting in non-tmux mode.
     /// When set, `execute_streaming` uses `effective_args()` instead of raw `self.args`.
     invocation_ctx: SharedInvocationContext,
@@ -186,8 +187,14 @@ impl CliBackend {
             args,
             timeout,
             env,
+            cwd: None,
             invocation_ctx: SharedInvocationContext::default(),
         }
+    }
+
+    pub fn with_cwd(mut self, cwd: Option<PathBuf>) -> Self {
+        self.cwd = cwd;
+        self
     }
 
     pub fn resolved_command_path(&self) -> PathBuf {
@@ -468,6 +475,9 @@ impl CliBackend {
 
         let resolved_command = self.resolved_command_path();
         let mut cmd = Command::new(&resolved_command);
+        if let Some(ref cwd) = self.cwd {
+            cmd.current_dir(cwd);
+        }
         cmd.args(&effective_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -804,19 +814,19 @@ impl BackendRegistry {
         let shared_ctx = SharedTmuxContext::default();
         let shared_invocation = SharedInvocationContext::default();
 
-        let mut claude_backend = claude::backend_from_config(config, None, None);
+        let mut claude_backend = claude::backend_from_config(config, None, None, None);
         claude_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
             "claude".to_owned(),
             backend_with_optional_tmux(claude_backend, &tmux, shared_ctx.clone()),
         );
-        let mut codex_backend = codex::backend_from_config(config, None, None);
+        let mut codex_backend = codex::backend_from_config(config, None, None, None);
         codex_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
         );
-        let mut gemini_backend = gemini::backend_from_config(config, None, None);
+        let mut gemini_backend = gemini::backend_from_config(config, None, None, None);
         gemini_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
             "gemini".to_owned(),
@@ -1185,9 +1195,9 @@ impl BackendRegistry {
 
         let model = spec.model.as_deref();
         match spec.name.as_str() {
-            "claude" => Ok(claude::backend_from_config(&self.config, model, role)),
-            "codex" => Ok(codex::backend_from_config(&self.config, model, role)),
-            "gemini" => Ok(gemini::backend_from_config(&self.config, model, role)),
+            "claude" => Ok(claude::backend_from_config(&self.config, model, role, None)),
+            "codex" => Ok(codex::backend_from_config(&self.config, model, role, None)),
+            "gemini" => Ok(gemini::backend_from_config(&self.config, model, role, None)),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for spec lookup: {}",
                 backend_spec_key(spec)
@@ -1226,6 +1236,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use tempfile::tempdir;
@@ -1425,6 +1436,39 @@ printf 'progress 20%%\rpartial-line'
         assert_eq!(output, "progress 10%\rprogress 20%\rpartial-line");
         let logged = fs::read(writer.path()).expect("read log bytes");
         assert_eq!(logged, b"progress 10%\rprogress 20%\rpartial-line");
+    }
+
+    #[tokio::test]
+    async fn cli_backend_execute_uses_configured_cwd() {
+        let temp = tempdir().expect("tempdir");
+        let cwd_dir = temp.path().join("repo-clone");
+        fs::create_dir_all(&cwd_dir).expect("create cwd dir");
+        let script_path = write_executable_script(
+            temp.path(),
+            "print-cwd.sh",
+            r#"#!/bin/sh
+cat >/dev/null
+pwd
+"#,
+        );
+
+        let backend = CliBackend::new(
+            "cwd-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(2),
+            BTreeMap::new(),
+        )
+        .with_cwd(Some(cwd_dir.clone()));
+
+        let output = Backend::execute(&backend, "ignored")
+            .await
+            .expect("backend should succeed");
+        let observed = PathBuf::from(output.trim())
+            .canonicalize()
+            .expect("observed cwd should be canonicalizable");
+        let expected = cwd_dir.canonicalize().expect("expected cwd canonical");
+        assert_eq!(observed, expected);
     }
 
     #[tokio::test]

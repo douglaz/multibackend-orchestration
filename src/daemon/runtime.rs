@@ -70,6 +70,10 @@ pub struct DaemonRuntimeConfig {
     /// Total wall-clock timeout (seconds) for backend calls within a single
     /// PRD state transition.
     pub prd_backend_timeout_secs: u64,
+    /// Executable used for git invocations in interactive PRD.
+    pub git_bin: String,
+    /// Executable used for GitHub CLI invocations in interactive PRD.
+    pub gh_bin: String,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -604,6 +608,8 @@ async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         owner: config.owner.clone(),
         repo: config.repo.clone(),
         data_dir,
+        git_bin: config.git_bin.clone(),
+        gh_bin: config.gh_bin.clone(),
         prd_enabled: config.prd_enabled,
         question_backends: config.prd_question_backends.clone(),
         writer_backend: config.prd_writer_backend.clone(),
@@ -612,6 +618,8 @@ async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         backend_timeout_secs: config.prd_backend_timeout_secs,
         global_config: config.global_config.clone(),
         verbose: config.verbose,
+        max_concurrent: config.max_concurrent,
+        worker_cwd: None,
     };
 
     spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await

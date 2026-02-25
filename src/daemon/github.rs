@@ -23,6 +23,7 @@ const LABEL_RETRY_MAX: u32 = 3;
 
 /// Base delay between label mutation retries (doubles each attempt).
 const LABEL_RETRY_BASE_DELAY_MS: u64 = 500;
+const DEFAULT_GH_BIN: &str = "gh";
 
 pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
     (
@@ -88,6 +89,15 @@ pub struct PrMergeInfo {
 /// Returns `(issues, overflow)` where overflow is true when exactly 100 issues
 /// were returned, indicating possible truncation.
 pub fn poll_issues(owner: &str, repo: &str, labels: &[String]) -> Result<(Vec<GhIssue>, bool)> {
+    poll_issues_with_gh_bin(DEFAULT_GH_BIN, owner, repo, labels)
+}
+
+pub fn poll_issues_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    labels: &[String],
+) -> Result<(Vec<GhIssue>, bool)> {
     let full_repo = format!("{owner}/{repo}");
     let mut args: Vec<String> = vec![
         "issue".into(),
@@ -107,7 +117,7 @@ pub fn poll_issues(owner: &str, repo: &str, labels: &[String]) -> Result<(Vec<Gh
         args.push(label.clone());
     }
 
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args(&args)
         .output()
         .map_err(|err| RalphError::Orchestration(format!("failed to run gh issue list: {err}")))?;
@@ -479,8 +489,18 @@ pub fn post_raw_issue_comment(
     issue_number: u32,
     body: &str,
 ) -> Result<()> {
+    post_raw_issue_comment_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, body)
+}
+
+pub fn post_raw_issue_comment_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    body: &str,
+) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args([
             "issue",
             "comment",
@@ -919,10 +939,14 @@ pub fn update_terminal_labels_best_effort(
 /// This is best-effort and intentionally non-failing: startup must continue
 /// even when label creation fails.
 pub fn ensure_labels_best_effort(owner: &str, repo: &str) {
+    ensure_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo);
+}
+
+pub fn ensure_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
     let full_repo = format!("{owner}/{repo}");
 
     for (name, color, description) in REQUIRED_LABELS {
-        let output = Command::new("gh")
+        let output = Command::new(gh_bin)
             .args([
                 "label",
                 "create",
@@ -1029,9 +1053,19 @@ pub fn swap_lifecycle_label(
 
 /// Add a label with retry-on-conflict/transient-failure behavior.
 pub fn add_label_with_retry(owner: &str, repo: &str, issue_number: u32, label: &str) -> Result<()> {
+    add_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label)
+}
+
+pub fn add_label_with_retry_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    label: &str,
+) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     for attempt in 0..LABEL_RETRY_MAX {
-        let output = Command::new("gh")
+        let output = Command::new(gh_bin)
             .args([
                 "issue",
                 "edit",
@@ -1081,9 +1115,19 @@ pub fn remove_label_with_retry(
     issue_number: u32,
     label: &str,
 ) -> Result<()> {
+    remove_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label)
+}
+
+pub fn remove_label_with_retry_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    label: &str,
+) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     for attempt in 0..LABEL_RETRY_MAX {
-        let output = Command::new("gh")
+        let output = Command::new(gh_bin)
             .args([
                 "issue",
                 "edit",
@@ -1128,8 +1172,17 @@ pub fn remove_label_with_retry(
 
 /// Fetch the current lifecycle labels for an issue from GitHub.
 pub fn fetch_issue_labels(owner: &str, repo: &str, issue_number: u32) -> Result<Vec<String>> {
+    fetch_issue_labels_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number)
+}
+
+pub fn fetch_issue_labels_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<Vec<String>> {
     let full_repo = format!("{owner}/{repo}");
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args([
             "issue",
             "view",
@@ -1300,8 +1353,17 @@ pub fn fetch_issue_comments(
     repo: &str,
     issue_number: u32,
 ) -> Result<Vec<IssueComment>> {
+    fetch_issue_comments_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number)
+}
+
+pub fn fetch_issue_comments_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Result<Vec<IssueComment>> {
     let full_repo = format!("{owner}/{repo}");
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args([
             "issue",
             "view",
@@ -1366,7 +1428,11 @@ pub fn fetch_issue_comments(
 ///
 /// Uses `gh api user -q .login` and returns a non-empty login string.
 pub fn fetch_authenticated_login() -> Result<String> {
-    let output = Command::new("gh")
+    fetch_authenticated_login_with_gh_bin(DEFAULT_GH_BIN)
+}
+
+pub fn fetch_authenticated_login_with_gh_bin(gh_bin: &str) -> Result<String> {
+    let output = Command::new(gh_bin)
         .args(["api", "user", "-q", ".login"])
         .output()
         .map_err(|err| {
@@ -1467,7 +1533,25 @@ pub fn find_bot_comment_with_marker(
     marker: &str,
     bot_login: &str,
 ) -> Result<Option<IssueComment>> {
-    let comments = fetch_issue_comments(owner, repo, issue_number)?;
+    find_bot_comment_with_marker_with_gh_bin(
+        DEFAULT_GH_BIN,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )
+}
+
+pub fn find_bot_comment_with_marker_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    let comments = fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number)?;
     Ok(comments
         .into_iter()
         .find(|c| c.author_login == bot_login && c.body.contains(marker)))
@@ -1486,7 +1570,28 @@ pub fn post_bot_comment_with_marker(
     body_text: &str,
     bot_login: &str,
 ) -> Result<Option<u64>> {
-    let meta = post_bot_comment_with_marker_metadata(
+    post_bot_comment_with_marker_with_gh_bin(
+        DEFAULT_GH_BIN,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        body_text,
+        bot_login,
+    )
+}
+
+pub fn post_bot_comment_with_marker_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<u64>> {
+    let meta = post_bot_comment_with_marker_metadata_with_gh_bin(
+        gh_bin,
         owner,
         repo,
         issue_number,
@@ -1510,15 +1615,40 @@ pub fn post_bot_comment_with_marker_metadata(
     body_text: &str,
     bot_login: &str,
 ) -> Result<Option<IssueComment>> {
-    if let Some(existing) =
-        find_bot_comment_with_marker(owner, repo, issue_number, marker, bot_login)?
-    {
+    post_bot_comment_with_marker_metadata_with_gh_bin(
+        DEFAULT_GH_BIN,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        body_text,
+        bot_login,
+    )
+}
+
+pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    marker: &str,
+    body_text: &str,
+    bot_login: &str,
+) -> Result<Option<IssueComment>> {
+    if let Some(existing) = find_bot_comment_with_marker_with_gh_bin(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+        marker,
+        bot_login,
+    )? {
         return Ok(Some(existing));
     }
 
     let full_body = format!("{marker}\n{body_text}");
     let full_repo = format!("{owner}/{repo}");
-    let output = Command::new("gh")
+    let output = Command::new(gh_bin)
         .args([
             "issue",
             "comment",
@@ -1543,7 +1673,8 @@ pub fn post_bot_comment_with_marker_metadata(
     }
 
     // Fetch back to get the full metadata of the newly posted comment.
-    Ok(find_bot_comment_with_marker(
+    Ok(find_bot_comment_with_marker_with_gh_bin(
+        gh_bin,
         owner,
         repo,
         issue_number,
@@ -1554,11 +1685,15 @@ pub fn post_bot_comment_with_marker_metadata(
 
 /// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
 pub fn ensure_prd_labels_best_effort(owner: &str, repo: &str) {
+    ensure_prd_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo);
+}
+
+pub fn ensure_prd_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
     use crate::daemon::interactive_prd::PRD_LABELS;
     let full_repo = format!("{owner}/{repo}");
 
     for (name, color, description) in PRD_LABELS {
-        let output = Command::new("gh")
+        let output = Command::new(gh_bin)
             .args([
                 "label",
                 "create",

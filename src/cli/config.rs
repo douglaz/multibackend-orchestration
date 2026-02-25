@@ -581,7 +581,6 @@ fn parse_bool(raw: &str, key: &str) -> Result<bool> {
     })
 }
 
-
 fn parse_u32(raw: &str, key: &str) -> Result<u32> {
     raw.parse::<u32>()
         .map_err(|_| RalphError::Validation(format!("key '{key}' expects unsigned integer value")))
@@ -793,7 +792,6 @@ fn parse_optional_string_list(raw: &str) -> Result<Option<Vec<String>>> {
     Ok(Some(parse_string_list(raw)?))
 }
 
-
 fn parse_string_list(raw: &str) -> Result<Vec<String>> {
     if raw.trim().starts_with('[') {
         let value: Value = serde_json::from_str(raw).map_err(|_| {
@@ -982,12 +980,8 @@ mod tests {
     #[test]
     fn set_global_value_rejects_unknown_role_timeout() {
         let mut config = crate::config::GlobalConfig::default();
-        let err = set_global_value(
-            &mut config,
-            "backends.claude.role_timeouts.bogus",
-            "42",
-        )
-        .expect_err("unknown timeout role should fail");
+        let err = set_global_value(&mut config, "backends.claude.role_timeouts.bogus", "42")
+            .expect_err("unknown timeout role should fail");
         assert!(err.to_string().contains("unknown backend timeout role"));
     }
 

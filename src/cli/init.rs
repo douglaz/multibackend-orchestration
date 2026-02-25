@@ -201,9 +201,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        create_workspace, plan_actions, validate_target, InitAction, TEMPLATE_FILES,
-    };
+    use super::{create_workspace, plan_actions, validate_target, InitAction, TEMPLATE_FILES};
     use crate::error::RalphError;
     use crate::prompts::templates::{
         default_arbiter_template, default_completer_template, default_final_reviewer_template,
@@ -272,7 +270,6 @@ mod tests {
                 .expect("read arbiter template"),
             default_arbiter_template()
         );
-
     }
 
     #[test]

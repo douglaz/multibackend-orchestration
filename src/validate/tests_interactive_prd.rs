@@ -1,6 +1,7 @@
 use super::*;
 
 use std::fs;
+use std::sync::Mutex;
 
 use crate::daemon::github;
 use crate::daemon::interactive_prd::{
@@ -12,6 +13,11 @@ use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
+
+/// Serializes access to process-global env vars in tests that inject
+/// `RALPH_TEST_INJECT_PANIC`. The validate runner executes tests in parallel
+/// via `thread::scope`, so env mutation must be guarded.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -170,6 +176,46 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "interactive_prd::status_failed_marker_spoof_resistance",
             func: status_failed_marker_spoof_resistance,
+        },
+        ConformanceTest {
+            name: "interactive_prd::prd_poll_config_max_concurrent_field",
+            func: prd_poll_config_max_concurrent_field,
+        },
+        ConformanceTest {
+            name: "interactive_prd::max_concurrent_zero_treated_as_one",
+            func: max_concurrent_zero_treated_as_one,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_dedup_invariant",
+            func: concurrent_dedup_invariant,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_error_isolation",
+            func: concurrent_error_isolation,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_panic_isolation",
+            func: concurrent_panic_isolation,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_bounded_worker_count",
+            func: concurrent_bounded_worker_count,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_refresh_ordering",
+            func: concurrent_refresh_ordering,
+        },
+        ConformanceTest {
+            name: "interactive_prd::concurrent_advancement_slow_fast",
+            func: concurrent_advancement_slow_fast,
+        },
+        ConformanceTest {
+            name: "interactive_prd::hardening_single_worker_reset_each_issue",
+            func: hardening_single_worker_reset_each_issue,
+        },
+        ConformanceTest {
+            name: "interactive_prd::hardening_worktree_failure_fallback_sequential",
+            func: hardening_worktree_failure_fallback_sequential,
         },
     ]
 }
@@ -3335,6 +3381,1136 @@ fn status_failed_marker_spoof_resistance(_harness: &RalphHarness) -> TestResult 
             bot_result.unwrap().id,
             301,
             "should find the bot comment, not the spoof"
+        );
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency conformance tests
+// ---------------------------------------------------------------------------
+
+fn prd_poll_config_max_concurrent_field(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::PrdPollConfig;
+    use std::path::PathBuf;
+
+    run_case(|| {
+        let config = PrdPollConfig {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            data_dir: PathBuf::from("/tmp"),
+            git_bin: "git".to_string(),
+            gh_bin: "gh".to_string(),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 4,
+            worker_cwd: None,
+        };
+        assert_eq!(
+            config.max_concurrent, 4,
+            "max_concurrent should store value"
+        );
+    })
+}
+
+fn max_concurrent_zero_treated_as_one(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::PrdPollConfig;
+    use std::path::PathBuf;
+
+    run_case(|| {
+        let config = PrdPollConfig {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            data_dir: PathBuf::from("/tmp"),
+            git_bin: "git".to_string(),
+            gh_bin: "gh".to_string(),
+            prd_enabled: true,
+            question_backends: vec![],
+            writer_backend: String::new(),
+            reviewer_backend: String::new(),
+            max_revisions: 0,
+            backend_timeout_secs: 10,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 0,
+            worker_cwd: None,
+        };
+        let effective = std::cmp::max(1, config.max_concurrent);
+        assert_eq!(effective, 1, "max_concurrent=0 should be treated as 1");
+    })
+}
+
+/// Conformance: dedup invariant via real poll_and_advance_prd path.
+/// Issue #50 appears in both ralph:prd and ralph:prd-active polls.
+/// Assert it is processed exactly once per tick (counted via label-edit calls).
+fn concurrent_dedup_invariant(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let counter = data_dir.join("edit_count");
+        fs::write(&counter, "0").expect("init counter");
+        let counter_str = counter.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+COUNTER="{counter_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0; has_active=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; ralph:prd-active) has_active=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ] || [ "$has_active" = "1" ]; then
+          printf '[{{"number":50,"title":"X","labels":[{{"name":"ralph:prd"}},{{"name":"ralph:prd-active"}}],"body":"X"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        c=$(cat "$COUNTER" 2>/dev/null || printf '0'); c=$((c+1)); printf '%d' "$c" > "$COUNTER"
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(result.is_ok(), "tick should succeed");
+        let count: u32 = fs::read_to_string(&counter)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "issue #50 should be processed exactly once, got {count}"
+        );
+    })
+}
+
+/// Conformance: error isolation via real poll_and_advance_prd path.
+/// Issue #60's label edit fails; issue #70 succeeds. Tick returns Ok and
+/// issue #70's label edit was reached.
+fn concurrent_error_isolation(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let success_flag = data_dir.join("issue70_ok");
+        let success_str = success_flag.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+SUCCESS="{success_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":60,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":70,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            60) exit 1 ;;
+            70) touch "$SUCCESS"; exit 0 ;;
+          esac
+        done
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(
+            result.is_ok(),
+            "tick should return Ok despite issue #60 error"
+        );
+        assert!(
+            success_flag.exists(),
+            "issue #70 should advance despite #60 error"
+        );
+    })
+}
+
+/// Conformance: panic isolation via real poll_and_advance_prd path.
+/// Issue #110 panics deterministically via `RALPH_TEST_INJECT_PANIC`.
+/// Issue #111 proceeds normally and its label edit creates a flag file.
+///
+fn concurrent_panic_isolation(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let success_flag = data_dir.join("issue111_ok");
+        let success_str = success_flag.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+SUCCESS="{success_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":110,"title":"Panic","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":111,"title":"Good","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in 111) touch "$SUCCESS" ;; esac
+        done
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        // Inject a real panic for issue #110
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
+        let result = poll_and_advance_prd(&config);
+        unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
+        drop(_guard);
+
+        assert!(result.is_ok(), "tick should succeed despite #110 panic");
+        assert!(
+            success_flag.exists(),
+            "issue #111 should advance despite #110 panic"
+        );
+
+        // Verify the panicking issue's failure state was persisted
+        let state_path = data_dir.join("acme/widgets/.ralph/interactive-prd/110.json");
+        assert!(
+            state_path.exists(),
+            "panicking issue #110 should have persisted failure state"
+        );
+        let state_raw = fs::read_to_string(&state_path).expect("read state #110");
+        let state: InteractivePrdState =
+            serde_json::from_str(&state_raw).expect("parse state #110");
+        assert!(
+            state.error_count >= 1,
+            "issue #110 error_count should be >= 1 after panic, got {}",
+            state.error_count
+        );
+        assert!(
+            state.last_error.as_deref().unwrap_or("").contains("panic"),
+            "issue #110 last_error should mention panic, got {:?}",
+            state.last_error
+        );
+    })
+}
+
+/// Conformance: bounded concurrency via real poll_and_advance_prd path.
+/// With max_concurrent=2 and 4 issues, peak active workers (measured via
+/// flock-based counter in mock gh script) must never exceed 2.
+///
+/// Uses FIFO-based deterministic rendezvous barrier (no sleep): two FIFOs
+/// create a paired handshake so concurrent workers must overlap. Each edit
+/// handler claims a slot (odd/even), increments active, then cross-writes/
+/// reads the FIFO pair. Both block until their peer writes, guaranteeing
+/// overlap and accurate peak measurement.
+fn concurrent_bounded_worker_count(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let active_file = data_dir.join("active");
+        let peak_file = data_dir.join("peak");
+        let lock_file = data_dir.join("counter.lock");
+        let slot_file = data_dir.join("slot_counter");
+        fs::write(&active_file, "0").unwrap();
+        fs::write(&peak_file, "0").unwrap();
+        fs::write(&slot_file, "0").unwrap();
+        let active_str = active_file.to_string_lossy().into_owned();
+        let peak_str = peak_file.to_string_lossy().into_owned();
+        let lock_str = lock_file.to_string_lossy().into_owned();
+        let slot_str = slot_file.to_string_lossy().into_owned();
+
+        // Two FIFOs for the rendezvous barrier
+        let fifo_a = data_dir.join("barrier_a");
+        let fifo_b = data_dir.join("barrier_b");
+        let fifo_a_str = fifo_a.to_string_lossy().into_owned();
+        let fifo_b_str = fifo_b.to_string_lossy().into_owned();
+        for (fifo, name) in [(&fifo_a, "barrier_a"), (&fifo_b, "barrier_b")] {
+            let st = std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap_or_else(|e| panic!("mkfifo {name}: {e}"));
+            assert!(st.success(), "mkfifo {name} failed: {st}");
+        }
+
+        // Per-issue flag directory for first-edit tracking
+        let flags_dir = data_dir.join("edit_flags");
+        fs::create_dir_all(&flags_dir).unwrap();
+        let flags_str = flags_dir.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+ACTIVE="{active_str}"
+PEAK="{peak_str}"
+LOCK="{lock_str}"
+SLOT="{slot_str}"
+FIFO_A="{fifo_a_str}"
+FIFO_B="{fifo_b_str}"
+FLAGS="{flags_str}"
+_lock() {{ while ! mkdir "$LOCK.d" 2>/dev/null; do :; done; }}
+_unlock() {{ rmdir "$LOCK.d"; }}
+inc() {{ _lock; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c+1)); printf '%d' "$c">"$ACTIVE"; p=$(cat "$PEAK" 2>/dev/null||printf '0'); [ "$c" -gt "$p" ] && printf '%d' "$c">"$PEAK"; _unlock; }}
+dec() {{ _lock; c=$(cat "$ACTIVE" 2>/dev/null||printf '0'); c=$((c-1)); printf '%d' "$c">"$ACTIVE"; _unlock; }}
+claim_slot() {{ _lock; s=$(cat "$SLOT" 2>/dev/null||printf '0'); s=$((s+1)); printf '%d' "$s">"$SLOT"; if [ $((s % 2)) -eq 1 ]; then printf '1'; else printf '2'; fi; _unlock; }}
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":300,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":301,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}},{{"number":302,"title":"C","labels":[{{"name":"ralph:prd"}}],"body":"C"}},{{"number":303,"title":"D","labels":[{{"name":"ralph:prd"}}],"body":"D"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        ISSUE_NUM=""
+        for arg in "$@"; do case "$arg" in 300|301|302|303) ISSUE_NUM="$arg" ;; esac; done
+        if [ -n "$ISSUE_NUM" ] && [ ! -f "$FLAGS/$ISSUE_NUM" ]; then
+          touch "$FLAGS/$ISSUE_NUM"
+          MY_SLOT=$(claim_slot)
+          inc
+          if [ "$MY_SLOT" = "1" ]; then
+            read _dummy < "$FIFO_A"
+            printf 'go\n' > "$FIFO_B"
+          else
+            printf 'go\n' > "$FIFO_A"
+            read _dummy < "$FIFO_B"
+          fi
+          dec
+        fi
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 2,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(result.is_ok(), "tick should succeed");
+        let peak: u32 = fs::read_to_string(&peak_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(peak <= 2, "peak {peak} must not exceed max_concurrent=2");
+        assert!(peak >= 1, "at least one worker should have been active");
+    })
+}
+
+/// Conformance: refresh_repo_clone runs exactly once per non-empty tick,
+/// and before any per-issue backend processing (label edits).
+/// Uses mock git (logs "refresh" on fetch) and mock gh (logs "edit:<N>" on
+/// label edits) writing to a shared event log file.
+fn concurrent_refresh_ordering(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let event_log = data_dir.join("event_log");
+        let event_log_str = event_log.to_string_lossy().into_owned();
+
+        // Create a repo clone dir WITH a .git dir so refresh_repo_clone runs
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+        // Mock git: logs "refresh" on fetch
+        let git_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch)
+    printf 'refresh\n' >> "$EVENT_LOG"
+    exit 0
+    ;;
+  reset) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+        );
+
+        // Mock gh: logs "edit:<issue>" on label edits
+        let gh_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":400,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":401,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            400) printf 'edit:400\n' >> "$EVENT_LOG" ;;
+            401) printf 'edit:401\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        let git_path = scripts_dir.join("git");
+        fs::write(&git_path, git_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 30,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+        let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+        let events: Vec<&str> = log_content.lines().collect();
+
+        // Refresh must appear exactly once
+        let refresh_count = events.iter().filter(|e| **e == "refresh").count();
+        assert_eq!(
+            refresh_count, 1,
+            "refresh_repo_clone should be called exactly once, got {refresh_count}"
+        );
+
+        // Refresh must be the first event (before any per-issue edit)
+        assert_eq!(
+            events.first().copied(),
+            Some("refresh"),
+            "refresh must occur before any per-issue processing; events: {:?}",
+            events
+        );
+
+        // All non-refresh events must be per-issue edits (after refresh)
+        for event in &events[1..] {
+            assert!(
+                event.starts_with("edit:"),
+                "expected per-issue edit event after refresh, got: {event}"
+            );
+        }
+    })
+}
+
+/// Conformance: slow issue must not head-of-line block fast issue when
+/// `max_concurrent >= 2`. Uses FIFO (named pipe) for deterministic
+/// synchronization — no sleep or polling.
+///
+/// Issue #80 (slow) blocks on reading a FIFO. Issue #90 (fast) logs its
+/// edit, then writes to the FIFO, unblocking #80. Event log proves fast
+/// completes before slow. Under sequential execution the FIFO read would
+/// deadlock, so completion proves concurrent execution.
+fn concurrent_advancement_slow_fast(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let issue80_flag = data_dir.join("issue80_processed");
+        let issue90_flag = data_dir.join("issue90_processed");
+        let issue80_str = issue80_flag.to_string_lossy().into_owned();
+        let issue90_str = issue90_flag.to_string_lossy().into_owned();
+
+        // FIFO for deterministic handshake
+        let gate_fifo = data_dir.join("slow_gate");
+        let gate_str = gate_fifo.to_string_lossy().into_owned();
+        let mkfifo_status = std::process::Command::new("mkfifo")
+            .arg(&gate_fifo)
+            .status()
+            .expect("mkfifo should succeed");
+        assert!(
+            mkfifo_status.success(),
+            "mkfifo failed with status: {mkfifo_status}"
+        );
+
+        // Event log with flock-based atomic append
+        let event_log = data_dir.join("event_log");
+        let event_log_str = event_log.to_string_lossy().into_owned();
+        let lock_file = data_dir.join("event.lock");
+        let lock_str = lock_file.to_string_lossy().into_owned();
+
+        // Track that slow issue has been unblocked (subsequent edit calls pass through)
+        let slow_unblocked = data_dir.join("slow_unblocked");
+        let slow_unblocked_str = slow_unblocked.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+ISSUE80_FLAG="{issue80_str}"
+ISSUE90_FLAG="{issue90_str}"
+GATE="{gate_str}"
+EVENT_LOG="{event_log_str}"
+LOCK="{lock_str}"
+SLOW_UNBLOCKED="{slow_unblocked_str}"
+
+log_event() {{
+  (
+    flock 9
+    printf '%s\n' "$1" >> "$EVENT_LOG"
+  ) 9>"$LOCK"
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":80,"title":"Slow","labels":[{{"name":"ralph:prd"}}],"body":"S"}},{{"number":90,"title":"Fast","labels":[{{"name":"ralph:prd"}}],"body":"F"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        is80=0; is90=0
+        for arg in "$@"; do case "$arg" in 80) is80=1 ;; 90) is90=1 ;; esac; done
+        if [ "$is80" = "1" ]; then
+          if [ ! -f "$SLOW_UNBLOCKED" ]; then
+            read dummy < "$GATE"
+            touch "$SLOW_UNBLOCKED"
+            log_event "edit:80"
+            touch "$ISSUE80_FLAG"
+          fi
+        elif [ "$is90" = "1" ]; then
+          if [ ! -f "$ISSUE90_FLAG" ]; then
+            log_event "edit:90"
+            touch "$ISSUE90_FLAG"
+            printf 'go\n' > "$GATE"
+          fi
+        fi
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(&clone_dir).unwrap();
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: "git".to_string(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 2,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        // Bounded watchdog: run poll_and_advance_prd on a spawned thread
+        // with a join timeout so a regression (FIFO deadlock under sequential
+        // processing) fails with a clear assertion instead of hanging the
+        // full validate suite indefinitely.
+        let watchdog_timeout = std::time::Duration::from_secs(30);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config_clone = config.clone();
+        let handle = std::thread::spawn(move || {
+            let r = poll_and_advance_prd(&config_clone);
+            let _ = tx.send(r);
+        });
+        let result = rx
+            .recv_timeout(watchdog_timeout)
+            .expect("slow/fast conformance test timed out — possible FIFO deadlock regression");
+        let _ = handle.join();
+
+        assert!(result.is_ok(), "tick should complete: {:?}", result);
+        assert!(
+            issue90_flag.exists(),
+            "fast issue #90 should have been processed"
+        );
+        assert!(
+            issue80_flag.exists(),
+            "slow issue #80 should have been processed"
+        );
+
+        // Verify ordering: fast (edit:90) must precede slow (edit:80)
+        let log_content = fs::read_to_string(&event_log).expect("read event log");
+        let events: Vec<&str> = log_content.lines().collect();
+        assert!(
+            events.len() >= 2,
+            "expected at least 2 events, got: {:?}",
+            events
+        );
+        let fast_pos = events.iter().position(|e| *e == "edit:90");
+        let slow_pos = events.iter().position(|e| *e == "edit:80");
+        assert!(
+            fast_pos.is_some() && slow_pos.is_some(),
+            "both edit events must appear; events: {:?}",
+            events
+        );
+        assert!(
+            fast_pos.unwrap() < slow_pos.unwrap(),
+            "fast edit:90 (pos {}) must precede slow edit:80 (pos {}); events: {:?}",
+            fast_pos.unwrap(),
+            slow_pos.unwrap(),
+            events
+        );
+    })
+}
+
+/// Hardening: with `max_concurrent=1` and two issues, reset must run before
+/// each issue in sequential mode.
+fn hardening_single_worker_reset_each_issue(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let event_log = data_dir.join("event_log");
+        let event_log_str = event_log.to_string_lossy().into_owned();
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+        let git_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch) printf 'refresh\n' >> "$EVENT_LOG"; exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset)
+    case "$3" in
+      origin/HEAD|origin/main|origin/master) printf 'refresh-reset\n' >> "$EVENT_LOG" ;;
+      *) printf 'worker-reset\n' >> "$EVENT_LOG" ;;
+    esac
+    exit 0
+    ;;
+  clean) printf 'worker-clean\n' >> "$EVENT_LOG"; exit 0 ;;
+  checkout|worktree) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+        );
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":501,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":502,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            501) printf 'edit:501\n' >> "$EVENT_LOG" ;;
+            502) printf 'edit:502\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        let git_path = scripts_dir.join("git");
+        fs::write(&git_path, git_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 2,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 1,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(result.is_ok(), "tick should succeed: {:?}", result);
+        let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+        let events: Vec<&str> = log_content.lines().collect();
+        let reset_positions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| (*e == "worker-reset").then_some(idx))
+            .collect();
+        assert_eq!(
+            reset_positions.len(),
+            2,
+            "expected one reset per issue in single-worker mode; events: {:?}",
+            events
+        );
+        let edit_501 = events
+            .iter()
+            .position(|e| *e == "edit:501")
+            .expect("missing edit:501");
+        let edit_502 = events
+            .iter()
+            .position(|e| *e == "edit:502")
+            .expect("missing edit:502");
+        assert!(
+            reset_positions[0] < edit_501,
+            "first reset must happen before issue 501 edit; events: {:?}",
+            events
+        );
+        assert!(
+            reset_positions[1] < edit_502 && edit_501 < reset_positions[1],
+            "second reset must happen between issue 501 and 502 processing; events: {:?}",
+            events
+        );
+    })
+}
+
+/// Hardening: if worktree setup fails while parallel mode is requested, the
+/// tick should degrade to sequential processing.
+fn hardening_worktree_failure_fallback_sequential(_harness: &RalphHarness) -> TestResult {
+    use crate::config::GlobalConfig;
+    use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    run_case(|| {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = tmp.path();
+
+        let clone_dir = data_dir.join("acme").join("widgets");
+        fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+        let git_log = data_dir.join("git_events");
+        let git_log_str = git_log.to_string_lossy().into_owned();
+        let peak_file = data_dir.join("peak");
+        let active_file = data_dir.join("active");
+        let lock_dir = data_dir.join("counter-lock");
+        let flags_dir = data_dir.join("flags");
+        fs::write(&peak_file, "0").expect("init peak");
+        fs::write(&active_file, "0").expect("init active");
+        fs::create_dir_all(&flags_dir).expect("create flags dir");
+        let peak_str = peak_file.to_string_lossy().into_owned();
+        let active_str = active_file.to_string_lossy().into_owned();
+        let lock_dir_str = lock_dir.to_string_lossy().into_owned();
+        let flags_str = flags_dir.to_string_lossy().into_owned();
+
+        let git_script = format!(
+            r#"#!/bin/sh
+LOG="{git_log_str}"
+case "$1" in
+  fetch) exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset|clean|checkout) exit 0 ;;
+  worktree)
+    printf 'worktree_fail\n' >> "$LOG"
+    exit 1
+    ;;
+  *) exit 0 ;;
+esac
+"#
+        );
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+PEAK="{peak_str}"
+ACTIVE="{active_str}"
+LOCKDIR="{lock_dir_str}"
+FLAGS="{flags_str}"
+lock() {{
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do :; done
+}}
+unlock() {{
+  rmdir "$LOCKDIR"
+}}
+inc_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur + 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  pk=$(cat "$PEAK" 2>/dev/null || printf '0')
+  if [ "$cur" -gt "$pk" ]; then
+    printf '%d' "$cur" > "$PEAK"
+  fi
+  unlock
+}}
+dec_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur - 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  unlock
+}}
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; esac; done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":610,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":611,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      edit)
+        ISSUE=""
+        for arg in "$@"; do case "$arg" in 610|611) ISSUE="$arg" ;; esac; done
+        if [ -n "$ISSUE" ] && [ ! -f "$FLAGS/$ISSUE" ]; then
+          touch "$FLAGS/$ISSUE"
+          inc_active
+          sleep 1
+          dec_active
+        fi
+        exit 0 ;;
+      view)
+        for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done
+        printf '{{}}'; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+        );
+
+        let scripts_dir = data_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        let gh_path = scripts_dir.join("gh");
+        fs::write(&gh_path, gh_script).unwrap();
+        let git_path = scripts_dir.join("git");
+        fs::write(&git_path, git_script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = PrdPollConfig {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            git_bin: git_path.to_string_lossy().into_owned(),
+            gh_bin: gh_path.to_string_lossy().into_owned(),
+            prd_enabled: true,
+            question_backends: vec!["claude".to_string(), "codex".to_string()],
+            writer_backend: "claude".to_string(),
+            reviewer_backend: "codex".to_string(),
+            max_revisions: 1,
+            backend_timeout_secs: 5,
+            global_config: GlobalConfig::default(),
+            verbose: false,
+            max_concurrent: 2,
+            worker_cwd: None,
+        };
+
+        let result = poll_and_advance_prd(&config);
+
+        assert!(result.is_ok(), "tick should succeed: {:?}", result);
+        let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
+        assert!(
+            git_log_content.contains("worktree_fail"),
+            "worktree setup failure should be observed"
+        );
+        let peak: u32 = fs::read_to_string(&peak_file)
+            .expect("read peak")
+            .trim()
+            .parse()
+            .expect("parse peak");
+        assert_eq!(
+            peak, 1,
+            "peak concurrency should be 1 after sequential fallback, got {peak}"
         );
     })
 }

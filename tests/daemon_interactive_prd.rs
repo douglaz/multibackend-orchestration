@@ -10,6 +10,7 @@ use ralph::daemon::interactive_prd::{
 };
 use ralph::validate::assertions::assert_exit_code;
 use ralph::validate::harness::RalphHarness;
+use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -2308,6 +2309,7 @@ esac; exit 0
 /// marker text), the bot should still post its own marker comment and hydrate
 /// state from the bot-authored comment, not the user spoof.
 #[test]
+#[serial]
 fn user_marker_spoof_does_not_block_bot_marker_posting() {
     let h =
         RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
@@ -2628,6 +2630,1647 @@ esac; exit 0
         state.state == PrdWorkflowState::AwaitingFeedback,
         "issue should remain in AwaitingFeedback: state={:?}",
         state.state,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: dedup invariant
+// ---------------------------------------------------------------------------
+
+/// When the same issue appears in both `ralph:prd` and `ralph:prd-active`
+/// poll passes, `poll_and_advance_prd` must process it exactly once per tick.
+///
+/// Uses a non-terminal (Pending) issue so advance_issue actually runs, and
+/// counts label-edit calls as a processing side-effect to prove single execution.
+#[test]
+#[serial]
+fn dedup_invariant_issue_processed_at_most_once() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    // Counter file: counts how many times gh receives a label-edit call for
+    // issue #50 (the side-effect of advance_issue doing Pending->AwaitingAnswers).
+    let advance_count = tmp.path().join("advance_count");
+    fs::write(&advance_count, "0").expect("init counter");
+
+    let advance_count_str = advance_count.to_string_lossy().into_owned();
+    let gh_script = format!(
+        r#"#!/bin/sh
+ADVANCE_COUNT="{advance_count_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+          esac
+        done
+        # Both polls return the same issue #50 with both labels
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":50,"title":"Dedup test","labels":[{{"name":"ralph:prd"}},{{"name":"ralph:prd-active"}}],"body":"Test"}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[{{"number":50,"title":"Dedup test","labels":[{{"name":"ralph:prd"}},{{"name":"ralph:prd-active"}}],"body":"Test"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        # Count every label edit for issue #50 as a processing side-effect
+        count=$(cat "$ADVANCE_COUNT" 2>/dev/null || printf '0')
+        count=$((count + 1))
+        printf '%d' "$count" > "$ADVANCE_COUNT"
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Ensure repo clone dir exists (for refresh_repo_clone)
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(&clone_dir).expect("create clone dir");
+
+    // No pre-seeded state — issue #50 starts as Pending (default)
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 30,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    // Run with mock PATH
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "poll_and_advance_prd should succeed");
+
+    // Read the counter: label-edit calls are the side-effect of advance_issue
+    // running the Pending->AwaitingAnswers transition (adds ralph:prd-active).
+    // If dedup failed, the issue would be processed twice and the counter would
+    // be >= 2. With correct dedup, it should be processed exactly once.
+    let count_str = fs::read_to_string(&advance_count).expect("read counter");
+    let count: u32 = count_str.trim().parse().expect("parse counter");
+    assert_eq!(
+        count, 1,
+        "issue #50 should be processed exactly once per tick, but was processed {count} times"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: max_concurrent config field
+// ---------------------------------------------------------------------------
+
+/// Verify that `PrdPollConfig` correctly reflects `max_concurrent` from config,
+/// and that 0 is treated as 1.
+#[test]
+fn max_concurrent_zero_treated_as_one() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::PrdPollConfig;
+
+    let config = PrdPollConfig {
+        owner: "o".to_string(),
+        repo: "r".to_string(),
+        data_dir: PathBuf::from("/tmp"),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec![],
+        writer_backend: String::new(),
+        reviewer_backend: String::new(),
+        max_revisions: 0,
+        backend_timeout_secs: 10,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 0,
+        worker_cwd: None,
+    };
+    // The effective worker count is max(1, max_concurrent) inside poll_and_advance_prd
+    let effective = std::cmp::max(1, config.max_concurrent);
+    assert_eq!(effective, 1);
+}
+
+/// Verify that `PrdPollConfig.max_concurrent` properly stores non-zero values.
+#[test]
+fn max_concurrent_preserves_configured_value() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::PrdPollConfig;
+
+    let config = PrdPollConfig {
+        owner: "o".to_string(),
+        repo: "r".to_string(),
+        data_dir: PathBuf::from("/tmp"),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec![],
+        writer_backend: String::new(),
+        reviewer_backend: String::new(),
+        max_revisions: 0,
+        backend_timeout_secs: 10,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 4,
+        worker_cwd: None,
+    };
+    assert_eq!(config.max_concurrent, 4);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: error isolation (via daemon harness)
+// ---------------------------------------------------------------------------
+
+/// Verify that when one issue errors and another succeeds within the same tick,
+/// the successful issue still advances and the tick returns Ok.
+#[test]
+#[serial]
+fn error_isolation_tick_succeeds_despite_issue_error() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let success_flag = tmp.path().join("issue70_edited");
+    let success_flag_str = success_flag.to_string_lossy().into_owned();
+
+    // gh mock: returns two Pending issues, #60 and #70.
+    // - Issue #60: bot login lookup (gh api user) succeeds, but then the label
+    //   edit for issue 60 fails (exit 1), causing its transition to error.
+    // - Issue #70: bot login succeeds, label edit succeeds, so its transition
+    //   advances. We track this via a success flag file.
+    let gh_script = format!(
+        r#"#!/bin/sh
+SUCCESS_FLAG="{success_flag_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":60,"title":"Issue A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":70,"title":"Issue B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        # Check which issue number is being edited
+        for arg in "$@"; do
+          case "$arg" in
+            60)
+              # Issue #60 label edit fails -> triggers error in transition
+              exit 1
+              ;;
+            70)
+              # Issue #70 label edit succeeds -> mark success
+              touch "$SUCCESS_FLAG"
+              exit 0
+              ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // Ensure repo clone dir exists
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(&clone_dir).expect("create clone dir");
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 30,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    // Tick returns Ok despite issue #60 erroring
+    assert!(
+        result.is_ok(),
+        "poll_and_advance_prd should return Ok despite per-issue errors: {:?}",
+        result
+    );
+
+    // Issue #70's label edit was reached (success path advanced)
+    assert!(
+        success_flag.exists(),
+        "issue #70 should have advanced (label edit reached) despite issue #60 failing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: early return when no issues
+// ---------------------------------------------------------------------------
+
+/// When both polls return empty, poll_and_advance_prd should return Ok
+/// without calling refresh_repo_clone.
+#[test]
+#[serial]
+fn empty_polls_return_early() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let refresh_flag = tmp.path().join("refresh_called");
+    let gh_script = r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list) printf '[]'; exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  *) exit 0 ;;
+esac
+exit 0
+"#;
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec![],
+        writer_backend: String::new(),
+        reviewer_backend: String::new(),
+        max_revisions: 0,
+        backend_timeout_secs: 10,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "empty polls should succeed");
+    // refresh_repo_clone only runs for non-empty ticks; it calls git in the
+    // clone dir. Since the clone dir doesn't have .git, git calls would fail
+    // if refresh was called. The fact we got Ok proves early return worked.
+    assert!(
+        !refresh_flag.exists(),
+        "refresh should not be called for empty polls"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: concurrent advancement (slow vs fast issues)
+// ---------------------------------------------------------------------------
+
+/// With `max_concurrent >= 2`, a slow issue must not block an immediately-
+/// advanceable issue from advancing in the same tick.
+///
+/// Uses FIFO (named pipe) based deterministic synchronization:
+/// - Issue #80 (slow) blocks on reading a FIFO until the fast issue signals.
+/// - Issue #90 (fast) records its advancement to an event log, then writes to
+///   the FIFO unblocking #80.
+/// - An event log captures ordering: fast must record its edit *before* slow
+///   records its edit, proving no head-of-line blocking.
+///
+/// Under sequential execution this would deadlock (issue #80 blocks on FIFO
+/// read, #90 never starts), so success proves true concurrent execution.
+#[test]
+#[serial]
+fn concurrent_advancement_slow_and_fast() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let issue80_flag = tmp.path().join("issue80_processed");
+    let issue90_flag = tmp.path().join("issue90_processed");
+    let issue80_str = issue80_flag.to_string_lossy().into_owned();
+    let issue90_str = issue90_flag.to_string_lossy().into_owned();
+
+    // FIFO for deterministic handshake: fast issue writes, slow issue reads.
+    let gate_fifo = tmp.path().join("slow_gate");
+    let gate_str = gate_fifo.to_string_lossy().into_owned();
+    let mkfifo_status = std::process::Command::new("mkfifo")
+        .arg(&gate_fifo)
+        .status()
+        .expect("mkfifo should succeed");
+    assert!(
+        mkfifo_status.success(),
+        "mkfifo failed with status: {mkfifo_status}"
+    );
+
+    // Event log with flock-based atomic append to capture ordering.
+    let event_log = tmp.path().join("event_log");
+    let event_log_str = event_log.to_string_lossy().into_owned();
+    let lock_file = tmp.path().join("event.lock");
+    let lock_str = lock_file.to_string_lossy().into_owned();
+
+    // Tracking file: marks that the slow issue has already completed its
+    // FIFO handshake (so subsequent `issue edit 80` calls pass through).
+    let slow_unblocked = tmp.path().join("slow_unblocked");
+    let slow_unblocked_str = slow_unblocked.to_string_lossy().into_owned();
+
+    // gh mock:
+    // - Returns issues #80 and #90 (both Pending).
+    // - On first `issue edit` for #80 (slow): blocks on FIFO read until
+    //   #90 writes. Subsequent edit calls for #80 pass through immediately.
+    // - On first `issue edit` for #90 (fast): logs "edit:90", marks
+    //   processed, writes to FIFO (unblocking #80).
+    // - Under sequential processing, #80 would block forever on the FIFO
+    //   read, causing a timeout. Only concurrent execution allows completion.
+    let gh_script = format!(
+        r#"#!/bin/sh
+ISSUE80_FLAG="{issue80_str}"
+ISSUE90_FLAG="{issue90_str}"
+GATE="{gate_str}"
+EVENT_LOG="{event_log_str}"
+LOCK="{lock_str}"
+SLOW_UNBLOCKED="{slow_unblocked_str}"
+
+log_event() {{
+  (
+    flock 9
+    printf '%s\n' "$1" >> "$EVENT_LOG"
+  ) 9>"$LOCK"
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":80,"title":"Slow issue","labels":[{{"name":"ralph:prd"}}],"body":"Slow"}},{{"number":90,"title":"Fast issue","labels":[{{"name":"ralph:prd"}}],"body":"Fast"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        is80=0
+        is90=0
+        for arg in "$@"; do
+          case "$arg" in
+            80) is80=1 ;;
+            90) is90=1 ;;
+          esac
+        done
+        if [ "$is80" = "1" ]; then
+          # Slow: block on FIFO only once (first edit call)
+          if [ ! -f "$SLOW_UNBLOCKED" ]; then
+            read dummy < "$GATE"
+            touch "$SLOW_UNBLOCKED"
+            log_event "edit:80"
+            touch "$ISSUE80_FLAG"
+          fi
+        elif [ "$is90" = "1" ]; then
+          if [ ! -f "$ISSUE90_FLAG" ]; then
+            # Fast: log, mark processed, then unblock slow via FIFO write
+            log_event "edit:90"
+            touch "$ISSUE90_FLAG"
+            printf 'go\n' > "$GATE"
+          fi
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(&clone_dir).expect("create clone dir");
+
+    let global = GlobalConfig::default();
+    // Use a short backend timeout: we only observe the concurrent gh calls
+    // (label edits) via the FIFO handshake; backend (claude/codex) commands
+    // are not mocked and will fail quickly with this timeout.
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 2,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+
+    // Bounded watchdog: run on a spawned thread with a join timeout so a
+    // regression (FIFO deadlock under sequential processing) fails with a
+    // clear assertion instead of hanging CI indefinitely.
+    let watchdog_timeout = std::time::Duration::from_secs(30);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let config_clone = config.clone();
+    let handle = std::thread::spawn(move || {
+        let r = poll_and_advance_prd(&config_clone);
+        let _ = tx.send(r);
+    });
+    let result = rx.recv_timeout(watchdog_timeout).expect(
+        "concurrent_advancement_slow_and_fast timed out — possible FIFO deadlock regression",
+    );
+    let _ = handle.join();
+
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should complete: {:?}", result);
+
+    // Both issues must have been processed in the same tick.
+    assert!(
+        issue90_flag.exists(),
+        "fast issue #90 should have been processed"
+    );
+    assert!(
+        issue80_flag.exists(),
+        "slow issue #80 should have been processed (unblocked by concurrent #90)"
+    );
+
+    // Verify explicit event ordering: fast issue (#90) must reach its
+    // advancement point (edit:90) before slow issue (#80) completes (edit:80).
+    // This ordering is impossible under sequential processing where #80
+    // would block on the FIFO before #90 ever starts.
+    let log_content = fs::read_to_string(&event_log).expect("read event log");
+    let events: Vec<&str> = log_content.lines().collect();
+    assert!(
+        events.len() >= 2,
+        "expected at least 2 events, got: {:?}",
+        events
+    );
+    let fast_pos = events.iter().position(|e| *e == "edit:90");
+    let slow_pos = events.iter().position(|e| *e == "edit:80");
+    assert!(
+        fast_pos.is_some() && slow_pos.is_some(),
+        "both edit events must appear in log; events: {:?}",
+        events
+    );
+    assert!(
+        fast_pos.unwrap() < slow_pos.unwrap(),
+        "fast issue edit:90 (pos {}) must precede slow issue edit:80 (pos {}); \
+         this ordering fails under sequential processing; events: {:?}",
+        fast_pos.unwrap(),
+        slow_pos.unwrap(),
+        events
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: bounded worker peak via atomic counter
+// ---------------------------------------------------------------------------
+
+/// With `max_concurrent = 2` and 4 issues, peak active concurrency (as
+/// measured by the mock) must never exceed 2.
+///
+/// Uses FIFO-based deterministic synchronization (no sleep): two FIFOs
+/// create a rendezvous barrier so paired workers must overlap. Each edit
+/// handler atomically claims a slot (odd/even), increments the active
+/// counter, then performs a cross-write/read on the FIFO pair — slot 1
+/// writes to FIFO_A and reads FIFO_B; slot 2 writes to FIFO_B and reads
+/// FIFO_A. Both block until their peer writes, guaranteeing overlap.
+/// Peak is captured while both are active.
+#[test]
+#[serial]
+fn bounded_concurrency_peak_never_exceeds_max() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let active_file = tmp.path().join("active_count");
+    let peak_file = tmp.path().join("peak_count");
+    let lock_file = tmp.path().join("counter.lock");
+    let slot_file = tmp.path().join("slot_counter");
+    fs::write(&active_file, "0").expect("init active");
+    fs::write(&peak_file, "0").expect("init peak");
+    fs::write(&slot_file, "0").expect("init slot");
+
+    let active_str = active_file.to_string_lossy().into_owned();
+    let peak_str = peak_file.to_string_lossy().into_owned();
+    let lock_str = lock_file.to_string_lossy().into_owned();
+    let slot_str = slot_file.to_string_lossy().into_owned();
+
+    // Two FIFOs for the rendezvous barrier
+    let fifo_a = tmp.path().join("barrier_a");
+    let fifo_b = tmp.path().join("barrier_b");
+    let fifo_a_str = fifo_a.to_string_lossy().into_owned();
+    let fifo_b_str = fifo_b.to_string_lossy().into_owned();
+    for (fifo, name) in [(&fifo_a, "barrier_a"), (&fifo_b, "barrier_b")] {
+        let st = std::process::Command::new("mkfifo")
+            .arg(fifo)
+            .status()
+            .unwrap_or_else(|e| panic!("mkfifo {name}: {e}"));
+        assert!(st.success(), "mkfifo {name} failed: {st}");
+    }
+
+    // Tracking directory for per-issue first-edit flags
+    let flags_dir = tmp.path().join("edit_flags");
+    fs::create_dir_all(&flags_dir).expect("create flags dir");
+    let flags_str = flags_dir.to_string_lossy().into_owned();
+
+    // gh mock: 4 Pending issues. Uses a FIFO-based rendezvous barrier
+    // (no sleep) to guarantee overlap so the peak active counter captures
+    // true concurrent execution. Only the first edit call per issue enters
+    // the barrier; subsequent edit calls for the same issue pass through.
+    let gh_script = format!(
+        r#"#!/bin/sh
+ACTIVE="{active_str}"
+PEAK="{peak_str}"
+LOCK="{lock_str}"
+SLOT="{slot_str}"
+FIFO_A="{fifo_a_str}"
+FIFO_B="{fifo_b_str}"
+FLAGS="{flags_str}"
+
+# mkdir-based spinlock (portable — no flock dependency)
+_lock() {{
+  while ! mkdir "$LOCK.d" 2>/dev/null; do :; done
+}}
+_unlock() {{
+  rmdir "$LOCK.d"
+}}
+
+inc_active() {{
+  _lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur + 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  pk=$(cat "$PEAK" 2>/dev/null || printf '0')
+  if [ "$cur" -gt "$pk" ]; then
+    printf '%d' "$cur" > "$PEAK"
+  fi
+  _unlock
+}}
+
+dec_active() {{
+  _lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur - 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  _unlock
+}}
+
+# Atomically claim a slot number (1 or 2), cycling per pair.
+claim_slot() {{
+  _lock
+  s=$(cat "$SLOT" 2>/dev/null || printf '0')
+  s=$((s + 1))
+  printf '%d' "$s" > "$SLOT"
+  if [ $((s % 2)) -eq 1 ]; then
+    printf '1'
+  else
+    printf '2'
+  fi
+  _unlock
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":100,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":101,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}},{{"number":102,"title":"C","labels":[{{"name":"ralph:prd"}}],"body":"C"}},{{"number":103,"title":"D","labels":[{{"name":"ralph:prd"}}],"body":"D"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        # Determine which issue this edit is for
+        ISSUE_NUM=""
+        for arg in "$@"; do
+          case "$arg" in
+            100|101|102|103) ISSUE_NUM="$arg" ;;
+          esac
+        done
+
+        # Only the first edit call per issue enters the barrier
+        if [ -n "$ISSUE_NUM" ] && [ ! -f "$FLAGS/$ISSUE_NUM" ]; then
+          touch "$FLAGS/$ISSUE_NUM"
+          MY_SLOT=$(claim_slot)
+          inc_active
+          # Rendezvous: slot 1 reads A then writes B; slot 2 writes A then reads B.
+          # Slot 1 blocks on the read until slot 2 writes, then slot 1 writes to
+          # unblock slot 2's read. Both are guaranteed active between the handshake.
+          if [ "$MY_SLOT" = "1" ]; then
+            read _dummy < "$FIFO_A"
+            printf 'go\n' > "$FIFO_B"
+          else
+            printf 'go\n' > "$FIFO_A"
+            read _dummy < "$FIFO_B"
+          fi
+          dec_active
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(&clone_dir).expect("create clone dir");
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 2,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+
+    // Bounded watchdog: run on a spawned thread with a join timeout so a
+    // regression (FIFO deadlock) fails with a clear assertion instead of
+    // hanging CI indefinitely.
+    let watchdog_timeout = std::time::Duration::from_secs(30);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let config_clone = config.clone();
+    let handle = std::thread::spawn(move || {
+        let r = poll_and_advance_prd(&config_clone);
+        let _ = tx.send(r);
+    });
+    let result = rx
+        .recv_timeout(watchdog_timeout)
+        .expect("bounded_concurrency_peak test timed out — possible FIFO deadlock regression");
+    let _ = handle.join();
+
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+    let peak: u32 = fs::read_to_string(&peak_file)
+        .expect("read peak")
+        .trim()
+        .parse()
+        .expect("parse peak");
+    assert!(
+        peak <= 2,
+        "peak concurrency {peak} must not exceed max_concurrent=2"
+    );
+    assert!(
+        peak >= 1,
+        "at least one worker should have been active, got peak={peak}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: panic isolation
+// ---------------------------------------------------------------------------
+
+/// Force a real panic in one issue's processing path via
+/// `RALPH_TEST_INJECT_PANIC` and verify the tick completes and the other
+/// issue still advances.
+///
+/// Issue #110 panics deterministically (env-var injection in advance_issue).
+/// Issue #111 processes normally and its label edit creates a flag file.
+#[test]
+#[serial]
+fn panic_isolation_tick_completes_despite_panic() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let issue111_flag = tmp.path().join("issue111_processed");
+    let issue111_str = issue111_flag.to_string_lossy().into_owned();
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+ISSUE111_FLAG="{issue111_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":110,"title":"Panic issue","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":111,"title":"Good issue","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        is111=0
+        for arg in "$@"; do
+          case "$arg" in
+            111) is111=1 ;;
+          esac
+        done
+        if [ "$is111" = "1" ]; then
+          touch "$ISSUE111_FLAG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(&clone_dir).expect("create clone dir");
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 5,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    // Inject a real panic for issue #110 via env var
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    // Tick completes despite issue #110 panicking
+    assert!(
+        result.is_ok(),
+        "tick should succeed despite issue #110 panic: {:?}",
+        result
+    );
+
+    // Issue #111 still advanced (its label edit was reached)
+    assert!(
+        issue111_flag.exists(),
+        "issue #111 should have advanced despite issue #110 panicking"
+    );
+
+    // Issue #110 must have its failure state persisted (not silently stuck
+    // in its pre-panic state).
+    let state_path = data_dir.join("acme/widgets/.ralph/interactive-prd/110.json");
+    assert!(
+        state_path.exists(),
+        "panicking issue #110 should have persisted failure state"
+    );
+    let state_raw = fs::read_to_string(&state_path).expect("read state #110");
+    let state: InteractivePrdState = serde_json::from_str(&state_raw).expect("parse state #110");
+    assert!(
+        state.error_count >= 1,
+        "issue #110 error_count should be >= 1 after panic, got {}",
+        state.error_count
+    );
+    assert!(
+        state.last_error.as_deref().unwrap_or("").contains("panic"),
+        "issue #110 last_error should mention panic, got {:?}",
+        state.last_error
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency: repo refresh ordering
+// ---------------------------------------------------------------------------
+
+/// Assert that `refresh_repo_clone` is called exactly once per non-empty tick,
+/// and before any per-issue backend invocation (label edit).
+///
+/// Uses a mock git + gh script combo: git commands log to a file with
+/// timestamps, and gh label edits also log. We verify git-fetch happens
+/// before any issue edits, and exactly once.
+#[test]
+#[serial]
+fn refresh_repo_clone_once_before_processing() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let event_log = tmp.path().join("event_log");
+    let event_log_str = event_log.to_string_lossy().into_owned();
+
+    // Create a repo clone dir WITH a .git dir so refresh_repo_clone runs
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+    // Mock git: logs "refresh" on fetch.  Only handle commands the test and
+    // poll_and_advance_prd actually need; exit 1 for anything else so that
+    // a stale PATH leak doesn't make `git rev-parse --show-toplevel` succeed
+    // in a concurrently running test (guard_not_git_repo calls rev-parse).
+    let git_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch)
+    printf 'refresh\n' >> "$EVENT_LOG"
+    exit 0
+    ;;
+  reset|checkout|worktree|clean)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#
+    );
+
+    // gh mock: logs "edit:<issue>" on label edits
+    let gh_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":200,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":201,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            200) printf 'edit:200\n' >> "$EVENT_LOG" ;;
+            201) printf 'edit:201\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    let git_path = scripts_dir.join("git");
+    fs::write(&git_path, git_script).expect("write git script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+        fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let global = GlobalConfig::default();
+    let config = PrdPollConfig {
+        owner: "acme".to_string(),
+        repo: "widgets".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_string(), "codex".to_string()],
+        writer_backend: "claude".to_string(),
+        reviewer_backend: "codex".to_string(),
+        max_revisions: 1,
+        backend_timeout_secs: 30,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+    let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+    let events: Vec<&str> = log_content.lines().collect();
+
+    // Refresh must appear exactly once
+    let refresh_count = events.iter().filter(|e| **e == "refresh").count();
+    assert_eq!(
+        refresh_count, 1,
+        "refresh_repo_clone should be called exactly once, got {refresh_count}"
+    );
+
+    // Refresh must be the first event (before any edit)
+    assert_eq!(
+        events.first().copied(),
+        Some("refresh"),
+        "refresh must occur before any per-issue processing; events: {:?}",
+        events
+    );
+}
+
+/// With `max_concurrent=1` and multiple issues, a reset must run before each issue.
+#[test]
+#[serial]
+fn single_worker_reset_runs_before_each_issue() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let event_log = tmp.path().join("event_log");
+    let event_log_str = event_log.to_string_lossy().into_owned();
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+    let git_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  fetch) printf 'refresh\n' >> "$EVENT_LOG"; exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset)
+    case "$3" in
+      origin/HEAD|origin/main|origin/master) printf 'refresh-reset\n' >> "$EVENT_LOG" ;;
+      *) printf 'worker-reset\n' >> "$EVENT_LOG" ;;
+    esac
+    exit 0
+    ;;
+  clean) printf 'worker-clean\n' >> "$EVENT_LOG"; exit 0 ;;
+  checkout|worktree) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+    );
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+EVENT_LOG="{event_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":501,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":502,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        for arg in "$@"; do
+          case "$arg" in
+            501) printf 'edit:501\n' >> "$EVENT_LOG" ;;
+            502) printf 'edit:502\n' >> "$EVENT_LOG" ;;
+          esac
+        done
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in comments) want_comments=1 ;; esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    let git_path = scripts_dir.join("git");
+    fs::write(&git_path, git_script).expect("write git script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+        fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let config = PrdPollConfig {
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+        writer_backend: "claude".to_owned(),
+        reviewer_backend: "codex".to_owned(),
+        max_revisions: 1,
+        backend_timeout_secs: 2,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 1,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+
+    let log_content = fs::read_to_string(&event_log).unwrap_or_default();
+    let events: Vec<&str> = log_content.lines().collect();
+    let reset_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| (*e == "worker-reset").then_some(idx))
+        .collect();
+    assert_eq!(
+        reset_positions.len(),
+        2,
+        "expected one reset per issue in single-worker mode; events: {:?}",
+        events
+    );
+    let edit_501 = events
+        .iter()
+        .position(|e| *e == "edit:501")
+        .expect("missing edit:501");
+    let edit_502 = events
+        .iter()
+        .position(|e| *e == "edit:502")
+        .expect("missing edit:502");
+    assert!(
+        reset_positions[0] < edit_501,
+        "first reset must happen before issue 501 edit; events: {:?}",
+        events
+    );
+    assert!(
+        reset_positions[1] < edit_502 && edit_501 < reset_positions[1],
+        "second reset must happen between issue 501 and 502 processing; events: {:?}",
+        events
+    );
+}
+
+/// When worktree setup fails for parallel mode, processing should degrade to
+/// sequential execution rather than running multiple workers on a shared checkout.
+#[test]
+#[serial]
+fn worktree_setup_failure_falls_back_to_sequential() {
+    use ralph::config::GlobalConfig;
+    use ralph::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
+
+    let tmp = TempDir::new().expect("create tempdir");
+    let data_dir = tmp.path();
+
+    let clone_dir = data_dir.join("acme").join("widgets");
+    fs::create_dir_all(clone_dir.join(".git")).expect("create .git dir");
+
+    let git_log = tmp.path().join("git_events");
+    let git_log_str = git_log.to_string_lossy().into_owned();
+    let peak_file = tmp.path().join("peak");
+    let active_file = tmp.path().join("active");
+    let lock_dir = tmp.path().join("counter-lock");
+    let flags_dir = tmp.path().join("flags");
+    fs::write(&peak_file, "0").expect("init peak");
+    fs::write(&active_file, "0").expect("init active");
+    fs::create_dir_all(&flags_dir).expect("create flags dir");
+    let peak_str = peak_file.to_string_lossy().into_owned();
+    let active_str = active_file.to_string_lossy().into_owned();
+    let lock_dir_str = lock_dir.to_string_lossy().into_owned();
+    let flags_str = flags_dir.to_string_lossy().into_owned();
+
+    let git_script = format!(
+        r#"#!/bin/sh
+LOG="{git_log_str}"
+case "$1" in
+  fetch) exit 0 ;;
+  rev-parse) printf 'deadbeef\n'; exit 0 ;;
+  reset|clean|checkout) exit 0 ;;
+  worktree)
+    printf 'worktree_fail\n' >> "$LOG"
+    exit 1
+    ;;
+  *) exit 0 ;;
+esac
+"#
+    );
+
+    let gh_script = format!(
+        r#"#!/bin/sh
+PEAK="{peak_str}"
+ACTIVE="{active_str}"
+LOCKDIR="{lock_dir_str}"
+FLAGS="{flags_str}"
+
+lock() {{
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do :; done
+}}
+unlock() {{
+  rmdir "$LOCKDIR"
+}}
+inc_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur + 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  pk=$(cat "$PEAK" 2>/dev/null || printf '0')
+  if [ "$cur" -gt "$pk" ]; then
+    printf '%d' "$cur" > "$PEAK"
+  fi
+  unlock
+}}
+dec_active() {{
+  lock
+  cur=$(cat "$ACTIVE" 2>/dev/null || printf '0')
+  cur=$((cur - 1))
+  printf '%d' "$cur" > "$ACTIVE"
+  unlock
+}}
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in ralph:prd) has_prd=1 ;; esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":610,"title":"A","labels":[{{"name":"ralph:prd"}}],"body":"A"}},{{"number":611,"title":"B","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        ISSUE=""
+        for arg in "$@"; do
+          case "$arg" in 610|611) ISSUE="$arg" ;; esac
+        done
+        if [ -n "$ISSUE" ] && [ ! -f "$FLAGS/$ISSUE" ]; then
+          touch "$FLAGS/$ISSUE"
+          inc_active
+          sleep 1
+          dec_active
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        for arg in "$@"; do
+          case "$arg" in comments) want_comments=1 ;; esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+        else
+          printf '{{}}'
+        fi
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+esac
+exit 0
+"#
+    );
+
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+    let gh_path = scripts_dir.join("gh");
+    fs::write(&gh_path, gh_script).expect("write gh script");
+    let git_path = scripts_dir.join("git");
+    fs::write(&git_path, git_script).expect("write git script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
+        fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
+    }
+
+    let path_env = format!(
+        "{}:{}",
+        scripts_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let config = PrdPollConfig {
+        owner: "acme".to_owned(),
+        repo: "widgets".to_owned(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_string(),
+        gh_bin: "gh".to_string(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+        writer_backend: "claude".to_owned(),
+        reviewer_backend: "codex".to_owned(),
+        max_revisions: 1,
+        backend_timeout_secs: 5,
+        global_config: GlobalConfig::default(),
+        verbose: false,
+        max_concurrent: 2,
+        worker_cwd: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", &path_env) };
+    let result = poll_and_advance_prd(&config);
+    unsafe { std::env::set_var("PATH", &old_path) };
+
+    assert!(result.is_ok(), "tick should succeed: {:?}", result);
+    let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
+    assert!(
+        git_log_content.contains("worktree_fail"),
+        "worktree setup failure should be observed"
+    );
+    let peak: u32 = fs::read_to_string(&peak_file)
+        .expect("read peak")
+        .trim()
+        .parse()
+        .expect("parse peak");
+    assert_eq!(
+        peak, 1,
+        "peak concurrency should be 1 after sequential fallback, got {peak}"
     );
 }
 

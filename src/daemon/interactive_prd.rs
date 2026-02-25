@@ -227,6 +227,8 @@ pub struct PrdPollConfig {
     pub owner: String,
     pub repo: String,
     pub data_dir: PathBuf,
+    pub git_bin: String,
+    pub gh_bin: String,
     pub prd_enabled: bool,
     pub question_backends: Vec<String>,
     pub writer_backend: String,
@@ -235,6 +237,15 @@ pub struct PrdPollConfig {
     pub backend_timeout_secs: u64,
     pub global_config: GlobalConfig,
     pub verbose: bool,
+    /// Maximum number of issues to process concurrently within one tick.
+    /// `0` is treated as `1` (sequential).
+    pub max_concurrent: u32,
+    /// Per-worker override for the repo clone directory used as backend cwd.
+    /// When set, backends use this path instead of `repo_clone_path()`.
+    /// This field is not set by callers — it is populated internally by
+    /// `poll_and_advance_prd` to give each worker an isolated directory.
+    #[doc(hidden)]
+    pub worker_cwd: Option<PathBuf>,
 }
 
 impl PrdPollConfig {
@@ -243,13 +254,259 @@ impl PrdPollConfig {
         self.data_dir.join(&self.owner).join(&self.repo)
     }
 
+    /// Effective working directory for backend calls.
+    ///
+    /// Returns `worker_cwd` when set (per-worker isolation), otherwise falls
+    /// back to the shared `repo_clone_path()`.
+    fn effective_repo_cwd(&self) -> PathBuf {
+        self.worker_cwd
+            .clone()
+            .unwrap_or_else(|| self.repo_clone_path())
+    }
+
+    fn copy_dir_contents_recursive(src: &Path, dst: &Path) -> Result<()> {
+        if !src.exists() {
+            return Ok(());
+        }
+        fs::create_dir_all(dst).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to create directory {}: {err}",
+                dst.display()
+            ))
+        })?;
+
+        for entry in fs::read_dir(src).map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to read directory {}: {err}",
+                src.display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to read directory entry in {}: {err}",
+                    src.display()
+                ))
+            })?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            let file_type = entry.file_type().map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to inspect {}: {err}",
+                    src_path.display()
+                ))
+            })?;
+            if file_type.is_dir() {
+                Self::copy_dir_contents_recursive(&src_path, &dst_path)?;
+            } else if file_type.is_file() {
+                if let Some(parent) = dst_path.parent() {
+                    fs::create_dir_all(parent).map_err(|err| {
+                        RalphError::InteractivePrdFailed(format!(
+                            "failed to create directory {}: {err}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                fs::copy(&src_path, &dst_path).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to copy {} -> {}: {err}",
+                        src_path.display(),
+                        dst_path.display()
+                    ))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reset the effective working directory to a clean state (HEAD of base repo).
+    ///
+    /// Called before each issue so that leftover files from a previous issue
+    /// do not leak into the next one.
+    fn reset_effective_repo_dir(&self) -> Result<()> {
+        let wdir = self.effective_repo_cwd();
+        let base = self.repo_clone_path();
+
+        // Non-git fallback for tests/dev environments: keep per-worker
+        // directories isolated by re-syncing from base directory each issue.
+        if !base.join(".git").exists() {
+            if wdir == base {
+                // Single-worker non-git mode cannot clone from itself; keep as-is.
+                fs::create_dir_all(&wdir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to ensure working directory {}: {err}",
+                        wdir.display()
+                    ))
+                })?;
+                return Ok(());
+            }
+
+            if wdir.exists() {
+                fs::remove_dir_all(&wdir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to remove worker directory {}: {err}",
+                        wdir.display()
+                    ))
+                })?;
+            }
+            fs::create_dir_all(&wdir).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to create worker directory {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+            Self::copy_dir_contents_recursive(&base, &wdir)?;
+            return Ok(());
+        }
+
+        if !wdir.join(".git").exists() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "working directory {} is not a git repository",
+                wdir.display()
+            )));
+        }
+
+        let head_out = std::process::Command::new(&self.git_bin)
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&base)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to read HEAD from {}: {err}",
+                    base.display()
+                ))
+            })?;
+        if !head_out.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "failed to read HEAD from {}: {}",
+                base.display(),
+                String::from_utf8_lossy(&head_out.stderr).trim()
+            )));
+        }
+        let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let reset = std::process::Command::new(&self.git_bin)
+            .args(["reset", "--hard", &head])
+            .current_dir(&wdir)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to reset {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+        if !reset.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git reset failed in {}: {}",
+                wdir.display(),
+                String::from_utf8_lossy(&reset.stderr).trim()
+            )));
+        }
+
+        // Default cleanup mode: remove untracked files/directories, keep ignored files.
+        // Exclude `.ralph/` so daemon runtime state (e.g. interactive PRD JSON)
+        // is not deleted between issues.
+        let clean = std::process::Command::new(&self.git_bin)
+            .args(["clean", "-fd", "-e", ".ralph/"])
+            .current_dir(&wdir)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to clean {}: {err}",
+                    wdir.display()
+                ))
+            })?;
+        if !clean.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git clean failed in {}: {}",
+                wdir.display(),
+                String::from_utf8_lossy(&clean.stderr).trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Create a per-worker clone of the repo checkout via `git worktree add`.
+    ///
+    /// Returns the worker-specific directory path, or an error if setup fails.
+    /// This function never falls back to the shared base checkout.
+    fn setup_worker_dir(&self, worker_id: usize) -> Result<PathBuf> {
+        let base = self.repo_clone_path();
+        let worker_dir = base
+            .join("..")
+            .join(format!("{}-worker-{}", self.repo, worker_id));
+        // Canonicalize parent to avoid `..` in the path
+        let worker_dir = worker_dir
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.join(format!("{}-worker-{}", self.repo, worker_id)))
+            .unwrap_or(worker_dir);
+
+        if worker_dir.join(".git").exists() {
+            return Ok(worker_dir);
+        }
+
+        if !base.join(".git").exists() {
+            if worker_dir.exists() {
+                fs::remove_dir_all(&worker_dir).map_err(|err| {
+                    RalphError::InteractivePrdFailed(format!(
+                        "failed to remove worker directory {}: {err}",
+                        worker_dir.display()
+                    ))
+                })?;
+            }
+            fs::create_dir_all(&worker_dir).map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to create worker directory {}: {err}",
+                    worker_dir.display()
+                ))
+            })?;
+            Self::copy_dir_contents_recursive(&base, &worker_dir)?;
+            return Ok(worker_dir);
+        }
+
+        let out = std::process::Command::new(&self.git_bin)
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                &worker_dir.to_string_lossy(),
+                "HEAD",
+            ])
+            .current_dir(&base)
+            .output()
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to run git worktree add for {}: {err}",
+                    worker_dir.display()
+                ))
+            })?;
+        if !out.status.success() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git worktree add failed for {}: {}",
+                worker_dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+
+        if !worker_dir.join(".git").exists() {
+            return Err(RalphError::InteractivePrdFailed(format!(
+                "git worktree add did not create git metadata in {}",
+                worker_dir.display()
+            )));
+        }
+
+        Ok(worker_dir)
+    }
+
     /// Fetch latest from origin and reset the clone to origin's default branch.
     fn refresh_repo_clone(&self) -> Result<()> {
         let repo = self.repo_clone_path();
         if !repo.join(".git").exists() {
             return Ok(());
         }
-        let fetch = std::process::Command::new("git")
+        let fetch = std::process::Command::new(&self.git_bin)
             .args(["fetch", "origin"])
             .current_dir(&repo)
             .output();
@@ -264,7 +521,7 @@ impl PrdPollConfig {
         }
         // Try origin/HEAD, then origin/main, then origin/master
         for target in &["origin/HEAD", "origin/main", "origin/master"] {
-            let reset = std::process::Command::new("git")
+            let reset = std::process::Command::new(&self.git_bin)
                 .args(["reset", "--hard", target])
                 .current_dir(&repo)
                 .output();
@@ -275,32 +532,6 @@ impl PrdPollConfig {
             }
         }
         Ok(())
-    }
-}
-
-/// RAII guard that sets the process cwd and restores it on drop.
-struct CwdGuard {
-    original: PathBuf,
-}
-
-impl CwdGuard {
-    fn set(path: &Path) -> Result<Self> {
-        let original = std::env::current_dir().map_err(|e| {
-            RalphError::InteractivePrdFailed(format!("failed to get current dir: {e}"))
-        })?;
-        std::env::set_current_dir(path).map_err(|e| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to set cwd to {}: {e}",
-                path.display()
-            ))
-        })?;
-        Ok(Self { original })
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
     }
 }
 
@@ -323,12 +554,16 @@ pub fn has_prd_label(labels: &[String]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Create a CLI backend from a backend spec string and global config.
-fn create_backend(backend_spec: &str, global_config: &GlobalConfig) -> Result<CliBackend> {
+fn create_backend(
+    backend_spec: &str,
+    global_config: &GlobalConfig,
+    cwd: Option<PathBuf>,
+) -> Result<CliBackend> {
     let spec = parse_backend_spec(backend_spec)?;
     let model = spec.model.as_deref();
     match spec.name.as_str() {
-        "claude" => Ok(claude::backend_from_config(global_config, model, None)),
-        "codex" => Ok(codex::backend_from_config(global_config, model, None)),
+        "claude" => Ok(claude::backend_from_config(global_config, model, None, cwd)),
+        "codex" => Ok(codex::backend_from_config(global_config, model, None, cwd)),
         _ => Err(RalphError::Validation(format!(
             "unknown PRD backend: {backend_spec}"
         ))),
@@ -402,37 +637,196 @@ pub const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
 ///
 /// Enforces the spec invariant "at most one state transition per issue per tick"
 /// by deduplicating issue numbers across both poll passes.
+///
+/// Issues are processed concurrently using a bounded thread pool controlled by
+/// `config.max_concurrent`. Each worker owns its own `bot_login_cache` and is
+/// isolated via `catch_unwind` so that a panic or error in one issue does not
+/// affect others.
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
-    let mut processed: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut bot_login_cache: Option<String> = None;
-
+    // Phase 1: sequential polls
     let labels = vec!["ralph:prd".to_owned()];
-    let (issues, _overflow) = github::poll_issues(&config.owner, &config.repo, &labels)?;
+    let (issues, _overflow) =
+        github::poll_issues_with_gh_bin(&config.gh_bin, &config.owner, &config.repo, &labels)?;
 
-    for issue in &issues {
-        if !processed.insert(issue.number) {
-            continue;
-        }
-        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
-            eprintln!(
-                "prd: failed to advance {}/{}#{}: {err}",
-                config.owner, config.repo, issue.number
-            );
+    let active_labels = vec!["ralph:prd-active".to_owned()];
+    let (active_issues, _) = github::poll_issues_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        &active_labels,
+    )?;
+
+    // Phase 2: deduplicate issues across both passes
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped_issues: Vec<GhIssue> = Vec::new();
+    for issue in issues.into_iter().chain(active_issues.into_iter()) {
+        if seen.insert(issue.number) {
+            deduped_issues.push(issue);
         }
     }
 
-    // Also process issues that are in prd-active state (already picked up).
-    let active_labels = vec!["ralph:prd-active".to_owned()];
-    let (active_issues, _) = github::poll_issues(&config.owner, &config.repo, &active_labels)?;
+    // Early return when no work
+    if deduped_issues.is_empty() {
+        return Ok(());
+    }
 
-    for issue in &active_issues {
-        if !processed.insert(issue.number) {
-            continue; // already advanced in the ralph:prd pass
+    // Phase 3: once-per-tick repo refresh (before any per-issue work)
+    if let Err(err) = config.refresh_repo_clone() {
+        eprintln!(
+            "prd: warning: repo refresh failed for {}/{}: {err}",
+            config.owner, config.repo
+        );
+    }
+
+    // Phase 4: bounded concurrent per-issue processing
+    let issue_count = deduped_issues.len();
+    let requested_workers = std::cmp::max(1, config.max_concurrent) as usize;
+    let mut worker_count = std::cmp::min(requested_workers, issue_count);
+    let mut worker_dirs: Vec<PathBuf> = Vec::new();
+
+    if worker_count > 1 {
+        for worker_id in 0..worker_count {
+            match config.setup_worker_dir(worker_id) {
+                Ok(dir) => worker_dirs.push(dir),
+                Err(err) => {
+                    eprintln!(
+                        "prd: warning: failed to setup worker {worker_id} dir; \
+                         falling back to sequential mode: {err}"
+                    );
+                    worker_count = 1;
+                    worker_dirs.clear();
+                    break;
+                }
+            }
         }
-        if let Err(err) = advance_issue(config, issue, &mut bot_login_cache) {
+    }
+    if worker_count > 1 {
+        let unique_count = worker_dirs
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if unique_count != worker_dirs.len() {
             eprintln!(
-                "prd: failed to advance active {}/{}#{}: {err}",
-                config.owner, config.repo, issue.number
+                "prd: warning: worker directory isolation check failed ({} unique for {} workers); \
+                 falling back to sequential mode",
+                unique_count,
+                worker_dirs.len()
+            );
+            worker_count = 1;
+            worker_dirs.clear();
+        }
+    }
+
+    let work_queue = std::sync::Mutex::new(std::collections::VecDeque::from(deduped_issues));
+    let errors: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+    std::thread::scope(|s| {
+        let work_queue = &work_queue;
+        let errors = &errors;
+
+        for worker_id in 0..worker_count {
+            // Each worker gets its own config clone with an isolated cwd so
+            // concurrent backend processes do not share the same checkout
+            // (avoiding git lock contention and file interference).
+            let mut worker_config = config.clone();
+            if worker_count > 1 {
+                worker_config.worker_cwd = Some(worker_dirs[worker_id].clone());
+            } else {
+                // Sequential mode still gets a worker cwd so each issue reset
+                // runs against the base checkout.
+                worker_config.worker_cwd = Some(config.repo_clone_path());
+            }
+
+            s.spawn(move || {
+                let mut bot_login_cache: Option<String> = None;
+
+                loop {
+                    let issue = {
+                        let mut queue = work_queue.lock().expect("work queue lock poisoned");
+                        queue.pop_front()
+                    };
+                    let Some(issue) = issue else { break };
+
+                    let issue_number = issue.number;
+
+                    // Reset the worktree to a clean state before each issue
+                    // so leftover files from the previous issue don't leak.
+                    if let Err(err) = worker_config.reset_effective_repo_dir() {
+                        let mut errs = errors.lock().expect("errors lock poisoned");
+                        errs.push((issue_number, format!("repo reset failed: {err}")));
+                        continue;
+                    }
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        advance_issue(&worker_config, &issue, &mut bot_login_cache)
+                    }));
+
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            let mut errs = errors.lock().expect("errors lock poisoned");
+                            errs.push((issue_number, err.to_string()));
+                        }
+                        Err(panic_payload) => {
+                            let msg = match panic_payload.downcast_ref::<&str>() {
+                                Some(s) => s.to_string(),
+                                None => match panic_payload.downcast_ref::<String>() {
+                                    Some(s) => s.clone(),
+                                    None => "unknown panic".to_string(),
+                                },
+                            };
+                            eprintln!(
+                                "prd: PANIC while advancing {}/{}#{}: {msg}",
+                                worker_config.owner, worker_config.repo, issue_number
+                            );
+
+                            // Persist failure state for the panicking issue so it
+                            // transitions to Failed rather than silently remaining
+                            // in its pre-panic state.  If no state file exists
+                            // yet (panic before first save), create a fresh one.
+                            let loaded = InteractivePrdState::load(
+                                &worker_config.data_dir,
+                                &worker_config.owner,
+                                &worker_config.repo,
+                                issue_number,
+                            );
+                            let mut state = match loaded {
+                                Ok(Some(s)) => s,
+                                _ => InteractivePrdState::new(
+                                    &worker_config.owner,
+                                    &worker_config.repo,
+                                    issue_number,
+                                ),
+                            };
+                            if !state.is_terminal() {
+                                let panic_err =
+                                    RalphError::InteractivePrdFailed(format!("panic: {msg}"));
+                                let _ = finish_transition(
+                                    &worker_config,
+                                    &mut state,
+                                    Err(panic_err),
+                                    &mut bot_login_cache,
+                                );
+                            }
+
+                            let mut errs = errors.lock().expect("errors lock poisoned");
+                            errs.push((issue_number, format!("panic: {msg}")));
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // Phase 5: emit aggregated non-panic errors once after all workers complete.
+    // Panic errors are already logged at the catch_unwind site above.
+    let collected_errors = errors.into_inner().expect("errors lock poisoned");
+    for (issue_num, msg) in &collected_errors {
+        if !msg.starts_with("panic: ") {
+            eprintln!(
+                "prd: failed to advance {}/{}#{}: {msg}",
+                config.owner, config.repo, issue_num
             );
         }
     }
@@ -452,6 +846,25 @@ fn advance_issue(
 
     if state.is_terminal() {
         return Ok(());
+    }
+
+    // Test-only panic injection: when RALPH_TEST_INJECT_PANIC is set to a
+    // comma-separated list of issue numbers, advance_issue panics for those
+    // issues.  This allows integration and conformance tests to verify that
+    // `catch_unwind` isolation works for real panics (not just errors).
+    // The env var is never set in production; the cost is a single
+    // env::var_os() call that returns None.
+    if let Some(val) = std::env::var_os("RALPH_TEST_INJECT_PANIC") {
+        let val = val.to_string_lossy();
+        let should_panic = val
+            .split(',')
+            .any(|n| n.trim().parse::<u32>().ok() == Some(issue.number));
+        if should_panic {
+            panic!(
+                "injected panic for issue #{} (RALPH_TEST_INJECT_PANIC)",
+                issue.number
+            );
+        }
     }
 
     match state.state.clone() {
@@ -493,7 +906,7 @@ fn transition_pending_to_awaiting_answers(
 
     eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
-    let result = get_or_fetch_bot_login(bot_login_cache)
+    let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
 }
@@ -516,21 +929,38 @@ fn do_pending_to_awaiting(
     let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
 
     if !has_active {
-        github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
-            |err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            },
-        )?;
+        github::add_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:prd-active",
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
     }
     if has_prd {
-        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+        let _ = github::remove_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:prd",
+        );
     }
 
     // 2. Remove ralph:ready if present (prevent dual workflow ownership)
     if issue.labels.iter().any(|l| l == "ralph:ready") {
-        let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:ready");
+        let _ = github::remove_label_with_retry_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            "ralph:ready",
+        );
     }
 
     // 3. Check if questions marker already exists (idempotent restart/retry).
@@ -539,13 +969,19 @@ fn do_pending_to_awaiting(
     let next_revision = state.question_revision + 1;
     let marker = prd_marker(issue_number, "questions", next_revision);
 
-    let existing_marker_comment =
-        github::find_bot_comment_with_marker(owner, repo, issue_number, &marker, bot_login)
-            .map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            })?;
+    let existing_marker_comment = github::find_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        &marker,
+        bot_login,
+    )
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     let (comment_id, questions_posted_at) = if let Some(existing) = existing_marker_comment {
         // Marker already exists — hydrate timestamp from real comment time,
@@ -574,7 +1010,8 @@ fn do_pending_to_awaiting(
         // timestamp rather than local wall clock. This ensures answer-gating
         // compares against the real comment time consistently.
         // Uses bot-scoped posting so user-authored spoof markers are ignored.
-        let posted_meta = github::post_bot_comment_with_marker_metadata(
+        let posted_meta = github::post_bot_comment_with_marker_metadata_with_gh_bin(
+            &config.gh_bin,
             owner,
             repo,
             issue_number,
@@ -604,12 +1041,15 @@ fn do_pending_to_awaiting(
     Ok(())
 }
 
-fn get_or_fetch_bot_login(bot_login_cache: &mut Option<String>) -> Result<String> {
+fn get_or_fetch_bot_login(
+    config: &PrdPollConfig,
+    bot_login_cache: &mut Option<String>,
+) -> Result<String> {
     if let Some(login) = bot_login_cache.clone() {
         return Ok(login);
     }
 
-    let login = github::fetch_authenticated_login().map_err(|err| {
+    let login = github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).map_err(|err| {
         RalphError::InteractivePrdFailed(format!("failed to resolve authenticated gh login: {err}"))
     })?;
     *bot_login_cache = Some(login.clone());
@@ -633,7 +1073,7 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         config.owner, config.repo
     );
 
-    let result = get_or_fetch_bot_login(bot_login_cache).and_then(|bot_login| {
+    let result = get_or_fetch_bot_login(config, bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
     });
     finish_transition(config, state, result, bot_login_cache)
@@ -655,11 +1095,13 @@ fn do_awaiting_answers_to_awaiting_feedback(
         ))
     })?;
 
-    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let comments =
+        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
 
     let Some(answer_comment) = find_first_answer_comment(
         &comments,
@@ -712,7 +1154,8 @@ fn do_awaiting_answers_to_awaiting_feedback(
         "## Draft Engineering Specification (Revision {next_revision})\n\n{draft_spec}\n\n\
          *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
     );
-    let comment_id = github::post_bot_comment_with_marker(
+    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -773,7 +1216,7 @@ fn transition_awaiting_feedback(
         config.owner, config.repo
     );
 
-    let result = get_or_fetch_bot_login(bot_login_cache)
+    let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
 }
@@ -789,17 +1232,20 @@ fn do_awaiting_feedback(
     let repo = &config.repo;
 
     // Fetch current labels and comments
-    let labels = github::fetch_issue_labels(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let labels = github::fetch_issue_labels_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
+            ))
+        })?;
 
-    let comments = github::fetch_issue_comments(owner, repo, issue_number).map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    let comments =
+        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
 
     // Check approval by label
     if labels.iter().any(|l| l == "ralph:prd-approved") {
@@ -869,7 +1315,8 @@ fn do_awaiting_feedback(
         "## Draft Engineering Specification (Revision {next_revision})\n\n{revised_spec}\n\n\
          *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
     );
-    let comment_id = github::post_bot_comment_with_marker(
+    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -919,7 +1366,8 @@ fn do_approval_transition(
          *The interactive PRD workflow is now complete.*",
         state.draft_revision
     );
-    github::post_bot_comment_with_marker(
+    github::post_bot_comment_with_marker_with_gh_bin(
+        &config.gh_bin,
         owner,
         repo,
         issue_number,
@@ -935,7 +1383,14 @@ fn do_approval_transition(
 
     // Add ralph:prd-done BEFORE removing ralph:prd-active. On partial failure
     // the issue retains ralph:prd-active (poll-visible) and gains ralph:prd-done.
-    github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-done").map_err(|err| {
+    github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-done",
+    )
+    .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
         ))
@@ -962,13 +1417,18 @@ fn do_approval_transition(
 
     // Save succeeded — now safe to remove ralph:prd-active (issue will be
     // polled via ralph:prd-done or terminal state file going forward).
-    github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active").map_err(
-        |err| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-            ))
-        },
-    )?;
+    github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-active",
+    )
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     Ok(())
 }
@@ -1016,11 +1476,18 @@ fn generate_revision_from_feedback_with_timeout(
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let writer = create_backend(&config.writer_backend, &config.global_config)?;
-    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+    let repo_cwd = config.effective_repo_cwd();
+    let writer = create_backend(
+        &config.writer_backend,
+        &config.global_config,
+        Some(repo_cwd.clone()),
+    )?;
+    let reviewer = create_backend(
+        &config.reviewer_backend,
+        &config.global_config,
+        Some(repo_cwd),
+    )?;
 
     // Build feedback revision prompt
     let revision_prompt = render_prompt(
@@ -1263,11 +1730,18 @@ fn generate_draft_from_answers_with_timeout(
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
-    let writer = create_backend(&config.writer_backend, &config.global_config)?;
-    let reviewer = create_backend(&config.reviewer_backend, &config.global_config)?;
+    let repo_cwd = config.effective_repo_cwd();
+    let writer = create_backend(
+        &config.writer_backend,
+        &config.global_config,
+        Some(repo_cwd.clone()),
+    )?;
+    let reviewer = create_backend(
+        &config.reviewer_backend,
+        &config.global_config,
+        Some(repo_cwd),
+    )?;
 
     let idea_context = INTERACTIVE_DRAFT_CONTEXT_TEMPLATE
         .replace("{issue}", issue_text)
@@ -1390,8 +1864,6 @@ fn run_review_with_retry_sync(
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
 fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
-    config.refresh_repo_clone()?;
-    let _cwd = CwdGuard::set(&config.repo_clone_path())?;
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -1403,13 +1875,22 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
     let deadline = std::time::Instant::now() + timeout;
 
     let prompt = format!("{QUESTION_GEN_PROMPT}{issue_text}");
+    let repo_cwd = config.effective_repo_cwd();
 
     // Backend A
-    let backend_a = create_backend(&config.question_backends[0], &config.global_config)?;
+    let backend_a = create_backend(
+        &config.question_backends[0],
+        &config.global_config,
+        Some(repo_cwd.clone()),
+    )?;
     let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
 
     // Backend B
-    let backend_b = create_backend(&config.question_backends[1], &config.global_config)?;
+    let backend_b = create_backend(
+        &config.question_backends[1],
+        &config.global_config,
+        Some(repo_cwd),
+    )?;
     let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
 
     // Synthesis: merge/dedupe/prioritize
@@ -1506,7 +1987,8 @@ fn transition_to_failed(
     );
 
     if let Some(login) = bot_login {
-        let _ = github::post_bot_comment_with_marker(
+        let _ = github::post_bot_comment_with_marker_with_gh_bin(
+            &config.gh_bin,
             owner,
             repo,
             issue_number,
@@ -1518,11 +2000,23 @@ fn transition_to_failed(
         // No bot identity — post without idempotency check rather than using
         // body-only lookup (which a user spoof could suppress).
         let full_body = format!("{marker}\n{error_body}");
-        let _ = github::post_raw_issue_comment(owner, repo, issue_number, &full_body);
+        let _ = github::post_raw_issue_comment_with_gh_bin(
+            &config.gh_bin,
+            owner,
+            repo,
+            issue_number,
+            &full_body,
+        );
     }
 
     // Add ralph:prd-failed BEFORE removing ralph:prd-active (boundary-safe ordering).
-    let _ = github::add_label_with_retry(owner, repo, issue_number, "ralph:prd-failed");
+    let _ = github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-failed",
+    );
 
     // Set terminal state and persist BEFORE removing the poll-visible labels.
     let prev_state = state.state.clone();
@@ -1546,8 +2040,20 @@ fn transition_to_failed(
     }
 
     // Save succeeded — now safe to remove poll-visible labels
-    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd-active");
-    let _ = github::remove_label_with_retry(owner, repo, issue_number, "ralph:prd");
+    let _ = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd-active",
+    );
+    let _ = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        "ralph:prd",
+    );
 
     Ok(())
 }
@@ -1589,9 +2095,9 @@ mod tests {
         find_first_answer_comment, find_new_feedback_comments,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
         prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, CwdGuard, InteractivePrdState, PrdPollConfig,
-        PrdWorkflowState, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS,
-        PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
+        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2449,13 +2955,15 @@ mod tests {
         global.backends.codex.args = vec![];
 
         let data_dir = PathBuf::from("/tmp/ralph-test-prd-unit");
-        // Ensure repo clone directory exists so CwdGuard can chdir into it.
+        // Ensure repo clone directory exists for backend current_dir usage.
         let _ = std::fs::create_dir_all(data_dir.join("test").join("repo"));
 
         PrdPollConfig {
             owner: "test".to_owned(),
             repo: "repo".to_owned(),
             data_dir,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec!["claude".to_owned(), "codex".to_owned()],
             writer_backend: "claude".to_owned(),
@@ -2464,6 +2972,8 @@ mod tests {
             backend_timeout_secs: 30,
             global_config: global,
             verbose: false,
+            max_concurrent: 1,
+            worker_cwd: None,
         }
     }
 
@@ -2921,7 +3431,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CwdGuard and refresh_repo_clone tests
+    // repo_clone_path and refresh_repo_clone tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2930,6 +3440,8 @@ mod tests {
             owner: "acme".to_owned(),
             repo: "widgets".to_owned(),
             data_dir: PathBuf::from("/data"),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -2938,29 +3450,13 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            worker_cwd: None,
         };
-        assert_eq!(config.repo_clone_path(), PathBuf::from("/data/acme/widgets"));
-    }
-
-    #[test]
-    fn cwd_guard_sets_and_restores_directory() {
-        let original = std::env::current_dir().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        {
-            let _guard = CwdGuard::set(tmp.path()).unwrap();
-            assert_eq!(
-                std::env::current_dir().unwrap().canonicalize().unwrap(),
-                tmp.path().canonicalize().unwrap(),
-            );
-        }
-        // After drop, cwd should be restored
-        assert_eq!(std::env::current_dir().unwrap(), original);
-    }
-
-    #[test]
-    fn cwd_guard_fails_for_nonexistent_path() {
-        let result = CwdGuard::set(std::path::Path::new("/nonexistent/path/xyz"));
-        assert!(result.is_err());
+        assert_eq!(
+            config.repo_clone_path(),
+            PathBuf::from("/data/acme/widgets")
+        );
     }
 
     #[test]
@@ -2970,6 +3466,8 @@ mod tests {
             owner: "o".to_owned(),
             repo: "r".to_owned(),
             data_dir: tmp.path().to_path_buf(),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -2978,6 +3476,8 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            worker_cwd: None,
         };
         // Create the dir but not .git — should succeed without error
         std::fs::create_dir_all(config.repo_clone_path()).unwrap();
@@ -3010,7 +3510,12 @@ mod tests {
         // Create a bare clone to act as "origin"
         let origin_dir = tmp.path().join("origin.git");
         std::process::Command::new("git")
-            .args(["clone", "--bare", repo_dir.to_str().unwrap(), origin_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                repo_dir.to_str().unwrap(),
+                origin_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
@@ -3022,7 +3527,11 @@ mod tests {
         // Add a new commit to origin (via a separate checkout)
         let work = tmp.path().join("work");
         std::process::Command::new("git")
-            .args(["clone", origin_dir.to_str().unwrap(), work.to_str().unwrap()])
+            .args([
+                "clone",
+                origin_dir.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         std::fs::write(work.join("file.txt"), "v2").unwrap();
@@ -3047,12 +3556,17 @@ mod tests {
             .unwrap();
 
         // repo_dir is still at v1
-        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(),
+            "v1"
+        );
 
         let config = PrdPollConfig {
             owner: "owner".to_owned(),
             repo: "repo".to_owned(),
             data_dir: tmp.path().to_path_buf(),
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
             prd_enabled: true,
             question_backends: vec![],
             writer_backend: String::new(),
@@ -3061,12 +3575,17 @@ mod tests {
             backend_timeout_secs: 10,
             global_config: GlobalConfig::default(),
             verbose: false,
+            max_concurrent: 1,
+            worker_cwd: None,
         };
 
         config.refresh_repo_clone().unwrap();
 
         // After refresh, repo_dir should have v2
-        assert_eq!(std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(), "v2");
+        assert_eq!(
+            std::fs::read_to_string(repo_dir.join("file.txt")).unwrap(),
+            "v2"
+        );
     }
 
     #[test]
@@ -3097,7 +3616,7 @@ mod tests {
                 "backend output should contain repo clone path, got: {output}"
             );
         }
-        // If it errored (e.g. synthesis failure), that's fine — the cwd
-        // change and restore are already tested by cwd_guard_sets_and_restores_directory.
+        // If it errored (e.g. synthesis failure), that's fine — this test
+        // still verifies backend execution used the clone directory as cwd.
     }
 }
