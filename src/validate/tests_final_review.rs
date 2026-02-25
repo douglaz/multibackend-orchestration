@@ -175,7 +175,7 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer evaluating a completed project for quality and correctness."* ]]; then
+elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
   total=$(inc_counter "final_reviewer_total")
   round=$(( (total - 1) / 2 + 1 ))
   slot=$(( (total - 1) % 2 + 1 ))
@@ -202,7 +202,7 @@ EOF
 No additional amendments in round two.
 EOF
   fi
-elif [[ "$prompt" == *"You are the project planner evaluating proposed amendments from final reviewers."* ]]; then
+elif [[ "$prompt" == *"You are a technical evaluator assessing proposed amendments from final reviewers."* ]]; then
   call=$(inc_counter "planner_position_calls")
   cat <<'EOF'
 # Planner Positions

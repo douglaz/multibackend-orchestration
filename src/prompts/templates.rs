@@ -394,21 +394,17 @@ If any checks fail:
 }
 
 pub fn default_final_reviewer_template() -> &'static str {
-    r#"You are a final reviewer evaluating a completed project for quality and correctness.
+    r#"You are a final reviewer auditing a completed project for correctness, safety, and robustness.
 
-Given:
-- `prompt.md` (the master prompt)
-- The full project state
-- All implemented features and their specs
-- Full access to the project codebase via your tools (file reading, search, shell commands)
+You have full access to the project codebase via your tools (file reading, search, shell commands). The specification and plan are already committed to git — do NOT rely on a separate spec document. Instead, read the actual source code.
 
 Your job is to:
-1. Review the entire project against the master prompt requirements
-2. Use your tools to explore the actual source code — run `git diff`, read modified files, check for side effects
-3. Review code for bugs, correctness issues, missing error handling, and architectural problems
-4. Check for stray files, dead code, or unintended changes outside the scope of the requirements
-5. Identify any issues, gaps, or improvements needed
-6. Propose specific amendments if changes are required
+1. Run `git diff <base>...HEAD -- . ':(exclude).ralph'` to see all source changes, then read key files to review them
+2. **Prioritize correctness and safety over spec conformance**: Look for bugs, race conditions, resource leaks, incomplete error/panic handling, shared mutable state, and missing synchronization
+3. For concurrent/parallel code: verify each worker has properly isolated resources (working directories, file handles, state). Check whether panic/error paths persist failure state or silently drop it
+4. For tests: verify assertions actually prove what test names claim. Look for tests that pass for the wrong reason or miss asserting on the component that fails
+5. Check for stray files, dead code, or unintended changes outside scope
+6. Propose specific amendments if changes are required — you are NOT limited to the original spec scope; any real bug or safety issue is valid
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)
@@ -421,7 +417,7 @@ If no changes are needed:
 # Final Review: NO AMENDMENTS
 
 ## Summary
-<why the project is complete and correct>
+<why the project is complete and correct — cite specific source files you verified>
 
 ---
 
@@ -432,7 +428,7 @@ If changes are needed:
 ## Amendment: <ID>
 
 ### Problem
-<what is wrong or missing>
+<what is wrong or missing — cite source files and line numbers>
 
 ### Proposed Change
 <what should be changed>
@@ -448,28 +444,21 @@ If changes are needed:
 
 ## System Guardrails
 {{system_guardrails}}
-
-## Master Prompt
-{{master_prompt}}
-
-## Project State
-```json
-{{state_json}}
-```
 "#
 }
 
 pub fn default_planner_position_template() -> &'static str {
-    r#"You are the project planner evaluating proposed amendments from final reviewers.
+    r#"You are a technical evaluator assessing proposed amendments from final reviewers.
 
-Given:
-- `prompt.md` (the master prompt)
-- The proposed amendments from final review
+You have full access to the project codebase via your tools. Use them to verify the claims in each amendment by reading the actual source code.
 
 Your job is to:
-1. Evaluate each proposed amendment
-2. Accept or reject each one with rationale
-3. Provide your position on every amendment ID
+1. For each amendment, READ THE RELEVANT SOURCE FILES to verify whether the described problem actually exists
+2. Evaluate on TECHNICAL MERIT ONLY — does the amendment describe a real bug, safety issue, or correctness gap?
+3. Do NOT reject amendments because they are "out of scope" or "beyond the original spec" — any real bug or safety issue is valid regardless of scope
+4. Do NOT dismiss concurrency/isolation issues as "theoretical" just because they don't currently cause failures — shared mutable state is a defect even if current callers happen to be read-only
+5. REJECT amendments that describe code that doesn't exist, mischaracterize the implementation, or propose changes with no real benefit
+6. ACCEPT amendments that identify genuine correctness, safety, or robustness problems
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)
@@ -485,16 +474,13 @@ CRITICAL FORMAT REQUIREMENTS:
 ACCEPT or REJECT
 
 ### Rationale
-<why you accept or reject this amendment>
+<why you accept or reject — cite source files you verified>
 
 (repeat for every amendment ID)
 
 ---
 
 ## Context Provided
-
-## Master Prompt
-{{master_prompt}}
 
 ## Proposed Amendments
 {{proposed_amendments}}

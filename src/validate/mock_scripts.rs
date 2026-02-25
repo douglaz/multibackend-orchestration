@@ -69,7 +69,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -255,7 +255,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -399,7 +399,7 @@ EOF
   fi
   echo "cwd-ok" > cwd_test.txt
   git add cwd_test.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer evaluating a completed project for quality and correctness."; then
+elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 

@@ -2830,7 +2830,7 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
 ## Acceptance Criteria Verification
 Project-level acceptance requirements are satisfied.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer evaluating a completed project for quality and correctness."* ]]; then
+elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
   total=$(inc_counter "final_reviewer_total")
   inc_counter "final_reviewer_${backend_id}" >/dev/null
   round=$(( (total - 1) / 2 + 1 ))
@@ -2922,7 +2922,7 @@ Apply recurring ${backend_id} amendment for round ${round}.
 - \`README.md\` - update details
 EOF
   fi
-elif [[ "$prompt" == *"You are the project planner evaluating proposed amendments from final reviewers."* ]]; then
+elif [[ "$prompt" == *"You are a technical evaluator assessing proposed amendments from final reviewers."* ]]; then
   call=$(inc_counter "planner_position_calls")
   if [[ "$scenario" == "fail-after-proposals-once" || "$scenario" == "config-mismatch" ]]; then
     marker="${COUNTER_DIR}/planner_position_failed_once"
