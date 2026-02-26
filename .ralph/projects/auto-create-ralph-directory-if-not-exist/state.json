@@ -1,0 +1,150 @@
+{
+  "project_id": "auto-create-ralph-directory-if-not-exist",
+  "project_name": "auto-create .ralph directory if not exists when running ralp",
+  "created_at": "2026-02-14T02:00:18.423695938Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "e9ae115c02cd07eb8fb872b3dc964390cd2113a149089ee30cf27f11d84010d7",
+  "prompt_hash_at_loop_start": "e9ae115c02cd07eb8fb872b3dc964390cd2113a149089ee30cf27f11d84010d7",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 4,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "config-defaults-and-auto-init-for-ralph-auto",
+      "feature_name": "Config Defaults and Auto-Init for `ralph auto`",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020316-spec.md",
+        "impl_notes": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214020946-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214022613-review-001-feedback.md",
+            "response": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214022703-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214022817-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214021750-qa-001-fail.md",
+            "implementer_response": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214022200-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/001-config-defaults-and-auto-init-for-ralph-auto/20260214022507-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "12b1744f2b0bc7601819e67b39df60794a093f97",
+      "started_at": "2026-02-14T02:03:16.004760126Z",
+      "completed_at": "2026-02-14T02:28:17.696822022Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "fix-stale-timeout-assertion-in-init-command-test",
+      "feature_name": "Fix Stale Timeout Assertion in Init Command Test",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024001-spec.md",
+        "impl_notes": "loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024356-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024832-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-fix-stale-timeout-assertion-in-init-command-test/20260214024823-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "21c5603ba93267b0e935bdb28f645cbb18c62e27",
+      "started_at": "2026-02-14T02:40:01.954002508Z",
+      "completed_at": "2026-02-14T02:48:32.597615848Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260214022830-termination-request.md",
+        "verdict": "loops/002-completion/20260214023010-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260214023430-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": false,
+            "artifact": "loops/002-completion/20260214023913-acceptance-fail-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "continue",
+      "started_at": "2026-02-14T02:28:30.719614457Z",
+      "completed_at": "2026-02-14T02:30:10.416894192Z"
+    },
+    {
+      "loop_number": 4,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/004-completion/20260214024848-termination-request.md",
+        "verdict": "loops/004-completion/20260214024940-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/004-completion/20260214025404-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": true,
+            "artifact": "loops/004-completion/20260214025920-acceptance-pass-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-14T02:48:48.515014728Z",
+      "completed_at": "2026-02-14T02:49:40.685499089Z"
+    }
+  ]
+}
