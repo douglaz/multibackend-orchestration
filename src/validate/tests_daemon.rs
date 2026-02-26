@@ -3541,14 +3541,13 @@ exit 1
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh script");
 
-        // Override PATH so add_label_with_retry uses our mock gh
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", &gh_path);
-
-        let result = github::add_label_with_retry("acme", "widgets", 1, "ralph:in-progress");
-
-        // Restore PATH
-        std::env::set_var("PATH", &old_path);
+        let result = github::add_label_with_retry_with_gh_bin(
+            gh_path.to_str().expect("mock gh path should be UTF-8"),
+            "acme",
+            "widgets",
+            1,
+            "ralph:in-progress",
+        );
 
         assert!(
             result.is_ok(),
