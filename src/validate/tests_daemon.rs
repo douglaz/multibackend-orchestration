@@ -3539,10 +3539,12 @@ exit 1
 "#
         );
 
-        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh script");
+        let gh_bin = dh
+            .write_mock_script("gh", &gh_script)
+            .expect("write mock gh script");
 
         let result = github::add_label_with_retry_with_gh_bin(
-            gh_path.to_str().expect("mock gh path should be UTF-8"),
+            gh_bin.to_str().expect("mock gh path should be UTF-8"),
             "acme",
             "widgets",
             1,
