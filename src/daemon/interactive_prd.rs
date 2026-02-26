@@ -162,6 +162,14 @@ pub fn prd_marker(issue_number: u32, kind: &str, version: u32) -> String {
     format!("<!-- ralph:prd:{issue_number}:{kind}-v{version} -->")
 }
 
+pub const DRAFT_HEADING_PREFIX: &str = "## Draft Engineering Specification (Revision ";
+pub const DRAFT_FOOTER: &str =
+    "*Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*";
+
+pub fn format_draft_comment(revision: u32, spec_body: &str) -> String {
+    format!("{DRAFT_HEADING_PREFIX}{revision})\n\n{spec_body}\n\n{DRAFT_FOOTER}")
+}
+
 pub const PRD_LABELS: &[(&str, &str, &str)] = &[
     (
         "ralph:prd",
@@ -572,9 +580,29 @@ pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd-failed",
 ];
 
+const IN_PROGRESS_PRD_LABEL_NAMES: &[&str] = &[
+    "ralph:prd",
+    "ralph:prd-active",
+    "ralph:prd-approved",
+    "ralph:prd-failed",
+];
+
 /// Returns `true` if any PRD lifecycle label is present on the issue.
 pub fn has_prd_label(labels: &[String]) -> bool {
     labels.iter().any(|l| PRD_LABEL_NAMES.contains(&l.as_str()))
+}
+
+/// Returns `true` if an in-progress PRD lifecycle label is present.
+///
+/// `ralph:prd-done` has precedence and always returns `false`, even if mixed
+/// with in-progress labels.
+pub fn has_in_progress_prd_label(labels: &[String]) -> bool {
+    if labels.iter().any(|l| l == "ralph:prd-done") {
+        return false;
+    }
+    labels
+        .iter()
+        .any(|l| IN_PROGRESS_PRD_LABEL_NAMES.contains(&l.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,10 +1206,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
 
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
-    let draft_comment_body = format!(
-        "## Draft Engineering Specification (Revision {next_revision})\n\n{draft_spec}\n\n\
-         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
-    );
+    let draft_comment_body = format_draft_comment(next_revision, &draft_spec);
     let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
@@ -1339,10 +1364,7 @@ fn do_awaiting_feedback(
     // Post new draft comment with incremented marker
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
-    let draft_comment_body = format!(
-        "## Draft Engineering Specification (Revision {next_revision})\n\n{revised_spec}\n\n\
-         *Reply with feedback. Reply with \"approved\" or \"lgtm\" when this draft is ready.*"
-    );
+    let draft_comment_body = format_draft_comment(next_revision, &revised_spec);
     let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
@@ -2094,6 +2116,123 @@ pub fn prd_status_failed_marker(issue_number: u32) -> String {
     format!("<!-- ralph:prd:{issue_number}:status-failed -->")
 }
 
+// ---------------------------------------------------------------------------
+// Approved spec extraction from issue comments
+// ---------------------------------------------------------------------------
+
+/// Pure parsing helper: scans bot-authored comments for the highest
+/// `status-approved-vN` marker, then selects the latest matching
+/// `draft-vN` comment in API order.  Returns the cleaned spec body or
+/// `None` if any precondition fails.
+pub fn parse_approved_spec_from_comments(
+    comments: &[github::IssueComment],
+    bot_login: &str,
+    issue_number: u32,
+) -> Option<String> {
+    // Only consider bot-authored comments
+    let bot_comments: Vec<&github::IssueComment> = comments
+        .iter()
+        .filter(|c| c.author_login == bot_login)
+        .collect();
+
+    // Find highest approved revision N from status-approved-vN markers.
+    // Only check the first non-empty line of each bot comment to avoid
+    // matching marker-like lines injected into draft bodies via prompt
+    // injection.  Real approval comments always have the marker as the
+    // first line.
+    let approved_prefix = format!("<!-- ralph:prd:{issue_number}:status-approved-v");
+    let mut highest_approved: Option<u32> = None;
+    for comment in &bot_comments {
+        let first_line = comment.body.lines().map(str::trim).find(|l| !l.is_empty());
+        if let Some(line) = first_line {
+            if let Some(rest) = line.strip_prefix(&approved_prefix) {
+                if let Some(n_str) = rest.strip_suffix(" -->") {
+                    if let Ok(n) = n_str.parse::<u32>() {
+                        highest_approved = Some(highest_approved.map_or(n, |cur| cur.max(n)));
+                    }
+                }
+            }
+        }
+    }
+
+    let approved_revision = highest_approved?;
+
+    // Find the latest draft-vN comment (last in API order) matching approved revision
+    let draft_marker = prd_marker(issue_number, "draft", approved_revision);
+    let draft_comment = bot_comments
+        .iter()
+        .rev()
+        .find(|c| body_has_exact_marker_line(&c.body, &draft_marker))?;
+
+    // Clean the draft body
+    clean_draft_body(&draft_comment.body)
+}
+
+fn body_has_exact_marker_line(body: &str, marker: &str) -> bool {
+    body.lines().any(|line| line.trim() == marker)
+}
+
+/// Strip PRD marker lines, heading, footer, and surrounding whitespace
+/// from a raw draft comment body.  Returns `None` if the cleaned body is
+/// empty.
+pub fn clean_draft_body(raw: &str) -> Option<String> {
+    let mut lines: Vec<&str> = raw
+        .lines()
+        .filter(|line| !line.trim().starts_with("<!-- ralph:prd:"))
+        .collect();
+
+    // Skip leading blank lines before heading detection.
+    while matches!(lines.first(), Some(line) if line.trim().is_empty()) {
+        lines.remove(0);
+    }
+
+    // Strip heading if first content line starts with DRAFT_HEADING_PREFIX.
+    if let Some(first) = lines.first() {
+        if first.trim_start().starts_with(DRAFT_HEADING_PREFIX) {
+            lines.remove(0);
+        }
+    }
+
+    // Strip footer if trailing content line exactly matches DRAFT_FOOTER
+    // (skip trailing empty lines to find the actual last content line)
+    loop {
+        match lines.last() {
+            Some(line) if line.trim().is_empty() => {
+                lines.pop();
+            }
+            _ => break,
+        }
+    }
+    if let Some(last) = lines.last() {
+        if *last == DRAFT_FOOTER {
+            lines.pop();
+        }
+    }
+
+    let cleaned = lines.join("\n").trim().to_owned();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Fetch approved spec from issue comments using GitHub API.
+///
+/// Resolves bot login, fetches comments, and delegates to the pure parser.
+/// Returns `None` on any failure (login, API, parse, empty result).
+pub fn extract_approved_spec(
+    gh_bin: &str,
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+) -> Option<String> {
+    let bot_login = github::fetch_authenticated_login_with_gh_bin(gh_bin).ok()?;
+    let comments =
+        github::fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number).ok()?;
+    parse_approved_spec_from_comments(&comments, &bot_login, issue_number)
+}
+
 /// Public accessor for `extract_questions_text`.
 ///
 /// Exposed to allow conformance tests to verify bot-scoped marker hydration
@@ -2119,13 +2258,14 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        apply_transition_result, detect_approval, extract_questions_text,
-        find_first_answer_comment, find_new_feedback_comments,
+        apply_transition_result, clean_draft_body, detect_approval, extract_questions_text,
+        find_first_answer_comment, find_new_feedback_comments, format_draft_comment,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
-        prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt,
+        has_in_progress_prd_label, has_prd_label, parse_approved_spec_from_comments, prd_marker,
+        prd_status_approved_marker, render_answer_to_draft_prompt,
         run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
-        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
-        REQUIRED_SPEC_SECTION_COUNT,
+        DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT,
+        PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2258,6 +2398,55 @@ mod tests {
     fn prd_labels_alias_matches_lifecycle_labels() {
         assert_eq!(PRD_LABELS, PRD_LIFECYCLE_LABELS);
         assert_eq!(PRD_LABELS.len(), 5);
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_matches_each_in_progress_label() {
+        for label in [
+            "ralph:prd",
+            "ralph:prd-active",
+            "ralph:prd-approved",
+            "ralph:prd-failed",
+        ] {
+            assert!(
+                has_in_progress_prd_label(&[label.to_owned()]),
+                "expected {label} to be treated as in-progress"
+            );
+        }
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_rejects_done_empty_and_unrelated_labels() {
+        assert!(!has_in_progress_prd_label(&["ralph:prd-done".to_owned()]));
+        assert!(!has_in_progress_prd_label(&[]));
+        assert!(!has_in_progress_prd_label(&[
+            "bug".to_owned(),
+            "ralph:ready".to_owned()
+        ]));
+    }
+
+    #[test]
+    fn has_in_progress_prd_label_done_precedence_overrides_mixed_labels() {
+        let labels = vec![
+            "ralph:prd-approved".to_owned(),
+            "ralph:prd-done".to_owned(),
+            "ralph:ready".to_owned(),
+        ];
+        assert!(!has_in_progress_prd_label(&labels));
+    }
+
+    #[test]
+    fn has_prd_label_still_matches_done_label() {
+        assert!(has_prd_label(&["ralph:prd-done".to_owned()]));
+    }
+
+    #[test]
+    fn format_draft_comment_round_trip_includes_shared_heading_body_and_footer() {
+        let spec_body = "## Summary\nShip it.\n";
+        let formatted = format_draft_comment(7, spec_body);
+        assert!(formatted.starts_with(&format!("{DRAFT_HEADING_PREFIX}7)")));
+        assert!(formatted.contains(spec_body));
+        assert!(formatted.ends_with(DRAFT_FOOTER));
     }
 
     #[test]
@@ -3646,5 +3835,316 @@ mod tests {
         }
         // If it errored (e.g. synthesis failure), that's fine — this test
         // still verifies backend execution used the clone directory as cwd.
+    }
+
+    // -----------------------------------------------------------------------
+    // Approved spec extraction / parsing unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_approved_spec_highest_revision_wins() {
+        let spec_v1 = "## Summary\nOld spec v1.";
+        let spec_v2 = "## Summary\nNew spec v2.";
+        let comments = vec![
+            test_comment(
+                100,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 1),
+                    format_draft_comment(1, spec_v1)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            test_comment(
+                101,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved\nDraft revision 1 has been approved.",
+                    prd_marker(42, "status-approved", 1)
+                ),
+                "2026-01-01T00:00:20Z",
+            ),
+            test_comment(
+                102,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 2),
+                    format_draft_comment(2, spec_v2)
+                ),
+                "2026-01-01T00:00:30Z",
+            ),
+            test_comment(
+                103,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved\nDraft revision 2 has been approved.",
+                    prd_marker(42, "status-approved", 2)
+                ),
+                "2026-01-01T00:00:40Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(result.is_some(), "should extract approved spec");
+        let spec = result.unwrap();
+        assert!(
+            spec.contains("New spec v2"),
+            "should select highest revision, got: {spec}"
+        );
+        assert!(
+            !spec.contains("Old spec v1"),
+            "should not contain older revision"
+        );
+    }
+
+    #[test]
+    fn parse_approved_spec_duplicate_draft_latest_wins() {
+        let spec_early = "## Summary\nEarly draft.";
+        let spec_late = "## Summary\nLate draft.";
+        let comments = vec![
+            test_comment(
+                200,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(7, "draft", 1),
+                    format_draft_comment(1, spec_early)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            test_comment(
+                201,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(7, "draft", 1),
+                    format_draft_comment(1, spec_late)
+                ),
+                "2026-01-01T00:00:20Z",
+            ),
+            test_comment(
+                202,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(7, "status-approved", 1)
+                ),
+                "2026-01-01T00:00:30Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 7);
+        assert!(result.is_some());
+        let spec = result.unwrap();
+        assert!(
+            spec.contains("Late draft"),
+            "should use latest draft-v1 in API order, got: {spec}"
+        );
+    }
+
+    #[test]
+    fn parse_approved_spec_ignores_bot_comment_that_only_references_draft_marker() {
+        let real_spec = "## Summary\nReal draft.";
+        let draft_marker = prd_marker(77, "draft", 2);
+        let comments = vec![
+            test_comment(
+                210,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    &draft_marker,
+                    format_draft_comment(2, real_spec)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            // Later bot-authored comment references the marker inline, but is not a draft.
+            test_comment(
+                211,
+                "ralph-bot",
+                &format!("I reviewed marker `{draft_marker}` and left notes."),
+                "2026-01-01T00:00:20Z",
+            ),
+            test_comment(
+                212,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(77, "status-approved", 2)
+                ),
+                "2026-01-01T00:00:30Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 77);
+        assert!(result.is_some(), "should resolve approved spec from real draft");
+        assert_eq!(result.unwrap(), real_spec);
+    }
+
+    #[test]
+    fn parse_approved_spec_bot_only_filtering_ignores_user_spoof() {
+        let spoofed_approval = format!(
+            "{}\n## PRD Approved",
+            prd_marker(42, "status-approved", 5)
+        );
+        let real_draft = format!(
+            "{}\n{}",
+            prd_marker(42, "draft", 1),
+            format_draft_comment(1, "## Summary\nReal spec.")
+        );
+        let real_approval = format!(
+            "{}\n## PRD Approved",
+            prd_marker(42, "status-approved", 1)
+        );
+        let comments = vec![
+            // User-authored spoof: approval for v5 (no matching draft)
+            test_comment(300, "evil-user", &spoofed_approval, "2026-01-01T00:00:05Z"),
+            // Real bot draft v1
+            test_comment(301, "ralph-bot", &real_draft, "2026-01-01T00:00:10Z"),
+            // Real bot approval v1
+            test_comment(302, "ralph-bot", &real_approval, "2026-01-01T00:00:20Z"),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(result.is_some(), "should find bot-authored approval");
+        let spec = result.unwrap();
+        assert!(spec.contains("Real spec"), "got: {spec}");
+    }
+
+    #[test]
+    fn clean_draft_body_removes_markers_heading_footer_and_trims() {
+        let raw = format!(
+            "{}\n{}\n\n## Summary\nThe spec.\n\n{}",
+            prd_marker(42, "draft", 3),
+            format!("{DRAFT_HEADING_PREFIX}3)"),
+            DRAFT_FOOTER
+        );
+        let result = clean_draft_body(&raw);
+        assert!(result.is_some());
+        let cleaned = result.unwrap();
+        assert!(
+            !cleaned.contains("<!-- ralph:prd:"),
+            "marker should be removed"
+        );
+        assert!(
+            !cleaned.starts_with(DRAFT_HEADING_PREFIX),
+            "heading should be removed"
+        );
+        assert!(
+            !cleaned.contains(DRAFT_FOOTER),
+            "footer should be removed"
+        );
+        assert!(cleaned.contains("## Summary"));
+        assert!(cleaned.contains("The spec."));
+    }
+
+    #[test]
+    fn clean_draft_body_strips_heading_after_marker_when_blank_lines_precede_it() {
+        let raw = format!(
+            "{}\n\n   \n{}\n\n## Summary\nBody.\n\n{}",
+            prd_marker(42, "draft", 4),
+            format!("{DRAFT_HEADING_PREFIX}4)"),
+            DRAFT_FOOTER
+        );
+        let result = clean_draft_body(&raw);
+        assert!(result.is_some(), "cleaned draft should be present");
+        let cleaned = result.unwrap();
+        assert!(
+            !cleaned.starts_with(DRAFT_HEADING_PREFIX),
+            "heading should be stripped after leading blank lines"
+        );
+        assert_eq!(cleaned, "## Summary\nBody.");
+    }
+
+    #[test]
+    fn clean_draft_body_empty_after_cleanup_returns_none() {
+        let raw = format!(
+            "{}\n{}\n\n\n{}",
+            prd_marker(42, "draft", 1),
+            format!("{DRAFT_HEADING_PREFIX}1)"),
+            DRAFT_FOOTER
+        );
+        let result = clean_draft_body(&raw);
+        assert!(result.is_none(), "empty cleaned body should return None");
+    }
+
+    #[test]
+    fn parse_approved_spec_no_approval_marker_returns_none() {
+        let comments = vec![test_comment(
+            400,
+            "ralph-bot",
+            &format!(
+                "{}\n{}",
+                prd_marker(42, "draft", 1),
+                format_draft_comment(1, "## Summary\nSpec body.")
+            ),
+            "2026-01-01T00:00:10Z",
+        )];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(
+            result.is_none(),
+            "no approval marker should return None"
+        );
+    }
+
+    #[test]
+    fn parse_approved_spec_no_matching_draft_returns_none() {
+        // Approval for v3 but only draft v1 exists
+        let comments = vec![
+            test_comment(
+                500,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    prd_marker(42, "draft", 1),
+                    format_draft_comment(1, "## Summary\nSpec v1.")
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            test_comment(
+                501,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(42, "status-approved", 3)
+                ),
+                "2026-01-01T00:00:20Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(
+            result.is_none(),
+            "approved v3 with only draft v1 should return None"
+        );
+    }
+
+    #[test]
+    fn format_draft_comment_and_parse_roundtrip_consistency() {
+        let spec_body = "## Summary\nComplete spec with details.\n\n## Testing\nUnit tests.";
+        let formatted = format_draft_comment(5, spec_body);
+
+        // Simulate a complete draft comment as the bot would post it
+        let full_comment = format!("{}\n{}", prd_marker(42, "draft", 5), formatted);
+
+        // Simulate approval
+        let approval_comment = format!(
+            "{}\n## PRD Approved",
+            prd_marker(42, "status-approved", 5)
+        );
+        let comments = vec![
+            test_comment(600, "ralph-bot", &full_comment, "2026-01-01T00:00:10Z"),
+            test_comment(601, "ralph-bot", &approval_comment, "2026-01-01T00:00:20Z"),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
+        assert!(result.is_some(), "round-trip should succeed");
+        let extracted = result.unwrap();
+        assert_eq!(
+            extracted, spec_body,
+            "extracted spec should match original input to format_draft_comment"
+        );
     }
 }
