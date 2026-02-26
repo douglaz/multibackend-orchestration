@@ -85,7 +85,7 @@ args = [
     "stream-json",
 ]
 timeout_seconds = 7200
-enabled = "auto"
+enabled = "disabled"
 
 [backends.gemini.env]
 
@@ -108,7 +108,6 @@ final_review_enabled = true
 final_review_backends = [
     "claude",
     "codex",
-    "gemini",
 ]
 final_review_arbiter_backend = "codex"
 final_review_min_reviewers = 2
