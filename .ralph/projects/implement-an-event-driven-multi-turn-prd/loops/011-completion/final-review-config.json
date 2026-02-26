@@ -1,0 +1,10 @@
+{
+  "reviewers": [
+    "claude",
+    "codex"
+  ],
+  "arbiter_backend": "claude",
+  "min_reviewers": 2,
+  "consensus_threshold": 1.0,
+  "max_restarts": 3
+}

@@ -1,0 +1,152 @@
+{
+  "project_id": "refactor-the-daemon-runtime-loop-src-dae",
+  "project_name": "Refactor the daemon runtime loop (src/daemon/runtime.rs) fro",
+  "created_at": "2026-02-14T03:37:05.342725769Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "1ac3248369731bbb6403c1b3df35fcb4ca634dafd283ff949d3b291c555d8f2e",
+  "prompt_hash_at_loop_start": "1ac3248369731bbb6403c1b3df35fcb4ca634dafd283ff949d3b291c555d8f2e",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 4,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "async-cli-propagation-and-spawn-blocking-helper",
+      "feature_name": "Async CLI Propagation and spawn_blocking Helper",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034014-spec.md",
+        "impl_notes": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034213-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035501-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214034604-qa-001-fail.md",
+            "implementer_response": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035100-impl-qa-response-001.md"
+          },
+          {
+            "iteration": 2,
+            "passed": true,
+            "report": "loops/001-async-cli-propagation-and-spawn-blocking-helper/20260214035408-qa-002-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "a1826d71f98b28fda77ecce0fcf7af193f5e161b",
+      "started_at": "2026-02-14T03:40:14.696337018Z",
+      "completed_at": "2026-02-14T03:55:01.366626131Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "async-runtime-loop-internals-and-async-prompt",
+      "feature_name": "Async Runtime Loop Internals and Async Prompt Refinement",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214035637-spec.md",
+        "impl_notes": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040149-impl-notes.md",
+        "reviews": [
+          {
+            "iteration": 1,
+            "feedback": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040726-review-001-feedback.md",
+            "response": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214041327-impl-response-001.md"
+          }
+        ],
+        "approval": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214041742-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/002-async-runtime-loop-internals-and-async-prompt/20260214040612-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "3118993012d098fff0339696a963c55e8c02049d",
+      "started_at": "2026-02-14T03:56:37.776571088Z",
+      "completed_at": "2026-02-14T04:17:42.719842865Z"
+    },
+    {
+      "loop_number": 3,
+      "slug": "tokio-process-migration-and-async-killreap",
+      "feature_name": "Tokio Process Migration and Async Kill/Reap Semantics",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/003-tokio-process-migration-and-async-killreap/20260214041844-spec.md",
+        "impl_notes": "loops/003-tokio-process-migration-and-async-killreap/20260214042344-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/003-tokio-process-migration-and-async-killreap/20260214042917-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/003-tokio-process-migration-and-async-killreap/20260214042819-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "d5dff15bab07a45825990ccd2a66ca019a3117be",
+      "started_at": "2026-02-14T04:18:44.556141262Z",
+      "completed_at": "2026-02-14T04:29:17.888939815Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 4,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/004-completion/20260214042935-termination-request.md",
+        "verdict": "loops/004-completion/20260214043049-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/004-completion/20260214043553-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": true,
+            "artifact": "loops/004-completion/20260214044028-acceptance-pass-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-14T04:29:35.086137973Z",
+      "completed_at": "2026-02-14T04:30:49.447563815Z"
+    }
+  ]
+}
