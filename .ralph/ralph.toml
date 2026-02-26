@@ -85,7 +85,7 @@ args = [
     "stream-json",
 ]
 timeout_seconds = 7200
-enabled = "disabled"
+enabled = false
 
 [backends.gemini.env]
 
