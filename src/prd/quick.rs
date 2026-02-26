@@ -75,6 +75,15 @@ pub struct ReviewIssue {
     pub feedback: String,
 }
 
+/// Per-attempt event emitted by review retry logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewAttemptEvent {
+    pub attempt: u8,
+    pub prompt: String,
+    pub raw_output: String,
+    pub parse_error: Option<String>,
+}
+
 /// Draft prompt used by the writer backend.
 pub const DRAFT_PROMPT: &str = r#"You are a senior software engineer writing a focused engineering specification.
 
@@ -204,14 +213,33 @@ const MAX_SECTION_RETRIES: u8 = 2;
 pub async fn run_review_with_retry(
     backend: Arc<dyn Backend>,
     prompt: String,
+    mut on_attempt: Option<&mut dyn FnMut(ReviewAttemptEvent)>,
 ) -> Result<ReviewFeedback> {
     let mut current_prompt = prompt;
 
     for attempt in 1..=3_u8 {
         let raw = backend.execute(&current_prompt).await?;
         match parse_review_feedback(&raw) {
-            Ok(feedback) => return Ok(feedback),
+            Ok(feedback) => {
+                if let Some(cb) = on_attempt.as_mut() {
+                    cb(ReviewAttemptEvent {
+                        attempt,
+                        prompt: current_prompt.clone(),
+                        raw_output: raw.clone(),
+                        parse_error: None,
+                    });
+                }
+                return Ok(feedback);
+            }
             Err(parse_error) => {
+                if let Some(cb) = on_attempt.as_mut() {
+                    cb(ReviewAttemptEvent {
+                        attempt,
+                        prompt: current_prompt.clone(),
+                        raw_output: raw.clone(),
+                        parse_error: Some(parse_error.to_string()),
+                    });
+                }
                 if attempt == 3 {
                     return Err(RalphError::QuickPrdFailed(format!(
                         "failed to parse review feedback after 3 attempts: {parse_error}"
@@ -324,7 +352,7 @@ impl QuickPrdPipeline {
 
             // Run review with retry
             let review_start = Instant::now();
-            let feedback = run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
+            let feedback = run_review_with_retry(self.reviewer.clone(), review_prompt, None).await?;
             review_times_secs.push(review_start.elapsed().as_secs_f64());
 
             // Cache review
@@ -562,7 +590,7 @@ mod tests {
             vec!["no json here".to_string(), mock_approved_review()],
         ));
 
-        let feedback = run_review_with_retry(backend.clone(), "review this".to_string())
+        let feedback = run_review_with_retry(backend.clone(), "review this".to_string(), None)
             .await
             .expect("should succeed on retry");
         assert!(feedback.approved);
@@ -578,11 +606,35 @@ mod tests {
             vec!["bad1".to_string(), "bad2".to_string(), "bad3".to_string()],
         ));
 
-        let err = run_review_with_retry(backend.clone(), "review this".to_string())
+        let err = run_review_with_retry(backend.clone(), "review this".to_string(), None)
             .await
             .expect_err("should fail after 3 attempts");
         assert!(matches!(err, RalphError::QuickPrdFailed(_)));
         assert_eq!(backend.call_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_review_retry_callback_captures_each_attempt() {
+        let backend = Arc::new(MockBackend::new(
+            "reviewer",
+            vec!["bad1".to_string(), "bad2".to_string(), "bad3".to_string()],
+        ));
+        let mut events: Vec<ReviewAttemptEvent> = Vec::new();
+        let mut callback = |event: ReviewAttemptEvent| events.push(event);
+
+        let _ = run_review_with_retry(
+            backend.clone(),
+            "review this".to_string(),
+            Some(&mut callback),
+        )
+        .await
+        .expect_err("should fail after 3 attempts");
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].attempt, 1);
+        assert_eq!(events[1].attempt, 2);
+        assert_eq!(events[2].attempt, 3);
+        assert!(events.iter().all(|e| e.parse_error.is_some()));
     }
 
     #[tokio::test]

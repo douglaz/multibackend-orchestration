@@ -5,12 +5,13 @@
 //! `ralph:prd` issues.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -207,6 +208,170 @@ fn state_path(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> Pa
         .join(".ralph")
         .join("interactive-prd")
         .join(format!("{issue_number}.json"))
+}
+
+fn logs_dir_path(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> PathBuf {
+    data_dir
+        .join(owner)
+        .join(repo)
+        .join(".ralph")
+        .join("interactive-prd")
+        .join(issue_number.to_string())
+        .join("logs")
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PrdDebugLogEntry {
+    pub timestamp: String,
+    pub backend_spec: String,
+    pub label: String,
+    pub prompt_chars: usize,
+    pub prompt: String,
+    pub raw_output: Option<String>,
+    pub error: Option<String>,
+    pub validation: ValidationResult,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ValidationResult {
+    NotChecked,
+    Ok,
+    MissingSections { missing: Vec<String> },
+    ReviewParseFailed { error: String },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PrdDebugLogger {
+    log_dir: PathBuf,
+    prompt_truncate_bytes: Option<usize>,
+}
+
+impl PrdDebugLogger {
+    pub(crate) fn new(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> Self {
+        Self {
+            log_dir: logs_dir_path(data_dir, owner, repo, issue_number),
+            prompt_truncate_bytes: parse_log_truncate_bytes(),
+        }
+    }
+
+    pub(crate) fn log_attempt(
+        &self,
+        backend_spec: &str,
+        label: &str,
+        prompt: &str,
+        raw_output: Option<String>,
+        error: Option<String>,
+        validation: ValidationResult,
+    ) {
+        let now = Utc::now();
+        let timestamp = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let timestamp_for_filename = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let prompt_chars = prompt.chars().count();
+        let prompt_payload = match self.prompt_truncate_bytes {
+            Some(max_bytes) => truncate_prompt_utf8_safe(prompt, max_bytes),
+            None => prompt.to_owned(),
+        };
+
+        let entry = PrdDebugLogEntry {
+            timestamp,
+            backend_spec: backend_spec.to_owned(),
+            label: label.to_owned(),
+            prompt_chars,
+            prompt: prompt_payload,
+            raw_output,
+            error,
+            validation,
+        };
+
+        if let Err(err) = self.write_entry(&timestamp_for_filename, label, &entry) {
+            eprintln!("prd: debug log write failed ({label}): {err}");
+        }
+    }
+
+    pub(crate) fn write_entry(
+        &self,
+        timestamp_for_filename: &str,
+        label: &str,
+        entry: &PrdDebugLogEntry,
+    ) -> std::io::Result<PathBuf> {
+        fs::create_dir_all(&self.log_dir)?;
+
+        let mut payload = serde_json::to_vec_pretty(entry)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        payload.push(b'\n');
+
+        for suffix in 0..=9999_u16 {
+            let filename = if suffix == 0 {
+                generate_log_filename(timestamp_for_filename, label, None)
+            } else {
+                generate_log_filename(timestamp_for_filename, label, Some(suffix))
+            };
+            let path = self.log_dir.join(filename);
+            let mut file = match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            };
+            file.write_all(&payload)?;
+            file.flush()?;
+            return Ok(path);
+        }
+
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "could not allocate log filename for label '{label}' after 9999 collisions"
+            ),
+        ))
+    }
+}
+
+fn parse_log_truncate_bytes() -> Option<usize> {
+    let Some(raw) = std::env::var_os("RALPH_PRD_LOG_TRUNCATE") else {
+        return None;
+    };
+    let as_str = raw.to_string_lossy();
+    match as_str.trim().parse::<usize>() {
+        Ok(value) => Some(value),
+        Err(err) => {
+            eprintln!(
+                "prd: invalid RALPH_PRD_LOG_TRUNCATE='{as_str}' ({err}); prompt logging not truncated"
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn generate_log_filename(
+    timestamp: &str,
+    label: &str,
+    collision_suffix: Option<u16>,
+) -> String {
+    match collision_suffix {
+        Some(suffix) => format!("{timestamp}-{suffix:03}-{label}.json"),
+        None => format!("{timestamp}-{label}.json"),
+    }
+}
+
+pub(crate) fn truncate_prompt_utf8_safe(prompt: &str, max_bytes: usize) -> String {
+    if prompt.len() <= max_bytes {
+        return prompt.to_owned();
+    }
+
+    let mut cut = max_bytes.min(prompt.len());
+    while cut > 0 && !prompt.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let truncated = &prompt[..cut];
+    format!(
+        "{truncated}... [truncated at {cut} bytes, full length: {} bytes]",
+        prompt.len()
+    )
 }
 
 fn strip_code(text: &str) -> String {
@@ -983,6 +1148,7 @@ fn do_pending_to_awaiting(
     let issue_number = issue.number;
     let owner = &config.owner;
     let repo = &config.repo;
+    let logger = PrdDebugLogger::new(&config.data_dir, owner, repo, issue_number);
 
     // 1. Swap labels idempotently: add ralph:prd-active BEFORE removing
     //    ralph:prd so that on partial failure the issue remains visible to
@@ -1058,7 +1224,7 @@ fn do_pending_to_awaiting(
             issue.body.as_deref().unwrap_or_default()
         );
 
-        let questions = generate_questions_with_timeout(config, &issue_text)?;
+        let questions = generate_questions_with_timeout(config, &issue_text, &logger)?;
 
         // Post questions comment with idempotent marker
         let comment_body = format!(
@@ -1151,6 +1317,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
     let issue_number = issue.number;
     let owner = &config.owner;
     let repo = &config.repo;
+    let logger = PrdDebugLogger::new(&config.data_dir, owner, repo, issue_number);
 
     let questions_posted_at = state.questions_posted_at.ok_or_else(|| {
         RalphError::InteractivePrdFailed(format!(
@@ -1205,6 +1372,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
         &issue_text,
         &questions_text,
         &user_answers,
+        &logger,
     )?;
     eprintln!(
         "prd: draft generated for {owner}/{repo}#{issue_number} ({} chars)",
@@ -1290,6 +1458,7 @@ fn do_awaiting_feedback(
     let issue_number = issue.number;
     let owner = &config.owner;
     let repo = &config.repo;
+    let logger = PrdDebugLogger::new(&config.data_dir, owner, repo, issue_number);
 
     // Fetch current labels and comments
     let labels = github::fetch_issue_labels_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
@@ -1365,8 +1534,12 @@ fn do_awaiting_feedback(
         .as_deref()
         .unwrap_or("(no previous draft)");
 
-    let revised_spec =
-        generate_revision_from_feedback_with_timeout(config, current_draft, &aggregated_feedback)?;
+    let revised_spec = generate_revision_from_feedback_with_timeout(
+        config,
+        current_draft,
+        &aggregated_feedback,
+        &logger,
+    )?;
 
     // Post new draft comment with incremented marker
     let next_revision = state.draft_revision + 1;
@@ -1532,6 +1705,7 @@ fn generate_revision_from_feedback_with_timeout(
     config: &PrdPollConfig,
     current_draft: &str,
     aggregated_feedback: &str,
+    logger: &PrdDebugLogger,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let repo_cwd = config.effective_repo_cwd();
@@ -1555,21 +1729,35 @@ fn generate_revision_from_feedback_with_timeout(
         ],
     );
 
-    let mut current_spec = run_draft_with_section_retry_sync(&writer, &revision_prompt, deadline)?;
+    let mut current_spec = run_draft_with_section_retry_sync(
+        &writer,
+        &config.writer_backend,
+        "feedback-draft-attempt",
+        &revision_prompt,
+        deadline,
+        logger,
+    )?;
 
     // Run reviewer/section validation loop (same as initial draft generation)
     let idea_context = format!("Revision based on user feedback:\n{aggregated_feedback}");
-    for _iteration in 1..=config.max_revisions {
+    for iteration in 1..=config.max_revisions {
         let review_prompt = render_prompt(
             REVIEW_PROMPT,
             &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
         );
-        let feedback =
-            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "review/retry failed during feedback revision: {err}"
-                ))
-            })?;
+        let feedback = run_review_with_retry_sync(
+            &reviewer,
+            &config.reviewer_backend,
+            review_prompt,
+            "feedback-review-attempt",
+            deadline,
+            logger,
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "review/retry failed during feedback revision: {err}"
+            ))
+        })?;
 
         if feedback.approved || feedback.issues.is_empty() {
             // Reviewer approval does not bypass section completeness
@@ -1589,7 +1777,23 @@ fn generate_revision_from_feedback_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &rev_prompt, deadline)?;
+        let revision_label = format!("feedback-revision-{iteration}");
+        let revised = run_backend_sync(
+            &writer,
+            &config.writer_backend,
+            &revision_label,
+            &rev_prompt,
+            deadline,
+            logger,
+            |output| {
+                let (_cleaned, missing) = check_spec_sections(output);
+                if missing.is_empty() {
+                    ValidationResult::Ok
+                } else {
+                    ValidationResult::MissingSections { missing }
+                }
+            },
+        )?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
             current_spec = cleaned;
@@ -1786,6 +1990,7 @@ fn generate_draft_from_answers_with_timeout(
     issue_text: &str,
     questions_text: &str,
     user_answers: &str,
+    logger: &PrdDebugLogger,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
     let repo_cwd = config.effective_repo_cwd();
@@ -1806,19 +2011,33 @@ fn generate_draft_from_answers_with_timeout(
         .replace("{answers}", user_answers);
     let draft_prompt = render_answer_to_draft_prompt(issue_text, questions_text, user_answers);
 
-    let mut current_spec = run_draft_with_section_retry_sync(&writer, &draft_prompt, deadline)?;
+    let mut current_spec = run_draft_with_section_retry_sync(
+        &writer,
+        &config.writer_backend,
+        "draft-attempt",
+        &draft_prompt,
+        deadline,
+        logger,
+    )?;
 
-    for _iteration in 1..=config.max_revisions {
+    for iteration in 1..=config.max_revisions {
         let review_prompt = render_prompt(
             REVIEW_PROMPT,
             &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
         );
-        let feedback =
-            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "review/retry failed while generating draft: {err}"
-                ))
-            })?;
+        let feedback = run_review_with_retry_sync(
+            &reviewer,
+            &config.reviewer_backend,
+            review_prompt,
+            "draft-review-attempt",
+            deadline,
+            logger,
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "review/retry failed while generating draft: {err}"
+            ))
+        })?;
 
         if feedback.approved || feedback.issues.is_empty() {
             // Reviewer approval does not bypass section completeness
@@ -1838,7 +2057,23 @@ fn generate_draft_from_answers_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &revision_prompt, deadline)?;
+        let revision_label = format!("draft-revision-{iteration}");
+        let revised = run_backend_sync(
+            &writer,
+            &config.writer_backend,
+            &revision_label,
+            &revision_prompt,
+            deadline,
+            logger,
+            |output| {
+                let (_cleaned, missing) = check_spec_sections(output);
+                if missing.is_empty() {
+                    ValidationResult::Ok
+                } else {
+                    ValidationResult::MissingSections { missing }
+                }
+            },
+        )?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
             current_spec = cleaned;
@@ -1860,11 +2095,30 @@ fn generate_draft_from_answers_with_timeout(
 
 fn run_draft_with_section_retry_sync(
     writer: &CliBackend,
+    writer_backend_spec: &str,
+    label_prefix: &str,
     prompt: &str,
     deadline: std::time::Instant,
+    logger: &PrdDebugLogger,
 ) -> Result<String> {
     for attempt in 0..=DRAFT_SECTION_RETRIES {
-        let raw = run_backend_sync(writer, prompt, deadline)?;
+        let label = format!("{label_prefix}-{}", attempt + 1);
+        let raw = run_backend_sync(
+            writer,
+            writer_backend_spec,
+            &label,
+            prompt,
+            deadline,
+            logger,
+            |output| {
+                let (_cleaned, missing) = check_spec_sections(output);
+                if missing.is_empty() {
+                    ValidationResult::Ok
+                } else {
+                    ValidationResult::MissingSections { missing }
+                }
+            },
+        )?;
         let (cleaned, missing) = check_spec_sections(&raw);
         if missing.is_empty() {
             return Ok(cleaned);
@@ -1880,15 +2134,60 @@ fn run_draft_with_section_retry_sync(
     unreachable!("draft section retry loop should return")
 }
 
+fn build_review_retry_prompt(parse_error: &str, raw: &str) -> String {
+    format!(
+        "CRITICAL: Your previous review response could not be parsed.\n\n\
+         Error: {parse_error}\n\n\
+         Return ONLY a single fenced JSON block with this exact schema:\n\
+         ```json\n\
+         {{\"approved\": true/false, \"issues\": [{{\"area\": \"...\", \"feedback\": \"...\"}}]}}\n\
+         ```\n\
+         Use valid JSON, no prose before or after the fenced block.\n\n\
+         Previous response:\n---\n{raw}\n---\n"
+    )
+}
+
+fn derive_review_attempt_prompt(
+    initial_prompt: &str,
+    attempt_events: &[crate::prd::quick::ReviewAttemptEvent],
+    attempt: u8,
+) -> String {
+    if attempt <= 1 {
+        return initial_prompt.to_owned();
+    }
+
+    let mut current_prompt = initial_prompt.to_owned();
+    for event in attempt_events {
+        if event.attempt >= attempt {
+            break;
+        }
+        if let Some(parse_error) = &event.parse_error {
+            current_prompt = build_review_retry_prompt(parse_error, &event.raw_output);
+        }
+    }
+    current_prompt
+}
+
 fn run_review_with_retry_sync(
     reviewer: &CliBackend,
+    reviewer_backend_spec: &str,
     prompt: String,
+    label_prefix: &str,
     deadline: std::time::Instant,
+    logger: &PrdDebugLogger,
 ) -> Result<crate::prd::quick::ReviewFeedback> {
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(Duration::ZERO);
     if remaining.is_zero() {
+        logger.log_attempt(
+            reviewer_backend_spec,
+            &format!("{label_prefix}-1-of-3"),
+            &prompt,
+            None,
+            Some("PRD backend timeout exceeded".to_owned()),
+            ValidationResult::NotChecked,
+        );
         return Err(RalphError::InteractivePrdFailed(
             "PRD backend timeout exceeded".to_owned(),
         ));
@@ -1901,26 +2200,85 @@ fn run_review_with_retry_sync(
             RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
         })?;
 
+    let initial_prompt = prompt.clone();
+    let mut attempt_events: Vec<crate::prd::quick::ReviewAttemptEvent> = Vec::new();
+    let mut on_attempt = |event: crate::prd::quick::ReviewAttemptEvent| {
+        let label = format!("{label_prefix}-{}-of-3", event.attempt);
+        let validation = match &event.parse_error {
+            Some(error) => ValidationResult::ReviewParseFailed {
+                error: error.clone(),
+            },
+            None => ValidationResult::Ok,
+        };
+        logger.log_attempt(
+            reviewer_backend_spec,
+            &label,
+            &event.prompt,
+            Some(event.raw_output.clone()),
+            None,
+            validation,
+        );
+        attempt_events.push(event);
+    };
+
     let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
     let result = rt.block_on(async {
-        tokio::time::timeout(remaining, run_review_with_retry(backend, prompt)).await
+        tokio::time::timeout(
+            remaining,
+            run_review_with_retry(backend, prompt, Some(&mut on_attempt)),
+        )
+        .await
     });
 
     match result {
         Ok(Ok(feedback)) => Ok(feedback),
-        Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
-            "review execution failed: {err}"
-        ))),
-        Err(_) => Err(RalphError::InteractivePrdFailed(
-            "PRD backend timeout exceeded".to_owned(),
-        )),
+        Ok(Err(err)) => {
+            if attempt_events.len() < 3 {
+                let failed_attempt = (attempt_events.len() as u8) + 1;
+                let failed_prompt =
+                    derive_review_attempt_prompt(&initial_prompt, &attempt_events, failed_attempt);
+                logger.log_attempt(
+                    reviewer_backend_spec,
+                    &format!("{label_prefix}-{failed_attempt}-of-3"),
+                    &failed_prompt,
+                    None,
+                    Some(err.to_string()),
+                    ValidationResult::NotChecked,
+                );
+            }
+            Err(RalphError::InteractivePrdFailed(format!(
+                "review execution failed: {err}"
+            )))
+        }
+        Err(_) => {
+            if attempt_events.len() < 3 {
+                let failed_attempt = (attempt_events.len() as u8) + 1;
+                let failed_prompt =
+                    derive_review_attempt_prompt(&initial_prompt, &attempt_events, failed_attempt);
+                logger.log_attempt(
+                    reviewer_backend_spec,
+                    &format!("{label_prefix}-{failed_attempt}-of-3"),
+                    &failed_prompt,
+                    None,
+                    Some("PRD backend timeout exceeded".to_owned()),
+                    ValidationResult::NotChecked,
+                );
+            }
+            Err(RalphError::InteractivePrdFailed(
+                "PRD backend timeout exceeded".to_owned(),
+            ))
+        }
     }
 }
 
 /// Generate clarifying questions using two configured backends plus synthesis.
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
-fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
+fn generate_questions_with_timeout(
+    config: &PrdPollConfig,
+    issue_text: &str,
+    logger: &PrdDebugLogger,
+) -> Result<String> {
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -1940,7 +2298,15 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd.clone()),
     )?;
-    let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
+    let questions_a = run_backend_sync(
+        &backend_a,
+        &config.question_backends[0],
+        "question-gen-a",
+        &prompt,
+        deadline,
+        logger,
+        |_| ValidationResult::NotChecked,
+    )?;
 
     // Backend B
     let backend_b = create_backend(
@@ -1948,7 +2314,15 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd),
     )?;
-    let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
+    let questions_b = run_backend_sync(
+        &backend_b,
+        &config.question_backends[1],
+        "question-gen-b",
+        &prompt,
+        deadline,
+        logger,
+        |_| ValidationResult::NotChecked,
+    )?;
 
     // Synthesis: merge/dedupe/prioritize
     let synthesis_prompt = SYNTHESIS_PROMPT
@@ -1956,7 +2330,15 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         .replace("{questions_b}", &questions_b);
 
     // Use the first question backend for synthesis
-    let synthesized = run_backend_sync(&backend_a, &synthesis_prompt, deadline)?;
+    let synthesized = run_backend_sync(
+        &backend_a,
+        &config.question_backends[0],
+        "synthesis",
+        &synthesis_prompt,
+        deadline,
+        logger,
+        |_| ValidationResult::NotChecked,
+    )?;
 
     if synthesized.trim().is_empty() {
         return Err(RalphError::InteractivePrdFailed(
@@ -1970,14 +2352,26 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
 /// Run a backend synchronously with a deadline, using tokio runtime.
 fn run_backend_sync(
     backend: &CliBackend,
+    backend_spec: &str,
+    label: &str,
     prompt: &str,
     deadline: std::time::Instant,
+    logger: &PrdDebugLogger,
+    validation_fn: impl FnOnce(&str) -> ValidationResult,
 ) -> Result<String> {
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(Duration::ZERO);
 
     if remaining.is_zero() {
+        logger.log_attempt(
+            backend_spec,
+            label,
+            prompt,
+            None,
+            Some("PRD backend timeout exceeded".to_owned()),
+            ValidationResult::NotChecked,
+        );
         return Err(RalphError::InteractivePrdFailed(
             "PRD backend timeout exceeded".to_owned(),
         ));
@@ -1988,20 +2382,58 @@ fn run_backend_sync(
         .enable_all()
         .build()
         .map_err(|err| {
-            RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
+            let msg = format!("failed to create tokio runtime: {err}");
+            logger.log_attempt(
+                backend_spec,
+                label,
+                prompt,
+                None,
+                Some(msg.clone()),
+                ValidationResult::NotChecked,
+            );
+            RalphError::InteractivePrdFailed(msg)
         })?;
 
     let result =
         rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await });
 
     match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
-            "backend execution failed: {err}"
-        ))),
-        Err(_) => Err(RalphError::InteractivePrdFailed(
-            "PRD backend timeout exceeded".to_owned(),
-        )),
+        Ok(Ok(output)) => {
+            let validation = validation_fn(&output);
+            logger.log_attempt(
+                backend_spec,
+                label,
+                prompt,
+                Some(output.clone()),
+                None,
+                validation,
+            );
+            Ok(output)
+        }
+        Ok(Err(err)) => {
+            let msg = format!("backend execution failed: {err}");
+            logger.log_attempt(
+                backend_spec,
+                label,
+                prompt,
+                None,
+                Some(msg.clone()),
+                ValidationResult::NotChecked,
+            );
+            Err(RalphError::InteractivePrdFailed(msg))
+        }
+        Err(_) => {
+            let msg = "PRD backend timeout exceeded".to_owned();
+            logger.log_attempt(
+                backend_spec,
+                label,
+                prompt,
+                None,
+                Some(msg.clone()),
+                ValidationResult::NotChecked,
+            );
+            Err(RalphError::InteractivePrdFailed(msg))
+        }
     }
 }
 
@@ -2267,12 +2699,14 @@ mod tests {
     use super::{
         apply_transition_result, clean_draft_body, detect_approval, extract_questions_text,
         find_first_answer_comment, find_new_feedback_comments, format_draft_comment,
-        generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
-        has_in_progress_prd_label, has_prd_label, parse_approved_spec_from_comments, prd_marker,
-        prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
-        DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT,
-        PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        generate_draft_from_answers_with_timeout, generate_log_filename,
+        generate_revision_from_feedback_with_timeout, has_in_progress_prd_label, has_prd_label,
+        parse_approved_spec_from_comments, prd_marker, prd_status_approved_marker,
+        render_answer_to_draft_prompt, run_draft_with_section_retry_sync,
+        truncate_prompt_utf8_safe, InteractivePrdState, PrdDebugLogEntry, PrdDebugLogger,
+        PrdPollConfig, PrdWorkflowState, ValidationResult, DRAFT_FOOTER, DRAFT_HEADING_PREFIX,
+        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2344,6 +2778,83 @@ mod tests {
     #[test]
     fn marker_generation_matches_expected_format() {
         assert_eq!(prd_marker(42, "draft", 3), "<!-- ralph:prd:42:draft-v3 -->");
+    }
+
+    #[test]
+    fn generate_log_filename_formats_with_and_without_collision_suffix() {
+        let ts = "20260226T120000Z";
+        assert_eq!(
+            generate_log_filename(ts, "question-gen-a", None),
+            "20260226T120000Z-question-gen-a.json"
+        );
+        assert_eq!(
+            generate_log_filename(ts, "question-gen-a", Some(1)),
+            "20260226T120000Z-001-question-gen-a.json"
+        );
+        assert_eq!(
+            generate_log_filename(ts, "question-gen-a", Some(9999)),
+            "20260226T120000Z-9999-question-gen-a.json"
+        );
+    }
+
+    #[test]
+    fn logger_write_entry_uses_collision_suffix_on_existing_file() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let logger = PrdDebugLogger {
+            log_dir: tmp.path().to_path_buf(),
+            prompt_truncate_bytes: None,
+        };
+        let entry = PrdDebugLogEntry {
+            timestamp: "2026-02-26T12:00:00Z".to_owned(),
+            backend_spec: "claude(opus)".to_owned(),
+            label: "question-gen-a".to_owned(),
+            prompt_chars: 3,
+            prompt: "abc".to_owned(),
+            raw_output: Some("1. q".to_owned()),
+            error: None,
+            validation: ValidationResult::NotChecked,
+        };
+
+        let first = logger
+            .write_entry("20260226T120000Z", "question-gen-a", &entry)
+            .expect("first write should succeed");
+        let second = logger
+            .write_entry("20260226T120000Z", "question-gen-a", &entry)
+            .expect("second write should succeed");
+
+        assert_eq!(
+            first.file_name().and_then(|n| n.to_str()),
+            Some("20260226T120000Z-question-gen-a.json")
+        );
+        assert_eq!(
+            second.file_name().and_then(|n| n.to_str()),
+            Some("20260226T120000Z-001-question-gen-a.json")
+        );
+    }
+
+    #[test]
+    fn truncate_prompt_utf8_safe_preserves_boundaries_and_reports_original_length() {
+        let prompt = "hello🙂world";
+        let truncated = truncate_prompt_utf8_safe(prompt, 7);
+        assert!(
+            truncated.starts_with("hello"),
+            "truncated prompt should keep valid UTF-8 prefix: {truncated}"
+        );
+        assert!(
+            truncated.contains("truncated at 5 bytes"),
+            "truncation marker should report safe boundary: {truncated}"
+        );
+        assert!(
+            truncated.contains(&format!("full length: {} bytes", prompt.len())),
+            "truncation marker should report original byte length: {truncated}"
+        );
+    }
+
+    #[test]
+    fn truncate_prompt_utf8_safe_returns_original_when_within_limit() {
+        let prompt = "plain-ascii";
+        let truncated = truncate_prompt_utf8_safe(prompt, prompt.len());
+        assert_eq!(truncated, prompt);
     }
 
     #[test]
@@ -3204,6 +3715,10 @@ mod tests {
         }
     }
 
+    fn make_test_logger(config: &PrdPollConfig) -> PrdDebugLogger {
+        PrdDebugLogger::new(&config.data_dir, &config.owner, &config.repo, 42)
+    }
+
     /// Create a persistent temp script that echoes the given output.
     /// Returns the absolute path to the script.
     fn write_persistent_mock_script(output: &str) -> String {
@@ -3242,7 +3757,16 @@ mod tests {
 
         let backend = make_mock_backend(complete);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        let config = make_test_prd_config(&backend.command().to_string());
+        let logger = make_test_logger(&config);
+        let result = run_draft_with_section_retry_sync(
+            &backend,
+            "claude",
+            "draft-attempt",
+            "generate spec",
+            deadline,
+            &logger,
+        );
         assert!(
             result.is_ok(),
             "complete spec should succeed: {:?}",
@@ -3263,7 +3787,16 @@ mod tests {
 
         let backend = make_mock_backend(incomplete);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        let config = make_test_prd_config(&backend.command().to_string());
+        let logger = make_test_logger(&config);
+        let result = run_draft_with_section_retry_sync(
+            &backend,
+            "claude",
+            "draft-attempt",
+            "generate spec",
+            deadline,
+            &logger,
+        );
         assert!(result.is_err(), "incomplete spec should fail");
 
         let err = result.unwrap_err();
@@ -3293,12 +3826,14 @@ mod tests {
 
         let script = write_persistent_mock_script(incomplete);
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
+            &logger,
         );
         assert!(
             result.is_err(),
@@ -3358,12 +3893,14 @@ mod tests {
 
         let script = write_smart_mock_script(complete);
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
+            &logger,
         );
         assert!(
             result.is_ok(),
@@ -3382,6 +3919,7 @@ mod tests {
 
         let script = write_persistent_mock_script(incomplete);
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let current_draft = "\
 ## Summary\nOriginal.\n\n\
@@ -3395,6 +3933,7 @@ mod tests {
             &config,
             current_draft,
             "Please add more detail to the testing strategy.",
+            &logger,
         );
         assert!(
             result.is_err(),
@@ -3423,6 +3962,7 @@ mod tests {
 
         let script = write_smart_mock_script(complete);
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let current_draft = "\
 ## Summary\nOriginal.\n\n\
@@ -3436,6 +3976,7 @@ mod tests {
             &config,
             current_draft,
             "Please add more detail.",
+            &logger,
         );
         assert!(
             result.is_ok(),
@@ -3495,12 +4036,14 @@ mod tests {
     fn generate_draft_reviewer_approval_does_not_bypass_section_gating() {
         let script = write_approving_reviewer_incomplete_writer_script();
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
+            &logger,
         );
         assert!(
             result.is_err(),
@@ -3528,6 +4071,7 @@ mod tests {
     fn generate_revision_reviewer_approval_does_not_bypass_section_gating() {
         let script = write_approving_reviewer_incomplete_writer_script();
         let config = make_test_prd_config(&script);
+        let logger = make_test_logger(&config);
 
         let current_draft = "\
 ## Summary\nOriginal.\n\n\
@@ -3541,6 +4085,7 @@ mod tests {
             &config,
             current_draft,
             "Please expand the testing strategy.",
+            &logger,
         );
         assert!(
             result.is_err(),
@@ -3821,11 +4366,12 @@ mod tests {
 
         let config = make_test_prd_config(&script_path);
         let repo_dir = config.repo_clone_path();
+        let logger = make_test_logger(&config);
 
         // The function will succeed or fail at synthesis, but either way the
         // backend output (pwd) should contain the repo clone path, proving
         // it ran in the right directory.
-        let result = super::generate_questions_with_timeout(&config, "test issue");
+        let result = super::generate_questions_with_timeout(&config, "test issue", &logger);
 
         if let Ok(output) = result {
             let canonical_repo = repo_dir.canonicalize().unwrap_or(repo_dir);

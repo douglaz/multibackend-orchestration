@@ -22,6 +22,7 @@ mod tests_final_review_cap_skip;
 mod tests_gemini_backend;
 mod tests_init;
 mod tests_interactive_prd;
+mod tests_interactive_prd_logging;
 mod tests_prd;
 mod tests_project;
 mod tests_prompt_review;
@@ -119,6 +120,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_sessions::tests());
     tests.extend(tests_e2e_conformance::tests());
     tests.extend(tests_interactive_prd::tests());
+    tests.extend(tests_interactive_prd_logging::tests());
     tests.extend(tests_completion_panel::tests());
     tests
 }
