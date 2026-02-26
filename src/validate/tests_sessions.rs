@@ -39,8 +39,8 @@ fn setup_basic(h: &RalphHarness, project_id: &str) {
     let script_path = h
         .write_mock_script("mock.sh", &standard_mock_script())
         .expect("failed to write mock script");
-    h.setup_mock_backends(&script_path)
-        .expect("setup_mock_backends failed");
+    h.setup_mock_backends_stable(&script_path)
+        .expect("setup_mock_backends_stable failed");
     h.create_project(project_id, "Session Test", "session test prompt")
         .expect("create_project failed");
 }
@@ -385,8 +385,8 @@ fn working_directory_stays_at_repo_root(h: &RalphHarness) -> TestResult {
         let script_path = h
             .write_mock_script("pwd-mock.sh", &pwd_recording_mock_script())
             .expect("failed to write pwd mock script");
-        h.setup_mock_backends(&script_path)
-            .expect("setup_mock_backends failed");
+        h.setup_mock_backends_stable(&script_path)
+            .expect("setup_mock_backends_stable failed");
 
         // Set up pwd log path
         let pwd_log = h.temp_dir.path().join("ralph-pwd.log");

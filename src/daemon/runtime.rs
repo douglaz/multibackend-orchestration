@@ -790,10 +790,7 @@ async fn poll_and_claim(
 
             match spec {
                 Some(s) => {
-                    eprintln!(
-                        "prd-done: using approved spec for issue #{}",
-                        issue.number
-                    );
+                    eprintln!("prd-done: using approved spec for issue #{}", issue.number);
                     s
                 }
                 None => {

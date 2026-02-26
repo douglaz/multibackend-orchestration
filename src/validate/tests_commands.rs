@@ -626,8 +626,8 @@ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
     let script = h
         .write_mock_script("standard-mock.sh", &standard_mock_script())
         .expect("failed to write standard mock script");
-    h.setup_mock_backends(&script)
-        .expect("setup_mock_backends failed");
+    h.setup_mock_backends_stable(&script)
+        .expect("setup_mock_backends_stable failed");
     h.create_project(
         project_id,
         "Commands Conformance Project",

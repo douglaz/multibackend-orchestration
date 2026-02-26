@@ -1549,7 +1549,7 @@ pub fn post_comment_with_marker_metadata(
     }
 
     // Fetch back to get the full metadata of the newly posted comment.
-    Ok(find_comment_with_marker(owner, repo, issue_number, marker)?)
+    find_comment_with_marker(owner, repo, issue_number, marker)
 }
 
 /// Find a comment with the given marker string authored by the specified bot login.
@@ -1704,14 +1704,7 @@ pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
     }
 
     // Fetch back to get the full metadata of the newly posted comment.
-    Ok(find_bot_comment_with_marker_with_gh_bin(
-        gh_bin,
-        owner,
-        repo,
-        issue_number,
-        marker,
-        bot_login,
-    )?)
+    find_bot_comment_with_marker_with_gh_bin(gh_bin, owner, repo, issue_number, marker, bot_login)
 }
 
 /// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
@@ -2109,7 +2102,10 @@ mod tests {
         let raw = &parsed.comments[0];
         assert_eq!(raw.id, Some(42001));
         // No URL field, so extraction returns None
-        assert_eq!(super::extract_numeric_comment_id_from_url(raw.url.as_deref()), None);
+        assert_eq!(
+            super::extract_numeric_comment_id_from_url(raw.url.as_deref()),
+            None
+        );
         // The fallback to raw.id should yield 42001
         let id = super::extract_numeric_comment_id_from_url(raw.url.as_deref()).or(raw.id);
         assert_eq!(id, Some(42001));
