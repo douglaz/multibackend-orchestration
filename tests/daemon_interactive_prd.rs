@@ -128,13 +128,14 @@ fn prd_status_failed_marker_format() {
 
 #[test]
 fn prd_labels_have_expected_entries() {
-    assert_eq!(PRD_LABELS.len(), 5);
+    assert_eq!(PRD_LABELS.len(), 6);
     let names: Vec<&str> = PRD_LABELS.iter().map(|(name, _, _)| *name).collect();
     assert!(names.contains(&"ralph:prd"));
     assert!(names.contains(&"ralph:prd-active"));
     assert!(names.contains(&"ralph:prd-approved"));
     assert!(names.contains(&"ralph:prd-done"));
     assert!(names.contains(&"ralph:prd-failed"));
+    assert!(names.contains(&"ralph:waiting-feedback"));
 }
 
 // ---------------------------------------------------------------------------

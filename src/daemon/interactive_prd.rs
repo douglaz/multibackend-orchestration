@@ -196,6 +196,11 @@ pub const PRD_LABELS: &[(&str, &str, &str)] = &[
         "#d93f0b",
         "Interactive PRD workflow failed and needs attention",
     ),
+    (
+        "ralph:waiting-feedback",
+        "#fbca04",
+        "Interactive PRD workflow is waiting on user input or feedback",
+    ),
 ];
 
 pub const PRD_LIFECYCLE_LABELS: &[(&str, &str, &str)] = PRD_LABELS;
@@ -578,6 +583,7 @@ pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd-approved",
     "ralph:prd-done",
     "ralph:prd-failed",
+    "ralph:waiting-feedback",
 ];
 
 const IN_PROGRESS_PRD_LABEL_NAMES: &[&str] = &[
@@ -586,6 +592,8 @@ const IN_PROGRESS_PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd-approved",
     "ralph:prd-failed",
 ];
+
+const WAITING_FEEDBACK_LABEL: &str = "ralph:waiting-feedback";
 
 /// Returns `true` if any PRD lifecycle label is present on the issue.
 pub fn has_prd_label(labels: &[String]) -> bool {
@@ -603,6 +611,122 @@ pub fn has_in_progress_prd_label(labels: &[String]) -> bool {
     labels
         .iter()
         .any(|l| IN_PROGRESS_PRD_LABEL_NAMES.contains(&l.as_str()))
+}
+
+fn add_waiting_feedback_label_if_missing_best_effort(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    known_labels: Option<&[String]>,
+) {
+    let has_label = if let Some(labels) = known_labels {
+        labels.iter().any(|l| l == WAITING_FEEDBACK_LABEL)
+    } else {
+        match github::fetch_issue_labels_with_gh_bin(
+            &config.gh_bin,
+            &config.owner,
+            &config.repo,
+            issue_number,
+        ) {
+            Ok(labels) => labels.iter().any(|l| l == WAITING_FEEDBACK_LABEL),
+            Err(err) => {
+                eprintln!(
+                    "prd: warning: failed to fetch labels while adding {WAITING_FEEDBACK_LABEL} \
+                     for {}/{}#{}: {err}",
+                    config.owner, config.repo, issue_number
+                );
+                return;
+            }
+        }
+    };
+    if has_label {
+        return;
+    }
+
+    if let Err(err) = github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        issue_number,
+        WAITING_FEEDBACK_LABEL,
+    ) {
+        eprintln!(
+            "prd: warning: failed to add {WAITING_FEEDBACK_LABEL} for {}/{}#{}: {err}",
+            config.owner, config.repo, issue_number
+        );
+    }
+}
+
+fn remove_waiting_feedback_label_if_present_best_effort(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    known_labels: Option<&[String]>,
+) {
+    let has_label = if let Some(labels) = known_labels {
+        labels.iter().any(|l| l == WAITING_FEEDBACK_LABEL)
+    } else {
+        match github::fetch_issue_labels_with_gh_bin(
+            &config.gh_bin,
+            &config.owner,
+            &config.repo,
+            issue_number,
+        ) {
+            Ok(labels) => labels.iter().any(|l| l == WAITING_FEEDBACK_LABEL),
+            Err(err) => {
+                eprintln!(
+                    "prd: warning: failed to fetch labels while removing {WAITING_FEEDBACK_LABEL} \
+                     for {}/{}#{}: {err}",
+                    config.owner, config.repo, issue_number
+                );
+                return;
+            }
+        }
+    };
+    if !has_label {
+        return;
+    }
+
+    if let Err(err) = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        issue_number,
+        WAITING_FEEDBACK_LABEL,
+    ) {
+        eprintln!(
+            "prd: warning: failed to remove {WAITING_FEEDBACK_LABEL} for {}/{}#{}: {err}",
+            config.owner, config.repo, issue_number
+        );
+    }
+}
+
+fn reconcile_waiting_feedback_label(config: &PrdPollConfig, issue_number: u32) {
+    let persisted = match InteractivePrdState::load(
+        &config.data_dir,
+        &config.owner,
+        &config.repo,
+        issue_number,
+    ) {
+        Ok(Some(state)) => state,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!(
+                "prd: warning: failed to load state for waiting-feedback reconciliation on \
+                 {}/{}#{}: {err}",
+                config.owner, config.repo, issue_number
+            );
+            return;
+        }
+    };
+
+    match persisted.state {
+        PrdWorkflowState::AwaitingAnswers | PrdWorkflowState::AwaitingFeedback => {
+            add_waiting_feedback_label_if_missing_best_effort(config, issue_number, None);
+        }
+        PrdWorkflowState::Pending => {
+            remove_waiting_feedback_label_if_present_best_effort(config, issue_number, None);
+        }
+        PrdWorkflowState::Done | PrdWorkflowState::Failed => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +1001,8 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                             errs.push((issue_number, format!("panic: {msg}")));
                         }
                     }
+
+                    reconcile_waiting_feedback_label(&worker_config, issue_number);
                 }
             });
         }
@@ -971,7 +1097,15 @@ fn transition_pending_to_awaiting_answers(
 
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
-    finish_transition(config, state, result, bot_login_cache)
+    let finished = finish_transition(config, state, result, bot_login_cache);
+    if finished.is_ok() && state.state == PrdWorkflowState::AwaitingAnswers {
+        add_waiting_feedback_label_if_missing_best_effort(
+            config,
+            issue_number,
+            Some(&issue.labels),
+        );
+    }
+    finished
 }
 
 fn do_pending_to_awaiting(
@@ -1139,7 +1273,15 @@ fn transition_awaiting_answers_to_awaiting_feedback(
     let result = get_or_fetch_bot_login(config, bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
     });
-    finish_transition(config, state, result, bot_login_cache)
+    let finished = finish_transition(config, state, result, bot_login_cache);
+    if finished.is_ok() && state.state == PrdWorkflowState::AwaitingFeedback {
+        add_waiting_feedback_label_if_missing_best_effort(
+            config,
+            issue_number,
+            Some(&issue.labels),
+        );
+    }
+    finished
 }
 
 fn do_awaiting_answers_to_awaiting_feedback(
@@ -1276,9 +1418,20 @@ fn transition_awaiting_feedback(
         config.owner, config.repo
     );
 
+    let pre_draft_revision = state.draft_revision;
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
-    finish_transition(config, state, result, bot_login_cache)
+    let finished = finish_transition(config, state, result, bot_login_cache);
+    let did_revision = state.state == PrdWorkflowState::AwaitingFeedback
+        && state.draft_revision > pre_draft_revision;
+    if finished.is_ok() && did_revision {
+        add_waiting_feedback_label_if_missing_best_effort(
+            config,
+            issue_number,
+            Some(&issue.labels),
+        );
+    }
+    finished
 }
 
 fn do_awaiting_feedback(
@@ -1471,6 +1624,8 @@ fn do_approval_transition(
             "failed to persist Done state for {owner}/{repo}#{issue_number}: {save_err}"
         )));
     }
+
+    remove_waiting_feedback_label_if_present_best_effort(config, issue_number, None);
 
     // Save succeeded — now safe to remove ralph:prd-active (issue will be
     // polled via ralph:prd-done or terminal state file going forward).
@@ -2096,6 +2251,8 @@ fn transition_to_failed(
         )));
     }
 
+    remove_waiting_feedback_label_if_present_best_effort(config, issue_number, None);
+
     // Save succeeded — now safe to remove poll-visible labels
     let _ = github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
@@ -2404,7 +2561,7 @@ mod tests {
     #[test]
     fn prd_labels_alias_matches_lifecycle_labels() {
         assert_eq!(PRD_LABELS, PRD_LIFECYCLE_LABELS);
-        assert_eq!(PRD_LABELS.len(), 5);
+        assert_eq!(PRD_LABELS.len(), 6);
     }
 
     #[test]
@@ -2425,6 +2582,9 @@ mod tests {
     #[test]
     fn has_in_progress_prd_label_rejects_done_empty_and_unrelated_labels() {
         assert!(!has_in_progress_prd_label(&["ralph:prd-done".to_owned()]));
+        assert!(!has_in_progress_prd_label(&[
+            "ralph:waiting-feedback".to_owned()
+        ]));
         assert!(!has_in_progress_prd_label(&[]));
         assert!(!has_in_progress_prd_label(&[
             "bug".to_owned(),

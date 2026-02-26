@@ -96,6 +96,30 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: feedback_stage_failure_labeling,
         },
         ConformanceTest {
+            name: "interactive_prd::waiting_feedback_reconcile_add_on_waiting_noop_missing",
+            func: waiting_feedback_reconcile_add_on_waiting_noop_missing,
+        },
+        ConformanceTest {
+            name: "interactive_prd::waiting_feedback_reconcile_noop_when_present",
+            func: waiting_feedback_reconcile_noop_when_present,
+        },
+        ConformanceTest {
+            name: "interactive_prd::waiting_feedback_reconcile_add_after_failed_dispatch",
+            func: waiting_feedback_reconcile_add_after_failed_dispatch,
+        },
+        ConformanceTest {
+            name: "interactive_prd::waiting_feedback_reconcile_removes_stale_pending_label",
+            func: waiting_feedback_reconcile_removes_stale_pending_label,
+        },
+        ConformanceTest {
+            name: "interactive_prd::waiting_feedback_terminal_removal_failure_non_blocking",
+            func: waiting_feedback_terminal_removal_failure_non_blocking,
+        },
+        ConformanceTest {
+            name: "interactive_prd::waiting_feedback_not_added_when_waiting_save_fails",
+            func: waiting_feedback_not_added_when_waiting_save_fails,
+        },
+        ConformanceTest {
             name: "interactive_prd::mixed_comments_approval_triggers_done",
             func: mixed_comments_approval_triggers_done,
         },
@@ -276,8 +300,8 @@ fn state_serialization_roundtrip(_harness: &RalphHarness) -> TestResult {
 }
 
 fn prd_labels_are_complete(_harness: &RalphHarness) -> TestResult {
-    if PRD_LABELS.len() != 5 {
-        return TestResult::Fail(format!("expected 5 PRD labels, got {}", PRD_LABELS.len()));
+    if PRD_LABELS.len() != 6 {
+        return TestResult::Fail(format!("expected 6 PRD labels, got {}", PRD_LABELS.len()));
     }
 
     let expected = [
@@ -286,6 +310,7 @@ fn prd_labels_are_complete(_harness: &RalphHarness) -> TestResult {
         "ralph:prd-approved",
         "ralph:prd-done",
         "ralph:prd-failed",
+        "ralph:waiting-feedback",
     ];
     let names: Vec<&str> = PRD_LABELS.iter().map(|(name, _, _)| *name).collect();
     for label in &expected {
@@ -502,7 +527,7 @@ fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
 
 /// Verify that `daemon start` creates PRD lifecycle labels at startup.
 ///
-/// The mock gh logs every `label create` call. We verify that all 5 PRD labels
+/// The mock gh logs every `label create` call. We verify that all 6 PRD labels
 /// and all 4 standard labels are attempted.
 fn startup_prd_label_ensure(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -578,6 +603,7 @@ exit 1
             "ralph:prd-approved",
             "ralph:prd-done",
             "ralph:prd-failed",
+            "ralph:waiting-feedback",
         ];
         for label_name in &prd_label_names {
             let needle = format!("create {label_name} ");
@@ -897,6 +923,10 @@ exit 0
             label_raw.contains("--remove-label") && label_raw.contains("ralph:prd"),
             "ralph:prd should have been removed, label log:\n{label_raw}"
         );
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "ralph:waiting-feedback should be added after persisting AwaitingAnswers, label log:\n{label_raw}"
+        );
 
         // 3. Verify questions comment was posted (comment log exists and contains marker)
         let comment_raw = fs::read_to_string(&comment_log).unwrap_or_default();
@@ -1026,9 +1056,12 @@ EOF
 
         let draft_log = dh.temp_dir.path().join("prd_answer_to_draft_comment.log");
         let draft_log_str = draft_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("prd_answer_to_draft_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
 DRAFT_LOG="{draft_log_str}"
+LABEL_LOG="{label_log_str}"
 
 case "$1" in
   issue)
@@ -1056,6 +1089,7 @@ case "$1" in
         exit 0
         ;;
       edit)
+        echo "$@" >> "$LABEL_LOG"
         exit 0
         ;;
       view)
@@ -1174,6 +1208,11 @@ exit 0
             draft_raw.contains("<!-- ralph:prd:22:draft-v1 -->"),
             "expected draft-v1 marker in posted comment: {draft_raw}"
         );
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "ralph:waiting-feedback should be added after persisting AwaitingFeedback, label log:\n{label_raw}"
+        );
     })
 }
 
@@ -1219,9 +1258,12 @@ printf '## Summary\nRevised.\n\n## Acceptance Criteria\n- [ ] AC\n\n## Technical
 
         let comment_log = dh.temp_dir.path().join("fb_rev_comment.log");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("fb_rev_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
 LOG="{comment_log_str}"
+LLOG="{label_log_str}"
 case "$1" in
   issue)
     case "$2" in
@@ -1237,10 +1279,10 @@ case "$1" in
         if [ "$want_c" = "1" ]; then
           printf '{{"comments":[{{"id":300,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":301,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":302,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":303,"author":{{"login":"u"}},"body":"add error handling","createdAt":"2026-01-01T00:00:25Z"}}]}}'
           exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
         exit 0 ;;
       comment) shift; shift; while [ $# -gt 0 ]; do case "$1" in --body) printf '%s' "$2" > "$LOG"; shift 2 ;; *) shift ;; esac; done; exit 0 ;;
-      edit) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
     esac ;;
   api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
   pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
@@ -1277,6 +1319,11 @@ esac; exit 0
             posted.contains("<!-- ralph:prd:30:draft-v2 -->"),
             "draft-v2 marker expected: {posted}"
         );
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "ralph:waiting-feedback should be re-added/kept on revision, label log:\n{label_raw}"
+        );
     })
 }
 
@@ -1308,9 +1355,12 @@ fn approval_by_comment(h: &RalphHarness) -> TestResult {
 
         let comment_log = dh.temp_dir.path().join("approval_comment_conf.log");
         let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let label_log = dh.temp_dir.path().join("approval_comment_labels.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
         let gh_script = format!(
             r#"#!/bin/sh
 LOG="{comment_log_str}"
+LLOG="{label_log_str}"
 case "$1" in
   issue)
     case "$2" in
@@ -1329,10 +1379,10 @@ case "$1" in
           else
             printf '{{"comments":[{{"id":310,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":311,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":312,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":313,"author":{{"login":"u"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
           fi; exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
         exit 0 ;;
       comment) shift; shift; while [ $# -gt 0 ]; do case "$1" in --body) printf '%s' "$2" > "$LOG"; shift 2 ;; *) shift ;; esac; done; exit 0 ;;
-      edit) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
     esac ;;
   api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
   pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
@@ -1367,6 +1417,11 @@ esac; exit 0
         assert!(
             posted.contains("<!-- ralph:prd:31:status-approved-v1 -->"),
             "should post status-approved marker: {posted}"
+        );
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
+            "terminal Done should remove ralph:waiting-feedback after save, label log:\n{label_raw}"
         );
     })
 }
@@ -1518,7 +1573,7 @@ case "$1" in
         if [ "$want_c" = "1" ]; then
           printf '{{"comments":[{{"id":330,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":331,"author":{{"login":"u"}},"body":"a","createdAt":"2026-01-01T00:00:10Z"}},{{"id":332,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":333,"author":{{"login":"u"}},"body":"fix tests please","createdAt":"2026-01-01T00:00:25Z"}}]}}'
           exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
         exit 0 ;;
       comment) shift; shift; while [ $# -gt 0 ]; do case "$1" in --body) printf '%s' "$2" >> "$CLOG"; shift 2 ;; *) shift ;; esac; done; exit 0 ;;
       edit) echo "$@" >> "$LLOG"; exit 0 ;;
@@ -1561,6 +1616,559 @@ esac; exit 0
         assert!(
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed label should be added: {label_raw}"
+        );
+        assert!(
+            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
+            "terminal Failed should remove ralph:waiting-feedback after save, label log:\n{label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_reconcile_add_on_waiting_noop_missing(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/34.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 34, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 340, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 342,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 343,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("waiting_noop_add_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":34,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":340,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":341,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":342,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":343,"author":{{"login":"u"}},"body":"old feedback","createdAt":"2026-01-01T00:00:20Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "reconciliation should add missing waiting label on waiting no-op tick: {label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_reconcile_noop_when_present(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/35.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 35, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 350, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 352,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 353,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("waiting_noop_present_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":35,"title":"T","labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":350,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":351,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":352,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":353,"author":{{"login":"u"}},"body":"old feedback","createdAt":"2026-01-01T00:00:20Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
+        exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            !label_raw.contains("ralph:waiting-feedback"),
+            "no add/remove should be attempted when waiting label is already present: {label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_reconcile_add_after_failed_dispatch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/36.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 36, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 360, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 362,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 361,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("waiting_failed_dispatch_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":36,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          echo "gh: comments api failure" >&2
+          exit 1
+        fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let _ = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(state.state, PrdWorkflowState::AwaitingFeedback);
+        assert!(
+            state.error_count >= 1,
+            "error_count should increment on failure"
+        );
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "reconciliation should add waiting label after failed dispatch in waiting state: {label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_reconcile_removes_stale_pending_label(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/37.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 37, "owner": "acme", "repo": "widgets",
+            "state": "Pending",
+            "question_revision": 0, "draft_revision": 0,
+            "questions_comment_id": null, "questions_posted_at": null,
+            "latest_draft_comment_id": null, "latest_draft_body": null,
+            "user_answers": null, "last_processed_comment_id": null,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("pending_stale_waiting_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":37,"title":"T","labels":[{{"name":"ralph:prd"}},{{"name":"ralph:waiting-feedback"}}],"body":"B"}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      view)
+        want_l=0
+        for arg in "$@"; do case "$arg" in labels) want_l=1 ;; esac; done
+        if [ "$want_l" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd"}},{{"name":"ralph:waiting-feedback"}}]}}'
+          exit 0
+        fi
+        exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+      comment) exit 0 ;;
+    esac ;;
+  api)
+    if [ "$2" = "user" ]; then
+      echo "gh: auth failure" >&2
+      exit 1
+    fi
+    ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let _ = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(state.state, PrdWorkflowState::Pending);
+        assert!(
+            state.error_count >= 1,
+            "error_count should increment on failure"
+        );
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
+            "reconciliation should remove stale waiting label for Pending state: {label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_terminal_removal_failure_non_blocking(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/38.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 38, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 380, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 382,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 381,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh
+            .temp_dir
+            .path()
+            .join("terminal_remove_waiting_failure.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":38,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":380,"author":{{"login":"ralph-bot"}},"body":"q","createdAt":"2026-01-01T00:00:05Z"}},{{"id":381,"author":{{"login":"u"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":382,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":383,"author":{{"login":"u"}},"body":"LGTM","createdAt":"2026-01-01T00:00:20Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
+        exit 0 ;;
+      edit)
+        echo "$@" >> "$LLOG"
+        case "$*" in
+          *--remove-label*ralph:waiting-feedback*)
+            echo "gh: failed removing waiting label" >&2
+            exit 1
+            ;;
+        esac
+        exit 0
+        ;;
+      comment) exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        assert_exit_code(&output, 0);
+
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::Done,
+            "Done should persist even if waiting-label removal fails"
+        );
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
+            "should attempt removing waiting label on terminal transition: {label_raw}"
+        );
+    })
+}
+
+fn waiting_feedback_not_added_when_waiting_save_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh
+            .write_mock_script(
+                "question_backend.sh",
+                "#!/bin/sh\ncat >/dev/null\nprintf '1. Clarify API?\\n'\n",
+            )
+            .unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let label_log = dh.temp_dir.path().join("save_fail_waiting_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":39,"title":"T","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0 ;;
+      view)
+        want_c=0; want_l=0; want_tb=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_c=1 ;;
+            labels) want_l=1 ;;
+            title,body) want_tb=1 ;;
+          esac
+        done
+        if [ "$want_c" = "1" ]; then printf '{{"comments":[]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{{"title":"T","body":"B"}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit) echo "$@" >> "$LLOG"; exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+        let _ = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
+                ],
+            )
+            .unwrap();
+
+        let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            !label_raw.contains("ralph:waiting-feedback"),
+            "waiting label must not be added when transition save fails: {label_raw}"
         );
     })
 }
