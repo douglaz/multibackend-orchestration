@@ -21,17 +21,26 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
 /// `.ralph/daemon/worktrees/<task_id>/`. If the branch already exists
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
-pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
+///
+/// Returns `(worktree_path, prior_project_id)` where `prior_project_id` is
+/// `Some(project_id)` if the worktree was previously checked out to a project
+/// branch (`ralph/{project_id}`).  This enables the caller to skip project
+/// discovery and resume directly.
+pub fn create_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+) -> Result<(PathBuf, Option<String>)> {
     let wt_path = task_worktree_path(workspace_root, task_id);
     let branch_name = format!("ralph/daemon/{task_id}");
 
     if wt_path.exists() {
-        verify_worktree_branch(&wt_path, &branch_name)?;
+        let prior_project = verify_worktree_branch(&wt_path, &branch_name)?;
         // Ensure config is present even for reused worktrees (may have been
         // created before the config-copy logic, or by quick-prd which doesn't
         // copy config).
         copy_workspace_config(workspace_root, &wt_path);
-        return Ok(wt_path);
+        return Ok((wt_path, prior_project));
     }
 
     if let Some(parent) = wt_path.parent() {
@@ -140,7 +149,7 @@ pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -
     // `Workspace::discover()` + `Workspace::load()` work inside the worktree.
     copy_workspace_config(workspace_root, &wt_path);
 
-    Ok(wt_path)
+    Ok((wt_path, None))
 }
 
 fn fetch_origin(repo_root: &Path, task_id: &str) -> Result<()> {
@@ -222,7 +231,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
+/// Verify that the worktree is on the expected branch, force-checking it out if
+/// not.  Returns the prior project_id if the worktree was on a project branch
+/// (`ralph/{project_id}`) before the reset — this allows the caller to resume
+/// the project instead of rediscovering it.
+fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<Option<String>> {
     let current = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(wt_path)
@@ -244,14 +257,28 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
 
     let actual_branch = String::from_utf8_lossy(&current.stdout).trim().to_owned();
     if actual_branch == expected_branch {
-        return Ok(());
+        return Ok(None);
     }
+
+    // Extract project_id from the actual branch if it follows the project
+    // branch convention (`ralph/{project_id}`).  Exclude daemon and issue
+    // branches which use different conventions.
+    let prior_project = actual_branch
+        .strip_prefix("ralph/")
+        .filter(|s| !s.starts_with("daemon/") && !s.starts_with("issue-"))
+        .map(|s| s.to_owned());
 
     eprintln!(
         "warning: worktree: event=branch_mismatch path={} actual_branch={} expected_branch={expected_branch}",
         wt_path.display(),
         actual_branch
     );
+    if let Some(ref pid) = prior_project {
+        eprintln!(
+            "dispatch: event=prior_project_detected path={} project_id={pid}",
+            wt_path.display()
+        );
+    }
     eprintln!(
         "warning: worktree: event=branch_correction_attempt path={} actual_branch={} expected_branch={expected_branch}",
         wt_path.display(),
@@ -272,7 +299,7 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
         })?;
 
     if checkout.status.success() {
-        return Ok(());
+        return Ok(prior_project);
     }
 
     let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_owned();

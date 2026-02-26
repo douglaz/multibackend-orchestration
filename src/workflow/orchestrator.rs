@@ -3387,24 +3387,37 @@ async fn run_final_review_phase(
             );
             let mut reviewer_log =
                 LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
-            let retry_result: ParseRetryResult<FinalReviewerDecision> = execute_with_parse_retries(
-                reviewer_backend_impl,
-                registry,
-                "final_reviewer",
-                "final_review",
-                loop_number,
-                &prompt,
-                None,
-                parse_final_reviewer_output,
-                &expected_format_template_for("final_reviewer", None),
-                registry
-                    .timeout_for_role(reviewer_backend, "final_reviewer")
-                    .as_secs(),
-                &mut reviewer_log,
-                None,
-                repo_root_ref,
-            )
-            .await?;
+            let retry_result: ParseRetryResult<FinalReviewerDecision> =
+                match execute_with_parse_retries(
+                    reviewer_backend_impl,
+                    registry,
+                    "final_reviewer",
+                    "final_review",
+                    loop_number,
+                    &prompt,
+                    None,
+                    parse_final_reviewer_output,
+                    &expected_format_template_for("final_reviewer", None),
+                    registry
+                        .timeout_for_role(reviewer_backend, "final_reviewer")
+                        .as_secs(),
+                    &mut reviewer_log,
+                    None,
+                    repo_root_ref,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) if e.is_quota_error() => {
+                        warn!(
+                            loop = loop_number,
+                            backend = reviewer_backend.as_str(),
+                            "final reviewer backend hit quota limit; skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
             let decision = retry_result.parsed;
             let body = match &decision {
                 FinalReviewerDecision::NoAmendments { body }
@@ -3560,24 +3573,37 @@ async fn run_final_review_phase(
             );
             let mut vote_log =
                 LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
-            let retry_result: ParseRetryResult<VoteDecision> = execute_with_parse_retries(
-                reviewer_backend_impl,
-                registry,
-                "final_reviewer",
-                "final_review",
-                loop_number,
-                &vote_prompt,
-                None,
-                |raw| parse_vote_output(raw, &required_ids),
-                &expected_format_template_for("vote", None),
-                registry
-                    .timeout_for_role(reviewer_backend, "final_reviewer")
-                    .as_secs(),
-                &mut vote_log,
-                None,
-                repo_root_ref,
-            )
-            .await?;
+            let retry_result: ParseRetryResult<VoteDecision> =
+                match execute_with_parse_retries(
+                    reviewer_backend_impl,
+                    registry,
+                    "final_reviewer",
+                    "final_review",
+                    loop_number,
+                    &vote_prompt,
+                    None,
+                    |raw| parse_vote_output(raw, &required_ids),
+                    &expected_format_template_for("vote", None),
+                    registry
+                        .timeout_for_role(reviewer_backend, "final_reviewer")
+                        .as_secs(),
+                    &mut vote_log,
+                    None,
+                    repo_root_ref,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) if e.is_quota_error() => {
+                        warn!(
+                            loop = loop_number,
+                            backend = reviewer_backend.as_str(),
+                            "final reviewer vote backend hit quota limit; skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
             let decision = retry_result.parsed;
             let _ = write_artifact(
                 project_dir,

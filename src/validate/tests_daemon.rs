@@ -2127,7 +2127,7 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         let workspace_root = h.repo_root.join(".ralph");
 
         // Create a worktree (creates branch ralph/daemon/acme-widgets-99)
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
             .expect("first create_worktree should succeed");
         assert!(wt.exists(), "worktree directory should exist");
 
@@ -2156,7 +2156,7 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         );
 
         // Second create_worktree should succeed by reusing the existing branch
-        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+        let (wt2, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
             .expect("second create_worktree should succeed with existing branch");
         assert!(wt2.exists(), "worktree directory should be re-created");
     })
@@ -2170,7 +2170,7 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
         let workspace_root = h.repo_root.join(".ralph");
 
         // Create a worktree
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-77")
+        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-77")
             .expect("create_worktree should succeed");
 
         // Create a tracked file, commit it, then modify it (dirty tracked)
@@ -2238,7 +2238,7 @@ fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResul
         let workspace_root = h.repo_root.join(".ralph");
         let task_id = "acme-widgets-381";
 
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("initial create_worktree should succeed");
         assert!(wt.exists(), "worktree should exist after initial creation");
 
@@ -2257,7 +2257,7 @@ fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResul
         );
 
         // Must succeed because create_worktree now prunes before `worktree add`.
-        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let (wt2, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("create_worktree should recover from stale metadata");
         assert!(wt2.exists(), "worktree should be recreated after prune");
     })
@@ -2273,7 +2273,7 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
         let expected_branch = format!("ralph/daemon/{task_id}");
         let mismatched_branch = "tmp-branch-mismatch-382";
 
-        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("initial create_worktree should succeed");
         assert!(wt.exists(), "worktree should exist");
 
@@ -2284,7 +2284,7 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
             "test setup should move worktree to mismatched branch"
         );
 
-        let reused = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let (reused, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("reuse path should correct branch mismatch");
         assert_eq!(reused, wt, "reuse path should return same worktree path");
 
@@ -2572,7 +2572,7 @@ fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> Test
 
         // Pre-create a real git worktree so daemon reuses it.
         let workspace_root = dh.repo_root.join(".ralph");
-        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+        let (wt_path, _) = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
             .expect("create worktree");
 
         // Valid project: has prompt.md
@@ -3030,7 +3030,7 @@ fn worktree_uses_origin_head_not_local_refs(_h: &RalphHarness) -> TestResult {
             result.err()
         );
 
-        let wt_path = result.unwrap();
+        let (wt_path, _) = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify the worktree is on a branch based on origin/HEAD
@@ -3142,7 +3142,7 @@ fn worktree_falls_back_when_origin_head_missing(_h: &RalphHarness) -> TestResult
             result.err()
         );
 
-        let wt_path = result.unwrap();
+        let (wt_path, _) = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify worktree HEAD matches origin/master
@@ -3222,7 +3222,7 @@ fn worktree_falls_back_to_head_for_empty_remote(_h: &RalphHarness) -> TestResult
             result.err()
         );
 
-        let wt_path = result.unwrap();
+        let (wt_path, _) = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify worktree HEAD matches the local HEAD
