@@ -165,10 +165,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::daemon_status_multi_repo",
             func: daemon_status_multi_repo,
         },
-        // --- Loop 2 Dispatch-time Project Backfill Tests ---
+        // --- Loop 2 Dispatch Project-ID Normalization Tests ---
         ConformanceTest {
-            name: "daemon::discover_project_id_ignores_dirs_without_state_json",
-            func: discover_project_id_ignores_dirs_without_state_json,
+            name: "daemon::dispatch_fresh_issue_passes_project_id",
+            func: dispatch_fresh_issue_passes_project_id,
+        },
+        ConformanceTest {
+            name: "daemon::dispatch_resume_uses_issue_project_prompt_file",
+            func: dispatch_resume_uses_issue_project_prompt_file,
+        },
+        ConformanceTest {
+            name: "daemon::dispatch_ignores_legacy_slug_project_fallback",
+            func: dispatch_ignores_legacy_slug_project_fallback,
+        },
+        ConformanceTest {
+            name: "daemon::daemon_branch_format_incompatible_blocks_dispatch",
+            func: daemon_branch_format_incompatible_blocks_dispatch,
         },
         // --- Loop 2 Remote-First Branch Sync Tests ---
         ConformanceTest {
@@ -2127,7 +2139,7 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         let workspace_root = h.repo_root.join(".ralph");
 
         // Create a worktree (creates branch ralph/daemon/acme-widgets-99)
-        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
             .expect("first create_worktree should succeed");
         assert!(wt.exists(), "worktree directory should exist");
 
@@ -2156,7 +2168,7 @@ fn create_worktree_reuses_existing_branch(h: &RalphHarness) -> TestResult {
         );
 
         // Second create_worktree should succeed by reusing the existing branch
-        let (wt2, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
+        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-99")
             .expect("second create_worktree should succeed with existing branch");
         assert!(wt2.exists(), "worktree directory should be re-created");
     })
@@ -2170,7 +2182,7 @@ fn clean_worktree_removes_dirty_files(h: &RalphHarness) -> TestResult {
         let workspace_root = h.repo_root.join(".ralph");
 
         // Create a worktree
-        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-77")
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, "acme-widgets-77")
             .expect("create_worktree should succeed");
 
         // Create a tracked file, commit it, then modify it (dirty tracked)
@@ -2238,7 +2250,7 @@ fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResul
         let workspace_root = h.repo_root.join(".ralph");
         let task_id = "acme-widgets-381";
 
-        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("initial create_worktree should succeed");
         assert!(wt.exists(), "worktree should exist after initial creation");
 
@@ -2257,7 +2269,7 @@ fn runtime_create_worktree_handles_stale_metadata(h: &RalphHarness) -> TestResul
         );
 
         // Must succeed because create_worktree now prunes before `worktree add`.
-        let (wt2, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let wt2 = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("create_worktree should recover from stale metadata");
         assert!(wt2.exists(), "worktree should be recreated after prune");
     })
@@ -2273,7 +2285,7 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
         let expected_branch = format!("ralph/daemon/{task_id}");
         let mismatched_branch = "tmp-branch-mismatch-382";
 
-        let (wt, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let wt = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("initial create_worktree should succeed");
         assert!(wt.exists(), "worktree should exist");
 
@@ -2284,7 +2296,7 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
             "test setup should move worktree to mismatched branch"
         );
 
-        let (reused, _) = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
+        let reused = worktree::create_worktree(&h.repo_root, &workspace_root, task_id)
             .expect("reuse path should correct branch mismatch");
         assert_eq!(reused, wt, "reuse path should return same worktree path");
 
@@ -2551,57 +2563,24 @@ fn git(repo_root: &Path, args: &[&str]) {
 }
 
 // =============================================================================
-// Loop 2 Dispatch-time Project Backfill Tests
+// Loop 2 Dispatch Project-ID Normalization Tests
 // =============================================================================
 
-/// Asserts stray project directories without `prompt.md` are ignored by
-/// dispatch-time project discovery.
-///
-/// Sets up a worktree with:
-/// - `.ralph/projects/valid-proj/prompt.md` (valid)
-/// - `.ralph/projects/stray-proj/` (no prompt.md — stray)
-///
-/// The legacy task (project_id = null) should discover only `valid-proj` and
-/// dispatch via `ralph run --project valid-proj`.
-fn discover_project_id_ignores_dirs_without_state_json(h: &RalphHarness) -> TestResult {
+fn dispatch_fresh_issue_passes_project_id(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
-        let task_id = "acme-widgets-500";
-
-        // Pre-create a real git worktree so daemon reuses it.
-        let workspace_root = dh.repo_root.join(".ralph");
-        let (wt_path, _) = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
-            .expect("create worktree");
-
-        // Valid project: has prompt.md
-        let valid_proj_dir = wt_path.join(".ralph").join("projects").join("valid-proj");
-        fs::create_dir_all(&valid_proj_dir).expect("create valid project dir");
-        fs::write(valid_proj_dir.join("prompt.md"), "valid prompt").expect("write valid prompt");
-
-        // Stray project: directory only, no prompt.md
-        let stray_proj_dir = wt_path.join(".ralph").join("projects").join("stray-proj");
-        fs::create_dir_all(&stray_proj_dir).expect("create stray project dir");
-
-        // Provide a ralph:ready issue for the daemon to claim and dispatch
-        let issues = r#"[{"number":500,"title":"Legacy task","labels":[{"name":"ralph:ready"}],"body":"Should discover valid project."}]"#;
-
+        let issues = r#"[{"number":500,"title":"Fresh task","labels":[{"name":"ralph:ready"}],"body":"must start fresh"}]"#;
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let args_log = dh.temp_dir.path().join("discovery_args.log");
+        let args_log = dh.temp_dir.path().join("fresh_dispatch_args.log");
         let args_log_str = args_log.to_string_lossy().into_owned();
 
         let ralph_script = format!(
             r#"#!/bin/sh
 case "$1" in
-  run)
-    printf '%s\n' "$1" > "{args_log_str}"
-    printf '%s\n' "$2" >> "{args_log_str}"
-    printf '%s\n' "$3" >> "{args_log_str}"
-    exit 0
-    ;;
-  auto)
-    printf 'auto\n' > "{args_log_str}"
+  auto|run)
+    printf '%s\n' "$@" > "{args_log_str}"
     exit 0
     ;;
   *)
@@ -2613,7 +2592,7 @@ esac
         );
         let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
-        let label_log = dh.temp_dir.path().join("discover_label.log");
+        let label_log = dh.temp_dir.path().join("fresh_dispatch_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
         let output = dh
@@ -2635,11 +2614,242 @@ esac
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        // Verify dispatch used `ralph run --project valid-proj`
         let args = fs::read_to_string(&args_log).expect("read args log");
         assert!(
-            args.starts_with("run\n--project\nvalid-proj\n"),
-            "expected run --project valid-proj, got:\n{args}"
+            args.starts_with("auto\n"),
+            "expected fresh dispatch to use ralph auto, got:\n{args}"
+        );
+        assert!(
+            args.contains("--project-id\nissue-500\n"),
+            "expected --project-id issue-500, got:\n{args}"
+        );
+        assert!(
+            !args.starts_with("run\n"),
+            "fresh dispatch must not use ralph run --project, got:\n{args}"
+        );
+    })
+}
+
+fn dispatch_resume_uses_issue_project_prompt_file(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let bare_remote = dh.temp_dir.path().join("resume-origin.git");
+        git(
+            dh.temp_dir.path(),
+            &["init", "--bare", &bare_remote.to_string_lossy()],
+        );
+        git(
+            &dh.repo_root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &bare_remote.to_string_lossy(),
+            ],
+        );
+        let base_branch = git_stdout(&dh.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git(&dh.repo_root, &["push", "-u", "origin", &base_branch]);
+
+        git(&dh.repo_root, &["checkout", "-b", "ralph/issue-501"]);
+        let prompt_path = dh
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join("issue-501")
+            .join("prompt.md");
+        fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create issue project dir");
+        fs::write(&prompt_path, "# existing prompt").expect("write prompt");
+        git(
+            &dh.repo_root,
+            &["add", ".ralph/projects/issue-501/prompt.md"],
+        );
+        git(&dh.repo_root, &["commit", "-m", "seed issue-501 prompt"]);
+        git(&dh.repo_root, &["push", "-u", "origin", "ralph/issue-501"]);
+        git(&dh.repo_root, &["checkout", &base_branch]);
+
+        let issues = r#"[{"number":501,"title":"Resume task","labels":[{"name":"ralph:ready"}],"body":"must resume from issue id"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("resume_dispatch_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  auto|run)
+    printf '%s\n' "$@" > "{args_log_str}"
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("run\n"),
+            "resume dispatch should use ralph run, got:\n{args}"
+        );
+        assert!(
+            args.contains("--project\nissue-501\n"),
+            "expected run --project issue-501, got:\n{args}"
+        );
+        assert!(
+            !args.contains("--project-id"),
+            "resume path must not pass --project-id, got:\n{args}"
+        );
+    })
+}
+
+fn dispatch_ignores_legacy_slug_project_fallback(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        git(&dh.repo_root, &["branch", "ralph/legacy-slug-600"]);
+
+        let workspace_root = dh.repo_root.join(".ralph");
+        let task_id = "acme-widgets-600";
+        let wt_path = worktree::create_worktree(&dh.repo_root, &workspace_root, task_id)
+            .expect("create worktree");
+        let legacy_project_dir = wt_path
+            .join(".ralph")
+            .join("projects")
+            .join("legacy-slug-600");
+        fs::create_dir_all(&legacy_project_dir).expect("create legacy project dir");
+        fs::write(legacy_project_dir.join("prompt.md"), "legacy prompt")
+            .expect("write legacy prompt");
+
+        let issues = r#"[{"number":600,"title":"Legacy slug fallback check","labels":[{"name":"ralph:ready"}],"body":"must not resume legacy slug project"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("legacy_fallback_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  auto|run)
+    printf '%s\n' "$@" > "{args_log_str}"
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled: $1" >&2
+    exit 1
+    ;;
+esac
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("auto\n"),
+            "legacy slug fallback must not force resume, got:\n{args}"
+        );
+        assert!(
+            args.contains("--project-id\nissue-600\n"),
+            "fresh path must still use issue project id, got:\n{args}"
+        );
+        assert!(
+            !args.contains("--project\nlegacy-slug-600\n"),
+            "dispatch must not resume slug project id, got:\n{args}"
+        );
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("ralph/legacy-slug-600") && combined.contains("issue-600"),
+            "expected legacy-branch warning with branch and issue id, got:\n{combined}"
+        );
+    })
+}
+
+fn daemon_branch_format_incompatible_blocks_dispatch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok(["config", "set", "git.branch_format", "feature/{project_id}"])
+            .expect("set incompatible branch format");
+
+        let issues = r#"[{"number":601,"title":"Blocked by branch format","labels":[{"name":"ralph:ready"}],"body":"should never dispatch"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("blocked_dispatch_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 2);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("git.branch_format") && combined.contains("ralph/issue-1"),
+            "expected branch-format validation failure, got:\n{combined}"
+        );
+        assert!(
+            !args_log.exists(),
+            "daemon should block before dispatch and never invoke ralph child command"
         );
     })
 }
@@ -3030,7 +3240,7 @@ fn worktree_uses_origin_head_not_local_refs(_h: &RalphHarness) -> TestResult {
             result.err()
         );
 
-        let (wt_path, _) = result.unwrap();
+        let wt_path = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify the worktree is on a branch based on origin/HEAD
@@ -3142,7 +3352,7 @@ fn worktree_falls_back_when_origin_head_missing(_h: &RalphHarness) -> TestResult
             result.err()
         );
 
-        let (wt_path, _) = result.unwrap();
+        let wt_path = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify worktree HEAD matches origin/master
@@ -3222,7 +3432,7 @@ fn worktree_falls_back_to_head_for_empty_remote(_h: &RalphHarness) -> TestResult
             result.err()
         );
 
-        let (wt_path, _) = result.unwrap();
+        let wt_path = result.unwrap();
         assert!(wt_path.exists(), "worktree dir should exist");
 
         // Verify worktree HEAD matches the local HEAD

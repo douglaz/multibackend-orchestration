@@ -21,26 +21,17 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
 /// `.ralph/daemon/worktrees/<task_id>/`. If the branch already exists
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
-///
-/// Returns `(worktree_path, prior_project_id)` where `prior_project_id` is
-/// `Some(project_id)` if the worktree was previously checked out to a project
-/// branch (`ralph/{project_id}`).  This enables the caller to skip project
-/// discovery and resume directly.
-pub fn create_worktree(
-    repo_root: &Path,
-    workspace_root: &Path,
-    task_id: &str,
-) -> Result<(PathBuf, Option<String>)> {
+pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
     let branch_name = format!("ralph/daemon/{task_id}");
 
     if wt_path.exists() {
-        let prior_project = verify_worktree_branch(&wt_path, &branch_name)?;
+        verify_worktree_branch(&wt_path, &branch_name)?;
         // Ensure config is present even for reused worktrees (may have been
         // created before the config-copy logic, or by quick-prd which doesn't
         // copy config).
         copy_workspace_config(workspace_root, &wt_path);
-        return Ok((wt_path, prior_project));
+        return Ok(wt_path);
     }
 
     if let Some(parent) = wt_path.parent() {
@@ -149,7 +140,7 @@ pub fn create_worktree(
     // `Workspace::discover()` + `Workspace::load()` work inside the worktree.
     copy_workspace_config(workspace_root, &wt_path);
 
-    Ok((wt_path, None))
+    Ok(wt_path)
 }
 
 fn fetch_origin(repo_root: &Path, task_id: &str) -> Result<()> {
@@ -232,10 +223,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Verify that the worktree is on the expected branch, force-checking it out if
-/// not.  Returns the prior project_id if the worktree was on a project branch
-/// (`ralph/{project_id}`) before the reset — this allows the caller to resume
-/// the project instead of rediscovering it.
-fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<Option<String>> {
+/// not.
+fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
     let current = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(wt_path)
@@ -257,28 +246,14 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<Optio
 
     let actual_branch = String::from_utf8_lossy(&current.stdout).trim().to_owned();
     if actual_branch == expected_branch {
-        return Ok(None);
+        return Ok(());
     }
-
-    // Extract project_id from the actual branch if it follows the project
-    // branch convention (`ralph/{project_id}`).  Exclude daemon and issue
-    // branches which use different conventions.
-    let prior_project = actual_branch
-        .strip_prefix("ralph/")
-        .filter(|s| !s.starts_with("daemon/") && !s.starts_with("issue-"))
-        .map(|s| s.to_owned());
 
     eprintln!(
         "warning: worktree: event=branch_mismatch path={} actual_branch={} expected_branch={expected_branch}",
         wt_path.display(),
         actual_branch
     );
-    if let Some(ref pid) = prior_project {
-        eprintln!(
-            "dispatch: event=prior_project_detected path={} project_id={pid}",
-            wt_path.display()
-        );
-    }
     eprintln!(
         "warning: worktree: event=branch_correction_attempt path={} actual_branch={} expected_branch={expected_branch}",
         wt_path.display(),
@@ -299,7 +274,7 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<Optio
         })?;
 
     if checkout.status.success() {
-        return Ok(prior_project);
+        return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_owned();
@@ -610,4 +585,105 @@ pub fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::{create_worktree, task_worktree_path, verify_worktree_branch};
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git command failed: git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git command failed: git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn init_test_repo() -> (TempDir, PathBuf, PathBuf) {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let repo_root = temp_dir.path().join("repo");
+        fs::create_dir_all(&repo_root).expect("create repo root");
+
+        git_ok(&repo_root, &["init"]);
+        git_ok(&repo_root, &["config", "user.email", "test@example.com"]);
+        git_ok(&repo_root, &["config", "user.name", "Test User"]);
+
+        fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
+        git_ok(&repo_root, &["add", "README.md"]);
+        git_ok(&repo_root, &["commit", "-m", "initial"]);
+
+        let workspace_root = repo_root.join(".ralph");
+        fs::create_dir_all(&workspace_root).expect("create workspace root");
+
+        (temp_dir, repo_root, workspace_root)
+    }
+
+    #[test]
+    fn create_worktree_returns_expected_worktree_path() {
+        let (_tmp, repo_root, workspace_root) = init_test_repo();
+        let task_id = "acme-widgets-123";
+        let expected_path = task_worktree_path(&workspace_root, task_id);
+
+        let wt_path: PathBuf =
+            create_worktree(&repo_root, &workspace_root, task_id).expect("create worktree");
+
+        assert_eq!(wt_path, expected_path);
+        assert!(wt_path.is_dir(), "worktree directory should exist");
+    }
+
+    #[test]
+    fn verify_worktree_branch_returns_ok_for_matching_branch() {
+        let (_tmp, repo_root, workspace_root) = init_test_repo();
+        let task_id = "acme-widgets-124";
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id).expect("worktree");
+        let expected_branch = format!("ralph/daemon/{task_id}");
+
+        let result: crate::Result<()> = verify_worktree_branch(&wt_path, &expected_branch);
+        assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
+
+        let actual_branch = git_stdout(&wt_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(actual_branch, expected_branch);
+    }
+
+    #[test]
+    fn verify_worktree_branch_returns_error_for_missing_expected_branch() {
+        let (_tmp, repo_root, workspace_root) = init_test_repo();
+        let task_id = "acme-widgets-125";
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id).expect("worktree");
+
+        let err = verify_worktree_branch(&wt_path, "ralph/daemon/does-not-exist")
+            .expect_err("missing expected branch should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("does not match expected"),
+            "expected mismatch error, got: {message}"
+        );
+    }
 }

@@ -502,6 +502,14 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
 /// All task state is in-memory (`children: HashMap<u32, ChildHandle>`).
 /// GitHub lifecycle labels are the only durable task lifecycle source of truth.
 pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
+    if let Err(err) = validate_daemon_branch_format(&config.global_config.git.branch_format) {
+        eprintln!(
+            "daemon runtime refused to start for {}/{}: {err}",
+            config.owner, config.repo
+        );
+        return Err(err);
+    }
+
     // Phase 0: Clean .ralph/tmp and recreate logs directory
     {
         let tmp_dir = config.workspace_root.join("tmp");
@@ -828,47 +836,31 @@ async fn poll_and_claim(
     Ok(())
 }
 
-/// Scan a task worktree for valid projects under `.ralph/projects/*/prompt.md`.
-fn discover_project_ids(worktree_path: &Path) -> Vec<String> {
-    let projects_dir = worktree_path.join(".ralph").join("projects");
-    let entries = match std::fs::read_dir(&projects_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let prompt_path = entry.path().join("prompt.md");
-        if prompt_path.is_file() {
-            found.push(name);
-        }
-    }
-    found
+fn project_prompt_path(worktree_path: &Path, project_id: &str) -> PathBuf {
+    worktree_path
+        .join(".ralph")
+        .join("projects")
+        .join(project_id)
+        .join("prompt.md")
 }
 
-/// Scan remote `ralph/*` branches (excluding `daemon/` and `issue-` branches)
-/// for project data.  If found, check out that branch in the worktree and
-/// return the discovered project ID.
-///
-/// This handles retriggers of tasks originally dispatched via `ralph auto
-/// --idea`, where project commits land on `ralph/{project_id}` instead of
-/// `ralph/issue-<n>`.
-fn discover_project_from_remote_branches(
-    worktree_path: &Path,
-    task_id: &str,
-) -> Result<Option<String>> {
+fn should_resume_issue_project(worktree_path: &Path, project_id: &str) -> bool {
+    project_prompt_path(worktree_path, project_id).is_file()
+}
+
+fn detect_legacy_slug_branch(worktree_path: &Path) -> Result<Option<String>> {
     let output = std::process::Command::new("git")
         .args([
             "for-each-ref",
             "--format=%(refname:short)",
-            "refs/remotes/origin/ralph/",
+            "refs/heads/ralph/",
         ])
         .current_dir(worktree_path)
         .output()
         .map_err(|err| {
             RalphError::Orchestration(format!(
-                "discover_project_from_remote_branches: git for-each-ref failed: {err}"
+                "failed to scan local ralph/* branches in {}: {err}",
+                worktree_path.display()
             ))
         })?;
 
@@ -876,85 +868,39 @@ fn discover_project_from_remote_branches(
         return Ok(None);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for remote_branch in stdout.lines() {
-        let remote_branch = remote_branch.trim();
-        if remote_branch.is_empty() {
+    let mut branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    branches.sort();
+
+    for branch in branches {
+        if !branch.starts_with("ralph/") {
             continue;
         }
-        // Skip daemon worktree branches and issue branches (already checked
-        // by sync_project_branch).
-        let short = remote_branch.strip_prefix("origin/ralph/").unwrap_or("");
-        if short.starts_with("daemon/") || short.starts_with("issue-") {
+        if branch.starts_with("ralph/issue-") || branch.starts_with("ralph/daemon/") {
             continue;
         }
-
-        // Check if this branch has .ralph/projects/ content
-        let ls = std::process::Command::new("git")
-            .args(["ls-tree", "--name-only", remote_branch, ".ralph/projects/"])
-            .current_dir(worktree_path)
-            .output();
-        let has_projects = ls
-            .as_ref()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or(false);
-
-        if !has_projects {
-            continue;
-        }
-
-        // Checkout this branch and try discovery
-        let local_branch = match remote_branch.strip_prefix("origin/") {
-            Some(b) => b,
-            None => continue,
-        };
-        let checkout = crate::git::run_git(
-            worktree_path,
-            &["checkout", "-B", local_branch, remote_branch],
-        );
-        if checkout.is_err() {
-            continue;
-        }
-
-        let project_ids = discover_project_ids(worktree_path);
-        if let Some(project_id) = project_ids.into_iter().next() {
-            eprintln!(
-                "dispatch: event=project_branch_fallback task_id={task_id} branch={local_branch} project_id={project_id}"
-            );
-            return Ok(Some(project_id));
-        }
+        return Ok(Some(branch));
     }
 
     Ok(None)
 }
 
-/// Find the most recently modified project directory by prompt mtime.
-/// Returns `None` if no projects exist.
-#[cfg(test)]
-fn discover_latest_project_id(worktree_path: &Path) -> Option<String> {
-    let projects_dir = worktree_path.join(".ralph").join("projects");
-    let entries = match std::fs::read_dir(&projects_dir) {
-        Ok(entries) => entries,
-        Err(_) => return None,
-    };
-
-    let mut best: Option<(String, std::time::SystemTime)> = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let prompt_path = entry.path().join("prompt.md");
-        let modified = match std::fs::metadata(prompt_path).and_then(|meta| meta.modified()) {
-            Ok(modified) => modified,
-            Err(_) => continue,
-        };
-        let dominated = match &best {
-            Some((_, prev)) => modified > *prev,
-            None => true,
-        };
-        if dominated {
-            best = Some((name, modified));
-        }
+fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
+    let project_id = "issue-1";
+    let rendered = crate::git::branch::resolve_branch_name(branch_format, project_id);
+    if rendered == "ralph/issue-1" {
+        return Ok(());
     }
-    best.map(|(id, _)| id)
+
+    Err(RalphError::Validation(format!(
+        "incompatible git.branch_format for daemon-managed issue dispatch: \
+         formatting project_id '{project_id}' must produce 'ralph/issue-1', \
+         but '{branch_format}' produced '{rendered}'"
+    )))
 }
 
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
@@ -965,16 +911,14 @@ async fn dispatch_task(
     raw_idea: &str,
 ) -> Result<()> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+    let project_id = format!("issue-{issue_number}");
 
     bootstrap::ensure_repo_ready(&config.repo_root).await?;
 
     let workspace_root = config.workspace_root.clone();
 
     // Create worktree (reuses existing branch if present).
-    // `prior_project_id` is set when the worktree was on a project branch
-    // (`ralph/{project_id}`) before being reset to the daemon branch —
-    // this happens on daemon restart when a task was mid-flight.
-    let (wt_path, prior_project_id) = {
+    let wt_path = {
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
@@ -1012,67 +956,25 @@ async fn dispatch_task(
         }
     }
 
-    // Dispatch-time project discovery.
-    // Short-circuit if the worktree was already on a project branch (resume).
-    let effective_project_id = if let Some(project_id) = prior_project_id {
-        eprintln!(
-            "dispatch: event=project_resume task_id={task_id} project_id={project_id}"
-        );
-        Some(project_id)
-    } else {
+    let resume_existing_project = {
         let wt = wt_path.clone();
-        let mut discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
-
-        // If no projects found on the issue branch, scan remote ralph/*
-        // branches for project data.  This handles retriggers of tasks that
-        // were originally dispatched via `ralph auto --idea` (where project
-        // commits land on `ralph/{project_id}`, not `ralph/issue-<n>`).
-        if discovered.is_empty() {
-            let wt = wt_path.clone();
-            let tid = task_id.clone();
-            if let Ok(Some(project_id)) =
-                spawn_blocking_op(move || discover_project_from_remote_branches(&wt, &tid)).await
-            {
-                discovered.push(project_id);
-            }
-        }
-
-        match discovered.len() {
-            0 => None,
-            1 => {
-                let project_id = discovered.into_iter().next().unwrap();
-                eprintln!(
-                    "dispatch: event=project_backfill task_id={task_id} discovered_project_id={project_id}"
-                );
-                Some(project_id)
-            }
-            n => {
-                eprintln!(
-                    "dispatch: event=project_discovery_ambiguous task_id={task_id} count={n} projects={:?}",
-                    discovered
-                );
-                None
-            }
-        }
+        let pid = project_id.clone();
+        spawn_blocking_op(move || Ok(should_resume_issue_project(&wt, &pid))).await?
     };
 
-    // Checkout project branch if resuming
-    if let Some(ref project_id) = effective_project_id {
-        let wt = wt_path.clone();
-        let branch = format!("ralph/{project_id}");
-        let branch_clone = branch.clone();
-        let checkout_result =
-            spawn_blocking_op(move || worktree::checkout_branch_in_worktree(&wt, &branch_clone))
-                .await;
-        match checkout_result {
-            Ok(()) => {
-                eprintln!("dispatch: checked out project branch {branch} for task {task_id}");
-            }
-            Err(err) => {
-                eprintln!(
-                    "dispatch: project branch {branch} checkout failed for task {task_id} (may not exist yet): {err}"
-                );
-            }
+    if resume_existing_project {
+        eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
+    } else {
+        let legacy_slug_branch = {
+            let wt = wt_path.clone();
+            spawn_blocking_op(move || detect_legacy_slug_branch(&wt)).await?
+        };
+
+        if let Some(legacy_branch) = legacy_slug_branch {
+            eprintln!(
+                "warning: dispatch detected legacy branch '{legacy_branch}' for issue #{issue_number}; \
+                 starting fresh as '{project_id}' instead of resuming a slug project"
+            );
         }
     }
 
@@ -1162,19 +1064,15 @@ async fn dispatch_task(
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        match effective_project_id.as_deref() {
-            Some(project_id) => {
-                eprintln!(
-                    "dispatch: task {task_id} has project_id={project_id}; using ralph run --project"
-                );
-                process::spawn_ralph_run(&ralph_bin, &wt, project_id, &log_path).await?
-            }
-            None => {
-                eprintln!(
-                    "dispatch: task {task_id} has no project_id; using ralph auto --idea (fresh dispatch)"
-                );
-                process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path).await?
-            }
+        if resume_existing_project {
+            eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id}");
+            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path).await?
+        } else {
+            eprintln!(
+                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id}"
+            );
+            process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id))
+                .await?
         }
     };
 
@@ -2183,9 +2081,9 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 mod tests {
     use super::{
         build_pr_body, build_pr_title, detect_final_prompt_artifact, detect_quick_prd_artifact,
-        discover_latest_project_id, extract_issue_body, extract_original_title,
-        extract_project_ref, newest_by_mtime, post_artifact_comments_with_client,
-        sweep_artifact_comments, truncate_for_github, write_body_file, ArtifactCommentClient,
+        extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
+        post_artifact_comments_with_client, should_resume_issue_project, sweep_artifact_comments,
+        truncate_for_github, validate_daemon_branch_format, write_body_file, ArtifactCommentClient,
         ArtifactWatcherState, TRUNCATED_NOTE,
     };
     use crate::error::RalphError;
@@ -2327,28 +2225,45 @@ mod tests {
     }
 
     #[test]
-    fn discover_latest_project_id_prefers_newest_created_at() {
+    fn resume_decision_requires_issue_prompt_md() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let worktree = tmp.path().join("repo");
-        let projects_root = worktree.join(".ralph").join("projects");
-        std::fs::create_dir_all(&projects_root).expect("create projects root");
+        let project_id = "issue-42";
+        let prompt_path = worktree
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+            .join("prompt.md");
 
-        let project_a = projects_root.join("acme-project-a");
-        let project_b = projects_root.join("acme-project-b");
-        let project_c = projects_root.join("acme-project-c");
-        std::fs::create_dir_all(&project_a).expect("mkdir a");
-        std::fs::create_dir_all(&project_b).expect("mkdir b");
-        std::fs::create_dir_all(&project_c).expect("mkdir c");
+        assert!(!should_resume_issue_project(&worktree, project_id));
 
-        std::fs::write(project_a.join("prompt.md"), "a").expect("write a");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        std::fs::write(project_c.join("prompt.md"), "c").expect("write c");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        std::fs::write(project_b.join("prompt.md"), "b").expect("write b");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create project dir");
+        std::fs::write(&prompt_path, "# prompt").expect("write prompt");
+        assert!(should_resume_issue_project(&worktree, project_id));
 
-        assert_eq!(
-            discover_latest_project_id(&worktree),
-            Some("acme-project-b".to_owned())
+        std::fs::remove_file(&prompt_path).expect("remove prompt");
+        assert!(!should_resume_issue_project(&worktree, project_id));
+    }
+
+    #[test]
+    fn daemon_branch_format_validation_accepts_default() {
+        validate_daemon_branch_format("ralph/{project_id}")
+            .expect("default daemon branch format should be accepted");
+    }
+
+    #[test]
+    fn daemon_branch_format_validation_rejects_incompatible_format() {
+        let err = validate_daemon_branch_format("feature/{project_id}")
+            .expect_err("incompatible branch format should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("git.branch_format"),
+            "expected branch format validation message, got: {msg}"
+        );
+        assert!(
+            msg.contains("ralph/issue-1"),
+            "expected expected-branch hint, got: {msg}"
         );
     }
 

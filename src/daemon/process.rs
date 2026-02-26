@@ -29,8 +29,9 @@ pub async fn spawn_ralph_auto(
     worktree_path: &Path,
     idea: &str,
     log_file: &Path,
+    project_id: Option<&str>,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file)?;
+    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file, project_id)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
@@ -111,6 +112,7 @@ fn build_ralph_auto_command(
     worktree_path: &Path,
     idea: &str,
     log_file: &Path,
+    project_id: Option<&str>,
 ) -> Result<Command> {
     let file = std::fs::File::create(log_file).map_err(|err| {
         RalphError::Orchestration(format!(
@@ -123,8 +125,11 @@ fn build_ralph_auto_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
-    cmd.args(["auto", "--idea", idea])
-        .current_dir(worktree_path)
+    cmd.args(["auto", "--idea", idea]);
+    if let Some(project_id) = project_id {
+        cmd.args(["--project-id", project_id]);
+    }
+    cmd.current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(file))
         .stderr(std::process::Stdio::from(file_clone));
@@ -301,6 +306,7 @@ mod tests {
             Path::new("/tmp/worktree"),
             "implement feature",
             tmp.path(),
+            None,
         )
         .expect("build command");
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
@@ -310,6 +316,30 @@ mod tests {
                 OsStr::new("auto"),
                 OsStr::new("--idea"),
                 OsStr::new("implement feature"),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_auto_command_includes_project_id() {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let cmd = build_ralph_auto_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "implement feature",
+            tmp.path(),
+            Some("issue-42"),
+        )
+        .expect("build command");
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("auto"),
+                OsStr::new("--idea"),
+                OsStr::new("implement feature"),
+                OsStr::new("--project-id"),
+                OsStr::new("issue-42"),
             ]
         );
     }
