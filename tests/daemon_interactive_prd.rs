@@ -3,7 +3,6 @@
 //! These tests exercise state persistence, label conflict behavior, and
 //! idempotent restart handling without requiring live GitHub API access.
 
-use chrono;
 use ralph::daemon::interactive_prd::{
     detect_approval, has_prd_label, prd_marker, prd_status_failed_marker, InteractivePrdState,
     PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,

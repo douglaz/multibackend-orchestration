@@ -4,13 +4,13 @@ use std::fs;
 use std::sync::Mutex;
 
 use crate::daemon::github;
+use crate::daemon::github::IssueComment;
 use crate::daemon::interactive_prd::{
     detect_approval, format_draft_comment, has_in_progress_prd_label, has_prd_label,
     parse_approved_spec_from_comments, prd_marker, prd_status_approved_marker,
     prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, DRAFT_SECTION_RETRIES,
     PRD_LABELS, PRD_LABEL_NAMES, REQUIRED_SPEC_SECTION_COUNT,
 };
-use crate::daemon::github::IssueComment;
 use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
@@ -3165,7 +3165,7 @@ esac; exit 0
 /// existing bot marker, so the bot should still post its own.
 fn bot_scoped_marker_ignores_user_spoof(_harness: &RalphHarness) -> TestResult {
     run_case(|| {
-        let comments = vec![
+        let comments = [
             github::IssueComment {
                 id: 100,
                 author_login: "mallory".to_owned(),
@@ -4902,15 +4902,14 @@ struct PrdDoneDaemonRun {
     captured_idea: String,
 }
 
-fn run_prd_done_daemon(
-    harness: &RalphHarness,
-    gh_script: &str,
-) -> PrdDoneDaemonRun {
+fn run_prd_done_daemon(harness: &RalphHarness, gh_script: &str) -> PrdDoneDaemonRun {
     let dh =
         RalphHarness::new_daemon(&harness.ralph_bin, "acme", "widgets").expect("daemon harness");
     dh.init_workspace().expect("init failed");
 
-    let gh_script_path = dh.write_mock_script("gh", gh_script).expect("write mock gh");
+    let gh_script_path = dh
+        .write_mock_script("gh", gh_script)
+        .expect("write mock gh");
     let gh_dir = gh_script_path
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -4927,19 +4926,16 @@ fn run_prd_done_daemon(
 
     let output = dh
         .daemon_env(
-        [
-            "daemon",
-            "start",
-            "--repo",
-            "acme/widgets",
-            "--single-iteration",
-        ],
-        &[
-            ("PATH", &gh_path),
-            ("RALPH_DAEMON_BIN", &ralph_path),
-        ],
-    )
-    .expect("daemon start should execute");
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+        )
+        .expect("daemon start should execute");
 
     let captured_idea = fs::read_to_string(&captured_idea_path).unwrap_or_default();
 
@@ -5013,10 +5009,7 @@ fn prd_done_mixed_labels_not_blocked(harness: &RalphHarness) -> TestResult {
             prd_marker(20, "draft", 1),
             format_draft_comment(1, spec_body)
         );
-        let approval_body = format!(
-            "{}\n## PRD Approved",
-            prd_marker(20, "status-approved", 1)
-        );
+        let approval_body = format!("{}\n## PRD Approved", prd_marker(20, "status-approved", 1));
 
         let comments_json = format!(
             r#"{{"comments":[{},{}]}}"#,
@@ -5084,8 +5077,7 @@ fn prd_done_missing_markers_fallback(harness: &RalphHarness) -> TestResult {
             "should not use approved spec when markers are missing, stderr:\n{stderr}"
         );
         assert_eq!(
-            run.captured_idea,
-            "Missing markers issue\n\nFallback body.",
+            run.captured_idea, "Missing markers issue\n\nFallback body.",
             "fallback dispatch should use compose_raw_idea(title, body)"
         );
     })
@@ -5198,8 +5190,7 @@ esac
             "expected fallback warning when comments API fails, stderr:\n{stderr}"
         );
         assert_eq!(
-            run.captured_idea,
-            "API fail issue\n\nAPI fail body.",
+            run.captured_idea, "API fail issue\n\nAPI fail body.",
             "comments API failure should fallback to compose_raw_idea(title, body)"
         );
     })
@@ -5219,16 +5210,19 @@ fn prd_done_user_spoof_ignored(harness: &RalphHarness) -> TestResult {
             "{}\n## PRD Approved (SPOOFED)",
             prd_marker(50, "status-approved", 99)
         );
-        let real_approval_body = format!(
-            "{}\n## PRD Approved",
-            prd_marker(50, "status-approved", 1)
-        );
+        let real_approval_body =
+            format!("{}\n## PRD Approved", prd_marker(50, "status-approved", 1));
 
         let comments_json = format!(
             r#"{{"comments":[{},{},{}]}}"#,
             json_comment(100, "evil-user", &spoof_body, "2026-01-01T00:00:05Z"),
             json_comment(101, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
-            json_comment(102, "ralph-bot", &real_approval_body, "2026-01-01T00:00:20Z"),
+            json_comment(
+                102,
+                "ralph-bot",
+                &real_approval_body,
+                "2026-01-01T00:00:20Z"
+            ),
         );
         let issues_json = r#"[{"number":50,"title":"Spoof test issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Spoof test."}]"#;
 
@@ -5251,7 +5245,12 @@ fn prd_done_user_spoof_ignored(harness: &RalphHarness) -> TestResult {
         let comments = vec![
             make_test_issue_comment(100, "evil-user", &spoof_body, "2026-01-01T00:00:05Z"),
             make_test_issue_comment(101, "ralph-bot", &draft_body, "2026-01-01T00:00:10Z"),
-            make_test_issue_comment(102, "ralph-bot", &real_approval_body, "2026-01-01T00:00:20Z"),
+            make_test_issue_comment(
+                102,
+                "ralph-bot",
+                &real_approval_body,
+                "2026-01-01T00:00:20Z",
+            ),
         ];
         let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 50);
         assert!(result.is_some(), "parser should find bot-authored approval");
@@ -5275,28 +5274,19 @@ fn prd_done_highest_revision_wins(harness: &RalphHarness) -> TestResult {
             prd_marker(60, "draft", 1),
             format_draft_comment(1, spec_v1)
         );
-        let approval_v1 = format!(
-            "{}\n## PRD Approved",
-            prd_marker(60, "status-approved", 1)
-        );
+        let approval_v1 = format!("{}\n## PRD Approved", prd_marker(60, "status-approved", 1));
         let draft_v2 = format!(
             "{}\n{}",
             prd_marker(60, "draft", 2),
             format_draft_comment(2, spec_v2)
         );
-        let approval_v2 = format!(
-            "{}\n## PRD Approved",
-            prd_marker(60, "status-approved", 2)
-        );
+        let approval_v2 = format!("{}\n## PRD Approved", prd_marker(60, "status-approved", 2));
         let draft_v3 = format!(
             "{}\n{}",
             prd_marker(60, "draft", 3),
             format_draft_comment(3, spec_v3)
         );
-        let approval_v3 = format!(
-            "{}\n## PRD Approved",
-            prd_marker(60, "status-approved", 3)
-        );
+        let approval_v3 = format!("{}\n## PRD Approved", prd_marker(60, "status-approved", 3));
 
         let comments_json = format!(
             r#"{{"comments":[{},{},{},{},{},{}]}}"#,
@@ -5339,8 +5329,14 @@ fn prd_done_highest_revision_wins(harness: &RalphHarness) -> TestResult {
             extracted.contains("Draft v3 spec"),
             "should select v3, got: {extracted}"
         );
-        assert!(!extracted.contains("Draft v1 spec"), "should not contain v1");
-        assert!(!extracted.contains("Draft v2 spec"), "should not contain v2");
+        assert!(
+            !extracted.contains("Draft v1 spec"),
+            "should not contain v1"
+        );
+        assert!(
+            !extracted.contains("Draft v2 spec"),
+            "should not contain v2"
+        );
     })
 }
 

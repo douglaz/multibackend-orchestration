@@ -741,6 +741,7 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     let mut worker_dirs: Vec<PathBuf> = Vec::new();
 
     if worker_count > 1 {
+        let mut setup_failed = false;
         for worker_id in 0..worker_count {
             match config.setup_worker_dir(worker_id) {
                 Ok(dir) => worker_dirs.push(dir),
@@ -749,11 +750,14 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
                         "prd: warning: failed to setup worker {worker_id} dir; \
                          falling back to sequential mode: {err}"
                     );
-                    worker_count = 1;
-                    worker_dirs.clear();
+                    setup_failed = true;
                     break;
                 }
             }
+        }
+        if setup_failed {
+            worker_count = 1;
+            worker_dirs.clear();
         }
     }
     if worker_count > 1 {
@@ -781,18 +785,21 @@ pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
         let work_queue = &work_queue;
         let errors = &errors;
 
-        for worker_id in 0..worker_count {
+        // Pre-compute the cwd for each worker so we can iterate directly.
+        let worker_cwds: Vec<PathBuf> = if worker_count > 1 {
+            worker_dirs.clone()
+        } else {
+            // Sequential mode still gets a worker cwd so each issue reset
+            // runs against the base checkout.
+            vec![config.repo_clone_path()]
+        };
+
+        for worker_cwd in &worker_cwds {
             // Each worker gets its own config clone with an isolated cwd so
             // concurrent backend processes do not share the same checkout
             // (avoiding git lock contention and file interference).
             let mut worker_config = config.clone();
-            if worker_count > 1 {
-                worker_config.worker_cwd = Some(worker_dirs[worker_id].clone());
-            } else {
-                // Sequential mode still gets a worker cwd so each issue reset
-                // runs against the base checkout.
-                worker_config.worker_cwd = Some(config.repo_clone_path());
-            }
+            worker_config.worker_cwd = Some(worker_cwd.clone());
 
             s.spawn(move || {
                 let mut bot_login_cache: Option<String> = None;
@@ -2841,7 +2848,7 @@ mod tests {
     #[test]
     fn transition_path_pending_idempotent_marker_reuse() {
         let marker = prd_marker(42, "questions", 1);
-        let comments = vec![test_comment(
+        let comments = [test_comment(
             500,
             "ralph-bot",
             &format!("{marker}\n## Clarifying Questions\n1. Q?"),
@@ -3064,10 +3071,7 @@ mod tests {
     /// first incomplete output) and REQUIRED_SPEC_SECTION_COUNT is 6.
     #[test]
     fn section_retry_constants_are_correct() {
-        assert!(
-            DRAFT_SECTION_RETRIES >= 1,
-            "DRAFT_SECTION_RETRIES should be >= 1"
-        );
+        const { assert!(DRAFT_SECTION_RETRIES >= 1) };
         assert_eq!(
             REQUIRED_SPEC_SECTION_COUNT, 6,
             "REQUIRED_SPEC_SECTION_COUNT should be 6"
@@ -3464,10 +3468,10 @@ mod tests {
         writeln!(tmp, "  cat <<'__MOCK_EOF__'").unwrap();
         writeln!(tmp, "## Summary").unwrap();
         writeln!(tmp, "Incomplete draft from approval-bypass test.").unwrap();
-        writeln!(tmp, "").unwrap();
+        writeln!(tmp).unwrap();
         writeln!(tmp, "## Acceptance Criteria").unwrap();
         writeln!(tmp, "- [ ] Criterion 1").unwrap();
-        writeln!(tmp, "").unwrap();
+        writeln!(tmp).unwrap();
         writeln!(tmp, "## Technical Approach").unwrap();
         writeln!(tmp, "Approach description.").unwrap();
         writeln!(tmp, "__MOCK_EOF__").unwrap();
@@ -3924,10 +3928,7 @@ mod tests {
             test_comment(
                 202,
                 "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(7, "status-approved", 1)
-                ),
+                &format!("{}\n## PRD Approved", prd_marker(7, "status-approved", 1)),
                 "2026-01-01T00:00:30Z",
             ),
         ];
@@ -3949,11 +3950,7 @@ mod tests {
             test_comment(
                 210,
                 "ralph-bot",
-                &format!(
-                    "{}\n{}",
-                    &draft_marker,
-                    format_draft_comment(2, real_spec)
-                ),
+                &format!("{}\n{}", &draft_marker, format_draft_comment(2, real_spec)),
                 "2026-01-01T00:00:10Z",
             ),
             // Later bot-authored comment references the marker inline, but is not a draft.
@@ -3966,34 +3963,28 @@ mod tests {
             test_comment(
                 212,
                 "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(77, "status-approved", 2)
-                ),
+                &format!("{}\n## PRD Approved", prd_marker(77, "status-approved", 2)),
                 "2026-01-01T00:00:30Z",
             ),
         ];
 
         let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 77);
-        assert!(result.is_some(), "should resolve approved spec from real draft");
+        assert!(
+            result.is_some(),
+            "should resolve approved spec from real draft"
+        );
         assert_eq!(result.unwrap(), real_spec);
     }
 
     #[test]
     fn parse_approved_spec_bot_only_filtering_ignores_user_spoof() {
-        let spoofed_approval = format!(
-            "{}\n## PRD Approved",
-            prd_marker(42, "status-approved", 5)
-        );
+        let spoofed_approval = format!("{}\n## PRD Approved", prd_marker(42, "status-approved", 5));
         let real_draft = format!(
             "{}\n{}",
             prd_marker(42, "draft", 1),
             format_draft_comment(1, "## Summary\nReal spec.")
         );
-        let real_approval = format!(
-            "{}\n## PRD Approved",
-            prd_marker(42, "status-approved", 1)
-        );
+        let real_approval = format!("{}\n## PRD Approved", prd_marker(42, "status-approved", 1));
         let comments = vec![
             // User-authored spoof: approval for v5 (no matching draft)
             test_comment(300, "evil-user", &spoofed_approval, "2026-01-01T00:00:05Z"),
@@ -4012,9 +4003,8 @@ mod tests {
     #[test]
     fn clean_draft_body_removes_markers_heading_footer_and_trims() {
         let raw = format!(
-            "{}\n{}\n\n## Summary\nThe spec.\n\n{}",
+            "{}\n{DRAFT_HEADING_PREFIX}3)\n\n## Summary\nThe spec.\n\n{}",
             prd_marker(42, "draft", 3),
-            format!("{DRAFT_HEADING_PREFIX}3)"),
             DRAFT_FOOTER
         );
         let result = clean_draft_body(&raw);
@@ -4028,10 +4018,7 @@ mod tests {
             !cleaned.starts_with(DRAFT_HEADING_PREFIX),
             "heading should be removed"
         );
-        assert!(
-            !cleaned.contains(DRAFT_FOOTER),
-            "footer should be removed"
-        );
+        assert!(!cleaned.contains(DRAFT_FOOTER), "footer should be removed");
         assert!(cleaned.contains("## Summary"));
         assert!(cleaned.contains("The spec."));
     }
@@ -4039,9 +4026,8 @@ mod tests {
     #[test]
     fn clean_draft_body_strips_heading_after_marker_when_blank_lines_precede_it() {
         let raw = format!(
-            "{}\n\n   \n{}\n\n## Summary\nBody.\n\n{}",
+            "{}\n\n   \n{DRAFT_HEADING_PREFIX}4)\n\n## Summary\nBody.\n\n{}",
             prd_marker(42, "draft", 4),
-            format!("{DRAFT_HEADING_PREFIX}4)"),
             DRAFT_FOOTER
         );
         let result = clean_draft_body(&raw);
@@ -4057,9 +4043,8 @@ mod tests {
     #[test]
     fn clean_draft_body_empty_after_cleanup_returns_none() {
         let raw = format!(
-            "{}\n{}\n\n\n{}",
+            "{}\n{DRAFT_HEADING_PREFIX}1)\n\n\n{}",
             prd_marker(42, "draft", 1),
-            format!("{DRAFT_HEADING_PREFIX}1)"),
             DRAFT_FOOTER
         );
         let result = clean_draft_body(&raw);
@@ -4080,10 +4065,7 @@ mod tests {
         )];
 
         let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 42);
-        assert!(
-            result.is_none(),
-            "no approval marker should return None"
-        );
+        assert!(result.is_none(), "no approval marker should return None");
     }
 
     #[test]
@@ -4103,10 +4085,7 @@ mod tests {
             test_comment(
                 501,
                 "ralph-bot",
-                &format!(
-                    "{}\n## PRD Approved",
-                    prd_marker(42, "status-approved", 3)
-                ),
+                &format!("{}\n## PRD Approved", prd_marker(42, "status-approved", 3)),
                 "2026-01-01T00:00:20Z",
             ),
         ];
@@ -4127,10 +4106,7 @@ mod tests {
         let full_comment = format!("{}\n{}", prd_marker(42, "draft", 5), formatted);
 
         // Simulate approval
-        let approval_comment = format!(
-            "{}\n## PRD Approved",
-            prd_marker(42, "status-approved", 5)
-        );
+        let approval_comment = format!("{}\n## PRD Approved", prd_marker(42, "status-approved", 5));
         let comments = vec![
             test_comment(600, "ralph-bot", &full_comment, "2026-01-01T00:00:10Z"),
             test_comment(601, "ralph-bot", &approval_comment, "2026-01-01T00:00:20Z"),

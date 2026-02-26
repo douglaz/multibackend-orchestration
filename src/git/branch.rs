@@ -176,7 +176,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
 
         let branch_force_result = run_git(
             repo_root,
-            &["branch", "-f", base_branch, &remote_base_branch],
+            &["branch", "-f", base_branch, remote_base_branch],
         );
         if let Err(branch_force_err) = branch_force_result {
             let err_string = branch_force_err.to_string();

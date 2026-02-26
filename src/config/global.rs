@@ -116,17 +116,12 @@ pub struct BackendConfig {
     pub role_timeouts: RoleTimeouts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BackendEnabled {
+    #[default]
     Auto,
     Enabled,
     Disabled,
-}
-
-impl Default for BackendEnabled {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Serialize for BackendEnabled {
