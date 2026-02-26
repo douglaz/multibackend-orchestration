@@ -1240,6 +1240,8 @@ struct RawComment {
     #[serde(default, deserialize_with = "deserialize_comment_id")]
     id: Option<u64>,
     #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
     author: Option<RawCommentAuthor>,
     #[serde(default)]
     body: Option<String>,
@@ -1252,9 +1254,34 @@ struct RawCommentAuthor {
     login: String,
 }
 
+/// Extract a numeric comment ID from a GitHub comment URL.
+///
+/// Handles two URL formats:
+/// - GraphQL: `https://github.com/…#issuecomment-3954637090`
+/// - REST:    `https://api.github.com/repos/…/comments/3954637090`
+fn extract_numeric_comment_id_from_url(url: Option<&str>) -> Option<u64> {
+    let url = url?;
+    // GraphQL URL: …#issuecomment-NNNNN
+    if let Some(fragment) = url.rsplit_once('#') {
+        if let Some(id_str) = fragment.1.strip_prefix("issuecomment-") {
+            if let Ok(id) = id_str.parse::<u64>() {
+                return Some(id);
+            }
+        }
+    }
+    // REST URL: …/comments/NNNNN
+    if let Some(last_segment) = url.rsplit_once('/') {
+        if let Ok(id) = last_segment.1.parse::<u64>() {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Deserialize a comment ID that may be a numeric u64 (REST API / mocks)
 /// or a string node ID (GraphQL API via `gh issue view --json`).
-/// String node IDs are hashed to a stable u64 for ordering comparisons.
+/// String node IDs are skipped (return None) — the caller should prefer
+/// the numeric ID extracted from the `url` field instead.
 fn deserialize_comment_id<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1279,13 +1306,10 @@ where
             Ok(Some(v as u64))
         }
 
-        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
-            // GraphQL node IDs like "IC_kwDORMeVKs7q9rJD" — hash to stable u64.
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            v.hash(&mut hasher);
-            Ok(Some(hasher.finish()))
+        fn visit_str<E: de::Error>(self, _v: &str) -> std::result::Result<Self::Value, E> {
+            // GraphQL node IDs like "IC_kwDORMeVKs7q9rJD" are not numeric.
+            // Return None — the caller extracts the numeric ID from the URL field.
+            Ok(None)
         }
 
         fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
@@ -1403,7 +1427,14 @@ pub fn fetch_issue_comments_with_gh_bin(
         .comments
         .into_iter()
         .filter_map(|raw_comment| {
-            let id = raw_comment.id?;
+            // Prefer numeric ID extracted from the URL field (works with
+            // both GraphQL and REST responses).  The `url` field from
+            // `gh issue view --json comments` looks like:
+            //   https://github.com/…#issuecomment-3954637090
+            // The REST API `url` looks like:
+            //   https://api.github.com/repos/…/comments/3954637090
+            let id = extract_numeric_comment_id_from_url(raw_comment.url.as_deref())
+                .or(raw_comment.id)?;
             let author_login = raw_comment
                 .author
                 .as_ref()
@@ -2005,6 +2036,83 @@ mod tests {
         let err = super::parse_authenticated_login("   ").expect_err("empty login should fail");
         let message = err.to_string();
         assert!(message.contains("empty login"));
+    }
+
+    #[test]
+    fn extract_numeric_comment_id_from_graphql_url() {
+        let url = "https://github.com/douglaz/multibackend-orchestration/issues/92#issuecomment-3954637090";
+        assert_eq!(
+            super::extract_numeric_comment_id_from_url(Some(url)),
+            Some(3954637090)
+        );
+    }
+
+    #[test]
+    fn extract_numeric_comment_id_from_rest_url() {
+        let url = "https://api.github.com/repos/douglaz/multibackend-orchestration/issues/comments/3954637090";
+        assert_eq!(
+            super::extract_numeric_comment_id_from_url(Some(url)),
+            Some(3954637090)
+        );
+    }
+
+    #[test]
+    fn extract_numeric_comment_id_from_none() {
+        assert_eq!(super::extract_numeric_comment_id_from_url(None), None);
+    }
+
+    #[test]
+    fn extract_numeric_comment_id_from_invalid_url() {
+        assert_eq!(
+            super::extract_numeric_comment_id_from_url(Some("https://example.com/no-id")),
+            None
+        );
+    }
+
+    #[test]
+    fn deserialize_graphql_comment_with_string_id_and_url() {
+        // Simulates the JSON returned by `gh issue view --json comments`
+        // where `id` is a GraphQL node ID (string) and `url` contains the
+        // numeric comment ID.
+        let json = r#"{
+            "comments": [{
+                "id": "IC_kwDORMeVKs7rtvki",
+                "url": "https://github.com/o/r/issues/1#issuecomment-3954637090",
+                "author": {"login": "alice"},
+                "body": "hello",
+                "createdAt": "2026-01-01T00:00:00Z"
+            }]
+        }"#;
+        let parsed: super::RawIssueComments = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.comments.len(), 1);
+        let raw = &parsed.comments[0];
+        // The string node ID should be None from the deserializer
+        assert_eq!(raw.id, None);
+        // The numeric ID should be extracted from the URL
+        let numeric_id = super::extract_numeric_comment_id_from_url(raw.url.as_deref());
+        assert_eq!(numeric_id, Some(3954637090));
+    }
+
+    #[test]
+    fn deserialize_numeric_comment_id_without_url() {
+        // Simulates mock/test JSON where `id` is already numeric
+        let json = r#"{
+            "comments": [{
+                "id": 42001,
+                "author": {"login": "bob"},
+                "body": "test",
+                "createdAt": "2026-01-01T00:00:00Z"
+            }]
+        }"#;
+        let parsed: super::RawIssueComments = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.comments.len(), 1);
+        let raw = &parsed.comments[0];
+        assert_eq!(raw.id, Some(42001));
+        // No URL field, so extraction returns None
+        assert_eq!(super::extract_numeric_comment_id_from_url(raw.url.as_deref()), None);
+        // The fallback to raw.id should yield 42001
+        let id = super::extract_numeric_comment_id_from_url(raw.url.as_deref()).or(raw.id);
+        assert_eq!(id, Some(42001));
     }
 
     fn git(repo_root: &std::path::Path, args: &[&str]) {
