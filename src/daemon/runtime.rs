@@ -987,6 +987,31 @@ async fn dispatch_task(
         spawn_blocking_op(move || worktree::clean_worktree(&wt)).await?;
     }
 
+    // Remote-first project branch sync — must run BEFORE discovery so that
+    // `ralph/issue-{n}` (which contains committed project data) is checked
+    // out when we scan `.ralph/projects/`.
+    {
+        let wt = wt_path.clone();
+        let base_branch = config.base_branch.clone();
+        match spawn_blocking_op(move || {
+            crate::git::branch::sync_project_branch(&wt, issue_number, &base_branch)
+        })
+        .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "dispatch: remote-first sync completed for issue {issue_number} (task {task_id})"
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "dispatch: remote-first sync failed for issue {issue_number} (task {task_id}): {err}"
+                );
+                return Err(err);
+            }
+        }
+    }
+
     // Dispatch-time project discovery.
     // Short-circuit if the worktree was already on a project branch (resume).
     let effective_project_id = if let Some(project_id) = prior_project_id {
@@ -1030,29 +1055,6 @@ async fn dispatch_task(
             }
         }
     };
-
-    // Remote-first project branch sync
-    {
-        let wt = wt_path.clone();
-        let base_branch = config.base_branch.clone();
-        match spawn_blocking_op(move || {
-            crate::git::branch::sync_project_branch(&wt, issue_number, &base_branch)
-        })
-        .await
-        {
-            Ok(()) => {
-                eprintln!(
-                    "dispatch: remote-first sync completed for issue {issue_number} (task {task_id})"
-                );
-            }
-            Err(err) => {
-                eprintln!(
-                    "dispatch: remote-first sync failed for issue {issue_number} (task {task_id}): {err}"
-                );
-                return Err(err);
-            }
-        }
-    }
 
     // Checkout project branch if resuming
     if let Some(ref project_id) = effective_project_id {
