@@ -538,6 +538,41 @@ pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_
 }
 
 pub fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result<()> {
+    // Always prefer resetting to the remote branch so we don't resume with
+    // stale local commits that are behind origin (which causes push failures).
+    let remote_branch = format!("origin/{branch}");
+    let has_remote = Command::new("git")
+        .args(["rev-parse", "--verify", &remote_branch])
+        .current_dir(worktree_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_remote {
+        let checkout = Command::new("git")
+            .args([
+                "checkout",
+                "--force",
+                "--ignore-other-worktrees",
+                "-B",
+                branch,
+                "--track",
+                &remote_branch,
+            ])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to checkout tracking branch {branch}: {err}"
+                ))
+            })?;
+
+        if checkout.status.success() {
+            return Ok(());
+        }
+    }
+
+    // No remote — try local branch directly.
     let checkout = Command::new("git")
         .args(["checkout", "--force", "--ignore-other-worktrees", branch])
         .current_dir(worktree_path)
@@ -548,7 +583,7 @@ pub fn checkout_branch_in_worktree(worktree_path: &Path, branch: &str) -> Result
         return Ok(());
     }
 
-    let remote_branch = format!("origin/{branch}");
+    // Last resort: create tracking branch from remote (branch doesn't exist locally at all).
     let fallback = Command::new("git")
         .args([
             "checkout",
