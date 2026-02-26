@@ -210,11 +210,19 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             }
             "tool_use" | "tool_result" => {}
             "result" => {
-                // Summary event; always capture result text — it contains the
+                // Summary event; capture result text — it contains the
                 // clean final response without narration from assistant events.
+                // When multiple result events exist (e.g. claude uses tools
+                // between responses), keep the longest one since shorter
+                // follow-ups are typically summaries, not the full content.
                 if let Some(text) = extract_result_event_text(&event) {
                     if !text.is_empty() {
-                        result_text = Some(text);
+                        let dominated = result_text
+                            .as_ref()
+                            .is_some_and(|prev| prev.len() >= text.len());
+                        if !dominated {
+                            result_text = Some(text);
+                        }
                     }
                 }
                 if output.session_id.is_none() {
@@ -922,6 +930,41 @@ Done."#;
         assert_eq!(
             normalized.text,
             "# Verdict: COMPLETE\n\nAll requirements met."
+        );
+    }
+
+    #[test]
+    fn normalize_output_claude_cli_verbose_multiple_results_keeps_longest() {
+        // When claude uses tools between responses, multiple result events
+        // may appear. The first contains the full spec; the last is a short
+        // summary after tool use. We must keep the longest result.
+        let full_spec = "## Summary\nFull spec.\n\n## Acceptance Criteria\n- AC1";
+        let summary = "The spec has been written to file.";
+        let escaped_spec = full_spec.replace('\n', "\\n");
+        let line_init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let line_asst1 = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{escaped_spec}"}}]}},"session_id":"s1"}}"#,
+        );
+        let line_res1 =
+            format!(r#"{{"type":"result","result":"{escaped_spec}","session_id":"s1"}}"#,);
+        let line_asst2 = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{summary}"}}]}},"session_id":"s1"}}"#,
+        );
+        let line_res2 = format!(r#"{{"type":"result","result":"{summary}","session_id":"s1"}}"#,);
+        let raw = [line_init, &line_asst1, &line_res1, &line_asst2, &line_res2].join("\n");
+        let normalized = normalize_output(&raw).expect("keeps longest result");
+        assert!(
+            normalized.text.contains("## Summary"),
+            "should keep the longer result with section headers, got: {:?}",
+            normalized.text,
+        );
+        assert!(
+            normalized.text.contains("## Acceptance Criteria"),
+            "should preserve all sections"
+        );
+        assert!(
+            !normalized.text.contains("written to file"),
+            "should not use the short summary result"
         );
     }
 }
