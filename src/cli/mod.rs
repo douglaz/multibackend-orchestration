@@ -50,6 +50,8 @@ pub enum Commands {
 pub struct InitArgs {
     #[arg(long, default_value = ".ralph")]
     pub dir: PathBuf,
+    #[arg(long)]
+    pub copy_files: bool,
     #[arg(short = 'n', long = "dry-run")]
     pub dry_run: bool,
 }
@@ -342,6 +344,7 @@ mod tests {
         };
 
         assert_eq!(args.dir, std::path::PathBuf::from(".ralph"));
+        assert!(!args.copy_files);
         assert!(args.dry_run);
     }
 
@@ -353,7 +356,20 @@ mod tests {
         };
 
         assert_eq!(args.dir, std::path::PathBuf::from(".ralph"));
+        assert!(!args.copy_files);
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_init_with_copy_files_flag() {
+        let cli = Cli::parse_from(["ralph", "init", "--copy-files"]);
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init command");
+        };
+
+        assert_eq!(args.dir, std::path::PathBuf::from(".ralph"));
+        assert!(args.copy_files);
+        assert!(!args.dry_run);
     }
 
     #[test]

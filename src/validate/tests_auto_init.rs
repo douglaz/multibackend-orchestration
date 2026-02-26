@@ -46,18 +46,10 @@ fn auto_initializes_workspace_when_missing(h: &RalphHarness) -> TestResult {
         assert_dir_exists(&workspace_root);
         assert_file_exists(&workspace_root.join("ralph.toml"));
         assert_dir_exists(&workspace_root.join("projects"));
-        assert_dir_exists(&workspace_root.join("templates"));
-        assert_file_exists(&workspace_root.join("templates/spec.md"));
-        assert_file_exists(&workspace_root.join("templates/implementation.md"));
-        assert_file_exists(&workspace_root.join("templates/review.md"));
-        assert_file_exists(&workspace_root.join("templates/prompt_reviewer.md"));
-        assert_file_exists(&workspace_root.join("templates/prompt_review_validator.md"));
-        assert_file_exists(&workspace_root.join("templates/completion.md"));
-        assert_file_exists(&workspace_root.join("templates/qa.md"));
-        assert_file_exists(&workspace_root.join("templates/final_reviewer.md"));
-        assert_file_exists(&workspace_root.join("templates/planner_position.md"));
-        assert_file_exists(&workspace_root.join("templates/vote.md"));
-        assert_file_exists(&workspace_root.join("templates/arbiter.md"));
+        assert!(
+            !workspace_root.join("templates").exists(),
+            "auto bootstrap should use minimal init and not create templates/"
+        );
     })
 }
 

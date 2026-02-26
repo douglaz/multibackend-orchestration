@@ -125,6 +125,7 @@ fn test_init_fails_on_existing_non_empty_workspace() {
     // First init should succeed
     let args = ralph::cli::InitArgs {
         dir: workspace_root.clone(),
+        copy_files: false,
         dry_run: false,
     };
     ralph::cli::init::execute(args).expect("first init should succeed");
@@ -132,6 +133,7 @@ fn test_init_fails_on_existing_non_empty_workspace() {
     // Second init should fail
     let args = ralph::cli::InitArgs {
         dir: workspace_root.clone(),
+        copy_files: false,
         dry_run: false,
     };
     let result = ralph::cli::init::execute(args);
@@ -154,6 +156,7 @@ fn test_init_does_not_partially_overwrite_on_failure() {
     // First init
     let args = ralph::cli::InitArgs {
         dir: workspace_root.clone(),
+        copy_files: false,
         dry_run: false,
     };
     ralph::cli::init::execute(args).expect("first init should succeed");
@@ -163,6 +166,7 @@ fn test_init_does_not_partially_overwrite_on_failure() {
     // Attempt second init (should fail)
     let args = ralph::cli::InitArgs {
         dir: workspace_root.clone(),
+        copy_files: false,
         dry_run: false,
     };
     let _ = ralph::cli::init::execute(args);
@@ -204,6 +208,7 @@ fn test_init_creates_template_files_with_cli_execute() {
 
     let args = InitArgs {
         dir: workspace_root.clone(),
+        copy_files: true,
         dry_run: false,
     };
 
@@ -295,6 +300,7 @@ fn test_init_cli_with_absolute_path() {
 
     let args = InitArgs {
         dir: absolute_path.clone(),
+        copy_files: true,
         dry_run: false,
     };
 
@@ -349,6 +355,7 @@ fn test_init_cli_with_relative_path() {
 
     let args = InitArgs {
         dir: relative_path.clone(),
+        copy_files: true,
         dry_run: false,
     };
 

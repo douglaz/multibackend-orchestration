@@ -201,11 +201,7 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
 
 /// Map shorthand alias keys to their canonical dotted form.
 fn resolve_config_alias(key: &str) -> &str {
-    match key {
-        "planner_backend" => "workflow.planner_backend",
-        "qa_backend" => "workflow.qa_backend",
-        _ => key,
-    }
+    crate::config::normalize_global_config_key_alias(key)
 }
 
 fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<()> {
@@ -311,8 +307,9 @@ fn execute_set(
     let key = resolve_config_alias(key);
     match scope {
         ConfigScope::Global => {
-            set_global_value(&mut workspace.config, key, raw_value)?;
-            workspace.save_config()?;
+            save_global_value_sparse(&workspace.root.join("ralph.toml"), key, raw_value)?;
+            workspace.config =
+                crate::config::GlobalConfig::load(&workspace.root.join("ralph.toml"))?;
             println!("updated global config: {key}");
             Ok(())
         }
@@ -379,12 +376,17 @@ fn lookup_path<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
     Ok(current)
 }
 
+#[cfg(test)]
 fn set_global_value(
     config: &mut crate::config::GlobalConfig,
     key: &str,
     raw_value: &str,
 ) -> Result<()> {
     crate::config::set_global_config_value(config, key, raw_value)
+}
+
+fn save_global_value_sparse(path: &std::path::Path, key: &str, raw_value: &str) -> Result<()> {
+    crate::config::save_config_sparse(path, key, raw_value)
 }
 
 fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> Result<()> {

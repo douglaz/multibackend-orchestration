@@ -615,7 +615,19 @@ fn loops_flag(h: &RalphHarness) -> TestResult {
 fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "issue-217";
-        setup_with_standard_mock(h, project_id);
+        h.ralph_ok(["init", "--copy-files"])
+            .expect("init --copy-files failed");
+        let script = h
+            .write_mock_script("standard-mock.sh", &standard_mock_script())
+            .expect("failed to write standard mock script");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            project_id,
+            "Run Conformance Project",
+            "Run suite test prompt",
+        )
+        .expect("create_project failed");
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "true"])
             .expect("config set workflow.qa_enabled true failed");

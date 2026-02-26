@@ -66,7 +66,7 @@ fn ensure_workspace_initialized(repo_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let _ = crate::cli::init::create_workspace(&workspace_root)?;
+    let _ = crate::cli::init::create_workspace(&workspace_root, false)?;
     Ok(())
 }
 

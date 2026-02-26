@@ -6,7 +6,9 @@ use std::time::Duration;
 use clap::ValueEnum;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use toml_edit::{DocumentMut, Item, Table, Value as TomlEditValue};
 
+use crate::error::RalphError;
 use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1100,6 +1102,216 @@ impl GlobalConfig {
 // Shared global config mutation helpers
 // ---------------------------------------------------------------------------
 
+/// Map shorthand alias keys to their canonical dotted form.
+pub(crate) fn normalize_global_config_key_alias(key: &str) -> &str {
+    match key {
+        "planner_backend" => "workflow.planner_backend",
+        "qa_backend" => "workflow.qa_backend",
+        _ => key,
+    }
+}
+
+/// Split a canonical global-config key into document path segments.
+///
+/// Dynamic backend keys preserve the dynamic suffix as a single segment even
+/// if it contains dots, for example:
+/// `backends.claude.env.FOO.BAR` => `["backends","claude","env","FOO.BAR"]`.
+pub(crate) fn split_global_config_key_segments(key: &str) -> Vec<String> {
+    let key = normalize_global_config_key_alias(key);
+    if let Some(suffix) = key.strip_prefix("backends.claude.env.") {
+        return vec![
+            "backends".to_owned(),
+            "claude".to_owned(),
+            "env".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.codex.env.") {
+        return vec![
+            "backends".to_owned(),
+            "codex".to_owned(),
+            "env".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.gemini.env.") {
+        return vec![
+            "backends".to_owned(),
+            "gemini".to_owned(),
+            "env".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.claude.models.") {
+        return vec![
+            "backends".to_owned(),
+            "claude".to_owned(),
+            "models".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.codex.models.") {
+        return vec![
+            "backends".to_owned(),
+            "codex".to_owned(),
+            "models".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.gemini.models.") {
+        return vec![
+            "backends".to_owned(),
+            "gemini".to_owned(),
+            "models".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.claude.role_timeouts.") {
+        return vec![
+            "backends".to_owned(),
+            "claude".to_owned(),
+            "role_timeouts".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.codex.role_timeouts.") {
+        return vec![
+            "backends".to_owned(),
+            "codex".to_owned(),
+            "role_timeouts".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+    if let Some(suffix) = key.strip_prefix("backends.gemini.role_timeouts.") {
+        return vec![
+            "backends".to_owned(),
+            "gemini".to_owned(),
+            "role_timeouts".to_owned(),
+            suffix.to_owned(),
+        ];
+    }
+
+    key.split('.').map(ToOwned::to_owned).collect()
+}
+
+/// Sparse global-config save path used by `ralph config set --global`.
+///
+/// - Validates with the exact same key/value semantics as `set_global_config_value`.
+/// - Preserves unrelated TOML structure/comments/formatting.
+/// - Mutates only the targeted key path.
+pub(crate) fn save_config_sparse(toml_path: &Path, key: &str, raw_value: &str) -> Result<()> {
+    let raw = fs::read_to_string(toml_path)?;
+    let mut candidate: GlobalConfig = toml::from_str(&raw)?;
+
+    let key = normalize_global_config_key_alias(key);
+    set_global_config_value(&mut candidate, key, raw_value)?;
+
+    let mut doc = raw.parse::<DocumentMut>().map_err(|err| {
+        RalphError::Validation(format!(
+            "failed to parse global config TOML for sparse edit: {err}"
+        ))
+    })?;
+    let path = split_global_config_key_segments(key);
+
+    if key_becomes_none(key, raw_value) {
+        remove_document_key(&mut doc, &path);
+    } else {
+        let value = extract_edit_value(&candidate, key, &path)?;
+        set_document_key(&mut doc, &path, value);
+    }
+
+    fs::write(toml_path, doc.to_string())?;
+    Ok(())
+}
+
+fn key_becomes_none(key: &str, raw_value: &str) -> bool {
+    match key {
+        "workspace.daemon_repo"
+        | "workflow.planner_backend"
+        | "workflow.implementer_backend"
+        | "workflow.reviewer_backend"
+        | "workflow.qa_backend"
+        | "workflow.completer_backend" => raw_value == "null",
+        "workflow.planner_max_prior_loops" => raw_value == "none",
+        _ if key.starts_with("backends.claude.models.")
+            || key.starts_with("backends.codex.models.")
+            || key.starts_with("backends.gemini.models.")
+            || key.starts_with("backends.claude.role_timeouts.")
+            || key.starts_with("backends.codex.role_timeouts.")
+            || key.starts_with("backends.gemini.role_timeouts.") =>
+        {
+            raw_value == "null"
+        }
+        _ => false,
+    }
+}
+
+fn extract_edit_value(config: &GlobalConfig, key: &str, path: &[String]) -> Result<TomlEditValue> {
+    let config_value = toml::Value::try_from(config.clone()).map_err(|err| {
+        RalphError::Validation(format!(
+            "failed to serialize config while applying sparse key '{key}': {err}"
+        ))
+    })?;
+    let mut current = &config_value;
+    for segment in path {
+        current = current.get(segment).ok_or_else(|| {
+            RalphError::Validation(format!(
+                "internal sparse-save error: key '{key}' missing after validation"
+            ))
+        })?;
+    }
+
+    current.to_string().parse::<TomlEditValue>().map_err(|err| {
+        RalphError::Validation(format!(
+            "failed to encode sparse value for key '{key}': {err}"
+        ))
+    })
+}
+
+fn set_document_key(doc: &mut DocumentMut, path: &[String], value: TomlEditValue) {
+    if path.is_empty() {
+        return;
+    }
+    let (parents, last) = path.split_at(path.len() - 1);
+    let table = ensure_table_path(doc.as_table_mut(), parents);
+    table[last[0].as_str()] = Item::Value(value);
+}
+
+fn ensure_table_path<'a>(table: &'a mut Table, path: &[String]) -> &'a mut Table {
+    if let Some((segment, rest)) = path.split_first() {
+        let needs_table =
+            !table.contains_key(segment.as_str()) || !table[segment.as_str()].is_table();
+        if needs_table {
+            table[segment.as_str()] = Item::Table(Table::new());
+        }
+        let next = table[segment.as_str()]
+            .as_table_mut()
+            .expect("table ensured");
+        return ensure_table_path(next, rest);
+    }
+    table
+}
+
+fn remove_document_key(doc: &mut DocumentMut, path: &[String]) {
+    remove_from_table(doc.as_table_mut(), path);
+}
+
+fn remove_from_table(table: &mut Table, path: &[String]) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.remove(path[0].as_str());
+        return;
+    }
+
+    let head = path[0].as_str();
+    let Some(next) = table.get_mut(head).and_then(Item::as_table_mut) else {
+        return;
+    };
+    remove_from_table(next, &path[1..]);
+}
+
 /// Apply a key/value mutation to a `GlobalConfig`, using the same key coverage
 /// and validation as `ralph config set --global`.
 ///
@@ -1110,6 +1322,8 @@ pub(crate) fn set_global_config_value(
     key: &str,
     raw_value: &str,
 ) -> Result<()> {
+    let key = normalize_global_config_key_alias(key);
+
     match key {
         "workspace.version" => config.workspace.version = raw_value.to_owned(),
         "workspace.default_backend" => {
@@ -1621,9 +1835,15 @@ fn cfg_set_role_timeout(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::{
-        set_global_config_value, BackendConfig, BackendEnabled, BackendRoleModels, GlobalConfig,
-        PartialBackendConfig, PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
+        normalize_global_config_key_alias, save_config_sparse, set_global_config_value,
+        split_global_config_key_segments, BackendConfig, BackendEnabled, BackendRoleModels,
+        GlobalConfig, PartialBackendConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
+        RoleTimeouts,
     };
 
     #[test]
@@ -3003,5 +3223,326 @@ planner_state_in_prompt = "summary"
                 "key '{key}' should produce 'unsupported global config key' error"
             );
         }
+    }
+
+    #[test]
+    fn sparse_save_preserves_comments_and_unknown_keys() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        fs::write(
+            &path,
+            r#"# keep me
+[workspace]
+# keep default backend comment
+default_backend = "claude"
+unknown_workspace_key = "still-here"
+
+[custom]
+note = "preserve"
+"#,
+        )
+        .expect("write config");
+
+        save_config_sparse(&path, "workflow.auto_commit", "false").expect("sparse save");
+
+        let updated = fs::read_to_string(&path).expect("read updated config");
+        assert!(updated.contains("# keep me"));
+        assert!(updated.contains("# keep default backend comment"));
+        assert!(updated.contains("unknown_workspace_key = \"still-here\""));
+        assert!(updated.contains("[custom]"));
+        assert!(updated.contains("note = \"preserve\""));
+    }
+
+    #[test]
+    fn sparse_save_rejects_invalid_value_without_mutating_file() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+        let before = fs::read_to_string(&path).expect("read initial config");
+
+        let err = save_config_sparse(&path, "workflow.auto_commit", "maybe")
+            .expect_err("invalid value should fail");
+        assert!(err.to_string().contains("expects boolean"));
+
+        let after = fs::read_to_string(&path).expect("read config after failure");
+        assert_eq!(after, before, "sparse save must not mutate on failure");
+    }
+
+    #[test]
+    fn sparse_save_rejects_invalid_key_without_mutating_file() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+        let before = fs::read_to_string(&path).expect("read initial config");
+
+        let err = save_config_sparse(&path, "workspace.daemon_prd_enabled", "false")
+            .expect_err("unsupported key should fail");
+        assert!(err.to_string().contains("unsupported global config key"));
+
+        let after = fs::read_to_string(&path).expect("read config after failure");
+        assert_eq!(after, before, "sparse save must not mutate on failure");
+    }
+
+    #[test]
+    fn sparse_save_rejects_invalid_toml_without_mutating_file() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        fs::write(&path, "not = [valid").expect("write invalid toml");
+        let before = fs::read_to_string(&path).expect("read invalid config");
+
+        let _ = save_config_sparse(&path, "workflow.auto_commit", "false")
+            .expect_err("invalid toml should fail");
+
+        let after = fs::read_to_string(&path).expect("read config after failure");
+        assert_eq!(after, before, "sparse save must not mutate on TOML failure");
+    }
+
+    #[test]
+    fn sparse_save_alias_writes_canonical_path() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+
+        save_config_sparse(&path, "planner_backend", "codex").expect("sparse save alias");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        assert!(
+            raw.contains("planner_backend = \"codex\""),
+            "alias should write workflow.planner_backend key"
+        );
+        let loaded = GlobalConfig::load(&path).expect("load config");
+        assert_eq!(loaded.workflow.planner_backend.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn split_global_config_key_segments_preserves_dotted_dynamic_suffix() {
+        assert_eq!(
+            split_global_config_key_segments("backends.claude.env.FOO.BAR"),
+            vec![
+                "backends".to_owned(),
+                "claude".to_owned(),
+                "env".to_owned(),
+                "FOO.BAR".to_owned(),
+            ]
+        );
+        assert_eq!(
+            split_global_config_key_segments("backends.codex.models.final.reviewer"),
+            vec![
+                "backends".to_owned(),
+                "codex".to_owned(),
+                "models".to_owned(),
+                "final.reviewer".to_owned(),
+            ]
+        );
+        assert_eq!(
+            split_global_config_key_segments("backends.gemini.role_timeouts.prompt.reviewer"),
+            vec![
+                "backends".to_owned(),
+                "gemini".to_owned(),
+                "role_timeouts".to_owned(),
+                "prompt.reviewer".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_save_supports_dotted_dynamic_suffixes() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+
+        save_config_sparse(&path, "backends.claude.env.FOO.BAR", "baz").expect("set env");
+
+        let model_err =
+            save_config_sparse(&path, "backends.claude.models.prompt.reviewer", "sonnet")
+                .expect_err("unknown dotted model role should still reject");
+        assert!(model_err.to_string().contains("unknown backend model role"));
+
+        let timeout_err =
+            save_config_sparse(&path, "backends.claude.role_timeouts.prompt.reviewer", "45")
+                .expect_err("unknown dotted timeout role should still reject");
+        assert!(timeout_err
+            .to_string()
+            .contains("unknown backend timeout role"));
+
+        let toml_value: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse toml");
+        assert_eq!(
+            toml_value
+                .get("backends")
+                .and_then(|v| v.get("claude"))
+                .and_then(|v| v.get("env"))
+                .and_then(|v| v.get("FOO.BAR"))
+                .and_then(toml::Value::as_str),
+            Some("baz")
+        );
+    }
+
+    #[test]
+    fn sparse_save_table_driven_key_coverage_matches_shared_mutator() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        let expected_path = temp.path().join("expected.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+        GlobalConfig::default()
+            .save(&expected_path)
+            .expect("save expected config");
+
+        let mut expected = GlobalConfig::default();
+        let cases = vec![
+            ("workspace.version", "2.0"),
+            ("workspace.default_backend", "codex"),
+            ("workspace.git_bin", "/usr/local/bin/git"),
+            ("workspace.gh_bin", "/usr/local/bin/gh"),
+            ("workspace.tmux", "true"),
+            ("workspace.tmux_session", "ci-session"),
+            ("workspace.tmux_window_keep_seconds", "30"),
+            ("workspace.daemon_poll_seconds", "75"),
+            ("workspace.daemon_max_concurrent", "7"),
+            ("workspace.daemon_labels", "[\"ralph:ready\",\"triage\"]"),
+            ("workspace.daemon_repo", "acme/widgets"),
+            ("workspace.daemon_repo", "null"),
+            ("workspace.daemon_refinement_enabled", "false"),
+            ("workspace.daemon_refinement_backend", "codex"),
+            ("workspace.daemon_auto_rebase_enabled", "false"),
+            ("workspace.daemon_rebase_interval_seconds", "900"),
+            ("workspace.daemon_max_rebases_per_cycle", "4"),
+            ("workspace.daemon_rebase_timeout_seconds", "180"),
+            ("workspace.daemon_rebase_agent_backend", "none"),
+            ("workflow.max_review_iterations", "9"),
+            ("workflow.auto_commit", "false"),
+            ("workflow.commit_message_style", "minimal"),
+            (
+                "workflow.commit_tag_format",
+                "tag/{project_id}/{loop_number}",
+            ),
+            ("workflow.prompt_change_action", "restart-loop"),
+            ("workflow.prompt_review_enabled", "false"),
+            ("workflow.prompt_review_backend", "codex"),
+            (
+                "workflow.prompt_review_backends",
+                "[\"claude(opus)\",\"codex(gpt-5.3-codex-xhigh)\"]",
+            ),
+            ("workflow.prompt_review_min_reviewers", "2"),
+            ("workflow.planner_backend", "claude(opus)"),
+            ("planner_backend", "codex"),
+            ("workflow.implementer_backend", "claude"),
+            ("workflow.reviewer_backend", "codex"),
+            ("workflow.qa_backend", "claude"),
+            ("qa_backend", "codex"),
+            ("workflow.completer_backend", "claude"),
+            ("workflow.final_review_enabled", "false"),
+            ("workflow.final_review_backends", "[\"claude\",\"codex\"]"),
+            ("workflow.final_review_arbiter_backend", "codex"),
+            ("workflow.final_review_min_reviewers", "1"),
+            ("workflow.final_review_consensus_threshold", "0.75"),
+            ("workflow.max_final_review_restarts", "3"),
+            ("workflow.completion_backends", "[\"claude\",\"codex\"]"),
+            ("workflow.completion_min_completers", "1"),
+            ("workflow.completion_consensus_threshold", "0.8"),
+            ("workflow.qa_enabled", "false"),
+            ("workflow.max_qa_iterations", "8"),
+            ("workflow.planner_state_in_prompt", "full-json"),
+            ("workflow.planner_previous_specs_in_prompt", "full-text"),
+            ("workflow.planner_max_prior_loops", "none"),
+            ("workflow.planner_max_prior_loops", "12"),
+            ("workflow.max_review_history_entries_in_prompt", "6"),
+            ("workflow.max_qa_history_entries_in_prompt", "5"),
+            (
+                "workflow.include_history_when_session_reuse_enabled",
+                "true",
+            ),
+            ("workflow.session_reuse_enabled", "true"),
+            ("workflow.session_reuse_roles", "[\"planner\",\"reviewer\"]"),
+            ("workflow.session_reuse_reset_on_prompt_change", "true"),
+            ("workflow.session_reuse_reset_on_rollback", "true"),
+            ("templates.planner", "custom/spec.md"),
+            ("templates.implementer", "custom/implementation.md"),
+            ("templates.reviewer", "custom/review.md"),
+            ("templates.prompt_reviewer", "custom/prompt_reviewer.md"),
+            (
+                "templates.prompt_review_validator",
+                "custom/prompt_review_validator.md",
+            ),
+            ("templates.completer", "custom/completion.md"),
+            ("templates.qa", "custom/qa.md"),
+            ("templates.final_reviewer", "custom/final_reviewer.md"),
+            ("templates.planner_position", "custom/planner_position.md"),
+            ("templates.vote", "custom/vote.md"),
+            ("templates.arbiter", "custom/arbiter.md"),
+            ("git.auto_branch", "false"),
+            ("git.branch_format", "feature/{project_id}"),
+            ("git.sign_commits", "true"),
+            ("git.base_branch", "main"),
+            ("backends.claude.command", "/usr/local/bin/claude"),
+            ("backends.codex.command", "/usr/local/bin/codex"),
+            ("backends.gemini.command", "/usr/local/bin/gemini"),
+            ("backends.claude.timeout_seconds", "3600"),
+            ("backends.codex.timeout_seconds", "3700"),
+            ("backends.gemini.timeout_seconds", "3800"),
+            ("backends.claude.enabled", "true"),
+            ("backends.codex.enabled", "false"),
+            ("backends.gemini.enabled", "auto"),
+            ("backends.claude.role_timeouts.planner", "120"),
+            ("backends.codex.role_timeouts.acceptance_qa", "90"),
+            ("backends.gemini.role_timeouts.prompt_reviewer", "33"),
+            ("backends.claude.role_timeouts.planner", "null"),
+            ("backends.claude.args", "[\"--flag\",\"value\"]"),
+            ("backends.codex.args", "exec,-"),
+            ("backends.gemini.args", "[\"-p\",\"--json\"]"),
+            ("backends.claude.models.planner", "sonnet"),
+            ("backends.codex.models.acceptance_qa", "gpt-5.3-codex-high"),
+            ("backends.gemini.models.reformatter", "gemini-3-pro-preview"),
+            ("backends.claude.models.planner", "null"),
+            ("backends.claude.env.API_KEY", "secret"),
+            ("backends.codex.env.FOO.BAR", "baz"),
+            ("backends.gemini.env.MODEL.VERSION", "v1"),
+        ];
+
+        for (key, raw_value) in cases {
+            save_config_sparse(&path, key, raw_value)
+                .unwrap_or_else(|err| panic!("sparse save failed for '{key}': {err}"));
+            set_global_config_value(&mut expected, key, raw_value)
+                .unwrap_or_else(|err| panic!("shared mutator failed for '{key}': {err}"));
+            expected
+                .save(&expected_path)
+                .unwrap_or_else(|err| panic!("failed to save expected config for '{key}': {err}"));
+            expected = GlobalConfig::load(&expected_path).unwrap_or_else(|err| {
+                panic!("failed to reload expected config for '{key}': {err}")
+            });
+
+            let actual = GlobalConfig::load(&path)
+                .unwrap_or_else(|err| panic!("failed to load config after '{key}': {err}"));
+            assert_eq!(
+                actual, expected,
+                "config mismatch after sparse save for key '{key}'"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_global_config_key_alias_handles_supported_aliases() {
+        assert_eq!(
+            normalize_global_config_key_alias("planner_backend"),
+            "workflow.planner_backend"
+        );
+        assert_eq!(
+            normalize_global_config_key_alias("qa_backend"),
+            "workflow.qa_backend"
+        );
+        assert_eq!(
+            normalize_global_config_key_alias("workflow.auto_commit"),
+            "workflow.auto_commit"
+        );
     }
 }

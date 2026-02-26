@@ -339,7 +339,7 @@ impl RalphHarness {
     /// the `ralph init` CLI subprocess. Faster and avoids process overhead.
     pub fn init_workspace_fast(&self) -> Result<Workspace> {
         let ralph_root = self.repo_root.join(".ralph");
-        crate::cli::init::create_workspace(&ralph_root)
+        crate::cli::init::create_workspace(&ralph_root, false)
     }
 
     /// Create a project via the production API instead of `ralph project new`.

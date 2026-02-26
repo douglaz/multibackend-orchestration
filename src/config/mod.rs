@@ -10,7 +10,9 @@ use crate::project::artifacts::slugify_backend;
 use crate::Result;
 use tracing::warn;
 
-pub(crate) use global::set_global_config_value;
+pub(crate) use global::{
+    normalize_global_config_key_alias, save_config_sparse, set_global_config_value,
+};
 pub use global::{
     CommitMessageStyle, GlobalConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
     PromptChangeAction,

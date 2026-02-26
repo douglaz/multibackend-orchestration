@@ -50,6 +50,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: config_set,
         },
         ConformanceTest {
+            name: "commands::config_set_global_sparse_preserves_comments",
+            func: config_set_global_sparse_preserves_comments,
+        },
+        ConformanceTest {
+            name: "commands::config_set_global_failure_does_not_mutate_file",
+            func: config_set_global_failure_does_not_mutate_file,
+        },
+        ConformanceTest {
+            name: "commands::config_set_global_supports_dotted_dynamic_suffix",
+            func: config_set_global_supports_dotted_dynamic_suffix,
+        },
+        ConformanceTest {
             name: "commands::config_show_global",
             func: config_show_global,
         },
@@ -374,6 +386,91 @@ fn config_set(h: &RalphHarness) -> TestResult {
         assert!(
             value.contains("codex"),
             "expected config get planner_backend to return 'codex' after set, got: '{value}'"
+        );
+    })
+}
+
+fn config_set_global_sparse_preserves_comments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let config_path = h.repo_root.join(".ralph").join("ralph.toml");
+        std::fs::write(
+            &config_path,
+            r#"# preserve-top-comment
+[workspace]
+# preserve-inline-comment
+default_backend = "claude"
+unknown_workspace_key = "keep-me"
+"#,
+        )
+        .expect("write custom config");
+
+        h.ralph_ok(["config", "set", "--global", "workflow.auto_commit", "false"])
+            .expect("global config set should succeed");
+
+        let updated = std::fs::read_to_string(&config_path).expect("read updated config");
+        assert!(
+            updated.contains("# preserve-top-comment"),
+            "top comment should be preserved by sparse edit"
+        );
+        assert!(
+            updated.contains("# preserve-inline-comment"),
+            "inline comment should be preserved by sparse edit"
+        );
+        assert!(
+            updated.contains("unknown_workspace_key = \"keep-me\""),
+            "unknown key should be preserved by sparse edit"
+        );
+    })
+}
+
+fn config_set_global_failure_does_not_mutate_file(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let config_path = h.repo_root.join(".ralph").join("ralph.toml");
+        let before = std::fs::read_to_string(&config_path).expect("read initial config");
+
+        let output = h
+            .ralph(["config", "set", "--global", "workflow.auto_commit", "maybe"])
+            .expect("ralph config set --global should execute");
+        assert_exit_code(&output, 2);
+
+        let after = std::fs::read_to_string(&config_path).expect("read config after failure");
+        assert_eq!(
+            after, before,
+            "invalid global config set should not mutate ralph.toml"
+        );
+    })
+}
+
+fn config_set_global_supports_dotted_dynamic_suffix(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "--global",
+            "backends.codex.env.FOO.BAR",
+            "baz",
+        ])
+        .expect("config set dotted env key should succeed");
+
+        let config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(h.repo_root.join(".ralph").join("ralph.toml"))
+                .expect("read config"),
+        )
+        .expect("parse config");
+        assert_eq!(
+            config
+                .get("backends")
+                .and_then(|v| v.get("codex"))
+                .and_then(|v| v.get("env"))
+                .and_then(|v| v.get("FOO.BAR"))
+                .and_then(toml::Value::as_str),
+            Some("baz")
         );
     })
 }
