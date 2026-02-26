@@ -50,6 +50,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: config_set,
         },
         ConformanceTest {
+            name: "commands::config_set_global_planner_max_prior_loops_none_roundtrip",
+            func: config_set_global_planner_max_prior_loops_none_roundtrip,
+        },
+        ConformanceTest {
             name: "commands::config_set_global_sparse_preserves_comments",
             func: config_set_global_sparse_preserves_comments,
         },
@@ -387,6 +391,32 @@ fn config_set(h: &RalphHarness) -> TestResult {
             value.contains("codex"),
             "expected config get planner_backend to return 'codex' after set, got: '{value}'"
         );
+    })
+}
+
+fn config_set_global_planner_max_prior_loops_none_roundtrip(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        h.ralph_ok([
+            "config",
+            "set",
+            "--global",
+            "workflow.planner_max_prior_loops",
+            "none",
+        ])
+        .expect("global planner_max_prior_loops set should succeed");
+
+        let output = h
+            .ralph([
+                "config",
+                "get",
+                "--global",
+                "workflow.planner_max_prior_loops",
+            ])
+            .expect("global planner_max_prior_loops get should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_eq(&output, "none");
     })
 }
 

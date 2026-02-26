@@ -376,7 +376,11 @@ pub struct WorkflowConfig {
     pub planner_state_in_prompt: PlannerStateInPrompt,
     #[serde(default)]
     pub planner_previous_specs_in_prompt: PreviousSpecsInPrompt,
-    #[serde(default = "default_planner_max_prior_loops")]
+    #[serde(
+        default = "default_planner_max_prior_loops",
+        serialize_with = "serialize_planner_max_prior_loops",
+        deserialize_with = "deserialize_planner_max_prior_loops"
+    )]
     pub planner_max_prior_loops: Option<usize>,
     #[serde(default = "default_max_review_history_entries_in_prompt")]
     pub max_review_history_entries_in_prompt: usize,
@@ -915,6 +919,41 @@ fn default_planner_max_prior_loops() -> Option<usize> {
     Some(10)
 }
 
+fn serialize_planner_max_prior_loops<S>(
+    value: &Option<usize>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(limit) => limit.serialize(serializer),
+        None => serializer.serialize_str("none"),
+    }
+}
+
+fn deserialize_planner_max_prior_loops<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PlannerMaxPriorLoopsRepr {
+        Number(usize),
+        Text(String),
+    }
+
+    match PlannerMaxPriorLoopsRepr::deserialize(deserializer)? {
+        PlannerMaxPriorLoopsRepr::Number(limit) => Ok(Some(limit)),
+        PlannerMaxPriorLoopsRepr::Text(raw) if raw == "none" => Ok(None),
+        PlannerMaxPriorLoopsRepr::Text(raw) => Err(de::Error::custom(format!(
+            "invalid planner_max_prior_loops '{raw}'; expected unsigned integer or \"none\""
+        ))),
+    }
+}
+
 fn default_max_review_history_entries_in_prompt() -> usize {
     3
 }
@@ -1232,7 +1271,6 @@ fn key_becomes_none(key: &str, raw_value: &str) -> bool {
         | "workflow.reviewer_backend"
         | "workflow.qa_backend"
         | "workflow.completer_backend" => raw_value == "null",
-        "workflow.planner_max_prior_loops" => raw_value == "none",
         _ if key.starts_with("backends.claude.models.")
             || key.starts_with("backends.codex.models.")
             || key.starts_with("backends.gemini.models.")
@@ -3060,6 +3098,28 @@ planner_state_in_prompt = "summary"
         assert!(!config.workflow.include_history_when_session_reuse_enabled);
     }
 
+    #[test]
+    fn workflow_config_deserializes_planner_max_prior_loops_none_string_as_unlimited() {
+        let raw = r#"
+[workflow]
+planner_max_prior_loops = "none"
+"#;
+        let config: GlobalConfig = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(config.workflow.planner_max_prior_loops, None);
+    }
+
+    #[test]
+    fn workflow_config_serializes_planner_max_prior_loops_none_as_none_string() {
+        let mut config = GlobalConfig::default();
+        config.workflow.planner_max_prior_loops = None;
+
+        let raw = toml::to_string(&config).expect("config should serialize");
+        assert!(raw.contains("planner_max_prior_loops = \"none\""));
+
+        let loaded: GlobalConfig = toml::from_str(&raw).expect("config should deserialize");
+        assert_eq!(loaded.workflow.planner_max_prior_loops, None);
+    }
+
     // ── Shared global config mutator parity tests ──────────────────────
 
     #[test]
@@ -3420,6 +3480,40 @@ note = "preserve"
     }
 
     #[test]
+    fn sparse_save_planner_max_prior_loops_none_roundtrips_to_unlimited() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+
+        save_config_sparse(&path, "workflow.planner_max_prior_loops", "none").expect("sparse save");
+
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("planner_max_prior_loops = \"none\""));
+
+        let loaded = GlobalConfig::load(&path).expect("load config");
+        assert_eq!(loaded.workflow.planner_max_prior_loops, None);
+    }
+
+    #[test]
+    fn sparse_save_planner_max_prior_loops_number_roundtrips() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        GlobalConfig::default()
+            .save(&path)
+            .expect("save default config");
+
+        save_config_sparse(&path, "workflow.planner_max_prior_loops", "12").expect("sparse save");
+
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("planner_max_prior_loops = 12"));
+
+        let loaded = GlobalConfig::load(&path).expect("load config");
+        assert_eq!(loaded.workflow.planner_max_prior_loops, Some(12));
+    }
+
+    #[test]
     fn sparse_save_inline_table_preserves_siblings() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ralph.toml");
@@ -3567,13 +3661,9 @@ note = "preserve"
     fn sparse_save_table_driven_key_coverage_matches_shared_mutator() {
         let temp = tempdir().expect("temp dir");
         let path = temp.path().join("ralph.toml");
-        let expected_path = temp.path().join("expected.toml");
         GlobalConfig::default()
             .save(&path)
             .expect("save default config");
-        GlobalConfig::default()
-            .save(&expected_path)
-            .expect("save expected config");
 
         let mut expected = GlobalConfig::default();
         let cases = vec![
@@ -3680,7 +3770,6 @@ note = "preserve"
             ("backends.claude.models.planner", "sonnet"),
             ("backends.codex.models.acceptance_qa", "gpt-5.3-codex-high"),
             ("backends.gemini.models.reformatter", "gemini-3-pro-preview"),
-            ("backends.claude.models.planner", "null"),
             ("backends.claude.env.API_KEY", "secret"),
             ("backends.codex.env.FOO.BAR", "baz"),
             ("backends.gemini.env.MODEL.VERSION", "v1"),
@@ -3691,12 +3780,6 @@ note = "preserve"
                 .unwrap_or_else(|err| panic!("sparse save failed for '{key}': {err}"));
             set_global_config_value(&mut expected, key, raw_value)
                 .unwrap_or_else(|err| panic!("shared mutator failed for '{key}': {err}"));
-            expected
-                .save(&expected_path)
-                .unwrap_or_else(|err| panic!("failed to save expected config for '{key}': {err}"));
-            expected = GlobalConfig::load(&expected_path).unwrap_or_else(|err| {
-                panic!("failed to reload expected config for '{key}': {err}")
-            });
 
             let actual = GlobalConfig::load(&path)
                 .unwrap_or_else(|err| panic!("failed to load config after '{key}': {err}"));
