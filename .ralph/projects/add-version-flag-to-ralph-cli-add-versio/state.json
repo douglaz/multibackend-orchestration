@@ -1,0 +1,78 @@
+{
+  "project_id": "add-version-flag-to-ralph-cli-add-versio",
+  "project_name": "# Add `--version` Flag to Ralph CLI\n\nAdd version reporting t",
+  "created_at": "2026-02-14T15:28:40.243308451Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "bebb0d1a3a182e086488655f9616a3f9c5231443479d5ace870ba047d42a3a43",
+  "prompt_hash_at_loop_start": "bebb0d1a3a182e086488655f9616a3f9c5231443479d5ace870ba047d42a3a43",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "add-version-flag-to-ralph-cli",
+      "feature_name": "Add `--version` flag to Ralph CLI",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-add-version-flag-to-ralph-cli/20260214153035-spec.md",
+        "impl_notes": "loops/001-add-version-flag-to-ralph-cli/20260214153242-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-add-version-flag-to-ralph-cli/20260214153422-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-add-version-flag-to-ralph-cli/20260214153409-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "eb99f618d1b6de069b1142479e7d53567b1be662",
+      "started_at": "2026-02-14T15:30:35.250643233Z",
+      "completed_at": "2026-02-14T15:34:22.954626991Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260214153433-termination-request.md",
+        "verdict": "loops/002-completion/20260214153503-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260214153718-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260214154100-acceptance-pass-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-14T15:34:33.511324256Z",
+      "completed_at": "2026-02-14T15:35:03.326551939Z"
+    }
+  ]
+}
