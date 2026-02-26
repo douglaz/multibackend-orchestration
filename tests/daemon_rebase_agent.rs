@@ -7,8 +7,9 @@
 //! `resolve_rebase_conflicts(path, target, backend_str, deadline)` which
 //! handles backend parsing internally.
 //!
-//! All tests acquire a shared mutex before mutating the process PATH, ensuring
-//! deterministic execution even under parallel test runners.
+//! All tests acquire a shared mutex before mutating the test-only claude-bin
+//! override environment variable, ensuring deterministic execution even under
+//! parallel test runners.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -20,8 +21,8 @@ use std::time::{Duration, Instant};
 use ralph::daemon::rebase_agent::{is_rebase_in_progress, resolve_rebase_conflicts};
 use tempfile::TempDir;
 
-/// Global mutex to serialize tests that mutate the process PATH.
-static PATH_MUTEX: Mutex<()> = Mutex::new(());
+/// Global mutex to serialize tests that mutate the process env override.
+static CLAUDE_BIN_MUTEX: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,7 +133,7 @@ fn create_multi_commit_conflict_repo() -> TempDir {
 }
 
 /// Write a mock `claude` script to a per-test bin directory inside the tempdir.
-/// Returns the bin directory path.
+/// Returns the executable path.
 fn write_mock_claude(tmp: &TempDir, script_content: &str) -> PathBuf {
     let bin_dir = tmp.path().join("mock-bin");
     fs::create_dir_all(&bin_dir).expect("create mock-bin dir");
@@ -142,21 +143,29 @@ fn write_mock_claude(tmp: &TempDir, script_content: &str) -> PathBuf {
     perms.set_mode(0o755);
     fs::set_permissions(&claude_path, perms).expect("set permissions");
 
-    bin_dir
+    claude_path
 }
 
-/// Run a closure with the mock bin directory prepended to PATH.
-/// Acquires the global PATH_MUTEX for safety and restores PATH on exit.
-fn with_mock_path<F, R>(mock_bin_dir: &Path, f: F) -> R
+/// Run a closure with the mock claude binary path injected via env override.
+/// Acquires the global mutex for safety and restores env on exit.
+fn with_mock_claude_bin<F, R>(mock_claude_bin: &Path, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", mock_bin_dir.display(), original_path);
-    std::env::set_var("PATH", &new_path);
+    let _guard = CLAUDE_BIN_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var("RALPH_REBASE_AGENT_CLAUDE_BIN").ok();
+    unsafe {
+        std::env::set_var(
+            "RALPH_REBASE_AGENT_CLAUDE_BIN",
+            mock_claude_bin.to_string_lossy().as_ref(),
+        )
+    };
     let result = f();
-    std::env::set_var("PATH", &original_path);
+    if let Some(value) = original {
+        unsafe { std::env::set_var("RALPH_REBASE_AGENT_CLAUDE_BIN", value) };
+    } else {
+        unsafe { std::env::remove_var("RALPH_REBASE_AGENT_CLAUDE_BIN") };
+    }
     result
 }
 
@@ -175,11 +184,11 @@ fn successful_conflict_recovery() {
         repo.display(),
         repo.display(),
     );
-    let mock_bin = write_mock_claude(&tmp, &script);
+    let mock_claude = write_mock_claude(&tmp, &script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
@@ -207,11 +216,11 @@ done
 "#,
         repo = repo.display(),
     );
-    let mock_bin = write_mock_claude(&tmp, &script);
+    let mock_claude = write_mock_claude(&tmp, &script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
@@ -229,11 +238,11 @@ fn agent_non_zero_exit_aborts_rebase() {
 
     // Mock claude that exits with code 1
     let script = "#!/bin/sh\nexit 1\n";
-    let mock_bin = write_mock_claude(&tmp, script);
+    let mock_claude = write_mock_claude(&tmp, script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
@@ -256,11 +265,11 @@ fn agent_success_without_resolution_fails() {
 
     // Mock claude that exits 0 but doesn't actually resolve anything
     let script = "#!/bin/sh\nexit 0\n";
-    let mock_bin = write_mock_claude(&tmp, script);
+    let mock_claude = write_mock_claude(&tmp, script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
@@ -283,12 +292,12 @@ fn agent_timeout_fails() {
 
     // Mock claude that sleeps longer than the deadline
     let script = "#!/bin/sh\nsleep 60\n";
-    let mock_bin = write_mock_claude(&tmp, script);
+    let mock_claude = write_mock_claude(&tmp, script);
 
     // Give only 2 seconds deadline (enough for git status but not for sleep 60)
     let deadline = Instant::now() + Duration::from_secs(2);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 
@@ -352,12 +361,12 @@ fn claude_shorthand_backend_string_works() {
         repo.display(),
         repo.display(),
     );
-    let mock_bin = write_mock_claude(&tmp, &script);
+    let mock_claude = write_mock_claude(&tmp, &script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
     // Use shorthand "claude" (no model parenthetical — should default to opus)
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude", deadline)
     });
 
@@ -397,11 +406,11 @@ fn agent_attempted_error_includes_attempted_wording() {
 
     // Mock claude that exits non-zero
     let script = "#!/bin/sh\nexit 1\n";
-    let mock_bin = write_mock_claude(&tmp, script);
+    let mock_claude = write_mock_claude(&tmp, script);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    let result = with_mock_path(&mock_bin, || {
+    let result = with_mock_claude_bin(&mock_claude, || {
         resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
     });
 

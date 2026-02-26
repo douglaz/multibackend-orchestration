@@ -235,6 +235,13 @@ fn remaining_budget(deadline: Instant, label: &str) -> std::result::Result<Durat
     Ok(deadline - now)
 }
 
+fn rebase_agent_claude_bin() -> String {
+    match std::env::var("RALPH_REBASE_AGENT_CLAUDE_BIN") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => "claude".to_owned(),
+    }
+}
+
 /// Build the agent command for the given backend.
 fn build_agent_command(
     worktree_path: &Path,
@@ -243,7 +250,7 @@ fn build_agent_command(
 ) -> std::process::Command {
     match backend {
         RebaseAgentBackend::Claude { model } => {
-            let mut cmd = std::process::Command::new("claude");
+            let mut cmd = std::process::Command::new(rebase_agent_claude_bin());
             cmd.args([
                 "-p",
                 "--permission-mode",

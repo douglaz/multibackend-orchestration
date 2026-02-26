@@ -196,7 +196,7 @@ pub async fn tmux_attach(session_name: &str) -> Result<()> {
 
     // Check if the session exists
     let session_exists = {
-        let output = tokio::process::Command::new("tmux")
+        let output = tokio::process::Command::new(crate::backend::tmux::tmux_bin())
             .args(["has-session", "-t", session_name])
             .output()
             .await
@@ -213,7 +213,7 @@ pub async fn tmux_attach(session_name: &str) -> Result<()> {
 
     // Run tmux attach as a child process (exec would be ideal but isn't
     // portable / testable; a blocking child process serves the same purpose).
-    let status = std::process::Command::new("tmux")
+    let status = std::process::Command::new(crate::backend::tmux::tmux_bin())
         .args(["attach", "-t", session_name])
         .status()
         .map_err(|err| {
