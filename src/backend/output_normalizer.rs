@@ -945,15 +945,12 @@ Done."#;
         let line_asst1 = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{escaped_spec}"}}]}},"session_id":"s1"}}"#,
         );
-        let line_res1 = format!(
-            r#"{{"type":"result","result":"{escaped_spec}","session_id":"s1"}}"#,
-        );
+        let line_res1 =
+            format!(r#"{{"type":"result","result":"{escaped_spec}","session_id":"s1"}}"#,);
         let line_asst2 = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{summary}"}}]}},"session_id":"s1"}}"#,
         );
-        let line_res2 = format!(
-            r#"{{"type":"result","result":"{summary}","session_id":"s1"}}"#,
-        );
+        let line_res2 = format!(r#"{{"type":"result","result":"{summary}","session_id":"s1"}}"#,);
         let raw = [line_init, &line_asst1, &line_res1, &line_asst2, &line_res2].join("\n");
         let normalized = normalize_output(&raw).expect("keeps longest result");
         assert!(
