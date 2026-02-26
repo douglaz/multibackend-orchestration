@@ -982,6 +982,36 @@ esac
     .to_owned()
 }
 
+/// Mock `ralph` script for daemon tests that captures the `--idea` argument
+/// to a caller-provided file, then exits successfully.
+pub fn daemon_mock_ralph_capturing_script(idea_output_path: &Path) -> String {
+    let quoted_output = shell_single_quote(&idea_output_path.to_string_lossy());
+    format!(
+        r###"#!/bin/sh
+case "$1" in
+  auto)
+    shift
+    idea=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--idea" ]; then
+        shift
+        idea="${{1:-}}"
+        break
+      fi
+      shift
+    done
+    printf '%s' "$idea" > {quoted_output}
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    )
+}
+
 /// Mock `ralph` script that creates a commit in the worktree before exiting,
 /// so `has_diff` detects divergence from the base branch.
 pub fn daemon_mock_ralph_with_commit_script() -> String {

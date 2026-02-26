@@ -4896,11 +4896,16 @@ esac
 }
 
 /// Write mock gh + ralph scripts and run `daemon start --single-iteration`.
-/// Returns the daemon process output.
+/// Returns daemon process output plus the captured `--idea` payload.
+struct PrdDoneDaemonRun {
+    output: std::process::Output,
+    captured_idea: String,
+}
+
 fn run_prd_done_daemon(
     harness: &RalphHarness,
     gh_script: &str,
-) -> std::process::Output {
+) -> PrdDoneDaemonRun {
     let dh =
         RalphHarness::new_daemon(&harness.ralph_bin, "acme", "widgets").expect("daemon harness");
     dh.init_workspace().expect("init failed");
@@ -4913,13 +4918,15 @@ fn run_prd_done_daemon(
     let existing_path = std::env::var("PATH").unwrap_or_default();
     let gh_path = format!("{gh_dir}:{existing_path}");
 
-    let ralph_script = mock_scripts::daemon_mock_ralph_script();
+    let captured_idea_path = dh.temp_dir.path().join("captured-idea.txt");
+    let ralph_script = mock_scripts::daemon_mock_ralph_capturing_script(&captured_idea_path);
     let ralph_path_obj = dh
         .write_mock_script("mock_ralph", &ralph_script)
         .expect("write mock ralph");
     let ralph_path = ralph_path_obj.to_string_lossy().into_owned();
 
-    dh.daemon_env(
+    let output = dh
+        .daemon_env(
         [
             "daemon",
             "start",
@@ -4932,7 +4939,14 @@ fn run_prd_done_daemon(
             ("RALPH_DAEMON_BIN", &ralph_path),
         ],
     )
-    .expect("daemon start should execute")
+    .expect("daemon start should execute");
+
+    let captured_idea = fs::read_to_string(&captured_idea_path).unwrap_or_default();
+
+    PrdDoneDaemonRun {
+        output,
+        captured_idea,
+    }
 }
 
 /// PRD-done issue dispatches with approved spec and logs success message.
@@ -4957,13 +4971,17 @@ fn prd_done_dispatch_uses_approved_spec(harness: &RalphHarness) -> TestResult {
         let issues_json = r#"[{"number":10,"title":"PRD done issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Test body."}]"#;
 
         let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         assert!(
             stderr.contains("prd-done: using approved spec"),
             "expected 'prd-done: using approved spec' in stderr, got:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea, spec_body,
+            "dispatch should receive exact approved spec body"
         );
 
         // Also verify the pure parser still produces correct output
@@ -5009,14 +5027,18 @@ fn prd_done_mixed_labels_not_blocked(harness: &RalphHarness) -> TestResult {
         let issues_json = r#"[{"number":20,"title":"Mixed label issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"},{"name":"ralph:prd-approved"}],"body":"Mixed labels."}]"#;
 
         let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         // Should be dispatched (not blocked by prd-approved in-progress label)
         assert!(
             stderr.contains("prd-done: using approved spec"),
             "mixed labels with prd-done should dispatch with approved spec, stderr:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea, spec_body,
+            "mixed-label dispatch should use approved spec"
         );
 
         // Also verify the label helper directly
@@ -5048,10 +5070,10 @@ fn prd_done_missing_markers_fallback(harness: &RalphHarness) -> TestResult {
         let issues_json = r#"[{"number":30,"title":"Missing markers issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Fallback body."}]"#;
 
         let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         assert!(
             stderr.contains("approved spec not found, falling back"),
             "expected fallback warning in stderr, got:\n{stderr}"
@@ -5060,6 +5082,11 @@ fn prd_done_missing_markers_fallback(harness: &RalphHarness) -> TestResult {
         assert!(
             !stderr.contains("prd-done: using approved spec"),
             "should not use approved spec when markers are missing, stderr:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea,
+            "Missing markers issue\n\nFallback body.",
+            "fallback dispatch should use compose_raw_idea(title, body)"
         );
     })
 }
@@ -5162,13 +5189,18 @@ esac
 "####
         );
 
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         assert!(
             stderr.contains("approved spec not found, falling back"),
             "expected fallback warning when comments API fails, stderr:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea,
+            "API fail issue\n\nAPI fail body.",
+            "comments API failure should fallback to compose_raw_idea(title, body)"
         );
     })
 }
@@ -5201,14 +5233,18 @@ fn prd_done_user_spoof_ignored(harness: &RalphHarness) -> TestResult {
         let issues_json = r#"[{"number":50,"title":"Spoof test issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Spoof test."}]"#;
 
         let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         // Should use the bot-authored v1 approval, not the user-spoofed v99
         assert!(
             stderr.contains("prd-done: using approved spec"),
             "should dispatch with bot-authored approved spec despite user spoof, stderr:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea, real_spec,
+            "spoofed user marker must not affect dispatched idea"
         );
 
         // Also verify at parser level
@@ -5274,13 +5310,17 @@ fn prd_done_highest_revision_wins(harness: &RalphHarness) -> TestResult {
         let issues_json = r#"[{"number":60,"title":"Multi-revision issue","labels":[{"name":"ralph:ready"},{"name":"ralph:prd-done"}],"body":"Multi-revision body."}]"#;
 
         let gh_script = prd_done_mock_gh_script(issues_json, &comments_json, "ralph-bot");
-        let output = run_prd_done_daemon(harness, &gh_script);
+        let run = run_prd_done_daemon(harness, &gh_script);
 
-        assert_exit_code(&output, 0);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_exit_code(&run.output, 0);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         assert!(
             stderr.contains("prd-done: using approved spec"),
             "expected approved spec dispatch for highest revision, stderr:\n{stderr}"
+        );
+        assert_eq!(
+            run.captured_idea, spec_v3,
+            "highest approved revision should be dispatched as raw idea"
         );
 
         // Verify parser selects v3

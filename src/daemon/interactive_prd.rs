@@ -2158,10 +2158,14 @@ pub fn parse_approved_spec_from_comments(
     let draft_comment = bot_comments
         .iter()
         .rev()
-        .find(|c| c.body.contains(&draft_marker))?;
+        .find(|c| body_has_exact_marker_line(&c.body, &draft_marker))?;
 
     // Clean the draft body
     clean_draft_body(&draft_comment.body)
+}
+
+fn body_has_exact_marker_line(body: &str, marker: &str) -> bool {
+    body.lines().any(|line| line.trim() == marker)
 }
 
 /// Strip PRD marker lines, heading, footer, and surrounding whitespace
@@ -2173,9 +2177,14 @@ pub fn clean_draft_body(raw: &str) -> Option<String> {
         .filter(|line| !line.trim().starts_with("<!-- ralph:prd:"))
         .collect();
 
-    // Strip heading if first content line starts with DRAFT_HEADING_PREFIX
+    // Skip leading blank lines before heading detection.
+    while matches!(lines.first(), Some(line) if line.trim().is_empty()) {
+        lines.remove(0);
+    }
+
+    // Strip heading if first content line starts with DRAFT_HEADING_PREFIX.
     if let Some(first) = lines.first() {
-        if first.starts_with(DRAFT_HEADING_PREFIX) {
+        if first.trim_start().starts_with(DRAFT_HEADING_PREFIX) {
             lines.remove(0);
         }
     }
@@ -3932,6 +3941,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_approved_spec_ignores_bot_comment_that_only_references_draft_marker() {
+        let real_spec = "## Summary\nReal draft.";
+        let draft_marker = prd_marker(77, "draft", 2);
+        let comments = vec![
+            test_comment(
+                210,
+                "ralph-bot",
+                &format!(
+                    "{}\n{}",
+                    &draft_marker,
+                    format_draft_comment(2, real_spec)
+                ),
+                "2026-01-01T00:00:10Z",
+            ),
+            // Later bot-authored comment references the marker inline, but is not a draft.
+            test_comment(
+                211,
+                "ralph-bot",
+                &format!("I reviewed marker `{draft_marker}` and left notes."),
+                "2026-01-01T00:00:20Z",
+            ),
+            test_comment(
+                212,
+                "ralph-bot",
+                &format!(
+                    "{}\n## PRD Approved",
+                    prd_marker(77, "status-approved", 2)
+                ),
+                "2026-01-01T00:00:30Z",
+            ),
+        ];
+
+        let result = parse_approved_spec_from_comments(&comments, "ralph-bot", 77);
+        assert!(result.is_some(), "should resolve approved spec from real draft");
+        assert_eq!(result.unwrap(), real_spec);
+    }
+
+    #[test]
     fn parse_approved_spec_bot_only_filtering_ignores_user_spoof() {
         let spoofed_approval = format!(
             "{}\n## PRD Approved",
@@ -3986,6 +4033,24 @@ mod tests {
         );
         assert!(cleaned.contains("## Summary"));
         assert!(cleaned.contains("The spec."));
+    }
+
+    #[test]
+    fn clean_draft_body_strips_heading_after_marker_when_blank_lines_precede_it() {
+        let raw = format!(
+            "{}\n\n   \n{}\n\n## Summary\nBody.\n\n{}",
+            prd_marker(42, "draft", 4),
+            format!("{DRAFT_HEADING_PREFIX}4)"),
+            DRAFT_FOOTER
+        );
+        let result = clean_draft_body(&raw);
+        assert!(result.is_some(), "cleaned draft should be present");
+        let cleaned = result.unwrap();
+        assert!(
+            !cleaned.starts_with(DRAFT_HEADING_PREFIX),
+            "heading should be stripped after leading blank lines"
+        );
+        assert_eq!(cleaned, "## Summary\nBody.");
     }
 
     #[test]
