@@ -22,7 +22,7 @@ pub struct RealTmuxRunner;
 #[async_trait]
 impl TmuxCommandRunner for RealTmuxRunner {
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("tmux")
+        let output = Command::new(tmux_bin())
             .args(args)
             .output()
             .await
@@ -55,8 +55,23 @@ impl TmuxCommandRunner for RealTmuxRunner {
     }
 }
 
+pub fn tmux_bin() -> String {
+    match std::env::var("RALPH_TMUX_BIN") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => "tmux".to_owned(),
+    }
+}
+
 pub fn check_tmux_available() -> Result<()> {
-    which::which("tmux")
+    let bin = tmux_bin();
+    if bin.contains(std::path::MAIN_SEPARATOR) {
+        return if Path::new(&bin).is_file() {
+            Ok(())
+        } else {
+            Err(RalphError::TmuxUnavailable)
+        };
+    }
+    which::which(&bin)
         .map(|_| ())
         .map_err(|_| RalphError::TmuxUnavailable)
 }

@@ -54,38 +54,38 @@ fn parses_tail_follow_without_tmux() {
     assert!(args.follow);
 }
 
-// --- tmux_attach behavior tests using PATH manipulation ---
+// --- tmux_attach behavior tests using explicit tmux binary override ---
 //
 // These tests use fake tmux scripts to verify the behavior of `tmux_attach`
-// without requiring real tmux. We use `PATH` manipulation protected by a mutex
-// to avoid races between parallel tests.
+// without requiring real tmux. We serialize environment override writes to
+// avoid races between parallel tests.
 
-static PATH_LOCK: Mutex<()> = Mutex::new(());
+static TMUX_BIN_LOCK: Mutex<()> = Mutex::new(());
 
-struct PathGuard {
+struct TmuxBinGuard {
     original: Option<String>,
 }
 
-impl PathGuard {
+impl TmuxBinGuard {
     fn set(path: &str) -> Self {
-        let original = std::env::var("PATH").ok();
-        std::env::set_var("PATH", path);
+        let original = std::env::var("RALPH_TMUX_BIN").ok();
+        unsafe { std::env::set_var("RALPH_TMUX_BIN", path) };
         Self { original }
     }
 }
 
-impl Drop for PathGuard {
+impl Drop for TmuxBinGuard {
     fn drop(&mut self) {
         if let Some(value) = self.original.as_ref() {
-            std::env::set_var("PATH", value);
+            unsafe { std::env::set_var("RALPH_TMUX_BIN", value) };
         } else {
-            std::env::remove_var("PATH");
+            unsafe { std::env::remove_var("RALPH_TMUX_BIN") };
         }
     }
 }
 
-fn lock_path() -> MutexGuard<'static, ()> {
-    PATH_LOCK.lock().expect("path lock poisoned")
+fn lock_tmux_bin() -> MutexGuard<'static, ()> {
+    TMUX_BIN_LOCK.lock().expect("tmux-bin lock poisoned")
 }
 
 fn write_executable(path: &std::path::Path, body: &str) {
@@ -101,10 +101,10 @@ fn write_executable(path: &std::path::Path, body: &str) {
 
 #[tokio::test]
 async fn tmux_attach_fails_when_tmux_unavailable() {
-    let _lock = lock_path();
+    let _lock = lock_tmux_bin();
     let temp = tempfile::tempdir().expect("temp dir");
-    // Set PATH to a directory with no tmux binary
-    let _guard = PathGuard::set(&temp.path().display().to_string());
+    let missing_tmux = temp.path().join("tmux");
+    let _guard = TmuxBinGuard::set(&missing_tmux.to_string_lossy());
 
     let result = tmux_attach("ralph").await;
 
@@ -121,7 +121,7 @@ async fn tmux_attach_fails_when_tmux_unavailable() {
 
 #[tokio::test]
 async fn tmux_attach_fails_when_session_does_not_exist() {
-    let _lock = lock_path();
+    let _lock = lock_tmux_bin();
     let temp = tempfile::tempdir().expect("temp dir");
     let tmux_script = temp.path().join("tmux");
 
@@ -136,9 +136,7 @@ exit 1
 "#,
     );
 
-    let base_path = std::env::var("PATH").unwrap_or_default();
-    let path = format!("{}:{base_path}", temp.path().display());
-    let _guard = PathGuard::set(&path);
+    let _guard = TmuxBinGuard::set(&tmux_script.to_string_lossy());
 
     let result = tmux_attach("nonexistent-session").await;
 
@@ -159,7 +157,7 @@ exit 1
 
 #[tokio::test]
 async fn tmux_attach_fails_when_attach_returns_nonzero() {
-    let _lock = lock_path();
+    let _lock = lock_tmux_bin();
     let temp = tempfile::tempdir().expect("temp dir");
     let tmux_script = temp.path().join("tmux");
 
@@ -177,9 +175,7 @@ exit 1
 "#,
     );
 
-    let base_path = std::env::var("PATH").unwrap_or_default();
-    let path = format!("{}:{base_path}", temp.path().display());
-    let _guard = PathGuard::set(&path);
+    let _guard = TmuxBinGuard::set(&tmux_script.to_string_lossy());
 
     let result = tmux_attach("ralph").await;
 
@@ -196,7 +192,7 @@ exit 1
 
 #[tokio::test]
 async fn tmux_attach_succeeds_when_session_exists() {
-    let _lock = lock_path();
+    let _lock = lock_tmux_bin();
     let temp = tempfile::tempdir().expect("temp dir");
     let tmux_script = temp.path().join("tmux");
 
@@ -214,9 +210,7 @@ exit 1
 "#,
     );
 
-    let base_path = std::env::var("PATH").unwrap_or_default();
-    let path = format!("{}:{base_path}", temp.path().display());
-    let _guard = PathGuard::set(&path);
+    let _guard = TmuxBinGuard::set(&tmux_script.to_string_lossy());
 
     let result = tmux_attach("ralph").await;
     assert!(result.is_ok(), "attach should succeed: {result:?}");

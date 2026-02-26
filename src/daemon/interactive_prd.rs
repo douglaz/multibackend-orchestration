@@ -3127,6 +3127,17 @@ mod tests {
     // Test helpers: temporary mock backend scripts
     // -----------------------------------------------------------------------
 
+    /// Persist a temporary executable script and return its absolute path.
+    ///
+    /// Close the writable file handle before returning so Linux does not race
+    /// with `ETXTBSY` ("Text file busy") when the script is executed
+    /// immediately in parallelized test runs.
+    fn persist_script_path(tmp: tempfile::NamedTempFile) -> String {
+        let (file, path) = tmp.keep().expect("persist temp script");
+        drop(file);
+        path.to_string_lossy().into_owned()
+    }
+
     /// Write a temporary bash script that echoes fixed output and return a
     /// `CliBackend` pointing to it.
     fn make_mock_backend(output: &str) -> CliBackend {
@@ -3145,12 +3156,7 @@ mod tests {
             std::fs::set_permissions(tmp.path(), perms).unwrap();
         }
 
-        // Persist the temp file so it outlives this function.
-        // The test is responsible for cleanup (or it happens on drop of PathBuf).
-        let path = tmp.into_temp_path();
-        let path_str = path.to_string_lossy().into_owned();
-        // Leak the temp path so it isn't deleted while the backend is in use.
-        std::mem::forget(path);
+        let path_str = persist_script_path(tmp);
 
         CliBackend::new(
             "mock-backend",
@@ -3211,10 +3217,7 @@ mod tests {
             std::fs::set_permissions(tmp.path(), perms).unwrap();
         }
 
-        let path = tmp.into_temp_path();
-        let path_str = path.to_string_lossy().into_owned();
-        std::mem::forget(path);
-        path_str
+        persist_script_path(tmp)
     }
 
     // -----------------------------------------------------------------------
@@ -3334,10 +3337,7 @@ mod tests {
             std::fs::set_permissions(tmp.path(), perms).unwrap();
         }
 
-        let path = tmp.into_temp_path();
-        let path_str = path.to_string_lossy().into_owned();
-        std::mem::forget(path);
-        path_str
+        persist_script_path(tmp)
     }
 
     /// `generate_draft_from_answers_with_timeout` with a complete-spec
@@ -3482,10 +3482,7 @@ mod tests {
             std::fs::set_permissions(tmp.path(), perms).unwrap();
         }
 
-        let path = tmp.into_temp_path();
-        let path_str = path.to_string_lossy().into_owned();
-        std::mem::forget(path);
-        path_str
+        persist_script_path(tmp)
     }
 
     /// `generate_draft_from_answers_with_timeout` must reject an incomplete

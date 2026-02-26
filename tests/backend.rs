@@ -651,32 +651,32 @@ fn test_completion_alternation_sequence_no_models() {
     }
 }
 
-static PATH_LOCK: Mutex<()> = Mutex::new(());
+static TMUX_BIN_LOCK: Mutex<()> = Mutex::new(());
 
-struct PathGuard {
+struct TmuxBinGuard {
     original: Option<String>,
 }
 
-impl PathGuard {
+impl TmuxBinGuard {
     fn set(path: &str) -> Self {
-        let original = std::env::var("PATH").ok();
-        std::env::set_var("PATH", path);
+        let original = std::env::var("RALPH_TMUX_BIN").ok();
+        unsafe { std::env::set_var("RALPH_TMUX_BIN", path) };
         Self { original }
     }
 }
 
-impl Drop for PathGuard {
+impl Drop for TmuxBinGuard {
     fn drop(&mut self) {
         if let Some(value) = self.original.as_ref() {
-            std::env::set_var("PATH", value);
+            unsafe { std::env::set_var("RALPH_TMUX_BIN", value) };
         } else {
-            std::env::remove_var("PATH");
+            unsafe { std::env::remove_var("RALPH_TMUX_BIN") };
         }
     }
 }
 
-fn lock_path() -> MutexGuard<'static, ()> {
-    PATH_LOCK.lock().expect("path lock poisoned")
+fn lock_tmux_bin() -> MutexGuard<'static, ()> {
+    TMUX_BIN_LOCK.lock().expect("tmux-bin lock poisoned")
 }
 
 fn write_executable(path: &std::path::Path, body: &str) {
@@ -700,7 +700,7 @@ fn tmux_enabled(session_name: &str) -> BackendRegistryTmuxConfig {
 
 #[tokio::test]
 async fn registry_wraps_backends_with_tmux_when_enabled() {
-    let _lock = lock_path();
+    let _lock = lock_tmux_bin();
     let temp = TempDir::new().expect("temp dir");
     let bin_dir = temp.path();
     let backend_script = bin_dir.join("mock-backend");
@@ -731,9 +731,7 @@ exit 1
 "#,
     );
 
-    let base_path = std::env::var("PATH").unwrap_or_default();
-    let path = format!("{}:{base_path}", bin_dir.display());
-    let _guard = PathGuard::set(&path);
+    let _guard = TmuxBinGuard::set(&tmux_script.to_string_lossy());
 
     let mut config = test_config();
     let command = backend_script.to_string_lossy().to_string();
@@ -758,7 +756,6 @@ exit 1
 
 #[tokio::test]
 async fn registry_keeps_direct_cli_backends_when_tmux_disabled() {
-    let _lock = lock_path();
     let temp = TempDir::new().expect("temp dir");
     let bin_dir = temp.path();
     let backend_script = bin_dir.join("mock-backend");
@@ -770,10 +767,6 @@ set -euo pipefail
 cat
 "#,
     );
-
-    let base_path = std::env::var("PATH").unwrap_or_default();
-    let path = format!("{}:{base_path}", bin_dir.display());
-    let _guard = PathGuard::set(&path);
 
     let mut config = test_config();
     let command = backend_script.to_string_lossy().to_string();
@@ -791,7 +784,6 @@ cat
 
 #[tokio::test]
 async fn get_or_create_for_spec_injects_model_args_and_reuses_cached_backend() {
-    let _lock = lock_path();
     let temp = TempDir::new().expect("temp dir");
     let bin_dir = temp.path();
     let backend_script = bin_dir.join("mock-backend");
@@ -833,7 +825,6 @@ printf '%s\n' "$*"
 
 #[tokio::test]
 async fn get_or_create_for_spec_codex_suffix_injects_reasoning_effort_args() {
-    let _lock = lock_path();
     let temp = TempDir::new().expect("temp dir");
     let bin_dir = temp.path();
     let backend_script = bin_dir.join("mock-backend");

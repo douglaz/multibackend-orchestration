@@ -426,8 +426,8 @@ fn review_limit_fails(h: &RalphHarness) -> TestResult {
         let script = h
             .write_mock_script("reject-review.sh", &always_reject_review_script())
             .expect("failed to write reject-review script");
-        h.setup_mock_backends(&script)
-            .expect("setup_mock_backends failed");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
         h.create_project(project_id, "Review Limit Project", "Review limit prompt")
             .expect("create_project failed");
 
@@ -697,8 +697,8 @@ fn impl_response_artifact_on_review_feedback(h: &RalphHarness) -> TestResult {
         let script_path = h
             .write_mock_script("feedback-then-approve.sh", &script)
             .expect("failed to write feedback-then-approve script");
-        h.setup_mock_backends(&script_path)
-            .expect("setup_mock_backends failed");
+        h.setup_mock_backends_stable(&script_path)
+            .expect("setup_mock_backends_stable failed");
         h.create_project(
             project_id,
             "Impl Response Conformance Project",
@@ -861,8 +861,8 @@ fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
     let script = h
         .write_mock_script("standard-mock.sh", &standard_mock_script())
         .expect("failed to write standard mock script");
-    h.setup_mock_backends(&script)
-        .expect("setup_mock_backends failed");
+    h.setup_mock_backends_stable(&script)
+        .expect("setup_mock_backends_stable failed");
     h.create_project(
         project_id,
         "Run Conformance Project",

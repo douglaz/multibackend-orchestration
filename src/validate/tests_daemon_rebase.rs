@@ -10,8 +10,8 @@ use crate::daemon::rebase_agent::{
 };
 use crate::validate::harness::RalphHarness;
 
-/// Mutex to serialize tests that mutate the process PATH.
-static PATH_MUTEX: Mutex<()> = Mutex::new(());
+/// Mutex to serialize tests that mutate the process env override.
+static CLAUDE_BIN_MUTEX: Mutex<()> = Mutex::new(());
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -209,14 +209,10 @@ fn agent_enabled_recovery_resolves_conflict(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
-
         let deadline = Instant::now() + Duration::from_secs(30);
-        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline);
-
-        std::env::set_var("PATH", &old_path);
+        let result = with_mock_claude_bin(&claude_path, || {
+            resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
+        });
 
         assert!(
             result.is_ok(),
@@ -339,14 +335,10 @@ fn agent_failure_aborts_rebase(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
-
         let deadline = Instant::now() + Duration::from_secs(30);
-        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline);
-
-        std::env::set_var("PATH", &old_path);
+        let result = with_mock_claude_bin(&claude_path, || {
+            resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
+        });
 
         assert!(result.is_err(), "agent failure should return error");
         let err = result.unwrap_err().to_string();
@@ -456,13 +448,9 @@ fn post_continue_error_propagation(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
-
-        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", expired_deadline);
-
-        std::env::set_var("PATH", &old_path);
+        let result = with_mock_claude_bin(&claude_path, || {
+            resolve_rebase_conflicts(repo, "master", "claude(opus)", expired_deadline)
+        });
 
         assert!(result.is_err(), "expired deadline should cause error");
         let err = result.unwrap_err().to_string();
@@ -543,14 +531,10 @@ fn conflict_failure_attempted_message(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
-
         let deadline = Instant::now() + Duration::from_secs(30);
-        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline);
-
-        std::env::set_var("PATH", &old_path);
+        let result = with_mock_claude_bin(&claude_path, || {
+            resolve_rebase_conflicts(repo, "master", "claude(opus)", deadline)
+        });
 
         assert!(result.is_err(), "agent failure should return error");
         let err = result.unwrap_err().to_string();
@@ -614,13 +598,9 @@ fn timeout_bounded_classification_path(_h: &RalphHarness) -> TestResult {
         perms.set_mode(0o755);
         fs::set_permissions(&claude_path, perms).expect("set perms");
 
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
-
-        let result = resolve_rebase_conflicts(repo, "master", "claude(opus)", expired_deadline);
-
-        std::env::set_var("PATH", &old_path);
+        let result = with_mock_claude_bin(&claude_path, || {
+            resolve_rebase_conflicts(repo, "master", "claude(opus)", expired_deadline)
+        });
 
         assert!(result.is_err(), "expired deadline should cause error");
         let err = result.unwrap_err().to_string();
@@ -629,6 +609,27 @@ fn timeout_bounded_classification_path(_h: &RalphHarness) -> TestResult {
             "error should propagate timeout: {err}"
         );
     })
+}
+
+fn with_mock_claude_bin<F, R>(mock_claude_path: &std::path::Path, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = CLAUDE_BIN_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var("RALPH_REBASE_AGENT_CLAUDE_BIN").ok();
+    unsafe {
+        std::env::set_var(
+            "RALPH_REBASE_AGENT_CLAUDE_BIN",
+            mock_claude_path.to_string_lossy().as_ref(),
+        )
+    };
+    let result = f();
+    if let Some(value) = original {
+        unsafe { std::env::set_var("RALPH_REBASE_AGENT_CLAUDE_BIN", value) };
+    } else {
+        unsafe { std::env::remove_var("RALPH_REBASE_AGENT_CLAUDE_BIN") };
+    }
+    result
 }
 
 fn run_git_in(repo: &std::path::Path, args: &[&str]) {

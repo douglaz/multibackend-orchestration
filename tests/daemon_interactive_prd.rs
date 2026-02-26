@@ -2729,11 +2729,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     // Ensure repo clone dir exists (for refresh_repo_clone)
     let clone_dir = data_dir.join("acme").join("widgets");
@@ -2747,7 +2743,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -2760,11 +2756,7 @@ exit 0
         worker_cwd: None,
     };
 
-    // Run with mock PATH
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "poll_and_advance_prd should succeed");
 
@@ -2939,11 +2931,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     // Ensure repo clone dir exists
     let clone_dir = data_dir.join("acme").join("widgets");
@@ -2955,7 +2943,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -2968,10 +2956,7 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     // Tick returns Ok despite issue #60 erroring
     assert!(
@@ -3026,11 +3011,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     let global = GlobalConfig::default();
     let config = PrdPollConfig {
@@ -3038,7 +3019,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec![],
         writer_backend: String::new(),
@@ -3051,10 +3032,7 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "empty polls should succeed");
     // refresh_repo_clone only runs for non-empty ticks; it calls git in the
@@ -3227,11 +3205,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     let clone_dir = data_dir.join("acme").join("widgets");
     fs::create_dir_all(&clone_dir).expect("create clone dir");
@@ -3245,7 +3219,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -3257,9 +3231,6 @@ exit 0
         max_concurrent: 2,
         worker_cwd: None,
     };
-
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
 
     // Bounded watchdog: run on a spawned thread with a join timeout so a
     // regression (FIFO deadlock under sequential processing) fails with a
@@ -3275,8 +3246,6 @@ exit 0
         "concurrent_advancement_slow_and_fast timed out — possible FIFO deadlock regression",
     );
     let _ = handle.join();
-
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should complete: {:?}", result);
 
@@ -3513,11 +3482,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     let clone_dir = data_dir.join("acme").join("widgets");
     fs::create_dir_all(&clone_dir).expect("create clone dir");
@@ -3528,7 +3493,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -3540,9 +3505,6 @@ exit 0
         max_concurrent: 2,
         worker_cwd: None,
     };
-
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
 
     // Bounded watchdog: run on a spawned thread with a join timeout so a
     // regression (FIFO deadlock) fails with a clear assertion instead of
@@ -3558,8 +3520,6 @@ exit 0
         .recv_timeout(watchdog_timeout)
         .expect("bounded_concurrency_peak test timed out — possible FIFO deadlock regression");
     let _ = handle.join();
-
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
 
@@ -3672,11 +3632,7 @@ exit 0
         fs::set_permissions(&gh_path, fs::Permissions::from_mode(0o755)).expect("chmod gh");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
 
     let clone_dir = data_dir.join("acme").join("widgets");
     fs::create_dir_all(&clone_dir).expect("create clone dir");
@@ -3687,7 +3643,7 @@ exit 0
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
         git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -3701,12 +3657,9 @@ exit 0
     };
 
     // Inject a real panic for issue #110 via env var
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     unsafe { std::env::set_var("RALPH_TEST_INJECT_PANIC", "110") };
     let result = poll_and_advance_prd(&config);
     unsafe { std::env::remove_var("RALPH_TEST_INJECT_PANIC") };
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     // Tick completes despite issue #110 panicking
     assert!(
@@ -3864,19 +3817,16 @@ exit 0
         fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
+    let git_bin = git_path.to_string_lossy().into_owned();
 
     let global = GlobalConfig::default();
     let config = PrdPollConfig {
         owner: "acme".to_string(),
         repo: "widgets".to_string(),
         data_dir: data_dir.to_path_buf(),
-        git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        git_bin,
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_string(), "codex".to_string()],
         writer_backend: "claude".to_string(),
@@ -3889,10 +3839,7 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
 
@@ -4019,18 +3966,15 @@ exit 0
         fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
+    let git_bin = git_path.to_string_lossy().into_owned();
 
     let config = PrdPollConfig {
         owner: "acme".to_owned(),
         repo: "widgets".to_owned(),
         data_dir: data_dir.to_path_buf(),
-        git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        git_bin,
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_owned(), "codex".to_owned()],
         writer_backend: "claude".to_owned(),
@@ -4043,10 +3987,7 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
 
@@ -4228,18 +4169,15 @@ exit 0
         fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
+    let git_bin = git_path.to_string_lossy().into_owned();
 
     let config = PrdPollConfig {
         owner: "acme".to_owned(),
         repo: "widgets".to_owned(),
         data_dir: data_dir.to_path_buf(),
-        git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        git_bin,
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_owned(), "codex".to_owned()],
         writer_backend: "claude".to_owned(),
@@ -4252,10 +4190,7 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
     let result = poll_and_advance_prd(&config);
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
     let git_log_content = fs::read_to_string(&git_log).unwrap_or_default();
@@ -4436,18 +4371,15 @@ exit 0
         fs::set_permissions(&git_path, fs::Permissions::from_mode(0o755)).expect("chmod git");
     }
 
-    let path_env = format!(
-        "{}:{}",
-        scripts_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let gh_bin = gh_path.to_string_lossy().into_owned();
+    let git_bin = git_path.to_string_lossy().into_owned();
 
     let config = PrdPollConfig {
         owner: "acme".to_owned(),
         repo: "widgets".to_owned(),
         data_dir: data_dir.to_path_buf(),
-        git_bin: "git".to_string(),
-        gh_bin: "gh".to_string(),
+        git_bin,
+        gh_bin,
         prd_enabled: true,
         question_backends: vec!["claude".to_owned(), "codex".to_owned()],
         writer_backend: "claude".to_owned(),
@@ -4460,9 +4392,6 @@ exit 0
         worker_cwd: None,
     };
 
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", &path_env) };
-
     let watchdog_timeout = std::time::Duration::from_secs(20);
     let (tx, rx) = std::sync::mpsc::channel();
     let config_clone = config.clone();
@@ -4474,8 +4403,6 @@ exit 0
         "stale worker-dir recovery test timed out — likely regressed to sequential fallback",
     );
     let _ = handle.join();
-
-    unsafe { std::env::set_var("PATH", &old_path) };
 
     assert!(result.is_ok(), "tick should succeed: {:?}", result);
     assert!(
