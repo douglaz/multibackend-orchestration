@@ -313,8 +313,8 @@ fn setup_with_mock_script(h: &RalphHarness, project_id: &str, script_name: &str,
     let script_path = h
         .write_mock_script(script_name, script)
         .expect("failed to write mock script");
-    h.setup_mock_backends(&script_path)
-        .expect("setup_mock_backends failed");
+    h.setup_mock_backends_stable(&script_path)
+        .expect("setup_mock_backends_stable failed");
     h.create_project(project_id, "QA Conformance Project", "QA suite test prompt")
         .expect("create_project failed");
 }
