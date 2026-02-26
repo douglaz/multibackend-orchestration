@@ -970,8 +970,11 @@ async fn dispatch_task(
 
     let workspace_root = config.workspace_root.clone();
 
-    // Create worktree (reuses existing branch if present)
-    let wt_path = {
+    // Create worktree (reuses existing branch if present).
+    // `prior_project_id` is set when the worktree was on a project branch
+    // (`ralph/{project_id}`) before being reset to the daemon branch —
+    // this happens on daemon restart when a task was mid-flight.
+    let (wt_path, prior_project_id) = {
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
@@ -984,8 +987,14 @@ async fn dispatch_task(
         spawn_blocking_op(move || worktree::clean_worktree(&wt)).await?;
     }
 
-    // Dispatch-time project discovery
-    let effective_project_id = {
+    // Dispatch-time project discovery.
+    // Short-circuit if the worktree was already on a project branch (resume).
+    let effective_project_id = if let Some(project_id) = prior_project_id {
+        eprintln!(
+            "dispatch: event=project_resume task_id={task_id} project_id={project_id}"
+        );
+        Some(project_id)
+    } else {
         let wt = wt_path.clone();
         let mut discovered = spawn_blocking_op(move || Ok(discover_project_ids(&wt))).await?;
 
