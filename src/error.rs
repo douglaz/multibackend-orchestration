@@ -135,6 +135,20 @@ pub enum RalphError {
 }
 
 impl RalphError {
+    /// Returns true if this is a transient quota/rate-limit error that should
+    /// be treated as a soft failure (skip the backend, don't fail the task).
+    pub fn is_quota_error(&self) -> bool {
+        match self {
+            RalphError::BackendCommandFailed { details, .. } => {
+                details.contains("TerminalQuotaError")
+                    || details.contains("RESOURCE_EXHAUSTED")
+                    || details.contains("MODEL_CAPACITY_EXHAUSTED")
+                    || details.contains("quota will reset")
+            }
+            _ => false,
+        }
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Validation(_)
