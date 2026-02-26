@@ -14,7 +14,8 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
+use crate::backend::{claude, codex, gemini, parse_backend_spec, Backend, CliBackend};
+use crate::config::global::BackendEnabled;
 use crate::config::GlobalConfig;
 use crate::daemon::github::{self, GhIssue};
 use crate::error::RalphError;
@@ -620,6 +621,16 @@ fn create_backend(
     match spec.name.as_str() {
         "claude" => Ok(claude::backend_from_config(global_config, model, None, cwd)),
         "codex" => Ok(codex::backend_from_config(global_config, model, None, cwd)),
+        "gemini" => {
+            if global_config.backends.gemini.enabled == BackendEnabled::Disabled {
+                let backend = match model {
+                    Some(model_name) => format!("gemini({model_name})"),
+                    None => "gemini".to_owned(),
+                };
+                return Err(RalphError::BackendUnavailable { backend });
+            }
+            Ok(gemini::backend_from_config(global_config, model, None, cwd))
+        }
         _ => Err(RalphError::Validation(format!(
             "unknown PRD backend: {backend_spec}"
         ))),

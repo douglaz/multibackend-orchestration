@@ -379,6 +379,47 @@ impl RalphHarness {
         self.set_config_fast("backends.gemini.enabled", "false")
     }
 
+    /// Configure claude/codex/gemini mock backend commands to the same script
+    /// and enable gemini.
+    pub fn setup_mock_backends_with_gemini<P: AsRef<Path>>(&self, script: P) -> Result<()> {
+        let script = script.as_ref().to_string_lossy().into_owned();
+        // Use a stable /bin/sh wrapper to avoid `/usr/bin/env` shebang issues
+        // inside Nix builds.
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{script}\"\n");
+        let wrapper = self.write_mock_script("mock-gemini-wrapper.sh", &wrapper_content)?;
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        self.set_config_fast("backends.claude.command", &wrapper_str)?;
+        self.set_config_fast("backends.claude.args", "[]")?;
+        self.set_config_fast("backends.codex.command", &wrapper_str)?;
+        self.set_config_fast("backends.codex.args", "[]")?;
+        self.set_config_fast("backends.gemini.command", &wrapper_str)?;
+        self.set_config_fast("backends.gemini.args", "[]")?;
+        self.set_config_fast("backends.gemini.enabled", "true")
+    }
+
+    /// Configure gemini-enabled mock backends and wrap execution to capture argv
+    /// in the file pointed to by `RALPH_ARGV_CAPTURE`.
+    pub fn setup_mock_backends_with_gemini_argv_capture<P: AsRef<Path>>(
+        &self,
+        script: P,
+    ) -> Result<()> {
+        let script = script.as_ref().to_string_lossy().into_owned();
+        let escaped = script.replace('"', "\\\"");
+        let wrapper_content = format!(
+            "#!/bin/sh\nif [ -n \"${{RALPH_ARGV_CAPTURE:-}}\" ]; then\n  {{\n    printf 'ARGV'\n    for arg in \"$@\"; do\n      printf ' [%s]' \"$arg\"\n    done\n    printf '\\n'\n  }} >> \"$RALPH_ARGV_CAPTURE\"\nfi\nexec bash \"{escaped}\" \"$@\"\n"
+        );
+        let wrapper = self.write_mock_script("mock-gemini-argv-wrapper.sh", &wrapper_content)?;
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+        self.set_config_fast("backends.claude.command", &wrapper_str)?;
+        self.set_config_fast("backends.claude.args", "[]")?;
+        self.set_config_fast("backends.codex.command", &wrapper_str)?;
+        self.set_config_fast("backends.codex.args", "[]")?;
+        self.set_config_fast("backends.gemini.command", &wrapper_str)?;
+        self.set_config_fast("backends.gemini.args", "[]")?;
+        self.set_config_fast("backends.gemini.enabled", "true")
+    }
+
     fn prepare_cli_args<I, S>(&self, args: I) -> Vec<OsString>
     where
         I: IntoIterator<Item = S>,

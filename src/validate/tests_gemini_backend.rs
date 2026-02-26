@@ -4,7 +4,8 @@ use std::process::Output;
 
 use crate::validate::assertions::{assert_exit_code, assert_json_field};
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::{daemon_mock_gh_script, standard_mock_script};
+use crate::validate::mock_scripts::{auto_mock_script, daemon_mock_gh_script, standard_mock_script};
+use crate::workspace::Workspace;
 use serde_json::json;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -24,6 +25,58 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "gemini_backend::daemon_refinement_guardrail_rejects_project_override",
             func: daemon_refinement_guardrail_rejects_project_override,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_reviewer_gemini_success",
+            func: quick_prd_reviewer_gemini_success,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_writer_gemini_success",
+            func: quick_prd_writer_gemini_success,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_reviewer_gemini_disabled_fails",
+            func: quick_prd_reviewer_gemini_disabled_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_writer_gemini_disabled_fails",
+            func: quick_prd_writer_gemini_disabled_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_reviewer_optional_unavailable_fails",
+            func: quick_prd_reviewer_optional_unavailable_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::quick_prd_writer_optional_unavailable_fails",
+            func: quick_prd_writer_optional_unavailable_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_reviewer_gemini_success",
+            func: auto_spec_reviewer_gemini_success,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_writer_gemini_success",
+            func: auto_spec_writer_gemini_success,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_reviewer_gemini_disabled_fails",
+            func: auto_spec_reviewer_gemini_disabled_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_writer_gemini_disabled_fails",
+            func: auto_spec_writer_gemini_disabled_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_reviewer_optional_unavailable_fails",
+            func: auto_spec_reviewer_optional_unavailable_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::auto_spec_writer_optional_unavailable_fails",
+            func: auto_spec_writer_optional_unavailable_fails,
+        },
+        ConformanceTest {
+            name: "gemini_backend::daemon_prd_guardrail_rejects_optional_gemini",
+            func: daemon_prd_guardrail_rejects_optional_gemini,
         },
     ]
 }
@@ -263,10 +316,315 @@ fn daemon_refinement_guardrail_rejects_project_override(h: &RalphHarness) -> Tes
     })
 }
 
+fn quick_prd_reviewer_gemini_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd reviewer gemini",
+                "--reviewer-backend",
+                "gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_exit_code(&output, 0);
+    })
+}
+
+fn quick_prd_writer_gemini_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd writer gemini",
+                "--writer-backend",
+                "gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_exit_code(&output, 0);
+    })
+}
+
+fn quick_prd_reviewer_gemini_disabled_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd reviewer disabled",
+                "--reviewer-backend",
+                "gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_nonzero_exit(&output, "disabled gemini reviewer should fail");
+    })
+}
+
+fn quick_prd_writer_gemini_disabled_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd writer disabled",
+                "--writer-backend",
+                "gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_nonzero_exit(&output, "disabled gemini writer should fail");
+    })
+}
+
+fn quick_prd_reviewer_optional_unavailable_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd reviewer optional",
+                "--reviewer-backend",
+                "?gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_nonzero_exit(&output, "optional unavailable reviewer backend should fail");
+    })
+}
+
+fn quick_prd_writer_optional_unavailable_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "quick-prd",
+                "--idea",
+                "quick-prd writer optional",
+                "--writer-backend",
+                "?gemini",
+            ])
+            .expect("quick-prd command should execute");
+        assert_nonzero_exit(&output, "optional unavailable writer backend should fail");
+    })
+}
+
+fn auto_spec_reviewer_gemini_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto reviewer gemini",
+                "--spec-reviewer",
+                "gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_exit_code(&output, 0);
+    })
+}
+
+fn auto_spec_writer_gemini_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto writer gemini",
+                "--spec-writer",
+                "gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_exit_code(&output, 0);
+    })
+}
+
+fn auto_spec_reviewer_gemini_disabled_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto reviewer disabled",
+                "--spec-reviewer",
+                "gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_nonzero_exit(&output, "disabled auto spec reviewer should fail");
+    })
+}
+
+fn auto_spec_writer_gemini_disabled_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto writer disabled",
+                "--spec-writer",
+                "gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_nonzero_exit(&output, "disabled auto spec writer should fail");
+    })
+}
+
+fn auto_spec_reviewer_optional_unavailable_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto reviewer optional",
+                "--spec-reviewer",
+                "?gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_nonzero_exit(&output, "optional unavailable auto reviewer should fail");
+    })
+}
+
+fn auto_spec_writer_optional_unavailable_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_auto_mock_with_gemini(h);
+        disable_gemini_backend(h);
+
+        let output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "auto writer optional",
+                "--spec-writer",
+                "?gemini",
+                "--dry-run",
+            ])
+            .expect("auto command should execute");
+        assert_nonzero_exit(&output, "optional unavailable auto writer should fail");
+    })
+}
+
+fn daemon_prd_guardrail_rejects_optional_gemini(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets")
+            .expect("create daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let workspace_root = dh.repo_root.join(".ralph");
+        let mut workspace = Workspace::load(workspace_root).expect("load workspace");
+        workspace.config.workspace.daemon_prd_reviewer_backend = "?gemini".to_owned();
+        workspace
+            .save_config()
+            .expect("save daemon PRD config mutation");
+
+        let gh = dh
+            .write_mock_script("gh", &daemon_mock_gh_script())
+            .expect("write mock gh");
+        let gh_path = format!(
+            "{}:{}",
+            gh.parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--single-iteration",
+                    "--repo",
+                    "acme/widgets",
+                ],
+                &[("PATH", &gh_path)],
+            )
+            .expect("daemon start should execute");
+        assert_nonzero_exit(
+            &output,
+            "daemon start should reject optional gemini on PRD surface",
+        );
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("workspace.daemon_prd_reviewer_backend"),
+            "expected daemon PRD reviewer key in error, got:\n{combined}"
+        );
+        assert!(
+            combined.contains("optional backend specs (?backend)"),
+            "expected optional backend syntax rejection, got:\n{combined}"
+        );
+    })
+}
+
+fn setup_auto_mock_with_gemini(h: &RalphHarness) {
+    h.init_workspace().expect("init failed");
+    let script = h
+        .write_mock_script("gemini-prd-auto-mock.sh", &auto_mock_script())
+        .expect("write auto mock script");
+    h.setup_mock_backends_with_gemini(&script)
+        .expect("setup gemini mock backends");
+}
+
+fn disable_gemini_backend(h: &RalphHarness) {
+    h.ralph_ok([
+        "config",
+        "set",
+        "backends.gemini.enabled",
+        "false",
+        "--global",
+    ])
+    .expect("disable gemini backend failed");
+}
+
 fn assert_nonzero_exit(output: &Output, message: &str) {
     assert!(
         output.status.code().unwrap_or(-1) != 0,
         "{message}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+    assert!(
+        combined.contains("gemini")
+            || combined.contains("optional backend specs (?backend)")
+            || combined.contains("backend unavailable"),
+        "expected output to mention gemini/backend unavailability, got:\n{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

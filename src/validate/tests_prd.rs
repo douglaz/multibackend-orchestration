@@ -1,5 +1,7 @@
 use super::*;
 
+use std::fs;
+
 use crate::validate::assertions::{assert_exit_code, assert_file_contains, assert_file_exists};
 use crate::validate::harness::RalphHarness;
 
@@ -20,6 +22,26 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prd::explicit_ask_max_preempts_preset",
             func: explicit_ask_max_preempts_preset,
+        },
+        ConformanceTest {
+            name: "prd::gemini_backend_bare_success",
+            func: gemini_backend_bare_success,
+        },
+        ConformanceTest {
+            name: "prd::gemini_backend_modeled_includes_model_flag",
+            func: gemini_backend_modeled_includes_model_flag,
+        },
+        ConformanceTest {
+            name: "prd::gemini_backend_bare_omits_model_flag",
+            func: gemini_backend_bare_omits_model_flag,
+        },
+        ConformanceTest {
+            name: "prd::gemini_backend_disabled_fails",
+            func: gemini_backend_disabled_fails,
+        },
+        ConformanceTest {
+            name: "prd::optional_gemini_unavailable_fails_hard",
+            func: optional_gemini_unavailable_fails_hard,
         },
     ]
 }
@@ -116,6 +138,136 @@ fn explicit_ask_max_preempts_preset(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn gemini_backend_bare_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_prd_mock_with_gemini(h);
+        let output = h
+            .ralph(["prd", "--idea", "Gemini PRD generation", "--backend", "gemini"])
+            .expect("prd gemini command should execute");
+        assert_exit_code(&output, 0);
+
+        let prd = h.repo_root.join("PRD.md");
+        assert_file_exists(&prd);
+        assert_file_contains(&prd, "## Executive Summary");
+    })
+}
+
+fn gemini_backend_modeled_includes_model_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_prd_mock_with_gemini_argv_capture(h);
+        let capture_path = h.temp_dir.path().join("prd-gemini-modeled.argv");
+        let capture_str = capture_path.to_string_lossy().into_owned();
+
+        let output = h
+            .ralph_env(
+                [
+                    "prd",
+                    "--idea",
+                    "Gemini PRD with explicit model",
+                    "--backend",
+                    "gemini(gemini-3-pro-preview)",
+                ],
+                &[("RALPH_ARGV_CAPTURE", &capture_str)],
+            )
+            .expect("prd gemini(model) command should execute");
+        assert_exit_code(&output, 0);
+
+        let argv_log = fs::read_to_string(&capture_path).expect("read argv capture log");
+        assert!(
+            argv_log.contains("[--model] [gemini-3-pro-preview]"),
+            "expected --model flag in argv log, got:\n{argv_log}"
+        );
+    })
+}
+
+fn gemini_backend_bare_omits_model_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_prd_mock_with_gemini_argv_capture(h);
+        let capture_path = h.temp_dir.path().join("prd-gemini-bare.argv");
+        let capture_str = capture_path.to_string_lossy().into_owned();
+
+        let output = h
+            .ralph_env(
+                ["prd", "--idea", "Gemini PRD bare backend", "--backend", "gemini"],
+                &[("RALPH_ARGV_CAPTURE", &capture_str)],
+            )
+            .expect("prd gemini command should execute");
+        assert_exit_code(&output, 0);
+
+        let argv_log = fs::read_to_string(&capture_path).expect("read argv capture log");
+        assert!(
+            !argv_log.contains("[--model]"),
+            "did not expect --model for bare gemini spec, got:\n{argv_log}"
+        );
+    })
+}
+
+fn gemini_backend_disabled_fails(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_prd_mock_with_gemini(h);
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.gemini.enabled",
+            "false",
+            "--global",
+        ])
+        .expect("disable gemini backend failed");
+
+        let output = h
+            .ralph(["prd", "--idea", "Gemini disabled", "--backend", "gemini"])
+            .expect("prd command should execute");
+        assert!(
+            output.status.code().unwrap_or(-1) != 0,
+            "disabled gemini should fail"
+        );
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_lowercase();
+        assert!(
+            combined.contains("gemini"),
+            "expected output to mention gemini backend, got:\n{combined}"
+        );
+    })
+}
+
+fn optional_gemini_unavailable_fails_hard(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        setup_prd_mock_with_gemini(h);
+        h.ralph_ok([
+            "config",
+            "set",
+            "backends.gemini.enabled",
+            "false",
+            "--global",
+        ])
+        .expect("disable gemini backend failed");
+
+        let output = h
+            .ralph(["prd", "--idea", "Gemini optional unavailable", "--backend", "?gemini"])
+            .expect("prd command should execute");
+        assert!(
+            output.status.code().unwrap_or(-1) != 0,
+            "?gemini should be a hard failure when unavailable"
+        );
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_lowercase();
+        assert!(
+            combined.contains("gemini"),
+            "expected unavailable backend output to mention gemini, got:\n{combined}"
+        );
+    })
+}
+
 fn setup_prd_mock(h: &RalphHarness) {
     h.init_workspace().expect("init_workspace failed");
     let script = h
@@ -123,6 +275,24 @@ fn setup_prd_mock(h: &RalphHarness) {
         .expect("failed to write PRD mock script");
     h.setup_mock_backends_stable(&script)
         .expect("setup_mock_backends failed");
+}
+
+fn setup_prd_mock_with_gemini(h: &RalphHarness) {
+    h.init_workspace().expect("init_workspace failed");
+    let script = h
+        .write_mock_script("prd-gemini-mock.sh", &prd_mock_script())
+        .expect("failed to write PRD mock script");
+    h.setup_mock_backends_with_gemini(&script)
+        .expect("setup_mock_backends_with_gemini failed");
+}
+
+fn setup_prd_mock_with_gemini_argv_capture(h: &RalphHarness) {
+    h.init_workspace().expect("init_workspace failed");
+    let script = h
+        .write_mock_script("prd-gemini-argv-mock.sh", &prd_mock_script())
+        .expect("failed to write PRD mock script");
+    h.setup_mock_backends_with_gemini_argv_capture(&script)
+        .expect("setup_mock_backends_with_gemini_argv_capture failed");
 }
 
 fn prd_mock_script() -> String {

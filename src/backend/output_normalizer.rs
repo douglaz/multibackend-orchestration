@@ -46,6 +46,19 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
     let first_preview: String = first_content_line.unwrap_or("").chars().take(80).collect();
 
     if !first_content_line.is_some_and(|l| l.starts_with('{')) {
+        // Route preamble + NDJSON output by finding the first stream event and
+        // normalizing only the stream tail.
+        if let Some(stream_tail) = try_extract_stream_tail_after_preamble(raw) {
+            tracing::debug!(
+                path = "preamble_stream",
+                raw_len,
+                first_line = %first_preview,
+                stream_len = stream_tail.len(),
+                "normalize_output: extracted NDJSON stream after preamble"
+            );
+            return normalize_claude_stream_json(&stream_tail);
+        }
+
         // Before returning raw text, check for multi-line JSON after preamble
         // (e.g. gemini CLI outputs "YOLO mode..." status lines before its JSON response).
         if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
@@ -421,6 +434,43 @@ fn try_extract_multiline_json_after_preamble(raw: &str) -> Option<NormalizedOutp
     None
 }
 
+/// Attempt to locate the first NDJSON stream event after non-JSON preamble
+/// lines and return the stream tail (that line onward).
+fn try_extract_stream_tail_after_preamble(raw: &str) -> Option<String> {
+    let lines: Vec<&str> = raw.lines().collect();
+
+    // If preamble content before the first JSON-looking line is markdown,
+    // treat the output as plain markdown (e.g. a JSON example code block).
+    let first_brace = lines.iter().position(|line| line.trim().starts_with('{'))?;
+    for line in &lines[..first_brace] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') || trimmed.starts_with("```") {
+            return None;
+        }
+    }
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.starts_with('{') {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let Some(event_type) = value.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if STREAM_EVENT_TYPES.contains(&event_type) {
+            return Some(lines[index..].join("\n"));
+        }
+    }
+    None
+}
+
 fn extract_single_json_text(value: &Value) -> Option<String> {
     for key in ["result", "response", "output", "text", "completion"] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
@@ -627,6 +677,55 @@ not-json
         let raw = "nope\nstill nope\n{\"result\":\"from-json\"}";
         let normalized = normalize_output(raw).expect("normalize_output");
         assert_eq!(normalized.text, "from-json");
+    }
+
+    #[test]
+    fn normalize_output_preserves_long_plain_prd_output() {
+        let repeated = "detail ".repeat(400);
+        let raw = format!(
+            "## Summary\n{repeated}\n\n## Acceptance Criteria\n- [ ] AC1\n\n## Technical Approach\n{repeated}\n\n## Files & Modules\n- src/prd.rs\n\n## Testing Strategy\n- cargo test\n\n## Out of Scope\n- none\n"
+        );
+        assert!(raw.len() > 2048, "test fixture should be >2KB");
+
+        let normalized = normalize_output(&raw).expect("plain markdown should normalize");
+        assert_eq!(normalized.text, raw);
+        assert_eq!(normalized.session_id, None);
+    }
+
+    #[test]
+    fn normalize_output_extracts_long_stream_result_text() {
+        let long_spec = format!(
+            "## Summary\n{}\n\n## Acceptance Criteria\n- [ ] A\n\n## Technical Approach\n{}\n\n## Files & Modules\n- src/a.rs\n\n## Testing Strategy\n- cargo test\n\n## Out of Scope\n- none",
+            "spec ".repeat(300),
+            "approach ".repeat(300)
+        );
+        assert!(long_spec.len() > 2048, "test fixture should be >2KB");
+        let escaped = long_spec
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        let raw = format!(
+            "{{\"type\":\"init\",\"session_id\":\"s-long\"}}\n{{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"narration\"}}\n{{\"type\":\"result\",\"result\":\"{escaped}\"}}"
+        );
+
+        let normalized = normalize_output(&raw).expect("stream result text should normalize");
+        assert_eq!(normalized.session_id.as_deref(), Some("s-long"));
+        assert_eq!(normalized.text, long_spec);
+    }
+
+    #[test]
+    fn normalize_output_routes_preamble_ndjson_and_prefers_result_text() {
+        let raw = concat!(
+            "YOLO mode is enabled.\n",
+            "Loaded cached credentials.\n",
+            "{\"type\":\"init\",\"session_id\":\"gem-pre-1\"}\n",
+            "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"narration text\"}\n",
+            "{\"type\":\"result\",\"result\":\"## Summary\\nFinal PRD text\"}"
+        );
+
+        let normalized = normalize_output(raw).expect("preamble stream should normalize");
+        assert_eq!(normalized.session_id.as_deref(), Some("gem-pre-1"));
+        assert_eq!(normalized.text, "## Summary\nFinal PRD text");
     }
 
     #[test]

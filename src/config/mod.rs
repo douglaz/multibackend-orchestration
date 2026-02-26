@@ -20,6 +20,7 @@ pub use project::{ProjectConfig, ProjectDaemonOverrides};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidationSurface {
     Required,
+    Prd,
     RequiredPanel,
     PanelList,
 }
@@ -32,7 +33,7 @@ impl ValidationSurface {
     fn allows_gemini(self) -> bool {
         matches!(
             self,
-            ValidationSurface::PanelList | ValidationSurface::RequiredPanel
+            ValidationSurface::PanelList | ValidationSurface::RequiredPanel | ValidationSurface::Prd
         )
     }
 }
@@ -521,7 +522,7 @@ fn validate_backend_spec(
 
     if parsed.name == "gemini" && !surface.allows_gemini() {
         return Err(RalphError::Validation(format!(
-            "gemini backend is not supported for {label}; it may only be used in panel surfaces (final review, completion, prompt review)"
+            "gemini backend is not supported for {label}; it may only be used in panel surfaces and PRD surfaces"
         )));
     }
 
@@ -542,7 +543,7 @@ pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Resul
             global,
             backend_spec,
             &format!("workspace.daemon_prd_question_backends[{index}]"),
-            ValidationSurface::Required,
+            ValidationSurface::Prd,
         )?;
     }
 
@@ -550,13 +551,13 @@ pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Resul
         global,
         &workspace.daemon_prd_writer_backend,
         "workspace.daemon_prd_writer_backend",
-        ValidationSurface::Required,
+        ValidationSurface::Prd,
     )?;
     validate_backend_spec(
         global,
         &workspace.daemon_prd_reviewer_backend,
         "workspace.daemon_prd_reviewer_backend",
-        ValidationSurface::Required,
+        ValidationSurface::Prd,
     )?;
 
     Ok(())
@@ -1146,18 +1147,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_prd_config_rejects_gemini_backend_specs() {
+    fn validate_prd_config_accepts_gemini_backend_specs() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_prd_question_backends = vec![
             "claude(opus)".to_owned(),
             "gemini(gemini-3-pro-preview)".to_owned(),
         ];
+        global.workspace.daemon_prd_writer_backend = "gemini".to_owned();
+        global.workspace.daemon_prd_reviewer_backend = "gemini(gemini-3-pro-preview)".to_owned();
+
+        validate_interactive_prd_workspace_config(&global)
+            .expect("gemini should be accepted on daemon PRD surfaces");
+    }
+
+    #[test]
+    fn validate_prd_config_rejects_optional_gemini_backend_specs() {
+        let mut global = GlobalConfig::default();
+        global.workspace.daemon_prd_question_backends = vec![
+            "claude(opus)".to_owned(),
+            "?gemini(gemini-3-pro-preview)".to_owned(),
+        ];
 
         let error = validate_interactive_prd_workspace_config(&global)
-            .expect_err("gemini should be rejected on daemon PRD surfaces");
-        assert!(error
-            .to_string()
-            .contains("gemini backend is not supported"));
+            .expect_err("optional gemini should be rejected on daemon PRD surfaces");
+        assert!(error.to_string().contains("optional backend specs (?backend)"));
         assert!(error
             .to_string()
             .contains("workspace.daemon_prd_question_backends[1]"));

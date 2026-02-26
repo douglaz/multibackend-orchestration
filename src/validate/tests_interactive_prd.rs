@@ -11,10 +11,12 @@ use crate::daemon::interactive_prd::{
     prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, DRAFT_SECTION_RETRIES,
     PRD_LABELS, PRD_LABEL_NAMES, REQUIRED_SPEC_SECTION_COUNT,
 };
+use crate::config::global::BackendEnabled;
 use crate::prd::quick::check_spec_sections;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
+use crate::workspace::Workspace;
 
 /// Serializes access to process-global env vars in tests that inject
 /// `RALPH_TEST_INJECT_PANIC`. The validate runner executes tests in parallel
@@ -246,6 +248,30 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "interactive_prd::prd_done_highest_revision_wins",
             func: prd_done_highest_revision_wins,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_reviewer_bare_success",
+            func: gemini_reviewer_bare_success,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_reviewer_modeled_includes_model_flag",
+            func: gemini_reviewer_modeled_includes_model_flag,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_reviewer_bare_omits_model_flag",
+            func: gemini_reviewer_bare_omits_model_flag,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_reviewer_disabled_preserves_fail_after_three",
+            func: gemini_reviewer_disabled_preserves_fail_after_three,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_question_backend_list_succeeds",
+            func: gemini_question_backend_list_succeeds,
+        },
+        ConformanceTest {
+            name: "interactive_prd::gemini_writer_backend_succeeds",
+            func: gemini_writer_backend_succeeds,
         },
     ]
 }
@@ -498,6 +524,205 @@ fn write_mock_gh(h: &RalphHarness, body: &str) -> crate::Result<String> {
 fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
     let script = h.write_mock_script("mock_ralph", &mock_scripts::daemon_mock_ralph_script())?;
     Ok(script.to_string_lossy().into_owned())
+}
+
+fn configure_daemon_prd_backends(
+    dh: &RalphHarness,
+    question_backends: [&str; 2],
+    writer_backend: &str,
+    reviewer_backend: &str,
+    gemini_enabled: BackendEnabled,
+) {
+    let workspace_root = dh.repo_root.join(".ralph");
+    let mut workspace = Workspace::load(workspace_root).expect("load workspace");
+    workspace.config.workspace.daemon_prd_question_backends = question_backends
+        .iter()
+        .map(|backend| (*backend).to_owned())
+        .collect();
+    workspace.config.workspace.daemon_prd_writer_backend = writer_backend.to_owned();
+    workspace.config.workspace.daemon_prd_reviewer_backend = reviewer_backend.to_owned();
+    workspace.config.backends.gemini.enabled = gemini_enabled;
+    workspace.save_config().expect("save workspace config");
+}
+
+fn seed_awaiting_answers_state(dh: &RalphHarness, issue_number: u32) -> std::path::PathBuf {
+    let state_path = dh
+        .temp_dir
+        .path()
+        .join("acme")
+        .join("widgets")
+        .join(".ralph")
+        .join("interactive-prd")
+        .join(format!("{issue_number}.json"));
+    fs::create_dir_all(state_path.parent().expect("state path parent should exist"))
+        .expect("create state dir");
+    let seeded = serde_json::json!({
+        "issue_number": issue_number,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingAnswers",
+        "question_revision": 1,
+        "draft_revision": 0,
+        "questions_comment_id": 320,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": null,
+        "latest_draft_body": null,
+        "user_answers": null,
+        "last_processed_comment_id": null,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seeded).expect("serialize seed state"),
+    )
+    .expect("write seeded state");
+    state_path
+}
+
+fn answer_to_draft_backend_script() -> &'static str {
+    r#"#!/bin/sh
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "reviewing an engineering specification"; then
+  cat <<'EOF'
+```json
+{"approved": true, "issues": []}
+```
+EOF
+  exit 0
+fi
+
+cat <<'EOF'
+## Summary
+Generated from interactive answers.
+
+## Acceptance Criteria
+- [ ] Draft posted to issue.
+
+## Technical Approach
+Use the daemon transition and quick-prd review loop.
+
+## Files & Modules
+- src/daemon/interactive_prd.rs
+
+## Testing Strategy
+- conformance test coverage
+
+## Out of Scope
+- webhooks
+EOF
+"#
+}
+
+fn answer_to_draft_gh_script(issue_number: u32, draft_log_path: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+DRAFT_LOG="{draft_log_path}"
+ISSUE_NUMBER="{issue_number}"
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        has_ready=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+            ralph:ready) has_ready=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[]'
+        elif [ "$has_active" = "1" ]; then
+          printf '[{{"number":%s,"title":"PRD issue","labels":[{{"name":"ralph:prd-active"}}],"body":"Need a spec from answers"}}]' "$ISSUE_NUMBER"
+        elif [ "$has_ready" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          if [ -f "$DRAFT_LOG" ]; then
+            draft_body="$(cat "$DRAFT_LOG" | sed 's/"/\\"/g' | tr '\n' ' ')"
+            printf '{{"comments":[{{"id":320,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:%s:questions-v1 -->\\n## Clarifying Questions\\n1. What API should be exposed?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":321,"author":{{"login":"octocat"}},"body":"Expose REST and include retries.","createdAt":"2026-01-01T00:00:15Z"}},{{"id":322,"author":{{"login":"ralph-bot"}},"body":"%s","createdAt":"2026-01-01T00:00:20Z"}}]}}' "$ISSUE_NUMBER" "$draft_body"
+          else
+            printf '{{"comments":[{{"id":320,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:%s:questions-v1 -->\\n## Clarifying Questions\\n1. What API should be exposed?","createdAt":"2026-01-01T00:00:05Z"}},{{"id":321,"author":{{"login":"octocat"}},"body":"Expose REST and include retries.","createdAt":"2026-01-01T00:00:15Z"}}]}}' "$ISSUE_NUMBER"
+          fi
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"PRD issue","body":"Need a spec from answers"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s' "$2" > "$DRAFT_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+"#
+    )
 }
 
 /// Verify that `daemon start` creates PRD lifecycle labels at startup.
@@ -1173,6 +1398,387 @@ exit 0
         assert!(
             draft_raw.contains("<!-- ralph:prd:22:draft-v1 -->"),
             "expected draft-v1 marker in posted comment: {draft_raw}"
+        );
+    })
+}
+
+fn run_answer_to_draft_tick_with_backends(
+    h: &RalphHarness,
+    issue_number: u32,
+    writer_backend: &str,
+    reviewer_backend: &str,
+    gemini_enabled: BackendEnabled,
+    argv_capture_path: Option<&std::path::Path>,
+) -> (InteractivePrdState, String) {
+    let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+    dh.init_workspace().expect("init failed");
+
+    let backend_script = dh
+        .write_mock_script(
+            &format!("prd_gemini_answer_to_draft_{issue_number}.sh"),
+            answer_to_draft_backend_script(),
+        )
+        .expect("write backend script");
+    if argv_capture_path.is_some() {
+        dh.setup_mock_backends_with_gemini_argv_capture(&backend_script)
+            .expect("setup gemini argv-capture backends");
+    } else {
+        dh.setup_mock_backends_with_gemini(&backend_script)
+            .expect("setup gemini backends");
+    }
+
+    configure_daemon_prd_backends(
+        &dh,
+        ["claude", "codex"],
+        writer_backend,
+        reviewer_backend,
+        gemini_enabled,
+    );
+
+    let state_path = seed_awaiting_answers_state(&dh, issue_number);
+    let draft_log = dh
+        .temp_dir
+        .path()
+        .join(format!("prd_gemini_answer_to_draft_comment_{issue_number}.log"));
+    let draft_log_str = draft_log.to_string_lossy().into_owned();
+    let gh_script = answer_to_draft_gh_script(issue_number, &draft_log_str);
+    let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+    let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+    let capture_owned = argv_capture_path.map(|path| path.to_string_lossy().into_owned());
+    let mut env_vars = vec![
+        ("PATH", gh_path.as_str()),
+        ("RALPH_DAEMON_BIN", ralph_path.as_str()),
+    ];
+    if capture_owned.is_some() {
+        env_vars.push((
+            "RALPH_ARGV_CAPTURE",
+            capture_owned.as_deref().expect("capture path should be set"),
+        ));
+    }
+
+    let output = dh
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &env_vars,
+        )
+        .expect("daemon start should execute");
+    assert_exit_code(&output, 0);
+
+    let state: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("state should exist"))
+            .expect("state should parse");
+    let argv_log = match argv_capture_path {
+        Some(path) => fs::read_to_string(path).unwrap_or_default(),
+        None => String::new(),
+    };
+    (state, argv_log)
+}
+
+fn gemini_reviewer_bare_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let (state, _) = run_answer_to_draft_tick_with_backends(
+            h,
+            82,
+            "claude",
+            "gemini",
+            BackendEnabled::Enabled,
+            None,
+        );
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "gemini reviewer should allow AwaitingAnswers -> AwaitingFeedback transition"
+        );
+        assert_eq!(state.draft_revision, 1, "draft revision should increment");
+    })
+}
+
+fn gemini_reviewer_modeled_includes_model_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let capture = h.temp_dir.path().join("interactive-prd-gemini-modeled.argv");
+        let (_state, argv_log) = run_answer_to_draft_tick_with_backends(
+            h,
+            83,
+            "claude",
+            "gemini(gemini-3-pro-preview)",
+            BackendEnabled::Enabled,
+            Some(&capture),
+        );
+        assert!(
+            argv_log.contains("[--model] [gemini-3-pro-preview]"),
+            "expected modeled gemini reviewer invocation, got:\n{argv_log}"
+        );
+    })
+}
+
+fn gemini_reviewer_bare_omits_model_flag(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let capture = h.temp_dir.path().join("interactive-prd-gemini-bare.argv");
+        let (_state, argv_log) = run_answer_to_draft_tick_with_backends(
+            h,
+            84,
+            "claude",
+            "gemini",
+            BackendEnabled::Enabled,
+            Some(&capture),
+        );
+        assert!(
+            !argv_log.contains("[--model]"),
+            "bare gemini reviewer should not include --model, got:\n{argv_log}"
+        );
+    })
+}
+
+fn gemini_writer_backend_succeeds(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let (state, _) = run_answer_to_draft_tick_with_backends(
+            h,
+            85,
+            "gemini",
+            "codex",
+            BackendEnabled::Enabled,
+            None,
+        );
+        assert_eq!(
+            state.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "gemini writer should allow AwaitingAnswers -> AwaitingFeedback transition"
+        );
+        assert_eq!(state.draft_revision, 1, "draft revision should increment");
+    })
+}
+
+fn gemini_reviewer_disabled_preserves_fail_after_three(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let backend_script = dh
+            .write_mock_script(
+                "prd_gemini_disabled_reviewer.sh",
+                answer_to_draft_backend_script(),
+            )
+            .expect("write backend script");
+        dh.setup_mock_backends_with_gemini(&backend_script)
+            .expect("setup gemini backends");
+        configure_daemon_prd_backends(
+            &dh,
+            ["claude", "codex"],
+            "claude",
+            "gemini",
+            BackendEnabled::Disabled,
+        );
+
+        let state_path = seed_awaiting_answers_state(&dh, 86);
+        let draft_log = dh.temp_dir.path().join("prd-gemini-disabled-draft.log");
+        let draft_log_str = draft_log.to_string_lossy().into_owned();
+        let gh_script = answer_to_draft_gh_script(86, &draft_log_str);
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write gh script");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write daemon mock ralph");
+
+        for tick in 1..=3 {
+            let _output = dh
+                .daemon_env(
+                    [
+                        "daemon",
+                        "start",
+                        "--repo",
+                        "acme/widgets",
+                        "--single-iteration",
+                    ],
+                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                )
+                .expect("daemon start should execute");
+
+            let state: InteractivePrdState =
+                serde_json::from_str(&fs::read_to_string(&state_path).expect("state should exist"))
+                    .expect("state should parse");
+            if tick < 3 {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::AwaitingAnswers,
+                    "tick {tick}: state should remain AwaitingAnswers while retrying"
+                );
+                assert_eq!(
+                    state.error_count, tick as u32,
+                    "tick {tick}: error_count should increment"
+                );
+            } else {
+                assert_eq!(
+                    state.state,
+                    PrdWorkflowState::Failed,
+                    "tick 3: state should fail after repeated backend-unavailable errors"
+                );
+                assert!(state.error_count >= 3, "tick 3: expected error_count >= 3");
+            }
+        }
+    })
+}
+
+fn gemini_question_backend_list_succeeds(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        let question_script = dh
+            .write_mock_script(
+                "prd_gemini_question_backend.sh",
+                r#"#!/bin/sh
+cat >/dev/null
+printf '1. What are the performance requirements?\n'
+printf '2. What error handling strategy should be used?\n'
+printf '3. Are there any backward compatibility constraints?\n'
+"#,
+            )
+            .expect("write question backend script");
+        dh.setup_mock_backends_with_gemini(&question_script)
+            .expect("setup gemini backends");
+        configure_daemon_prd_backends(
+            &dh,
+            ["gemini", "codex"],
+            "claude",
+            "codex",
+            BackendEnabled::Enabled,
+        );
+
+        let comment_log = dh.temp_dir.path().join("prd-gemini-question-comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+        let gh_script = format!(
+            r#"#!/bin/sh
+COMMENT_LOG="{comment_log_str}"
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        has_active=0
+        has_ready=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd) has_prd=1 ;;
+            ralph:prd-active) has_active=1 ;;
+            ralph:ready) has_ready=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ]; then
+          printf '[{{"number":91,"title":"Add auth","labels":[{{"name":"ralph:prd"}}],"body":"Need authentication support"}}]'
+        elif [ "$has_active" = "1" ] || [ "$has_ready" = "1" ]; then
+          printf '[]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_title_body=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{{"comments":[]}}'
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{{"labels":[{{"name":"ralph:prd"}}]}}'
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          printf '{{"title":"Add auth","body":"Need authentication support"}}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment)
+        shift; shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --body)
+              printf '%s' "$2" > "$COMMENT_LOG"
+              shift 2
+              ;;
+            *) shift ;;
+          esac
+        done
+        exit 0
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/pr/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) printf 'acme/widgets\n' ; exit 0 ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+    esac
+    ;;
+esac
+exit 0
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/91.json");
+        let state: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).expect("state should exist"))
+                .expect("state should parse");
+        assert_eq!(state.state, PrdWorkflowState::AwaitingAnswers);
+        assert_eq!(state.question_revision, 1);
+
+        let posted = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            posted.contains("<!-- ralph:prd:91:questions-v1 -->"),
+            "question marker should be posted for gemini question backend list: {posted}"
         );
     })
 }
