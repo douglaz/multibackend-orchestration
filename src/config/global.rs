@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use toml_edit::{DocumentMut, Item, Table, Value as TomlEditValue};
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value as TomlEditValue};
 
 use crate::error::RalphError;
 use crate::Result;
@@ -1274,22 +1274,97 @@ fn set_document_key(doc: &mut DocumentMut, path: &[String], value: TomlEditValue
     }
     let (parents, last) = path.split_at(path.len() - 1);
     let table = ensure_table_path(doc.as_table_mut(), parents);
-    table[last[0].as_str()] = Item::Value(value);
+    match table {
+        TableRefMut::Table(table) => table[last[0].as_str()] = Item::Value(value),
+        TableRefMut::InlineTable(table) => {
+            table.insert(last[0].as_str(), value);
+        }
+    }
 }
 
-fn ensure_table_path<'a>(table: &'a mut Table, path: &[String]) -> &'a mut Table {
+enum TableRefMut<'a> {
+    Table(&'a mut Table),
+    InlineTable(&'a mut InlineTable),
+}
+
+fn ensure_table_path<'a>(table: &'a mut Table, path: &[String]) -> TableRefMut<'a> {
+    ensure_table_path_in_table(table, path)
+}
+
+fn ensure_table_path_in_table<'a>(table: &'a mut Table, path: &[String]) -> TableRefMut<'a> {
     if let Some((segment, rest)) = path.split_first() {
-        let needs_table =
-            !table.contains_key(segment.as_str()) || !table[segment.as_str()].is_table();
-        if needs_table {
+        if !table.contains_key(segment.as_str()) {
             table[segment.as_str()] = Item::Table(Table::new());
         }
-        let next = table[segment.as_str()]
+
+        let is_standard_table = table
+            .get(segment.as_str())
+            .map(Item::is_table)
+            .unwrap_or(false);
+        if is_standard_table {
+            let next_table = table
+                .get_mut(segment.as_str())
+                .and_then(Item::as_table_mut)
+                .expect("table path segment is standard table");
+            return ensure_table_path_in_table(next_table, rest);
+        }
+
+        let is_inline_table = table
+            .get(segment.as_str())
+            .and_then(Item::as_inline_table)
+            .is_some();
+        if is_inline_table {
+            let next_inline_table = table
+                .get_mut(segment.as_str())
+                .and_then(Item::as_inline_table_mut)
+                .expect("table path segment is inline table");
+            return ensure_table_path_in_inline_table(next_inline_table, rest);
+        }
+
+        table[segment.as_str()] = Item::Table(Table::new());
+        let next_table = table[segment.as_str()]
             .as_table_mut()
-            .expect("table ensured");
-        return ensure_table_path(next, rest);
+            .expect("table path segment reset to standard table");
+        return ensure_table_path_in_table(next_table, rest);
     }
-    table
+    TableRefMut::Table(table)
+}
+
+fn ensure_table_path_in_inline_table<'a>(
+    table: &'a mut InlineTable,
+    path: &[String],
+) -> TableRefMut<'a> {
+    if let Some((segment, rest)) = path.split_first() {
+        if !table.contains_key(segment.as_str()) {
+            table.insert(
+                segment.as_str(),
+                TomlEditValue::InlineTable(InlineTable::new()),
+            );
+        }
+
+        let is_inline_table = table
+            .get(segment.as_str())
+            .and_then(TomlEditValue::as_inline_table)
+            .is_some();
+        if is_inline_table {
+            let next_inline_table = table
+                .get_mut(segment.as_str())
+                .and_then(TomlEditValue::as_inline_table_mut)
+                .expect("inline-table path segment is inline table");
+            return ensure_table_path_in_inline_table(next_inline_table, rest);
+        }
+
+        table.insert(
+            segment.as_str(),
+            TomlEditValue::InlineTable(InlineTable::new()),
+        );
+        let next_inline_table = table
+            .get_mut(segment.as_str())
+            .and_then(TomlEditValue::as_inline_table_mut)
+            .expect("inline-table path segment reset to inline table");
+        return ensure_table_path_in_inline_table(next_inline_table, rest);
+    }
+    TableRefMut::InlineTable(table)
 }
 
 fn remove_document_key(doc: &mut DocumentMut, path: &[String]) {
@@ -1306,10 +1381,34 @@ fn remove_from_table(table: &mut Table, path: &[String]) {
     }
 
     let head = path[0].as_str();
-    let Some(next) = table.get_mut(head).and_then(Item::as_table_mut) else {
+    let Some(next) = table.get_mut(head) else {
         return;
     };
-    remove_from_table(next, &path[1..]);
+    if let Some(next_table) = next.as_table_mut() {
+        remove_from_table(next_table, &path[1..]);
+        return;
+    }
+    if let Some(next_inline_table) = next.as_inline_table_mut() {
+        remove_from_inline_table(next_inline_table, &path[1..]);
+    }
+}
+
+fn remove_from_inline_table(table: &mut InlineTable, path: &[String]) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.remove(path[0].as_str());
+        return;
+    }
+
+    let head = path[0].as_str();
+    let Some(next) = table.get_mut(head) else {
+        return;
+    };
+    if let Some(next_inline_table) = next.as_inline_table_mut() {
+        remove_from_inline_table(next_inline_table, &path[1..]);
+    }
 }
 
 /// Apply a key/value mutation to a `GlobalConfig`, using the same key coverage
@@ -3318,6 +3417,84 @@ note = "preserve"
         );
         let loaded = GlobalConfig::load(&path).expect("load config");
         assert_eq!(loaded.workflow.planner_backend.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn sparse_save_inline_table_preserves_siblings() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        fs::write(
+            &path,
+            r#"workflow = { auto_commit = true, planner_backend = "claude", qa_backend = "codex" }
+"#,
+        )
+        .expect("write inline-table config");
+
+        save_config_sparse(&path, "workflow.auto_commit", "false").expect("sparse save");
+
+        let updated = fs::read_to_string(&path).expect("read updated config");
+        assert!(
+            updated.contains("workflow = {"),
+            "workflow should remain inline table"
+        );
+
+        let toml_value: toml::Value = toml::from_str(&updated).expect("parse toml");
+        let workflow = toml_value
+            .get("workflow")
+            .and_then(toml::Value::as_table)
+            .expect("workflow table present");
+        assert_eq!(
+            workflow
+                .get("auto_commit")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            workflow
+                .get("planner_backend")
+                .and_then(toml::Value::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            workflow.get("qa_backend").and_then(toml::Value::as_str),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn sparse_save_inline_table_removes_optional_key() {
+        let temp = tempdir().expect("temp dir");
+        let path = temp.path().join("ralph.toml");
+        fs::write(
+            &path,
+            r#"workflow = { auto_commit = true, planner_backend = "codex" }
+"#,
+        )
+        .expect("write inline-table config");
+
+        save_config_sparse(&path, "workflow.planner_backend", "null").expect("sparse save");
+
+        let updated = fs::read_to_string(&path).expect("read updated config");
+        assert!(
+            updated.contains("workflow = {"),
+            "workflow should remain inline table"
+        );
+
+        let toml_value: toml::Value = toml::from_str(&updated).expect("parse toml");
+        let workflow = toml_value
+            .get("workflow")
+            .and_then(toml::Value::as_table)
+            .expect("workflow table present");
+        assert_eq!(
+            workflow
+                .get("auto_commit")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            workflow.get("planner_backend").is_none(),
+            "planner_backend should be removed from inline table"
+        );
     }
 
     #[test]
