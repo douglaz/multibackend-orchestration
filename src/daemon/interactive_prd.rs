@@ -18,10 +18,12 @@ use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
 use crate::config::GlobalConfig;
 use crate::daemon::github::{self, GhIssue};
 use crate::error::RalphError;
+use crate::output_log::LogWriter;
 use crate::prd::quick::{
     check_spec_sections, format_issues, render_prompt, run_review_with_retry, DRAFT_PROMPT,
     REVIEW_PROMPT, REVISION_PROMPT,
 };
+use crate::util::hash::sha256_hex;
 use crate::Result;
 
 /// PRD workflow states persisted for daemon restart-safety.
@@ -207,6 +209,27 @@ fn state_path(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> Pa
         .join(".ralph")
         .join("interactive-prd")
         .join(format!("{issue_number}.json"))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn log_dir(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> PathBuf {
+    data_dir
+        .join(owner)
+        .join(repo)
+        .join(".ralph")
+        .join("interactive-prd")
+        .join(format!("{issue_number}"))
+        .join("logs")
+}
+
+fn write_prompt_summary(log: &mut LogWriter, prompt: &str) {
+    let hash = sha256_hex(prompt);
+    let byte_len = prompt.as_bytes().len();
+    let preview: String = prompt.chars().take(500).collect();
+    let summary = format!(
+        "--- prompt-summary sha256={hash} bytes={byte_len} ---\n{preview}\n--- end prompt-summary ---\n"
+    );
+    log.write_str(&summary);
 }
 
 fn strip_code(text: &str) -> String {
@@ -1589,7 +1612,7 @@ fn generate_revision_from_feedback_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &rev_prompt, deadline)?;
+        let revised = run_backend_sync(&writer, &rev_prompt, deadline, None)?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
             current_spec = cleaned;
@@ -1838,7 +1861,7 @@ fn generate_draft_from_answers_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &revision_prompt, deadline)?;
+        let revised = run_backend_sync(&writer, &revision_prompt, deadline, None)?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
             current_spec = cleaned;
@@ -1864,7 +1887,7 @@ fn run_draft_with_section_retry_sync(
     deadline: std::time::Instant,
 ) -> Result<String> {
     for attempt in 0..=DRAFT_SECTION_RETRIES {
-        let raw = run_backend_sync(writer, prompt, deadline)?;
+        let raw = run_backend_sync(writer, prompt, deadline, None)?;
         let (cleaned, missing) = check_spec_sections(&raw);
         if missing.is_empty() {
             return Ok(cleaned);
@@ -1940,7 +1963,7 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd.clone()),
     )?;
-    let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
+    let questions_a = run_backend_sync(&backend_a, &prompt, deadline, None)?;
 
     // Backend B
     let backend_b = create_backend(
@@ -1948,7 +1971,7 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd),
     )?;
-    let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
+    let questions_b = run_backend_sync(&backend_b, &prompt, deadline, None)?;
 
     // Synthesis: merge/dedupe/prioritize
     let synthesis_prompt = SYNTHESIS_PROMPT
@@ -1956,7 +1979,7 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         .replace("{questions_b}", &questions_b);
 
     // Use the first question backend for synthesis
-    let synthesized = run_backend_sync(&backend_a, &synthesis_prompt, deadline)?;
+    let synthesized = run_backend_sync(&backend_a, &synthesis_prompt, deadline, None)?;
 
     if synthesized.trim().is_empty() {
         return Err(RalphError::InteractivePrdFailed(
@@ -1972,6 +1995,7 @@ fn run_backend_sync(
     backend: &CliBackend,
     prompt: &str,
     deadline: std::time::Instant,
+    mut log_writer: Option<&mut LogWriter>,
 ) -> Result<String> {
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
@@ -1991,8 +2015,18 @@ fn run_backend_sync(
             RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
         })?;
 
-    let result =
-        rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await });
+    if let Some(writer) = log_writer.as_mut() {
+        let is_fallback = writer.attempt() > 0;
+        writer.write_attempt_separator(backend.name(), is_fallback);
+        write_prompt_summary(writer, prompt);
+    }
+
+    let result = match log_writer {
+        Some(writer) => rt.block_on(async {
+            tokio::time::timeout(remaining, backend.execute_with_log(prompt, Some(writer))).await
+        }),
+        None => rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await }),
+    };
 
     match result {
         Ok(Ok(output)) => Ok(output),
@@ -2268,17 +2302,20 @@ mod tests {
         apply_transition_result, clean_draft_body, detect_approval, extract_questions_text,
         find_first_answer_comment, find_new_feedback_comments, format_draft_comment,
         generate_draft_from_answers_with_timeout, generate_revision_from_feedback_with_timeout,
-        has_in_progress_prd_label, has_prd_label, parse_approved_spec_from_comments, prd_marker,
-        prd_status_approved_marker, render_answer_to_draft_prompt,
-        run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
-        DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT,
-        PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        has_in_progress_prd_label, has_prd_label, log_dir, parse_approved_spec_from_comments,
+        prd_marker, prd_status_approved_marker, render_answer_to_draft_prompt, run_backend_sync,
+        run_draft_with_section_retry_sync, write_prompt_summary, InteractivePrdState,
+        PrdPollConfig, PrdWorkflowState, DRAFT_FOOTER, DRAFT_HEADING_PREFIX,
+        DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT, PRD_LABELS, PRD_LIFECYCLE_LABELS,
+        REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
     use crate::daemon::github::IssueComment;
     use crate::error::RalphError;
+    use crate::output_log::{log_path_for_role, LogWriter};
     use crate::prd::quick::check_spec_sections;
+    use crate::util::hash::sha256_hex;
 
     use std::collections::BTreeMap;
     use std::io::Write as IoWrite;
@@ -3222,6 +3259,90 @@ mod tests {
         }
 
         persist_script_path(tmp)
+    }
+
+    #[test]
+    fn log_dir_uses_canonical_interactive_prd_logs_path() {
+        let data_dir = PathBuf::from("/tmp/ralph-data");
+        let path = log_dir(&data_dir, "octocat", "hello-world", 17);
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/ralph-data/octocat/hello-world/.ralph/interactive-prd/17/logs")
+        );
+    }
+
+    #[test]
+    fn write_prompt_summary_handles_multibyte_utf8_and_limits_to_500_chars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt = format!("{}END", "🙂".repeat(505));
+        let expected_hash = sha256_hex(&prompt);
+        let expected_preview: String = prompt.chars().take(500).collect();
+
+        let mut writer = LogWriter::open(temp.path(), "issue-7", None, "writer");
+        write_prompt_summary(&mut writer, &prompt);
+        let log_path = writer.path().to_path_buf();
+        drop(writer);
+
+        let content = std::fs::read_to_string(log_path).expect("read log");
+        let expected_header = format!(
+            "--- prompt-summary sha256={expected_hash} bytes={} ---\n",
+            prompt.as_bytes().len()
+        );
+        let preview = content
+            .strip_prefix(&expected_header)
+            .and_then(|rest| rest.strip_suffix("\n--- end prompt-summary ---\n"))
+            .expect("prompt summary block should match expected format");
+
+        assert_eq!(preview, expected_preview);
+        assert_eq!(preview.chars().count(), 500);
+        assert!(!preview.contains("END"));
+    }
+
+    #[test]
+    fn run_backend_sync_with_log_writer_writes_separator_summary_and_raw_output() {
+        let backend = make_mock_backend("mock backend output");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), "issue-9", None, "questions-a");
+        let prompt = "hello prompt";
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+        let result =
+            run_backend_sync(&backend, prompt, deadline, Some(&mut writer)).expect("backend run");
+        assert!(result.contains("mock backend output"));
+
+        let log_path = writer.path().to_path_buf();
+        drop(writer);
+
+        let content = std::fs::read_to_string(log_path).expect("read log");
+        assert!(content.contains("attempt=1"));
+        assert!(content.contains("fallback=false"));
+        assert!(content.contains(&format!("sha256={}", sha256_hex(prompt))));
+        assert!(content.contains(&format!("bytes={}", prompt.as_bytes().len())));
+        assert!(content.contains("hello prompt"));
+        assert!(content.contains("mock backend output"));
+    }
+
+    #[test]
+    fn run_backend_sync_with_none_does_not_create_log_file() {
+        let backend = make_mock_backend("no log output");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expected_log = log_path_for_role(temp.path(), "issue-11", None, "questions-a");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+        let result = run_backend_sync(&backend, "plain prompt", deadline, None)
+            .expect("backend run without logging");
+        assert!(result.contains("no log output"));
+        assert!(
+            !expected_log.exists(),
+            "no log file should be created when no writer is supplied"
+        );
+        assert!(
+            std::fs::read_dir(temp.path())
+                .expect("read temp directory")
+                .next()
+                .is_none(),
+            "temp directory should remain empty"
+        );
     }
 
     // -----------------------------------------------------------------------
