@@ -2642,7 +2642,7 @@ fn dispatch_resume_uses_issue_project_prompt_file(h: &RalphHarness) -> TestResul
         );
         git(
             &dh.repo_root,
-            &["remote", "add", "origin", &bare_remote.to_string_lossy()],
+            &["remote", "set-url", "origin", &bare_remote.to_string_lossy()],
         );
         let base_branch = git_stdout(&dh.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
         git(&dh.repo_root, &["push", "-u", "origin", &base_branch]);
@@ -2835,7 +2835,7 @@ exit 0
                 ],
             )
             .expect("daemon start should execute");
-        assert_exit_code(&output, 1);
+        assert_exit_code(&output, 2);
 
         let combined = combined_output(&output);
         assert!(
