@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{effective_completion_consensus, GlobalConfig, ProjectConfig};
-use crate::git::branch::{branch_exists, create_branch, remote_ref_exists, resolve_branch_name};
+use crate::git::branch::{
+    branch_exists, create_branch, current_branch, remote_ref_exists, resolve_branch_name,
+};
 use crate::git::is_git_repo;
 use crate::git::ralph_commit::{derive_position, list_ralph_commits};
 use crate::project::artifacts::parse_artifact_filename_timestamp;
@@ -373,6 +375,9 @@ fn maybe_create_project_branch(
 
     let branch_name = resolve_branch_name(&workspace.config.git.branch_format, project_id);
     if branch_exists(repo_root, &branch_name)? {
+        if current_branch(repo_root)? == branch_name {
+            return Ok(());
+        }
         return Err(RalphError::Validation(format!(
             "git branch '{}' already exists",
             branch_name
@@ -1021,6 +1026,7 @@ fn read_project_metadata(project_dir: &Path) -> Option<ProjectMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     /// Helper: write a minimal verdict artifact in the completion loop directory.
@@ -1164,6 +1170,63 @@ mod tests {
             attempt.verdict,
             Some(CompletionVerdict::Continue),
             "project override threshold=1.0 should yield Continue for 1/2 votes"
+        );
+    }
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    #[test]
+    fn maybe_create_project_branch_is_idempotent_when_head_matches_target() {
+        let tmp = TempDir::new().expect("tempdir");
+        let repo_root = tmp.path();
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+        git_ok(repo_root, &["config", "user.name", "Test User"]);
+        fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
+        git_ok(repo_root, &["add", "README.md"]);
+        git_ok(repo_root, &["commit", "-m", "initial"]);
+        git_ok(repo_root, &["checkout", "-b", "ralph/issue-42"]);
+
+        let workspace_root = repo_root.join(".ralph");
+        let workspace = Workspace::init(&workspace_root).expect("workspace init");
+
+        maybe_create_project_branch(&workspace, "issue-42", None)
+            .expect("branch creation should be idempotent when already checked out");
+    }
+
+    #[test]
+    fn maybe_create_project_branch_still_errors_for_existing_non_head_branch() {
+        let tmp = TempDir::new().expect("tempdir");
+        let repo_root = tmp.path();
+        git_ok(repo_root, &["init"]);
+        git_ok(repo_root, &["config", "user.email", "test@example.com"]);
+        git_ok(repo_root, &["config", "user.name", "Test User"]);
+        fs::write(repo_root.join("README.md"), "# test\n").expect("write README");
+        git_ok(repo_root, &["add", "README.md"]);
+        git_ok(repo_root, &["commit", "-m", "initial"]);
+        git_ok(repo_root, &["branch", "ralph/issue-77"]);
+
+        let workspace_root = repo_root.join(".ralph");
+        let workspace = Workspace::init(&workspace_root).expect("workspace init");
+
+        let err = maybe_create_project_branch(&workspace, "issue-77", None)
+            .expect_err("existing branch should still error when not checked out");
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected existing-branch validation error"
         );
     }
 }
