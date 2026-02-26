@@ -2135,12 +2135,16 @@ pub fn parse_approved_spec_from_comments(
         .filter(|c| c.author_login == bot_login)
         .collect();
 
-    // Find highest approved revision N from status-approved-vN markers
+    // Find highest approved revision N from status-approved-vN markers.
+    // Only check the first non-empty line of each bot comment to avoid
+    // matching marker-like lines injected into draft bodies via prompt
+    // injection.  Real approval comments always have the marker as the
+    // first line.
     let approved_prefix = format!("<!-- ralph:prd:{issue_number}:status-approved-v");
     let mut highest_approved: Option<u32> = None;
     for comment in &bot_comments {
-        for line in comment.body.lines() {
-            let line = line.trim();
+        let first_line = comment.body.lines().map(str::trim).find(|l| !l.is_empty());
+        if let Some(line) = first_line {
             if let Some(rest) = line.strip_prefix(&approved_prefix) {
                 if let Some(n_str) = rest.strip_suffix(" -->") {
                     if let Ok(n) = n_str.parse::<u32>() {
