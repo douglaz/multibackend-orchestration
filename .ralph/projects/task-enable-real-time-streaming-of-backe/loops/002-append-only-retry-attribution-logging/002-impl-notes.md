@@ -1,0 +1,28 @@
+# Implementation Notes
+
+## Decisions Made
+- **LogWriter struct design**: Created a `LogWriter` struct in `output_log.rs` that encapsulates append-mode file handling with best-effort semantics. On any I/O failure (open, write, flush), it emits `tracing::warn!` and disables further writes by setting `self.file = None`. All subsequent writes silently no-op, ensuring backend execution is never affected by logging failures.
+- **Attempt tracking inside LogWriter**: The `LogWriter` maintains an internal `attempt` counter that auto-increments on each `write_attempt_separator()` call. This ensures consistent numbering across timeout retries and parse-retry/reformatter fallback attempts within the same `(loop_number, role)` execution.
+- **Fallback detection heuristic**: The `is_fallback` flag in `execute_with_timeout_retries` is determined by whether the LogWriter has already recorded at least one attempt (`log_writer.attempt() > 0`). The very first call to `execute_with_timeout_retries` within `execute_with_parse_retries` will have `attempt=0` and thus `is_fallback=false`; subsequent calls (reformatter, reminded prompt) will have `is_fallback=true`.
+- **Canonical log roles**: Used `"planner"`, `"implementer"`, `"qa"`, `"reviewer"`, and `"prompt-reviewer"` as log file role names, matching the spec. The completer role reuses the `"planner"` log file since it is conceptually an extension of the planning phase within the same loop.
+- **LogWriter instantiation at each call site**: Each `execute_with_parse_retries` call creates its own `LogWriter`. Because files are opened in append mode, multiple LogWriter instances for the same role within the same loop will append to the same file (e.g., QA retry iterations across different phase steps).
+- **Separator format**: Used a stable, machine-parseable format: `\n--- attempt=N backend=LABEL fallback=BOOL ts=TIMESTAMP ---\n`. Timestamps use RFC 3339 format via `chrono::Utc::now().to_rfc3339()`.
+
+## Spec Deviations
+- **Streaming semantics (byte preservation)**: The spec's master prompt mentions byte-preserving chunked streaming with `read_buf()`/`BytesMut`, but this is explicitly listed as a blocker for future loops (not part of Loop 2's acceptance criteria). Loop 2 focuses only on append-only retry attribution logging. The current implementation logs the final string output returned by `backend.execute()`.
+- **Timeout and process cleanup**: Similarly, the timeout kill/reap behavior and timeout footer writing are listed under the master prompt's future requirements but are not in Loop 2's acceptance criteria. The existing timeout retry logic is preserved unchanged.
+- **Acceptance QA log role**: The acceptance QA phase uses role `"qa"` for its log file, which means acceptance QA output appends to the same QA log file as the regular QA phase within the same loop. This is consistent with the spec's requirement that all attempts for the same `(loop_number, role)` append to the same file.
+
+## Testing
+- **Unit tests** (in `output_log.rs`):
+  - `separator_format_contains_required_fields` - verifies attempt, backend, fallback, and timestamp fields
+  - `separator_format_fallback_flag` - verifies fallback=true variant
+  - `log_writer_opens_and_appends` - end-to-end write/read with multiple attempts
+  - `log_writer_appends_across_instances` - verifies append mode across separate LogWriter lifetimes
+  - `log_writer_attempt_counter_increments` - verifies monotonic counter
+  - `log_writer_disabled_on_bad_path_continues_silently` - verifies graceful failure handling
+  - `log_writer_prompt_reviewer_uses_root_path` - verifies None loop_number produces project-root path
+- **Conformance tests** (in `tests_streaming.rs`, registered in `validate/mod.rs`):
+  - `streaming::retry_append_behavior` - runs a full loop and verifies planner and implementer log files exist with attempt separators
+  - `streaming::prompt_reviewer_path` - enables prompt review and verifies the log is at project root, not inside a loop directory
+- **Verification**: `cargo test` passes with 590 tests passing, 1 ignored, 0 failures.
