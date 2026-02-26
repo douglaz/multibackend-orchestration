@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 /// Derives a deterministic, collision-safe log file path under `.ralph/tmp/logs`.
@@ -56,18 +57,51 @@ pub fn format_attempt_separator(
     is_fallback: bool,
     timestamp: &str,
 ) -> String {
+    format_attempt_separator_with_prompt(attempt, backend_label, is_fallback, timestamp, None)
+}
+
+/// Formats a separator line for a backend attempt, optionally including a
+/// prompt SHA-256 field.
+pub fn format_attempt_separator_with_prompt(
+    attempt: u32,
+    backend_label: &str,
+    is_fallback: bool,
+    timestamp: &str,
+    prompt_sha256: Option<&str>,
+) -> String {
     let sanitized = sanitize_for_filename(backend_label);
     let fallback_flag = if is_fallback {
         "fallback=true"
     } else {
         "fallback=false"
     };
-    format!("\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp} ---\n")
+    let prompt_hash_suffix = prompt_sha256
+        .map(|hash| format!(" prompt_sha256={hash}"))
+        .unwrap_or_default();
+    format!(
+        "\n--- attempt={attempt} backend={sanitized} {fallback_flag} ts={timestamp}{prompt_hash_suffix} ---\n"
+    )
 }
 
 /// Formats a timeout footer line appended when backend execution times out.
 pub fn format_timeout_footer(timestamp: &str) -> String {
     format!("\n--- timeout ts={timestamp} ---\n")
+}
+
+/// Formats a validation footer line appended after section validation checks.
+pub fn format_validation_footer(passed: bool, missing: &[String]) -> String {
+    if passed {
+        "\n--- validation=pass missing=[] ---\n".to_string()
+    } else {
+        let missing_joined = missing.join(",");
+        format!("\n--- validation=fail missing=[{missing_joined}] ---\n")
+    }
+}
+
+/// Computes lowercase-hex SHA-256 over the prompt's UTF-8 bytes.
+pub fn compute_prompt_sha256(prompt: &str) -> String {
+    let digest = Sha256::digest(prompt.as_bytes());
+    format!("{digest:x}")
 }
 
 /// Best-effort append-mode log writer.
@@ -124,9 +158,37 @@ impl LogWriter {
         self.write_bytes(separator.as_bytes());
     }
 
+    /// Write an attempt separator before a backend execution and include a
+    /// prompt SHA-256 hash derived from the prompt bytes.
+    /// Increments the internal attempt counter.
+    pub fn write_attempt_separator_with_prompt(
+        &mut self,
+        backend_label: &str,
+        is_fallback: bool,
+        prompt: &str,
+    ) {
+        self.attempt += 1;
+        let timestamp = Utc::now().to_rfc3339();
+        let prompt_sha256 = compute_prompt_sha256(prompt);
+        let separator = format_attempt_separator_with_prompt(
+            self.attempt,
+            backend_label,
+            is_fallback,
+            &timestamp,
+            Some(&prompt_sha256),
+        );
+        self.write_bytes(separator.as_bytes());
+    }
+
     /// Append a timeout footer line with the provided timestamp.
     pub fn write_timeout_footer(&mut self, timestamp: &str) {
         let footer = format_timeout_footer(timestamp);
+        self.write_bytes(footer.as_bytes());
+    }
+
+    /// Append a validation footer line for section validation outcomes.
+    pub fn write_validation_footer(&mut self, passed: bool, missing: &[String]) {
+        let footer = format_validation_footer(passed, missing);
         self.write_bytes(footer.as_bytes());
     }
 
@@ -265,6 +327,57 @@ mod tests {
     }
 
     #[test]
+    fn separator_format_with_prompt_hash() {
+        let sep = format_attempt_separator_with_prompt(
+            1,
+            "claude(opus)",
+            false,
+            "2026-01-01T00:00:00Z",
+            Some("2cf24dba"),
+        );
+        assert!(sep.contains("attempt=1"));
+        assert!(sep.contains("backend=claude_opus"));
+        assert!(sep.contains("fallback=false"));
+        assert!(sep.contains("ts=2026-01-01T00:00:00Z"));
+        assert!(sep.contains("prompt_sha256=2cf24dba"));
+    }
+
+    #[test]
+    fn legacy_separator_format_unchanged_exact() {
+        let sep = format_attempt_separator(2, "codex(gpt-5)", true, "2026-01-01T00:00:00Z");
+        assert_eq!(
+            sep,
+            "\n--- attempt=2 backend=codex_gpt-5 fallback=true ts=2026-01-01T00:00:00Z ---\n"
+        );
+        assert!(!sep.contains("prompt_sha256="));
+    }
+
+    #[test]
+    fn validation_footer_format_pass_exact() {
+        let footer = format_validation_footer(true, &[]);
+        assert_eq!(footer, "\n--- validation=pass missing=[] ---\n");
+    }
+
+    #[test]
+    fn validation_footer_format_fail_exact() {
+        let missing = vec!["Milestones".to_string(), "Requirements".to_string()];
+        let footer = format_validation_footer(false, &missing);
+        assert_eq!(
+            footer,
+            "\n--- validation=fail missing=[Milestones,Requirements] ---\n"
+        );
+    }
+
+    #[test]
+    fn compute_prompt_sha256_matches_known_vector() {
+        let hash = compute_prompt_sha256("hello");
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
     fn timeout_footer_format_contains_timestamp() {
         let footer = format_timeout_footer("2026-01-01T00:00:00Z");
         assert_eq!(footer, "\n--- timeout ts=2026-01-01T00:00:00Z ---\n");
@@ -315,6 +428,39 @@ mod tests {
         let content = fs::read_to_string(writer.path()).expect("read log");
         assert!(content.contains("partial output"));
         assert!(content.contains("--- timeout ts=2026-01-01T00:00:00Z ---"));
+    }
+
+    #[test]
+    fn log_writer_attempt_separator_with_prompt_hash_appends() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), "issue-8", Some(8), "writer");
+
+        writer.write_attempt_separator_with_prompt("claude(opus)", false, "hello");
+        writer.write_str("raw output");
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("attempt=1"));
+        assert!(
+            content.contains(
+                "prompt_sha256=2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            ),
+            "separator should include prompt hash"
+        );
+        assert!(content.contains("raw output"));
+    }
+
+    #[test]
+    fn log_writer_validation_footer_appends() {
+        let temp = tempdir().expect("tempdir");
+        let mut writer = LogWriter::open(temp.path(), "issue-4", Some(4), "writer");
+        let missing = vec!["Milestones".to_string(), "Requirements".to_string()];
+
+        writer.write_str("candidate content");
+        writer.write_validation_footer(false, &missing);
+
+        let content = fs::read_to_string(writer.path()).expect("read log");
+        assert!(content.contains("candidate content"));
+        assert!(content.contains("--- validation=fail missing=[Milestones,Requirements] ---"));
     }
 
     #[test]
