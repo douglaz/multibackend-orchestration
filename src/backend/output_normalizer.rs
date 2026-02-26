@@ -940,22 +940,21 @@ Done."#;
         // summary after tool use. We must keep the longest result.
         let full_spec = "## Summary\nFull spec.\n\n## Acceptance Criteria\n- AC1";
         let summary = "The spec has been written to file.";
-        let raw = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            r#"{"type":"system","subtype":"init","session_id":"s1"}"#,
-            format!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}},"session_id":"s1"}}"#,
-                full_spec.replace('\n', "\\n")
-            ),
-            format!(
-                r#"{{"type":"result","result":"{}","session_id":"s1"}}"#,
-                full_spec.replace('\n', "\\n")
-            ),
-            format!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{summary}"}}]}},"session_id":"s1"}}"#,
-            ),
-            format!(r#"{{"type":"result","result":"{summary}","session_id":"s1"}}"#),
+        let escaped_spec = full_spec.replace('\n', "\\n");
+        let line_init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let line_asst1 = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{escaped_spec}"}}]}},"session_id":"s1"}}"#,
         );
+        let line_res1 = format!(
+            r#"{{"type":"result","result":"{escaped_spec}","session_id":"s1"}}"#,
+        );
+        let line_asst2 = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{summary}"}}]}},"session_id":"s1"}}"#,
+        );
+        let line_res2 = format!(
+            r#"{{"type":"result","result":"{summary}","session_id":"s1"}}"#,
+        );
+        let raw = [line_init, &line_asst1, &line_res1, &line_asst2, &line_res2].join("\n");
         let normalized = normalize_output(&raw).expect("keeps longest result");
         assert!(
             normalized.text.contains("## Summary"),
