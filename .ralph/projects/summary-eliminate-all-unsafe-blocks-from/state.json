@@ -1,0 +1,78 @@
+{
+  "project_id": "summary-eliminate-all-unsafe-blocks-from",
+  "project_name": "## Summary\nEliminate all `unsafe` blocks from the codebase w",
+  "created_at": "2026-02-14T20:07:33.069556215Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "c9e420900f82e9713ff05ff51ae22f41589524725389d85a5b90b7d181b2d5d7",
+  "prompt_hash_at_loop_start": "c9e420900f82e9713ff05ff51ae22f41589524725389d85a5b90b7d181b2d5d7",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "harden-pidpgid-handling-with-nix-signal-apis",
+      "feature_name": "Harden PID/PGID handling with nix signal APIs",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214200908-spec.md",
+        "impl_notes": "loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214201131-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214201736-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-harden-pidpgid-handling-with-nix-signal-apis/20260214201709-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "80d8b76dd50624ee624b3c9d2867acf9cbe0ec9b",
+      "started_at": "2026-02-14T20:09:08.486629027Z",
+      "completed_at": "2026-02-14T20:17:36.634313014Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260214201746-termination-request.md",
+        "verdict": "loops/002-completion/20260214201840-completer-verdict.md",
+        "acceptance_results": [
+          {
+            "backend": "claude(opus)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260214203955-acceptance-pass-claudeopus.md"
+          },
+          {
+            "backend": "codex(gpt-5.3-codex-xhigh)",
+            "passed": true,
+            "artifact": "loops/002-completion/20260214204305-acceptance-pass-codexgpt-53-codex-xhigh.md"
+          }
+        ]
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-14T20:17:46.139222793Z",
+      "completed_at": "2026-02-14T20:18:40.812168452Z"
+    }
+  ]
+}
