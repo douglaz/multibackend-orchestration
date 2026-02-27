@@ -4,8 +4,8 @@
 //! idempotent restart handling without requiring live GitHub API access.
 
 use ralph::daemon::interactive_prd::{
-    detect_approval, has_prd_label, prd_marker, prd_status_failed_marker, InteractivePrdState,
-    PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
+    detect_approval, has_in_progress_prd_label, has_prd_label, prd_marker,
+    prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
 };
 use ralph::validate::assertions::assert_exit_code;
 use ralph::validate::harness::RalphHarness;
@@ -80,6 +80,13 @@ fn has_prd_label_returns_false_for_empty() {
     assert!(!has_prd_label(&[]));
 }
 
+#[test]
+fn waiting_feedback_label_classification_matches_exports() {
+    let labels = vec!["ralph:waiting-feedback".to_owned()];
+    assert!(has_prd_label(&labels));
+    assert!(!has_in_progress_prd_label(&labels));
+}
+
 // ---------------------------------------------------------------------------
 // Approval detection edge cases
 // ---------------------------------------------------------------------------
@@ -128,10 +135,11 @@ fn prd_status_failed_marker_format() {
 
 #[test]
 fn prd_labels_have_expected_entries() {
-    assert_eq!(PRD_LABELS.len(), 5);
+    assert_eq!(PRD_LABELS.len(), 6);
     let names: Vec<&str> = PRD_LABELS.iter().map(|(name, _, _)| *name).collect();
     assert!(names.contains(&"ralph:prd"));
     assert!(names.contains(&"ralph:prd-active"));
+    assert!(names.contains(&"ralph:waiting-feedback"));
     assert!(names.contains(&"ralph:prd-approved"));
     assert!(names.contains(&"ralph:prd-done"));
     assert!(names.contains(&"ralph:prd-failed"));
