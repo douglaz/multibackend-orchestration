@@ -166,6 +166,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
             window_keep_seconds: workspace.config.workspace.tmux_window_keep_seconds,
         },
     );
+    registry.set_cwd(Some(std::env::current_dir()?));
 
     backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
     backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;

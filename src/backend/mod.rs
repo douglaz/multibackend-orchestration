@@ -799,6 +799,7 @@ pub struct BackendRegistry {
     invocation_context: SharedInvocationContext,
     config: GlobalConfig,
     tmux: BackendRegistryTmuxConfig,
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -840,7 +841,14 @@ impl BackendRegistry {
             invocation_context: shared_invocation,
             config: config.clone(),
             tmux,
+            cwd: None,
         }
+    }
+
+    pub fn set_cwd(&mut self, cwd: Option<PathBuf>) {
+        self.cwd = cwd;
+        // Clear cached backends so they are re-created with the new cwd.
+        self.backends.clear();
     }
 
     /// Set the tmux execution context (loop number, role) for the next backend
@@ -1195,9 +1203,24 @@ impl BackendRegistry {
 
         let model = spec.model.as_deref();
         match spec.name.as_str() {
-            "claude" => Ok(claude::backend_from_config(&self.config, model, role, None)),
-            "codex" => Ok(codex::backend_from_config(&self.config, model, role, None)),
-            "gemini" => Ok(gemini::backend_from_config(&self.config, model, role, None)),
+            "claude" => Ok(claude::backend_from_config(
+                &self.config,
+                model,
+                role,
+                self.cwd.clone(),
+            )),
+            "codex" => Ok(codex::backend_from_config(
+                &self.config,
+                model,
+                role,
+                self.cwd.clone(),
+            )),
+            "gemini" => Ok(gemini::backend_from_config(
+                &self.config,
+                model,
+                role,
+                self.cwd.clone(),
+            )),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for spec lookup: {}",
                 backend_spec_key(spec)
