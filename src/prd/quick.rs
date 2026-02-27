@@ -81,6 +81,17 @@ pub const DRAFT_PROMPT: &str = r#"You are a senior software engineer writing a f
 **Feature Idea:**
 {{idea}}
 
+**Before writing the spec, explore the project:**
+1. List the directory tree to understand the project layout
+2. Read key files to understand architecture
+3. Search for existing utilities and patterns related to the feature
+4. Identify code that can be reused instead of building from scratch
+
+**Principles:**
+- Prefer reusing existing code over creating new abstractions
+- Keep changes minimal — the simplest solution that meets the requirement
+- Reference specific existing files/functions in Technical Approach
+
 **Required Output Format:**
 Your response must be a markdown document with the following exact section headings:
 
@@ -106,6 +117,11 @@ pub const REVIEW_PROMPT: &str = r#"You are a senior engineer reviewing an engine
 
 **Task:**
 Review the spec for: technical feasibility, missing edge cases, completeness of acceptance criteria, testing coverage, and clarity.
+
+Check specifically:
+- Does the spec reuse existing project infrastructure where possible?
+- Does it avoid reinventing utilities that already exist in the codebase?
+- Is the solution the simplest approach that meets the requirements?
 
 **Required Output Format:**
 Your response MUST be a single fenced JSON block:
