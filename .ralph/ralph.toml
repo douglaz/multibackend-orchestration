@@ -77,31 +77,27 @@ reformatter = "gpt-5.3-codex-medium"
 [backends.codex.role_timeouts]
 
 [backends.openrouter]
-command = "claude"
+command = "opencode"
 args = [
-    "-p",
-    "--permission-mode",
-    "acceptEdits",
-    "--allowedTools",
-    "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop",
+    "run",
+    "--format",
+    "json",
 ]
 timeout_seconds = 7200
 enabled = "auto"
 
 [backends.openrouter.env]
-ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
-ANTHROPIC_API_KEY = ""
 
 [backends.openrouter.models]
-planner = "openai/gpt-5.3-codex"
-implementer = "openai/gpt-5.3-codex"
-reviewer = "openai/gpt-5.3-codex"
-final_reviewer = "openai/gpt-5.3-codex"
-arbiter = "openai/gpt-5.3-codex"
-qa = "openai/gpt-5.3-codex"
-completer = "openai/gpt-5.3-codex"
-acceptance_qa = "openai/gpt-5.3-codex"
-reformatter = "openai/gpt-5.3-codex"
+planner = "openrouter/openai/gpt-5.2-codex"
+implementer = "openrouter/openai/gpt-5.2-codex"
+reviewer = "openrouter/openai/gpt-5.2-codex"
+final_reviewer = "openrouter/openai/gpt-5.2-codex"
+arbiter = "openrouter/openai/gpt-5.2-codex"
+qa = "openrouter/openai/gpt-5.2-codex"
+completer = "openrouter/openai/gpt-5.2-codex"
+acceptance_qa = "openrouter/openai/gpt-5.2-codex"
+reformatter = "openrouter/openai/gpt-5.2-codex"
 
 [backends.openrouter.role_timeouts]
 
