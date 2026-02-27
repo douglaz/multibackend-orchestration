@@ -1500,28 +1500,43 @@ fn do_approval_transition(
         )));
     }
 
-    // Save succeeded — now safe to remove ralph:prd-active (issue will be
-    // polled via ralph:prd-done or terminal state file going forward).
-    github::remove_label_with_retry_with_gh_bin(
+    // Save succeeded — now safe to remove terminal cleanup labels.
+    // Attempt both removals independently so one failure never suppresses
+    // the other cleanup operation.
+    let active_remove_err = github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-active",
     )
-    .map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
-
-    let _ = github::remove_label_with_retry_with_gh_bin(
+    .err();
+    let waiting_remove_err = github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         WAITING_FEEDBACK_LABEL,
-    );
+    )
+    .err();
+
+    if active_remove_err.is_some() || waiting_remove_err.is_some() {
+        // Keep the transition retryable: re-enter AwaitingFeedback in-memory
+        // so finish_transition persists a non-terminal state.
+        state.state = PrdWorkflowState::AwaitingFeedback;
+
+        let mut errors = Vec::new();
+        if let Some(err) = active_remove_err {
+            errors.push(format!("failed to remove ralph:prd-active: {err}"));
+        }
+        if let Some(err) = waiting_remove_err {
+            errors.push(format!("failed to remove {WAITING_FEEDBACK_LABEL}: {err}"));
+        }
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "post-save Done cleanup failed for {owner}/{repo}#{issue_number}: {}",
+            errors.join("; ")
+        )));
+    }
 
     Ok(())
 }
@@ -2315,7 +2330,7 @@ mod tests {
         prd_status_approved_marker, render_answer_to_draft_prompt,
         run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
         DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT,
-        PRD_LABEL_NAMES, PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        PRD_LABELS, PRD_LABEL_NAMES, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;

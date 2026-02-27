@@ -2186,6 +2186,168 @@ esac; exit 0
     // ralph:prd-active is still present so the issue remains poll-visible.
 }
 
+#[test]
+fn done_post_save_active_label_removal_failure_retries() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/141.json");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
+    let seed = serde_json::json!({
+        "issue_number": 141,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1410,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1412,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1411,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let label_log = h.temp_dir.path().join("done_cleanup_retry_labels.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+    let fail_once_path = h.temp_dir.path().join("fail_remove_active_once");
+    let fail_once_str = fail_once_path.to_string_lossy().into_owned();
+
+    // gh mock: first remove of ralph:prd-active fails after Done has been saved.
+    // waiting-feedback removal still succeeds and must be attempted in the same tick.
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+FAIL_ONCE="{fail_once_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":141,"title":"T","labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1410,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1411,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":1412,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:141:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1413,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit)
+        echo "$@" >> "$LLOG"
+        case "$*" in
+          *"--remove-label ralph:prd-active"*)
+            if [ ! -f "$FAIL_ONCE" ]; then
+              : > "$FAIL_ONCE"
+              echo "gh: transient remove failure for ralph:prd-active" >&2
+              exit 1
+            fi
+            ;;
+        esac
+        exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Tick 1: active-label removal fails post-save; state should be reverted
+    // to AwaitingFeedback so retry logic can run on the next tick.
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start tick 1");
+
+    let state_tick_1: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state after tick 1"))
+            .expect("parse state after tick 1");
+    assert_eq!(
+        state_tick_1.state,
+        PrdWorkflowState::AwaitingFeedback,
+        "state should be reverted to AwaitingFeedback after post-save cleanup failure"
+    );
+    assert!(
+        state_tick_1.error_count >= 1,
+        "error_count should increment after cleanup failure: {}",
+        state_tick_1.error_count
+    );
+    let label_raw_tick_1 = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw_tick_1.contains("--remove-label ralph:prd-active"),
+        "active label removal should be attempted: {label_raw_tick_1}"
+    );
+    assert!(
+        label_raw_tick_1.contains("--remove-label ralph:waiting-feedback"),
+        "waiting label removal should still be attempted after active failure: {label_raw_tick_1}"
+    );
+
+    // Tick 2: active-label removal now succeeds; transition should complete.
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start tick 2");
+
+    let state_tick_2: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state after tick 2"))
+            .expect("parse state after tick 2");
+    assert_eq!(
+        state_tick_2.state,
+        PrdWorkflowState::Done,
+        "state should transition to Done after cleanup retry succeeds"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Terminal save-failure recovery: approval path
 // ---------------------------------------------------------------------------

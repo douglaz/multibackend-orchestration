@@ -144,6 +144,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: approval_label_ordering_partial_failure_recovery,
         },
         ConformanceTest {
+            name: "interactive_prd::done_post_save_cleanup_failure_retries",
+            func: done_post_save_cleanup_failure_retries,
+        },
+        ConformanceTest {
             name: "interactive_prd::section_complete_spec_passes_validation",
             func: section_complete_spec_passes_validation,
         },
@@ -3081,6 +3085,143 @@ esac; exit 0
     })
 }
 
+/// Verify Done post-save cleanup failure behavior:
+/// 1) A first-tick failure removing `ralph:prd-active` still attempts
+///    `ralph:waiting-feedback` removal and leaves state retryable.
+/// 2) A second tick retries cleanup and completes transition to `Done`.
+fn done_post_save_cleanup_failure_retries(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("harness");
+        dh.init_workspace().unwrap();
+
+        let backend_script = dh.write_mock_script("noop.sh", "#!/bin/sh\ncat\n").unwrap();
+        dh.setup_mock_backends_stable(&backend_script).unwrap();
+
+        let state_path = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/221.json");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let seed = serde_json::json!({
+            "issue_number": 221, "owner": "acme", "repo": "widgets",
+            "state": "AwaitingFeedback",
+            "question_revision": 1, "draft_revision": 1,
+            "questions_comment_id": 2210, "questions_posted_at": "2026-01-01T00:00:05Z",
+            "latest_draft_comment_id": 2212,
+            "latest_draft_body": "## Summary\nDraft.",
+            "user_answers": "ans", "last_processed_comment_id": 2211,
+            "error_count": 0, "last_error": null, "last_advanced_at": null
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let label_log = dh.temp_dir.path().join("done_cleanup_retry_labels.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let fail_once = dh.temp_dir.path().join("fail_remove_active_once");
+        let fail_once_str = fail_once.to_string_lossy().into_owned();
+
+        let gh_script = format!(
+            r#"#!/bin/sh
+LLOG="{label_log_str}"
+FAIL_ONCE="{fail_once_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":221,"title":"T","labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":2210,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":2211,"author":{{"login":"alice"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":2212,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:221:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":2213,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit)
+        echo "$@" >> "$LLOG"
+        case "$*" in
+          *"--remove-label ralph:prd-active"*)
+            if [ ! -f "$FAIL_ONCE" ]; then
+              : > "$FAIL_ONCE"
+              echo "gh: transient remove failure for ralph:prd-active" >&2
+              exit 1
+            fi
+            ;;
+        esac
+        exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+        );
+        let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
+        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
+
+        // Tick 1: cleanup failure should keep the issue retryable.
+        let _output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        let state_tick_1: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state_tick_1.state,
+            PrdWorkflowState::AwaitingFeedback,
+            "state should remain retryable after post-save cleanup failure"
+        );
+        assert!(
+            state_tick_1.error_count >= 1,
+            "error_count should increment after cleanup failure: {}",
+            state_tick_1.error_count
+        );
+        let label_raw_tick_1 = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw_tick_1.contains("--remove-label ralph:prd-active"),
+            "active label removal should be attempted: {label_raw_tick_1}"
+        );
+        assert!(
+            label_raw_tick_1.contains("--remove-label ralph:waiting-feedback"),
+            "waiting label removal should still be attempted: {label_raw_tick_1}"
+        );
+
+        // Tick 2: removal retry succeeds, transition finishes.
+        let _output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .unwrap();
+        let state_tick_2: InteractivePrdState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state_tick_2.state,
+            PrdWorkflowState::Done,
+            "state should become Done after cleanup retry succeeds"
+        );
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Section-completeness conformance tests
 // ---------------------------------------------------------------------------
@@ -3532,7 +3673,10 @@ fn terminal_save_failure_keeps_retry_visibility(h: &RalphHarness) -> TestResult 
         });
         fs::write(&state_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-        let label_log = dh.temp_dir.path().join("terminal_save_failure_done_label.log");
+        let label_log = dh
+            .temp_dir
+            .path()
+            .join("terminal_save_failure_done_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
         let gh_script = r#"#!/bin/sh
 LLOG="__LABEL_LOG__"
