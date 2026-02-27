@@ -144,6 +144,7 @@ impl RalphError {
                     || details.contains("RESOURCE_EXHAUSTED")
                     || details.contains("MODEL_CAPACITY_EXHAUSTED")
                     || details.contains("quota will reset")
+                    || details.contains("hit your usage limit")
             }
             _ => false,
         }

@@ -679,9 +679,19 @@ impl CliBackend {
                 let stderr_bytes = self.collect_stderr(stderr_handle).await?;
 
                 if !status.success() {
+                    let stderr_text =
+                        String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
+                    // Some backends (e.g. codex) report errors via stdout JSON
+                    // rather than stderr. When stderr is empty, include stdout
+                    // so quota/error messages are visible to callers.
+                    let details = if stderr_text.is_empty() {
+                        String::from_utf8_lossy(&captured_stdout).trim().to_owned()
+                    } else {
+                        stderr_text
+                    };
                     return Err(RalphError::BackendCommandFailed {
                         backend: self.name.clone(),
-                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+                        details,
                     });
                 }
 
