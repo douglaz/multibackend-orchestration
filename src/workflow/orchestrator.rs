@@ -3601,6 +3601,19 @@ async fn run_final_review_phase(
                     );
                     continue;
                 }
+                Err(RalphError::BackendCommandFailed {
+                    ref backend,
+                    ref details,
+                }) => {
+                    warn!(
+                        loop = loop_number,
+                        backend = reviewer_backend.as_str(),
+                        error_backend = backend.as_str(),
+                        details = details.as_str(),
+                        "final reviewer vote backend command failed; skipping"
+                    );
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             let decision = retry_result.parsed;
