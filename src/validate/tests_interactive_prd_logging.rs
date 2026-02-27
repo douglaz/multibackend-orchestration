@@ -47,6 +47,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: draft_and_review_emit_expected_labels,
         },
         ConformanceTest {
+            name: "interactive_prd_logging::transport_failure_log_schema",
+            func: transport_failure_log_schema,
+        },
+        ConformanceTest {
             name: "interactive_prd_logging::state_file_path_unchanged",
             func: state_file_path_unchanged,
         },
@@ -550,17 +554,43 @@ exit 1
             2,
             "expected exactly two review-attempt logs (first malformed, second approved)"
         );
+
+        // Attempt 1: parse failed – raw_output present, error null, validation = review_parse_failed
+        let attempt_1 = review_entries
+            .iter()
+            .find(|e| e["label"].as_str() == Some("draft-review-attempt-1-of-3"))
+            .expect("missing attempt-1 review log");
         assert!(
-            review_entries
-                .iter()
-                .any(|entry| entry["label"].as_str() == Some("draft-review-attempt-1-of-3")),
-            "missing attempt-1 review log"
+            attempt_1["raw_output"].as_str().is_some(),
+            "attempt-1 raw_output should be present"
         );
         assert!(
-            review_entries
-                .iter()
-                .any(|entry| entry["label"].as_str() == Some("draft-review-attempt-2-of-3")),
-            "missing attempt-2 review log"
+            attempt_1["error"].is_null(),
+            "attempt-1 error should be null (parse failure, not transport error)"
+        );
+        assert_eq!(
+            attempt_1["validation"]["status"],
+            Value::String("review_parse_failed".to_owned()),
+            "attempt-1 validation.status should be review_parse_failed"
+        );
+
+        // Attempt 2: approved – raw_output present, error null, validation = ok
+        let attempt_2 = review_entries
+            .iter()
+            .find(|e| e["label"].as_str() == Some("draft-review-attempt-2-of-3"))
+            .expect("missing attempt-2 review log");
+        assert!(
+            attempt_2["raw_output"].as_str().is_some(),
+            "attempt-2 raw_output should be present"
+        );
+        assert!(
+            attempt_2["error"].is_null(),
+            "attempt-2 error should be null"
+        );
+        assert_eq!(
+            attempt_2["validation"]["status"],
+            Value::String("ok".to_owned()),
+            "attempt-2 validation.status should be ok"
         );
     })
 }
@@ -776,6 +806,212 @@ exit 1
 
         assert!(labels.contains(&"draft-attempt-1".to_owned()));
         assert!(labels.contains(&"draft-review-attempt-1-of-3".to_owned()));
+    })
+}
+
+fn transport_failure_log_schema(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Backend that succeeds for draft generation but exits non-zero for review
+        // (simulating a transport/runtime failure).
+        let backend_script = dh
+            .write_mock_script(
+                "transport-fail-backend.sh",
+                r#"#!/bin/sh
+INPUT="$(cat)"
+if echo "$INPUT" | grep -q 'Review the spec for\|\*\*Engineering Spec:\*\*\|review response could not be parsed'; then
+  echo "connection refused: backend unreachable" >&2
+  exit 1
+else
+  cat <<'EOF_SPEC'
+## Summary
+S
+## Acceptance Criteria
+A
+## Technical Approach
+T
+## Files & Modules
+F
+## Testing Strategy
+TS
+## Out of Scope
+O
+EOF_SPEC
+fi
+"#,
+            )
+            .expect("write backend script");
+        dh.setup_mock_backends_stable(&backend_script)
+            .expect("setup backends");
+
+        let mut state = InteractivePrdState::new("acme", "widgets", 30);
+        state.state = PrdWorkflowState::AwaitingAnswers;
+        state.question_revision = 1;
+        state.questions_posted_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:01Z")
+                .expect("timestamp")
+                .with_timezone(&Utc),
+        );
+        state.questions_comment_id = Some(100);
+        state.save(dh.data_dir()).expect("save state");
+
+        let gh_script = r#"#!/bin/sh
+set -eu
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do
+          if [ "$arg" = "ralph:prd-active" ]; then
+            has_active=1
+          fi
+        done
+        if [ "$has_active" = "1" ]; then
+          printf '[{"number":30,"title":"Draft issue","labels":[{"name":"ralph:prd-active"}],"body":"Body"}]'
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      view)
+        want_comments=0
+        want_labels=0
+        want_tb=0
+        for arg in "$@"; do
+          case "$arg" in
+            comments) want_comments=1 ;;
+            labels) want_labels=1 ;;
+            title,body) want_tb=1 ;;
+          esac
+        done
+        if [ "$want_comments" = "1" ]; then
+          printf '{"comments":[{"id":100,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:30:questions-v1 -->\\n## Clarifying Questions\\n1. Q?","createdAt":"2026-01-01T00:00:02Z"},{"id":101,"author":{"login":"octocat"},"body":"Answers here","createdAt":"2026-01-01T00:00:10Z"}]}'
+          exit 0
+        fi
+        if [ "$want_labels" = "1" ]; then
+          printf '{"labels":[{"name":"ralph:prd-active"}]}'
+          exit 0
+        fi
+        if [ "$want_tb" = "1" ]; then
+          printf '{"title":"Draft issue","body":"Body"}'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      edit)
+        exit 0
+        ;;
+      comment)
+        exit 0
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    ;;
+  label)
+    if [ "$2" = "create" ]; then
+      exit 0
+    fi
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      edit) exit 0 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        mkdir -p "$target_dir"
+        git init "$target_dir" --quiet 2>/dev/null
+        git -C "$target_dir" config user.email "mock@test"
+        git -C "$target_dir" config user.name "MockClone"
+        touch "$target_dir/.gitkeep"
+        git -C "$target_dir" add .gitkeep
+        git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        exit 0
+        ;;
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+
+exit 1
+"#;
+
+        let gh_path = write_mock_gh(&dh, gh_script).expect("write gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        // The daemon should not crash – the review failure is handled gracefully.
+        // Exit code may be non-zero (workflow failure) but the process must not panic.
+        let _output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute without panic");
+
+        let logs_dir = dh
+            .data_dir()
+            .join("acme/widgets/.ralph/interactive-prd/30/logs");
+        let entries = load_logs(&logs_dir);
+        let review_entries: Vec<&Value> = entries
+            .iter()
+            .filter(|entry| {
+                entry["label"]
+                    .as_str()
+                    .map(|label| label.starts_with("draft-review-attempt-"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(
+            !review_entries.is_empty(),
+            "expected at least one review-attempt log for transport failure"
+        );
+
+        // The first review attempt should be a transport failure
+        let failure_entry = review_entries
+            .iter()
+            .find(|e| e["label"].as_str() == Some("draft-review-attempt-1-of-3"))
+            .expect("missing draft-review-attempt-1-of-3 log entry");
+
+        // Transport failure: raw_output must be null (backend never returned output)
+        assert!(
+            failure_entry["raw_output"].is_null(),
+            "raw_output should be null for transport/runtime error, got: {:?}",
+            failure_entry["raw_output"]
+        );
+
+        // Transport failure: error must be a non-empty string
+        let error_val = failure_entry["error"]
+            .as_str()
+            .expect("error field should be a string for transport failure");
+        assert!(
+            !error_val.is_empty(),
+            "error field should be non-empty for transport failure"
+        );
+
+        // Transport failure: validation.status must be "not_checked"
+        assert_eq!(
+            failure_entry["validation"]["status"],
+            Value::String("not_checked".to_owned()),
+            "validation.status should be not_checked for transport/runtime error"
+        );
     })
 }
 
