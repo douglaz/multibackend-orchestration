@@ -959,14 +959,23 @@ impl BackendRegistry {
 
     pub fn opposite(&self, backend: &str) -> Result<&str> {
         let parsed = parse_backend_spec(backend)?;
-        match parsed.name.as_str() {
-            "claude" => Ok("codex"),
-            "codex" => Ok("claude"),
-            "openrouter" => Ok("claude"),
-            _ => Err(RalphError::Validation(format!(
-                "unknown backend for opposite lookup: {backend}"
-            ))),
+        let primary = match parsed.name.as_str() {
+            "claude" => "codex",
+            "codex" | "openrouter" => "claude",
+            _ => {
+                return Err(RalphError::Validation(format!(
+                    "unknown backend for opposite lookup: {backend}"
+                )));
+            }
+        };
+        // If the primary opposite is unavailable, try openrouter as substitute
+        // for codex (since openrouter provides codex-equivalent models).
+        if !self.is_backend_available(primary) && primary == "codex" {
+            if self.is_backend_available("openrouter") {
+                return Ok("openrouter");
+            }
         }
+        Ok(primary)
     }
 
     pub fn planner_for_loop(&self, loop_number: u32, starting_backend: &str) -> Result<String> {
@@ -2229,9 +2238,33 @@ done
     }
 
     #[test]
-    fn assign_feature_backends_recalculates_when_codex_disabled() {
+    fn opposite_returns_codex_for_claude_when_codex_enabled() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert_eq!(registry.opposite("claude").unwrap(), "codex");
+        assert_eq!(registry.opposite("codex").unwrap(), "claude");
+        assert_eq!(registry.opposite("openrouter").unwrap(), "claude");
+    }
+
+    #[test]
+    fn opposite_falls_back_to_openrouter_when_codex_disabled() {
         let mut config = GlobalConfig::default();
         config.backends.codex.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Auto;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        // claude's opposite is normally codex, but codex is disabled
+        // so it should fall back to openrouter.
+        assert_eq!(registry.opposite("claude").unwrap(), "openrouter");
+        // codex/openrouter opposite is still claude.
+        assert_eq!(registry.opposite("codex").unwrap(), "claude");
+        assert_eq!(registry.opposite("openrouter").unwrap(), "claude");
+    }
+
+    #[test]
+    fn assign_feature_backends_uses_openrouter_when_codex_disabled() {
+        let mut config = GlobalConfig::default();
+        config.backends.codex.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Auto;
         let registry = BackendRegistry::new(&config, tmux_disabled());
         let no_overrides = super::RoleOverrides {
             planner: None,
@@ -2241,21 +2274,26 @@ done
             completer: None,
         };
 
-        // Loop 5 (odd): planner = starting_backend = claude, implementer = opposite = codex.
-        // But codex is disabled, so if we recalculate we still get codex from alternation.
-        // The recalculation just gives the cycle answer; availability is checked separately.
+        // Loop 5 (odd): planner=claude, implementer=opposite(claude)=openrouter (codex disabled)
         let backends = registry
             .assign_feature_backends(5, "claude", &no_overrides)
             .expect("should assign backends");
-        // Odd loop: planner=claude, implementer=opposite(claude)=codex
         assert_eq!(backends.planner, "claude(opus)");
-        assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
+        assert!(
+            backends.implementer.starts_with("openrouter("),
+            "implementer should be openrouter, got: {}",
+            backends.implementer
+        );
 
-        // Even loop: planner=opposite(claude)=codex, implementer=opposite(codex)=claude
+        // Loop 6 (even): planner=opposite(claude)=openrouter, implementer=opposite(openrouter)=claude
         let backends = registry
             .assign_feature_backends(6, "claude", &no_overrides)
             .expect("should assign backends");
-        assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+        assert!(
+            backends.planner.starts_with("openrouter("),
+            "planner should be openrouter, got: {}",
+            backends.planner
+        );
         assert_eq!(backends.implementer, "claude(opus)");
     }
 
