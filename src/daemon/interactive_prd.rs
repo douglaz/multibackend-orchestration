@@ -2212,19 +2212,6 @@ fn run_review_with_retry_sync(
     let initial_prompt = prompt.clone();
     let mut attempt_events: Vec<crate::prd::quick::ReviewAttemptEvent> = Vec::new();
     let mut on_attempt = |event: crate::prd::quick::ReviewAttemptEvent| {
-        attempt_events.push(event);
-    };
-
-    let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
-    let result = rt.block_on(async {
-        tokio::time::timeout(
-            remaining,
-            run_review_with_retry(backend, prompt, Some(&mut on_attempt)),
-        )
-        .await
-    });
-
-    for event in &attempt_events {
         let label = format!("{label_prefix}-{}-of-3", event.attempt);
         let validation = match &event.parse_error {
             Some(error) => ValidationResult::ReviewParseFailed {
@@ -2240,7 +2227,17 @@ fn run_review_with_retry_sync(
             None,
             validation,
         );
-    }
+        attempt_events.push(event);
+    };
+
+    let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
+    let result = rt.block_on(async {
+        tokio::time::timeout(
+            remaining,
+            run_review_with_retry(backend, prompt, Some(&mut on_attempt)),
+        )
+        .await
+    });
 
     match result {
         Ok(Ok(feedback)) => Ok(feedback),
