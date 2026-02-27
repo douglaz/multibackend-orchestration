@@ -9,6 +9,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::Backend;
+use crate::daemon::interactive_prd::truncate_prompt_for_log;
 use crate::error::RalphError;
 use crate::output_log::LogWriter;
 use crate::prd::gaps::extract_fenced_json;
@@ -214,17 +215,6 @@ pub fn format_issues(issues: &[ReviewIssue]) -> String {
 }
 
 const MAX_SECTION_RETRIES: u8 = 2;
-
-const LOG_PROMPT_PREVIEW_CHARS: usize = 500;
-
-fn truncate_prompt_for_log(prompt: &str) -> (usize, String) {
-    let byte_len = prompt.len();
-    let preview = prompt
-        .chars()
-        .take(LOG_PROMPT_PREVIEW_CHARS)
-        .collect::<String>();
-    (byte_len, preview)
-}
 
 fn log_review_attempt_start(
     log_writer: Option<&mut LogWriter>,

@@ -2103,6 +2103,18 @@ fn run_review_with_retry_sync(
     }
 }
 
+fn run_backend_with_validation_na(
+    backend: &CliBackend,
+    backend_spec: &str,
+    prompt: &str,
+    deadline: std::time::Instant,
+    log_writer: &mut LogWriter,
+) -> Result<String> {
+    let result = run_backend_sync(backend, backend_spec, prompt, deadline, Some(log_writer));
+    log_validation_na(Some(log_writer));
+    result
+}
+
 /// Generate clarifying questions using two configured backends plus synthesis.
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
@@ -2134,14 +2146,13 @@ fn generate_questions_with_timeout(
         &config.global_config,
         Some(repo_cwd.clone()),
     )?;
-    let questions_a = run_backend_sync(
+    let questions_a = run_backend_with_validation_na(
         &backend_a,
         &config.question_backends[0],
         &prompt,
         deadline,
-        Some(&mut questions_a_log),
+        &mut questions_a_log,
     )?;
-    log_validation_na(Some(&mut questions_a_log));
 
     // Backend B
     let backend_b = create_backend(
@@ -2149,14 +2160,13 @@ fn generate_questions_with_timeout(
         &config.global_config,
         Some(repo_cwd),
     )?;
-    let questions_b = run_backend_sync(
+    let questions_b = run_backend_with_validation_na(
         &backend_b,
         &config.question_backends[1],
         &prompt,
         deadline,
-        Some(&mut questions_b_log),
+        &mut questions_b_log,
     )?;
-    log_validation_na(Some(&mut questions_b_log));
 
     // Synthesis: merge/dedupe/prioritize
     let synthesis_prompt = SYNTHESIS_PROMPT
@@ -2164,14 +2174,13 @@ fn generate_questions_with_timeout(
         .replace("{questions_b}", &questions_b);
 
     // Use the first question backend for synthesis
-    let synthesized = run_backend_sync(
+    let synthesized = run_backend_with_validation_na(
         &backend_a,
         &config.question_backends[0],
         &synthesis_prompt,
         deadline,
-        Some(&mut synthesis_log),
+        &mut synthesis_log,
     )?;
-    log_validation_na(Some(&mut synthesis_log));
 
     if synthesized.trim().is_empty() {
         return Err(RalphError::InteractivePrdFailed(

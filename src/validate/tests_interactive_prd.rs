@@ -186,6 +186,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: logging_timeout_and_error_markers,
         },
         ConformanceTest {
+            name: "interactive_prd::logging_questions_validation_na_on_error",
+            func: logging_questions_validation_na_on_error,
+        },
+        ConformanceTest {
             name: "interactive_prd::logging_utf8_prompt_truncation_safe",
             func: logging_utf8_prompt_truncation_safe,
         },
@@ -3420,6 +3424,106 @@ fn logging_timeout_and_error_markers(h: &RalphHarness) -> TestResult {
         assert!(
             error_raw.contains("--- execution: error"),
             "error marker missing:\n{error_raw}"
+        );
+    })
+}
+
+fn logging_questions_validation_na_on_error(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+
+        let timeout_script = dh
+            .write_mock_script(
+                "prd_log_validation_na_timeout.sh",
+                "#!/bin/sh\ncat >/dev/null\nsleep 2\nprintf '1. Late question\\n'\n",
+            )
+            .expect("write timeout script");
+        let timeout_config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &timeout_script.to_string_lossy(),
+            &timeout_script.to_string_lossy(),
+            1,
+            1,
+        );
+        let timeout_config_for_run = timeout_config.clone();
+        let timeout_err = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(&timeout_config_for_run, 907, "Issue text")
+        })
+        .expect_err("timeout scenario should fail");
+        assert!(
+            timeout_err.to_string().contains("timeout"),
+            "expected timeout error, got: {timeout_err}"
+        );
+        let timeout_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-907-questions-a.log");
+        let timeout_raw = fs::read_to_string(&timeout_log).expect("timeout log should exist");
+        assert!(
+            timeout_raw.contains("--- execution: timeout ---"),
+            "timeout marker missing:\n{timeout_raw}"
+        );
+        assert!(
+            timeout_raw.contains("--- validation: n/a ---"),
+            "validation n/a marker missing from timeout log:\n{timeout_raw}"
+        );
+
+        let synthesis_counter = dh.temp_dir.path().join("synthesis_error_counter.txt");
+        let synthesis_counter = synthesis_counter.to_string_lossy().into_owned();
+        let synthesis_error_script_content = format!(
+            "#!/bin/sh\nCOUNT_FILE=\"{synthesis_counter}\"\ncat >/dev/null\nN=0\nif [ -f \"$COUNT_FILE\" ]; then N=$(cat \"$COUNT_FILE\"); fi\nN=$((N+1))\nprintf '%s' \"$N\" > \"$COUNT_FILE\"\nif [ \"$N\" -eq 2 ]; then\n  echo 'boom from synthesis backend' >&2\n  exit 1\nfi\nprintf '1. Clarify API?\\n'\n"
+        );
+        let synthesis_error_script = dh
+            .write_mock_script(
+                "prd_log_validation_na_synthesis_error.sh",
+                &synthesis_error_script_content,
+            )
+            .expect("write synthesis error script");
+        let stable_script = dh
+            .write_mock_script(
+                "prd_log_validation_na_stable.sh",
+                "#!/bin/sh\ncat >/dev/null\nprintf '1. Clarify UX?\\n'\n",
+            )
+            .expect("write stable question script");
+
+        let synthesis_error_config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &synthesis_error_script.to_string_lossy(),
+            &stable_script.to_string_lossy(),
+            30,
+            1,
+        );
+        let synthesis_error_config_for_run = synthesis_error_config.clone();
+        let synthesis_error = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(
+                &synthesis_error_config_for_run,
+                908,
+                "Issue text",
+            )
+        })
+        .expect_err("synthesis error scenario should fail");
+        assert!(
+            synthesis_error
+                .to_string()
+                .contains("backend execution failed"),
+            "unexpected synthesis error output: {synthesis_error}"
+        );
+        let synthesis_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-908-synthesis.log");
+        let synthesis_raw = fs::read_to_string(&synthesis_log).expect("synthesis log should exist");
+        assert!(
+            synthesis_raw.contains("--- execution: error"),
+            "error marker missing from synthesis log:\n{synthesis_raw}"
+        );
+        assert!(
+            synthesis_raw.contains("--- validation: n/a ---"),
+            "validation n/a marker missing from synthesis log:\n{synthesis_raw}"
         );
     })
 }
