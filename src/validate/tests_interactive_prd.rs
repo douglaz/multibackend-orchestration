@@ -1788,8 +1788,10 @@ esac; exit 0
 
         let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
         assert!(
-            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
-            "successful Done transition should remove waiting label: {label_raw}"
+            label_raw
+                .lines()
+                .any(|line| line.contains("--remove-label") && line.contains("ralph:waiting-feedback")),
+            "successful Done transition should remove waiting label in the same command: {label_raw}"
         );
     })
 }
@@ -1986,8 +1988,10 @@ esac; exit 0
             "ralph:prd-failed label should be added: {label_raw}"
         );
         assert!(
-            label_raw.contains("--remove-label") && label_raw.contains("ralph:waiting-feedback"),
-            "successful Failed transition should remove waiting label: {label_raw}"
+            label_raw
+                .lines()
+                .any(|line| line.contains("--remove-label") && line.contains("ralph:waiting-feedback")),
+            "successful Failed transition should remove waiting label in the same command: {label_raw}"
         );
     })
 }
@@ -2545,7 +2549,7 @@ printf '1. Q1?\n2. Q2?\n'
           esac
         done
         if [ "$has_prd" = "1" ]; then
-          printf '[{{"number":70,"title":"Restart test","labels":[{{"name":"ralph:prd"}}],"body":"Test restart."}}]'
+          printf '[{"number":70,"title":"Restart test","labels":[{"name":"ralph:prd"}],"body":"Test restart."}]'
         elif [ "$has_active" = "1" ]; then
           printf '[]'
         else
@@ -2557,10 +2561,10 @@ printf '1. Q1?\n2. Q2?\n'
         want_c=0; want_l=0
         for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
         if [ "$want_c" = "1" ]; then
-          printf '{{"comments":[{{"id":7001,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:70:questions-v1 -->\\n## Clarifying Questions\\n1. Q1?","createdAt":"2026-01-10T12:00:00Z"}}]}}'
+          printf '{"comments":[{"id":7001,"author":{"login":"ralph-bot"},"body":"<!-- ralph:prd:70:questions-v1 -->\\n## Clarifying Questions\\n1. Q1?","createdAt":"2026-01-10T12:00:00Z"}]}'
           exit 0
         fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd"}]}'; exit 0; fi
         exit 0
         ;;
       comment) exit 0 ;;
@@ -2654,15 +2658,15 @@ fn bot_login_failure_exhaustion_awaiting_answers(h: &RalphHarness) -> TestResult
         has_active=0
         for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
         if [ "$has_active" = "1" ]; then
-          printf '[{{"number":200,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+          printf '[{"number":200,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
         else printf '[]'; fi; exit 0 ;;
       view)
         want_c=0; want_l=0
         for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
         if [ "$want_c" = "1" ]; then
-          printf '{{"comments":[{{"id":2000,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":2001,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:20Z"}}]}}'
+          printf '{"comments":[{"id":2000,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":2001,"author":{"login":"alice"},"body":"answers","createdAt":"2026-01-01T00:00:20Z"}]}'
           exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
         exit 0 ;;
       comment) exit 0 ;;
       edit) echo "$@" >> "$LLOG"; exit 0 ;;
@@ -2768,15 +2772,15 @@ fn bot_login_failure_exhaustion_awaiting_feedback(h: &RalphHarness) -> TestResul
         has_active=0
         for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
         if [ "$has_active" = "1" ]; then
-          printf '[{{"number":210,"title":"T","labels":[{{"name":"ralph:prd-active"}}],"body":"B"}}]'
+          printf '[{"number":210,"title":"T","labels":[{"name":"ralph:prd-active"}],"body":"B"}]'
         else printf '[]'; fi; exit 0 ;;
       view)
         want_c=0; want_l=0
         for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
         if [ "$want_c" = "1" ]; then
-          printf '{{"comments":[{{"id":2100,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":2101,"author":{{"login":"alice"}},"body":"ans","createdAt":"2026-01-01T00:00:10Z"}},{{"id":2102,"author":{{"login":"ralph-bot"}},"body":"draft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":2103,"author":{{"login":"alice"}},"body":"fix testing","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          printf '{"comments":[{"id":2100,"author":{"login":"ralph-bot"},"body":"questions","createdAt":"2026-01-01T00:00:05Z"},{"id":2101,"author":{"login":"alice"},"body":"ans","createdAt":"2026-01-01T00:00:10Z"},{"id":2102,"author":{"login":"ralph-bot"},"body":"draft","createdAt":"2026-01-01T00:00:15Z"},{"id":2103,"author":{"login":"alice"},"body":"fix testing","createdAt":"2026-01-01T00:00:25Z"}]}'
           exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}}]}}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd-active"}]}'; exit 0; fi
         exit 0 ;;
       comment) exit 0 ;;
       edit) echo "$@" >> "$LLOG"; exit 0 ;;
@@ -2865,14 +2869,14 @@ case "$1" in
         has_prd=0; has_active=0
         for arg in "$@"; do case "$arg" in ralph:prd) has_prd=1 ;; ralph:prd-active) has_active=1 ;; esac; done
         if [ "$has_prd" = "1" ]; then
-          printf '[{{"number":300,"title":"T","labels":[{{"name":"ralph:prd"}}],"body":"B"}}]'
+          printf '[{"number":300,"title":"T","labels":[{"name":"ralph:prd"}],"body":"B"}]'
         else printf '[]'; fi; exit 0 ;;
       view)
         want_c=0; want_l=0; want_tb=0
         for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; title,body) want_tb=1 ;; esac; done
-        if [ "$want_c" = "1" ]; then printf '{{"comments":[]}}'; exit 0; fi
-        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd"}}]}}'; exit 0; fi
-        if [ "$want_tb" = "1" ]; then printf '{{"title":"T","body":"B"}}'; exit 0; fi
+        if [ "$want_c" = "1" ]; then printf '{"comments":[]}'; exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{"labels":[{"name":"ralph:prd"}]}'; exit 0; fi
+        if [ "$want_tb" = "1" ]; then printf '{"title":"T","body":"B"}'; exit 0; fi
         exit 0 ;;
       comment) exit 0 ;;
       edit) echo "$@" >> "$LLOG"; exit 0 ;;
