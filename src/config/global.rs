@@ -803,34 +803,16 @@ fn default_gemini_backend_config() -> BackendConfig {
 
 fn default_openrouter_backend_config() -> BackendConfig {
     BackendConfig {
-        command: "claude".to_owned(),
+        command: "opencode".to_owned(),
         args: vec![
-            "-p".to_owned(),
-            "--permission-mode".to_owned(),
-            "acceptEdits".to_owned(),
-            "--allowedTools".to_owned(),
-            "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
+            "run".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
         ],
         timeout_seconds: default_backend_timeout_seconds(),
         enabled: BackendEnabled::Disabled,
-        env: BTreeMap::from([
-            (
-                "ANTHROPIC_BASE_URL".to_owned(),
-                "https://openrouter.ai/api".to_owned(),
-            ),
-            ("ANTHROPIC_API_KEY".to_owned(), String::new()),
-        ]),
-        models: BackendRoleModels {
-            planner: Some("opus".to_owned()),
-            implementer: Some("opus".to_owned()),
-            reviewer: Some("opus".to_owned()),
-            final_reviewer: Some("opus".to_owned()),
-            arbiter: Some("opus".to_owned()),
-            qa: Some("opus".to_owned()),
-            completer: Some("opus".to_owned()),
-            acceptance_qa: Some("opus".to_owned()),
-            reformatter: Some("sonnet".to_owned()),
-        },
+        env: BTreeMap::new(),
+        models: BackendRoleModels::default(),
         role_timeouts: RoleTimeouts::default(),
     }
 }

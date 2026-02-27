@@ -38,6 +38,8 @@ const STREAM_EVENT_TYPES: &[&str] = &[
     "message",
     "tool_use",
     "tool_result",
+    // OpenCode CLI
+    "step_start",
 ];
 
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
@@ -262,6 +264,49 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 merge_usage_from_event(&event, &mut output);
             }
             "turn.started" => {}
+
+            // --- OpenCode CLI events ---
+            "step_start" => {
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "text" => {
+                if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
+                    if !output.text.is_empty() && !output.text.ends_with('\n') {
+                        output.text.push('\n');
+                    }
+                    output.text.push_str(text);
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "step_finish" => {
+                // Extract tokens from part.tokens: {input, output, reasoning, cache: {read, write}}
+                if let Some(tokens) = event.pointer("/part/tokens") {
+                    output.tokens_in =
+                        extract_u64(tokens, &["input"]).or(output.tokens_in);
+                    output.tokens_out =
+                        extract_u64(tokens, &["output"]).or(output.tokens_out);
+                    if let Some(cache) = tokens.get("cache") {
+                        output.cached_in =
+                            extract_u64(cache, &["read"]).or(output.cached_in);
+                    }
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
 
             _ => {}
         }
@@ -966,5 +1011,46 @@ Done."#;
             !normalized.text.contains("written to file"),
             "should not use the short summary result"
         );
+    }
+
+    // --- OpenCode CLI output ---
+
+    #[test]
+    fn normalize_output_opencode_cli_extracts_text_and_metadata() {
+        let raw = concat!(
+            r#"{"type":"step_start","timestamp":1772226736532,"sessionID":"ses_abc123","part":{"id":"prt_1","sessionID":"ses_abc123","messageID":"msg_1","type":"step-start","snapshot":"abc"}}"#,
+            "\n",
+            r#"{"type":"text","timestamp":1772226737081,"sessionID":"ses_abc123","part":{"id":"prt_2","sessionID":"ses_abc123","messageID":"msg_1","type":"text","text":"Hello from opencode!","time":{"start":1772226737080,"end":1772226737080}}}"#,
+            "\n",
+            r#"{"type":"step_finish","timestamp":1772226737089,"sessionID":"ses_abc123","part":{"id":"prt_3","sessionID":"ses_abc123","messageID":"msg_1","type":"step-finish","reason":"stop","snapshot":"abc","cost":0.001888,"tokens":{"input":248,"output":65,"reasoning":51,"cache":{"read":12220,"write":0}}}}"#,
+        );
+        let normalized = normalize_output(raw).expect("opencode cli");
+        assert_eq!(normalized.text, "Hello from opencode!");
+        assert_eq!(normalized.session_id.as_deref(), Some("ses_abc123"));
+        assert_eq!(normalized.tokens_in, Some(248));
+        assert_eq!(normalized.tokens_out, Some(65));
+        assert_eq!(normalized.cached_in, Some(12220));
+    }
+
+    #[test]
+    fn normalize_output_opencode_cli_multiple_text_events() {
+        let raw = concat!(
+            r#"{"type":"step_start","timestamp":1,"sessionID":"ses_multi","part":{"type":"step-start"}}"#,
+            "\n",
+            r#"{"type":"text","timestamp":2,"sessionID":"ses_multi","part":{"type":"text","text":"First part."}}"#,
+            "\n",
+            "{\"type\":\"text\",\"timestamp\":3,\"sessionID\":\"ses_multi\",\"part\":{\"type\":\"text\",\"text\":\"# Implementation Notes\\n\\nDone.\"}}",
+            "\n",
+            r#"{"type":"step_finish","timestamp":4,"sessionID":"ses_multi","part":{"type":"step-finish","tokens":{"input":100,"output":50}}}"#,
+        );
+        let normalized = normalize_output(raw).expect("opencode multi text");
+        assert!(
+            normalized.text.contains("\n# Implementation Notes"),
+            "H1 heading must be on its own line; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(normalized.session_id.as_deref(), Some("ses_multi"));
+        assert_eq!(normalized.tokens_in, Some(100));
+        assert_eq!(normalized.tokens_out, Some(50));
     }
 }
