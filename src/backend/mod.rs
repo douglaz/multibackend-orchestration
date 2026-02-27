@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod mock;
+pub mod openrouter;
 pub mod output_normalizer;
 pub mod tmux;
 pub mod tmux_backend;
@@ -225,6 +226,9 @@ impl CliBackend {
         match &ctx.session_id {
             Some(id) => match self.name.as_str() {
                 n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
+                n if n.starts_with("openrouter") || n == "openrouter" => {
+                    self.effective_args_claude(id)
+                }
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
                 _ => Ok(self.args.clone()),
@@ -239,7 +243,11 @@ impl CliBackend {
     /// For Codex: adds --json.
     fn ensure_json_output_args(&self) -> Result<Vec<String>> {
         match self.name.as_str() {
-            n if n.starts_with("claude") || n == "claude" => {
+            n if n.starts_with("claude")
+                || n == "claude"
+                || n.starts_with("openrouter")
+                || n == "openrouter" =>
+            {
                 let mut args = self.args.clone();
                 // Only add if not already present
                 if !args
@@ -843,6 +851,12 @@ impl BackendRegistry {
             "gemini".to_owned(),
             backend_with_optional_tmux(gemini_backend, &tmux, shared_ctx.clone()),
         );
+        let mut openrouter_backend = openrouter::backend_from_config(config, None, None, None);
+        openrouter_backend.invocation_ctx = shared_invocation.clone();
+        backends.insert(
+            "openrouter".to_owned(),
+            backend_with_optional_tmux(openrouter_backend, &tmux, shared_ctx.clone()),
+        );
 
         Self {
             backends,
@@ -1131,6 +1145,11 @@ impl BackendRegistry {
                 &self.config.backends.gemini.models,
                 &self.config.backends.gemini.enabled,
             ),
+            (
+                "openrouter",
+                &self.config.backends.openrouter.models,
+                &self.config.backends.openrouter.enabled,
+            ),
         ] {
             if *enabled == BackendEnabled::Disabled {
                 continue;
@@ -1150,6 +1169,10 @@ impl BackendRegistry {
             ("claude", self.config.backends.claude.enabled.clone()),
             ("codex", self.config.backends.codex.enabled.clone()),
             ("gemini", self.config.backends.gemini.enabled.clone()),
+            (
+                "openrouter",
+                self.config.backends.openrouter.enabled.clone(),
+            ),
         ] {
             if enabled_mode != BackendEnabled::Enabled {
                 continue;
@@ -1226,6 +1249,12 @@ impl BackendRegistry {
                 self.cwd.clone(),
             )),
             "gemini" => Ok(gemini::backend_from_config(
+                &self.config,
+                model,
+                role,
+                self.cwd.clone(),
+            )),
+            "openrouter" => Ok(openrouter::backend_from_config(
                 &self.config,
                 model,
                 role,
