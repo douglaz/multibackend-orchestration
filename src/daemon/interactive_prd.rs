@@ -18,6 +18,7 @@ use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
 use crate::config::GlobalConfig;
 use crate::daemon::github::{self, GhIssue};
 use crate::error::RalphError;
+use crate::output_log::LogWriter;
 use crate::prd::quick::{
     check_spec_sections, format_issues, render_prompt, run_review_with_retry, DRAFT_PROMPT,
     REVIEW_PROMPT, REVISION_PROMPT,
@@ -207,6 +208,100 @@ fn state_path(data_dir: &Path, owner: &str, repo: &str, issue_number: u32) -> Pa
         .join(".ralph")
         .join("interactive-prd")
         .join(format!("{issue_number}.json"))
+}
+
+pub fn prd_log_dir(data_dir: &Path, owner: &str, repo: &str) -> PathBuf {
+    data_dir
+        .join(owner)
+        .join(repo)
+        .join(".ralph")
+        .join("interactive-prd")
+        .join("logs")
+}
+
+const LOG_PROMPT_PREVIEW_CHARS: usize = 500;
+
+pub fn truncate_prompt_for_log(prompt: &str) -> (usize, String) {
+    let byte_len = prompt.len();
+    let preview = prompt
+        .chars()
+        .take(LOG_PROMPT_PREVIEW_CHARS)
+        .collect::<String>();
+    (byte_len, preview)
+}
+
+#[derive(Debug, Clone)]
+struct PrdLogContext {
+    log_dir: PathBuf,
+    issue_number: u32,
+    writer_backend_spec: String,
+    reviewer_backend_spec: String,
+}
+
+impl PrdLogContext {
+    fn from_config(config: &PrdPollConfig, issue_number: u32) -> Self {
+        Self {
+            log_dir: prd_log_dir(&config.data_dir, &config.owner, &config.repo),
+            issue_number,
+            writer_backend_spec: config.writer_backend.clone(),
+            reviewer_backend_spec: config.reviewer_backend.clone(),
+        }
+    }
+
+    fn project_id(&self) -> String {
+        format!("issue-{}", self.issue_number)
+    }
+
+    fn open_writer(&self, role: &str) -> LogWriter {
+        LogWriter::open(&self.log_dir, &self.project_id(), None, role)
+    }
+}
+
+fn log_backend_attempt_start(log_writer: &mut LogWriter, backend_spec: &str, prompt: &str) {
+    log_writer.write_attempt_separator(backend_spec, false);
+    log_writer.write_str(&format!("backend_spec={backend_spec}\n"));
+    let (byte_len, preview) = truncate_prompt_for_log(prompt);
+    log_writer.write_str(&format!("prompt ({byte_len} bytes): {preview}\n"));
+    log_writer.write_str("--- raw output ---\n");
+}
+
+fn log_execution_timeout(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("\n--- execution: timeout ---\n");
+    }
+}
+
+fn log_execution_error(log_writer: Option<&mut LogWriter>, message: &str) {
+    if let Some(writer) = log_writer {
+        writer.write_str(&format!("\n--- execution: error {message} ---\n"));
+    }
+}
+
+fn log_execution_ok(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("\n--- execution: ok ---\n");
+    }
+}
+
+fn log_validation_pass(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("--- validation: pass ---\n");
+    }
+}
+
+fn log_validation_na(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("--- validation: n/a ---\n");
+    }
+}
+
+fn log_validation_fail(log_writer: Option<&mut LogWriter>, missing: &[String]) {
+    if let Some(writer) = log_writer {
+        writer.write_str(&format!(
+            "--- validation: fail missing=[{}] ---\n",
+            missing.join(", ")
+        ));
+    }
 }
 
 fn strip_code(text: &str) -> String {
@@ -1058,7 +1153,7 @@ fn do_pending_to_awaiting(
             issue.body.as_deref().unwrap_or_default()
         );
 
-        let questions = generate_questions_with_timeout(config, &issue_text)?;
+        let questions = generate_questions_with_timeout(config, issue_number, &issue_text)?;
 
         // Post questions comment with idempotent marker
         let comment_body = format!(
@@ -1202,6 +1297,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
     eprintln!("prd: generating draft for {owner}/{repo}#{issue_number}...");
     let draft_spec = generate_draft_from_answers_with_timeout(
         config,
+        issue_number,
         &issue_text,
         &questions_text,
         &user_answers,
@@ -1365,8 +1461,12 @@ fn do_awaiting_feedback(
         .as_deref()
         .unwrap_or("(no previous draft)");
 
-    let revised_spec =
-        generate_revision_from_feedback_with_timeout(config, current_draft, &aggregated_feedback)?;
+    let revised_spec = generate_revision_from_feedback_with_timeout(
+        config,
+        issue_number,
+        current_draft,
+        &aggregated_feedback,
+    )?;
 
     // Post new draft comment with incremented marker
     let next_revision = state.draft_revision + 1;
@@ -1530,10 +1630,15 @@ fn find_new_feedback_comments<'a>(
 /// Generate a revised draft from current draft + aggregated feedback.
 fn generate_revision_from_feedback_with_timeout(
     config: &PrdPollConfig,
+    issue_number: u32,
     current_draft: &str,
     aggregated_feedback: &str,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
+    let log_context = PrdLogContext::from_config(config, issue_number);
+    let mut writer_log = log_context.open_writer("writer");
+    let mut reviewer_log = log_context.open_writer("reviewer");
+
     let repo_cwd = config.effective_repo_cwd();
     let writer = create_backend(
         &config.writer_backend,
@@ -1555,7 +1660,13 @@ fn generate_revision_from_feedback_with_timeout(
         ],
     );
 
-    let mut current_spec = run_draft_with_section_retry_sync(&writer, &revision_prompt, deadline)?;
+    let mut current_spec = run_draft_with_section_retry_sync(
+        &writer,
+        &log_context.writer_backend_spec,
+        &revision_prompt,
+        deadline,
+        Some(&mut writer_log),
+    )?;
 
     // Run reviewer/section validation loop (same as initial draft generation)
     let idea_context = format!("Revision based on user feedback:\n{aggregated_feedback}");
@@ -1564,19 +1675,27 @@ fn generate_revision_from_feedback_with_timeout(
             REVIEW_PROMPT,
             &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
         );
-        let feedback =
-            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "review/retry failed during feedback revision: {err}"
-                ))
-            })?;
+        let feedback = run_review_with_retry_sync(
+            &reviewer,
+            &log_context.reviewer_backend_spec,
+            review_prompt,
+            deadline,
+            Some(&mut reviewer_log),
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "review/retry failed during feedback revision: {err}"
+            ))
+        })?;
 
         if feedback.approved || feedback.issues.is_empty() {
             // Reviewer approval does not bypass section completeness
             let (_cleaned, missing) = check_spec_sections(&current_spec);
             if missing.is_empty() {
+                log_validation_pass(Some(&mut writer_log));
                 return Ok(current_spec);
             }
+            log_validation_fail(Some(&mut writer_log), &missing);
             // Fall through to revision if sections are missing despite reviewer approval
         }
 
@@ -1589,22 +1708,33 @@ fn generate_revision_from_feedback_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &rev_prompt, deadline)?;
+        let revised = run_backend_sync(
+            &writer,
+            &log_context.writer_backend_spec,
+            &rev_prompt,
+            deadline,
+            Some(&mut writer_log),
+        )?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
+            log_validation_pass(Some(&mut writer_log));
             current_spec = cleaned;
+        } else {
+            log_validation_fail(Some(&mut writer_log), &missing);
         }
     }
 
     // Final section check after exhausting revisions
     let (_final, missing) = check_spec_sections(&current_spec);
     if !missing.is_empty() {
+        log_validation_fail(Some(&mut writer_log), &missing);
         return Err(RalphError::InteractivePrdFailed(format!(
             "revision missing required sections after {} revisions: {}",
             config.max_revisions,
             missing.join(", ")
         )));
     }
+    log_validation_pass(Some(&mut writer_log));
 
     Ok(current_spec)
 }
@@ -1783,11 +1913,16 @@ fn render_answer_to_draft_prompt(
 
 fn generate_draft_from_answers_with_timeout(
     config: &PrdPollConfig,
+    issue_number: u32,
     issue_text: &str,
     questions_text: &str,
     user_answers: &str,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(config.backend_timeout_secs);
+    let log_context = PrdLogContext::from_config(config, issue_number);
+    let mut writer_log = log_context.open_writer("writer");
+    let mut reviewer_log = log_context.open_writer("reviewer");
+
     let repo_cwd = config.effective_repo_cwd();
     let writer = create_backend(
         &config.writer_backend,
@@ -1806,26 +1941,40 @@ fn generate_draft_from_answers_with_timeout(
         .replace("{answers}", user_answers);
     let draft_prompt = render_answer_to_draft_prompt(issue_text, questions_text, user_answers);
 
-    let mut current_spec = run_draft_with_section_retry_sync(&writer, &draft_prompt, deadline)?;
+    let mut current_spec = run_draft_with_section_retry_sync(
+        &writer,
+        &log_context.writer_backend_spec,
+        &draft_prompt,
+        deadline,
+        Some(&mut writer_log),
+    )?;
 
     for _iteration in 1..=config.max_revisions {
         let review_prompt = render_prompt(
             REVIEW_PROMPT,
             &[("{{idea}}", &idea_context), ("{{spec}}", &current_spec)],
         );
-        let feedback =
-            run_review_with_retry_sync(&reviewer, review_prompt, deadline).map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "review/retry failed while generating draft: {err}"
-                ))
-            })?;
+        let feedback = run_review_with_retry_sync(
+            &reviewer,
+            &log_context.reviewer_backend_spec,
+            review_prompt,
+            deadline,
+            Some(&mut reviewer_log),
+        )
+        .map_err(|err| {
+            RalphError::InteractivePrdFailed(format!(
+                "review/retry failed while generating draft: {err}"
+            ))
+        })?;
 
         if feedback.approved || feedback.issues.is_empty() {
             // Reviewer approval does not bypass section completeness
             let (_cleaned, missing) = check_spec_sections(&current_spec);
             if missing.is_empty() {
+                log_validation_pass(Some(&mut writer_log));
                 return Ok(current_spec);
             }
+            log_validation_fail(Some(&mut writer_log), &missing);
             // Fall through to revision if sections are missing despite reviewer approval
         }
 
@@ -1838,37 +1987,58 @@ fn generate_draft_from_answers_with_timeout(
                 ("{{issues}}", &formatted_issues),
             ],
         );
-        let revised = run_backend_sync(&writer, &revision_prompt, deadline)?;
+        let revised = run_backend_sync(
+            &writer,
+            &log_context.writer_backend_spec,
+            &revision_prompt,
+            deadline,
+            Some(&mut writer_log),
+        )?;
         let (cleaned, missing) = check_spec_sections(&revised);
         if missing.is_empty() {
+            log_validation_pass(Some(&mut writer_log));
             current_spec = cleaned;
+        } else {
+            log_validation_fail(Some(&mut writer_log), &missing);
         }
     }
 
     // Final section check after exhausting revisions
     let (_final, missing) = check_spec_sections(&current_spec);
     if !missing.is_empty() {
+        log_validation_fail(Some(&mut writer_log), &missing);
         return Err(RalphError::InteractivePrdFailed(format!(
             "draft missing required sections after {} revisions: {}",
             config.max_revisions,
             missing.join(", ")
         )));
     }
+    log_validation_pass(Some(&mut writer_log));
 
     Ok(current_spec)
 }
 
 fn run_draft_with_section_retry_sync(
     writer: &CliBackend,
+    writer_backend_spec: &str,
     prompt: &str,
     deadline: std::time::Instant,
+    mut log_writer: Option<&mut LogWriter>,
 ) -> Result<String> {
     for attempt in 0..=DRAFT_SECTION_RETRIES {
-        let raw = run_backend_sync(writer, prompt, deadline)?;
+        let raw = run_backend_sync(
+            writer,
+            writer_backend_spec,
+            prompt,
+            deadline,
+            log_writer.as_deref_mut(),
+        )?;
         let (cleaned, missing) = check_spec_sections(&raw);
         if missing.is_empty() {
+            log_validation_pass(log_writer.as_deref_mut());
             return Ok(cleaned);
         }
+        log_validation_fail(log_writer.as_deref_mut(), &missing);
         if attempt == DRAFT_SECTION_RETRIES {
             return Err(RalphError::InteractivePrdFailed(format!(
                 "draft missing required sections after {} retries: {}",
@@ -1882,13 +2052,16 @@ fn run_draft_with_section_retry_sync(
 
 fn run_review_with_retry_sync(
     reviewer: &CliBackend,
+    reviewer_backend_spec: &str,
     prompt: String,
     deadline: std::time::Instant,
+    mut log_writer: Option<&mut LogWriter>,
 ) -> Result<crate::prd::quick::ReviewFeedback> {
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(Duration::ZERO);
     if remaining.is_zero() {
+        log_execution_timeout(log_writer.as_deref_mut());
         return Err(RalphError::InteractivePrdFailed(
             "PRD backend timeout exceeded".to_owned(),
         ));
@@ -1898,12 +2071,22 @@ fn run_review_with_retry_sync(
         .enable_all()
         .build()
         .map_err(|err| {
+            log_execution_error(log_writer.as_deref_mut(), &err.to_string());
             RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
         })?;
 
     let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
     let result = rt.block_on(async {
-        tokio::time::timeout(remaining, run_review_with_retry(backend, prompt)).await
+        tokio::time::timeout(
+            remaining,
+            run_review_with_retry(
+                backend,
+                prompt,
+                log_writer.as_deref_mut(),
+                Some(reviewer_backend_spec),
+            ),
+        )
+        .await
     });
 
     match result {
@@ -1911,16 +2094,23 @@ fn run_review_with_retry_sync(
         Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
             "review execution failed: {err}"
         ))),
-        Err(_) => Err(RalphError::InteractivePrdFailed(
-            "PRD backend timeout exceeded".to_owned(),
-        )),
+        Err(_) => {
+            log_execution_timeout(log_writer.as_deref_mut());
+            Err(RalphError::InteractivePrdFailed(
+                "PRD backend timeout exceeded".to_owned(),
+            ))
+        }
     }
 }
 
 /// Generate clarifying questions using two configured backends plus synthesis.
 ///
 /// All backend work is bounded by `backend_timeout_secs` as total wall-clock.
-fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> Result<String> {
+fn generate_questions_with_timeout(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    issue_text: &str,
+) -> Result<String> {
     if config.question_backends.len() != 2 {
         return Err(RalphError::InteractivePrdFailed(format!(
             "expected exactly 2 question backends, got {}",
@@ -1933,6 +2123,10 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
 
     let prompt = format!("{QUESTION_GEN_PROMPT}{issue_text}");
     let repo_cwd = config.effective_repo_cwd();
+    let log_context = PrdLogContext::from_config(config, issue_number);
+    let mut questions_a_log = log_context.open_writer("questions-a");
+    let mut questions_b_log = log_context.open_writer("questions-b");
+    let mut synthesis_log = log_context.open_writer("synthesis");
 
     // Backend A
     let backend_a = create_backend(
@@ -1940,7 +2134,14 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd.clone()),
     )?;
-    let questions_a = run_backend_sync(&backend_a, &prompt, deadline)?;
+    let questions_a = run_backend_sync(
+        &backend_a,
+        &config.question_backends[0],
+        &prompt,
+        deadline,
+        Some(&mut questions_a_log),
+    )?;
+    log_validation_na(Some(&mut questions_a_log));
 
     // Backend B
     let backend_b = create_backend(
@@ -1948,7 +2149,14 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         &config.global_config,
         Some(repo_cwd),
     )?;
-    let questions_b = run_backend_sync(&backend_b, &prompt, deadline)?;
+    let questions_b = run_backend_sync(
+        &backend_b,
+        &config.question_backends[1],
+        &prompt,
+        deadline,
+        Some(&mut questions_b_log),
+    )?;
+    log_validation_na(Some(&mut questions_b_log));
 
     // Synthesis: merge/dedupe/prioritize
     let synthesis_prompt = SYNTHESIS_PROMPT
@@ -1956,7 +2164,14 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
         .replace("{questions_b}", &questions_b);
 
     // Use the first question backend for synthesis
-    let synthesized = run_backend_sync(&backend_a, &synthesis_prompt, deadline)?;
+    let synthesized = run_backend_sync(
+        &backend_a,
+        &config.question_backends[0],
+        &synthesis_prompt,
+        deadline,
+        Some(&mut synthesis_log),
+    )?;
+    log_validation_na(Some(&mut synthesis_log));
 
     if synthesized.trim().is_empty() {
         return Err(RalphError::InteractivePrdFailed(
@@ -1970,14 +2185,21 @@ fn generate_questions_with_timeout(config: &PrdPollConfig, issue_text: &str) -> 
 /// Run a backend synchronously with a deadline, using tokio runtime.
 fn run_backend_sync(
     backend: &CliBackend,
+    backend_spec: &str,
     prompt: &str,
     deadline: std::time::Instant,
+    mut log_writer: Option<&mut LogWriter>,
 ) -> Result<String> {
+    if let Some(writer) = log_writer.as_deref_mut() {
+        log_backend_attempt_start(writer, backend_spec, prompt);
+    }
+
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(Duration::ZERO);
 
     if remaining.is_zero() {
+        log_execution_timeout(log_writer.as_deref_mut());
         return Err(RalphError::InteractivePrdFailed(
             "PRD backend timeout exceeded".to_owned(),
         ));
@@ -1988,20 +2210,43 @@ fn run_backend_sync(
         .enable_all()
         .build()
         .map_err(|err| {
+            log_execution_error(log_writer.as_deref_mut(), &err.to_string());
             RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
         })?;
 
-    let result =
-        rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await });
+    let result = rt.block_on(async {
+        tokio::time::timeout(
+            remaining,
+            backend.execute_with_log(prompt, log_writer.as_deref_mut()),
+        )
+        .await
+    });
 
     match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(err)) => Err(RalphError::InteractivePrdFailed(format!(
-            "backend execution failed: {err}"
-        ))),
-        Err(_) => Err(RalphError::InteractivePrdFailed(
-            "PRD backend timeout exceeded".to_owned(),
-        )),
+        Ok(Ok(output)) => {
+            log_execution_ok(log_writer.as_deref_mut());
+            Ok(output)
+        }
+        Ok(Err(err)) => match err {
+            RalphError::BackendTimeout { .. } => {
+                log_execution_timeout(log_writer.as_deref_mut());
+                Err(RalphError::InteractivePrdFailed(
+                    "PRD backend timeout exceeded".to_owned(),
+                ))
+            }
+            other => {
+                log_execution_error(log_writer.as_deref_mut(), &other.to_string());
+                Err(RalphError::InteractivePrdFailed(format!(
+                    "backend execution failed: {other}"
+                )))
+            }
+        },
+        Err(_) => {
+            log_execution_timeout(log_writer.as_deref_mut());
+            Err(RalphError::InteractivePrdFailed(
+                "PRD backend timeout exceeded".to_owned(),
+            ))
+        }
     }
 }
 
@@ -2257,6 +2502,47 @@ pub fn tests_extract_questions_text(
         issue_number,
         question_revision,
         bot_login,
+    )
+}
+
+/// Public test accessor for question generation with interactive PRD logging.
+pub fn tests_generate_questions_with_timeout(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    issue_text: &str,
+) -> Result<String> {
+    generate_questions_with_timeout(config, issue_number, issue_text)
+}
+
+/// Public test accessor for draft generation with interactive PRD logging.
+pub fn tests_generate_draft_from_answers_with_timeout(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    issue_text: &str,
+    questions_text: &str,
+    user_answers: &str,
+) -> Result<String> {
+    generate_draft_from_answers_with_timeout(
+        config,
+        issue_number,
+        issue_text,
+        questions_text,
+        user_answers,
+    )
+}
+
+/// Public test accessor for revision generation with interactive PRD logging.
+pub fn tests_generate_revision_from_feedback_with_timeout(
+    config: &PrdPollConfig,
+    issue_number: u32,
+    current_draft: &str,
+    aggregated_feedback: &str,
+) -> Result<String> {
+    generate_revision_from_feedback_with_timeout(
+        config,
+        issue_number,
+        current_draft,
+        aggregated_feedback,
     )
 }
 
@@ -3242,7 +3528,8 @@ mod tests {
 
         let backend = make_mock_backend(complete);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        let result =
+            run_draft_with_section_retry_sync(&backend, "claude", "generate spec", deadline, None);
         assert!(
             result.is_ok(),
             "complete spec should succeed: {:?}",
@@ -3263,7 +3550,8 @@ mod tests {
 
         let backend = make_mock_backend(incomplete);
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let result = run_draft_with_section_retry_sync(&backend, "generate spec", deadline);
+        let result =
+            run_draft_with_section_retry_sync(&backend, "claude", "generate spec", deadline, None);
         assert!(result.is_err(), "incomplete spec should fail");
 
         let err = result.unwrap_err();
@@ -3296,6 +3584,7 @@ mod tests {
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
+            1,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
@@ -3361,6 +3650,7 @@ mod tests {
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
+            1,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
@@ -3393,6 +3683,7 @@ mod tests {
 
         let result = generate_revision_from_feedback_with_timeout(
             &config,
+            1,
             current_draft,
             "Please add more detail to the testing strategy.",
         );
@@ -3434,6 +3725,7 @@ mod tests {
 
         let result = generate_revision_from_feedback_with_timeout(
             &config,
+            1,
             current_draft,
             "Please add more detail.",
         );
@@ -3498,6 +3790,7 @@ mod tests {
 
         let result = generate_draft_from_answers_with_timeout(
             &config,
+            1,
             "Feature: add auth",
             "1. What auth method?",
             "Use JWT tokens.",
@@ -3539,6 +3832,7 @@ mod tests {
 
         let result = generate_revision_from_feedback_with_timeout(
             &config,
+            1,
             current_draft,
             "Please expand the testing strategy.",
         );
@@ -3825,7 +4119,7 @@ mod tests {
         // The function will succeed or fail at synthesis, but either way the
         // backend output (pwd) should contain the repo clone path, proving
         // it ran in the right directory.
-        let result = super::generate_questions_with_timeout(&config, "test issue");
+        let result = super::generate_questions_with_timeout(&config, 1, "test issue");
 
         if let Ok(output) = result {
             let canonical_repo = repo_dir.canonicalize().unwrap_or(repo_dir);

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::Backend;
 use crate::error::RalphError;
+use crate::output_log::LogWriter;
 use crate::prd::gaps::extract_fenced_json;
 use crate::util::hash::sha256_hex;
 use crate::util::time::now_iso8601;
@@ -214,20 +215,113 @@ pub fn format_issues(issues: &[ReviewIssue]) -> String {
 
 const MAX_SECTION_RETRIES: u8 = 2;
 
+const LOG_PROMPT_PREVIEW_CHARS: usize = 500;
+
+fn truncate_prompt_for_log(prompt: &str) -> (usize, String) {
+    let byte_len = prompt.len();
+    let preview = prompt
+        .chars()
+        .take(LOG_PROMPT_PREVIEW_CHARS)
+        .collect::<String>();
+    (byte_len, preview)
+}
+
+fn log_review_attempt_start(
+    log_writer: Option<&mut LogWriter>,
+    backend_label: &str,
+    backend_spec: &str,
+    prompt: &str,
+) {
+    if let Some(writer) = log_writer {
+        writer.write_attempt_separator(backend_label, false);
+        writer.write_str(&format!("backend_spec={backend_spec}\n"));
+        let (byte_len, preview) = truncate_prompt_for_log(prompt);
+        writer.write_str(&format!("prompt ({byte_len} bytes): {preview}\n"));
+        writer.write_str("--- raw output ---\n");
+    }
+}
+
+fn log_review_execution_ok(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("\n--- execution: ok ---\n");
+        writer.write_str("--- validation: n/a ---\n");
+    }
+}
+
+fn log_review_execution_timeout(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("\n--- execution: timeout ---\n");
+        writer.write_str("--- validation: n/a ---\n");
+    }
+}
+
+fn log_review_execution_error(log_writer: Option<&mut LogWriter>, message: &str) {
+    if let Some(writer) = log_writer {
+        writer.write_str(&format!("\n--- execution: error {message} ---\n"));
+        writer.write_str("--- validation: n/a ---\n");
+    }
+}
+
+fn log_review_parse_ok(log_writer: Option<&mut LogWriter>) {
+    if let Some(writer) = log_writer {
+        writer.write_str("--- parse: ok ---\n");
+    }
+}
+
+fn log_review_parse_fail(log_writer: Option<&mut LogWriter>, message: &str) {
+    if let Some(writer) = log_writer {
+        writer.write_str(&format!("--- parse: fail {message} ---\n"));
+    }
+}
+
 /// Runs a review backend call with up to 3 parse attempts.
 /// On parse failure, retries with a strict reformat prompt requesting a single fenced JSON block.
 /// Returns an error if all 3 attempts fail (no silent fallback).
 pub async fn run_review_with_retry(
     backend: Arc<dyn Backend>,
     prompt: String,
+    mut log_writer: Option<&mut LogWriter>,
+    backend_spec: Option<&str>,
 ) -> Result<ReviewFeedback> {
     let mut current_prompt = prompt;
+    let backend_spec = backend_spec.unwrap_or_else(|| backend.name());
 
     for attempt in 1..=3_u8 {
-        let raw = backend.execute(&current_prompt).await?;
+        log_review_attempt_start(
+            log_writer.as_deref_mut(),
+            backend.name(),
+            backend_spec,
+            &current_prompt,
+        );
+
+        let raw = match backend.execute(&current_prompt).await {
+            Ok(raw) => {
+                if let Some(writer) = log_writer.as_deref_mut() {
+                    writer.write_str(&raw);
+                }
+                log_review_execution_ok(log_writer.as_deref_mut());
+                raw
+            }
+            Err(err) => {
+                match err {
+                    RalphError::BackendTimeout { .. } => {
+                        log_review_execution_timeout(log_writer.as_deref_mut());
+                    }
+                    _ => {
+                        log_review_execution_error(log_writer.as_deref_mut(), &err.to_string());
+                    }
+                }
+                return Err(err);
+            }
+        };
+
         match parse_review_feedback(&raw) {
-            Ok(feedback) => return Ok(feedback),
+            Ok(feedback) => {
+                log_review_parse_ok(log_writer.as_deref_mut());
+                return Ok(feedback);
+            }
             Err(parse_error) => {
+                log_review_parse_fail(log_writer.as_deref_mut(), &parse_error.to_string());
                 if attempt == 3 {
                     return Err(RalphError::QuickPrdFailed(format!(
                         "failed to parse review feedback after 3 attempts: {parse_error}"
@@ -300,7 +394,7 @@ impl QuickPrdPipeline {
         self.run_in(std::env::current_dir()?).await
     }
 
-    async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
+    pub(crate) async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
         let started_at = now_iso8601();
         let idea_hash = sha256_hex(&self.options.idea)[..12].to_owned();
 
@@ -340,7 +434,8 @@ impl QuickPrdPipeline {
 
             // Run review with retry
             let review_start = Instant::now();
-            let feedback = run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
+            let feedback =
+                run_review_with_retry(self.reviewer.clone(), review_prompt, None, None).await?;
             review_times_secs.push(review_start.elapsed().as_secs_f64());
 
             // Cache review
@@ -578,9 +673,10 @@ mod tests {
             vec!["no json here".to_string(), mock_approved_review()],
         ));
 
-        let feedback = run_review_with_retry(backend.clone(), "review this".to_string())
-            .await
-            .expect("should succeed on retry");
+        let feedback =
+            run_review_with_retry(backend.clone(), "review this".to_string(), None, None)
+                .await
+                .expect("should succeed on retry");
         assert!(feedback.approved);
         assert!(feedback.issues.is_empty());
         assert_eq!(backend.call_count().await, 2);
@@ -594,7 +690,7 @@ mod tests {
             vec!["bad1".to_string(), "bad2".to_string(), "bad3".to_string()],
         ));
 
-        let err = run_review_with_retry(backend.clone(), "review this".to_string())
+        let err = run_review_with_retry(backend.clone(), "review this".to_string(), None, None)
             .await
             .expect_err("should fail after 3 attempts");
         assert!(matches!(err, RalphError::QuickPrdFailed(_)));

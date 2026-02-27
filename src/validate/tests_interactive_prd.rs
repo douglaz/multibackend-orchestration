@@ -1,17 +1,23 @@
 use super::*;
 
 use std::fs;
+use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::backend::MockBackend;
+use crate::config::GlobalConfig;
 use crate::daemon::github;
 use crate::daemon::github::IssueComment;
 use crate::daemon::interactive_prd::{
     detect_approval, format_draft_comment, has_in_progress_prd_label, has_prd_label,
-    parse_approved_spec_from_comments, prd_marker, prd_status_approved_marker,
-    prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, DRAFT_SECTION_RETRIES,
-    PRD_LABELS, PRD_LABEL_NAMES, REQUIRED_SPEC_SECTION_COUNT,
+    parse_approved_spec_from_comments, prd_log_dir, prd_marker, prd_status_approved_marker,
+    prd_status_failed_marker, tests_generate_draft_from_answers_with_timeout,
+    tests_generate_questions_with_timeout, truncate_prompt_for_log, InteractivePrdState,
+    PrdPollConfig, PrdWorkflowState, DRAFT_SECTION_RETRIES, PRD_LABELS, PRD_LABEL_NAMES,
+    REQUIRED_SPEC_SECTION_COUNT,
 };
 use crate::prd::quick::check_spec_sections;
+use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
@@ -158,6 +164,34 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "interactive_prd::section_incomplete_revision_exhaustion_transitions_to_failed",
             func: section_incomplete_revision_exhaustion_transitions_to_failed,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_path_and_naming",
+            func: logging_path_and_naming,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_writer_validation_failure_persists_raw_output",
+            func: logging_writer_validation_failure_persists_raw_output,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_reviewer_retry_attempts",
+            func: logging_reviewer_retry_attempts,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_questions_and_synthesis_validation_na",
+            func: logging_questions_and_synthesis_validation_na,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_timeout_and_error_markers",
+            func: logging_timeout_and_error_markers,
+        },
+        ConformanceTest {
+            name: "interactive_prd::logging_utf8_prompt_truncation_safe",
+            func: logging_utf8_prompt_truncation_safe,
+        },
+        ConformanceTest {
+            name: "interactive_prd::quick_prd_review_logging_backward_compatibility",
+            func: quick_prd_review_logging_backward_compatibility,
         },
         ConformanceTest {
             name: "interactive_prd::terminal_save_failure_keeps_retry_visibility",
@@ -3052,6 +3086,403 @@ esac; exit 0
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed should be added: {label_raw}"
         );
+    })
+}
+
+fn make_logging_prd_config(
+    data_dir: &std::path::Path,
+    owner: &str,
+    repo: &str,
+    claude_script: &str,
+    codex_script: &str,
+    backend_timeout_secs: u64,
+    max_revisions: u32,
+) -> PrdPollConfig {
+    fs::create_dir_all(data_dir.join(owner).join(repo)).expect("create repo dir");
+
+    let mut global = GlobalConfig::default();
+    global.backends.claude.command = claude_script.to_owned();
+    global.backends.claude.args = vec![];
+    global.backends.claude.timeout_seconds = backend_timeout_secs;
+    global.backends.codex.command = codex_script.to_owned();
+    global.backends.codex.args = vec![];
+    global.backends.codex.timeout_seconds = backend_timeout_secs;
+
+    PrdPollConfig {
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
+        data_dir: data_dir.to_path_buf(),
+        git_bin: "git".to_owned(),
+        gh_bin: "gh".to_owned(),
+        prd_enabled: true,
+        question_backends: vec!["claude".to_owned(), "codex".to_owned()],
+        writer_backend: "claude".to_owned(),
+        reviewer_backend: "codex".to_owned(),
+        max_revisions,
+        backend_timeout_secs,
+        global_config: global,
+        verbose: false,
+        max_concurrent: 1,
+        worker_cwd: None,
+    }
+}
+
+fn run_off_runtime_thread<T, F>(f: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    std::thread::spawn(f)
+        .join()
+        .unwrap_or_else(|e| panic!("thread panicked: {}", super::panic_message(e)))
+}
+
+fn logging_path_and_naming(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let script = dh
+            .write_mock_script(
+                "prd_log_questions_ok.sh",
+                "#!/bin/sh\ncat >/dev/null\nprintf '1. API details?\\n2. Error handling?\\n'\n",
+            )
+            .expect("write question script");
+        let script = script.to_string_lossy().into_owned();
+        let config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &script,
+            &script,
+            30,
+            1,
+        );
+
+        let expected_log_dir = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs");
+        assert_eq!(
+            prd_log_dir(dh.temp_dir.path(), "acme", "widgets"),
+            expected_log_dir
+        );
+
+        let config_for_run = config.clone();
+        let questions = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(&config_for_run, 901, "Issue: add robust logging")
+        })
+        .expect("questions generation should succeed");
+        assert!(
+            !questions.trim().is_empty(),
+            "questions output should be non-empty"
+        );
+
+        for role in ["questions-a", "questions-b", "synthesis"] {
+            let path = expected_log_dir.join(format!("issue-901-{role}.log"));
+            assert!(path.exists(), "expected log file {}", path.display());
+        }
+    })
+}
+
+fn logging_writer_validation_failure_persists_raw_output(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let writer_script = dh
+            .write_mock_script(
+                "prd_log_writer_incomplete.sh",
+                "#!/bin/sh\ncat >/dev/null\ncat <<'EOF'\n## Summary\nOnly summary.\n\n## Acceptance Criteria\n- [ ] Partial\nEOF\n",
+            )
+            .expect("write writer script");
+        let reviewer_script = dh
+            .write_mock_script(
+                "prd_log_reviewer_ok.sh",
+                "#!/bin/sh\ncat >/dev/null\nprintf '```json\\n{\"approved\": true, \"issues\": []}\\n```\\n'\n",
+            )
+            .expect("write reviewer script");
+
+        let config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &writer_script.to_string_lossy(),
+            &reviewer_script.to_string_lossy(),
+            30,
+            1,
+        );
+
+        let config_for_run = config.clone();
+        let err = run_off_runtime_thread(move || {
+            tests_generate_draft_from_answers_with_timeout(
+                &config_for_run,
+                902,
+                "Issue text",
+                "1. Q?",
+                "A.",
+            )
+        })
+        .expect_err("incomplete writer output should fail");
+        assert!(
+            err.to_string().contains("missing required sections"),
+            "unexpected error: {err}"
+        );
+
+        let writer_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-902-writer.log");
+        let raw = fs::read_to_string(&writer_log).expect("writer log should exist");
+        assert!(
+            raw.contains("## Summary\nOnly summary."),
+            "raw writer output must be logged even on validation failure:\n{raw}"
+        );
+        assert!(
+            raw.contains("--- validation: fail missing=["),
+            "validation failure marker missing:\n{raw}"
+        );
+    })
+}
+
+fn logging_reviewer_retry_attempts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let writer_script = dh
+            .write_mock_script(
+                "prd_log_writer_complete.sh",
+                "#!/bin/sh\ncat >/dev/null\ncat <<'EOF'\n## Summary\nDone.\n\n## Acceptance Criteria\n- [ ] AC\n\n## Technical Approach\nApproach.\n\n## Files & Modules\n- src/x.rs\n\n## Testing Strategy\n- test\n\n## Out of Scope\n- none\nEOF\n",
+            )
+            .expect("write writer script");
+
+        let retry_counter = dh.temp_dir.path().join("review_retry_counter.txt");
+        let reviewer_script_content = format!(
+            "#!/bin/sh\nCOUNT_FILE=\"{}\"\ncat >/dev/null\nN=0\nif [ -f \"$COUNT_FILE\" ]; then N=$(cat \"$COUNT_FILE\"); fi\nN=$((N+1))\nprintf '%s' \"$N\" > \"$COUNT_FILE\"\nif [ \"$N\" -eq 1 ]; then\n  printf 'not json on first attempt\\n'\nelse\n  printf '```json\\n{{\"approved\": true, \"issues\": []}}\\n```\\n'\nfi\n",
+            retry_counter.to_string_lossy()
+        );
+        let reviewer_script = dh
+            .write_mock_script("prd_log_reviewer_retry.sh", &reviewer_script_content)
+            .expect("write reviewer script");
+
+        let config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &writer_script.to_string_lossy(),
+            &reviewer_script.to_string_lossy(),
+            30,
+            1,
+        );
+
+        let config_for_run = config.clone();
+        let _spec = run_off_runtime_thread(move || {
+            tests_generate_draft_from_answers_with_timeout(
+                &config_for_run,
+                903,
+                "Issue text",
+                "1. Q?",
+                "A.",
+            )
+        })
+        .expect("draft generation should succeed after reviewer parse retry");
+
+        let reviewer_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-903-reviewer.log");
+        let raw = fs::read_to_string(&reviewer_log).expect("reviewer log should exist");
+        let attempts = raw.matches("--- attempt=").count();
+        assert_eq!(
+            attempts, 2,
+            "expected one reviewer log entry per parse attempt:\n{raw}"
+        );
+        assert!(
+            raw.contains("not json on first attempt"),
+            "first raw reviewer output missing:\n{raw}"
+        );
+        assert!(
+            raw.contains("--- parse: fail"),
+            "parse failure marker missing:\n{raw}"
+        );
+        assert!(
+            raw.contains("--- parse: ok ---"),
+            "parse ok marker missing:\n{raw}"
+        );
+    })
+}
+
+fn logging_questions_and_synthesis_validation_na(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        let script = dh
+            .write_mock_script(
+                "prd_log_validation_na.sh",
+                "#!/bin/sh\ncat >/dev/null\nprintf '1. Clarify API?\\n2. Clarify UX?\\n'\n",
+            )
+            .expect("write question script");
+        let script = script.to_string_lossy().into_owned();
+        let config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &script,
+            &script,
+            30,
+            1,
+        );
+
+        let config_for_run = config.clone();
+        let _ = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(&config_for_run, 904, "Issue text")
+        })
+        .expect("questions generation should succeed");
+
+        for role in ["questions-a", "questions-b", "synthesis"] {
+            let path = dh.temp_dir.path().join(format!(
+                "acme/widgets/.ralph/interactive-prd/logs/issue-904-{role}.log"
+            ));
+            let raw = fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("failed to read {}: {e}", path.display());
+            });
+            assert!(
+                raw.contains("--- validation: n/a ---"),
+                "expected validation n/a marker in {}:\n{}",
+                path.display(),
+                raw
+            );
+        }
+    })
+}
+
+fn logging_timeout_and_error_markers(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+
+        let timeout_script = dh
+            .write_mock_script(
+                "prd_log_timeout.sh",
+                "#!/bin/sh\ncat >/dev/null\nsleep 2\nprintf '1. Late question\\n'\n",
+            )
+            .expect("write timeout script");
+        let timeout_config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &timeout_script.to_string_lossy(),
+            &timeout_script.to_string_lossy(),
+            1,
+            1,
+        );
+        let timeout_config_for_run = timeout_config.clone();
+        let timeout_err = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(&timeout_config_for_run, 905, "Issue text")
+        })
+        .expect_err("timeout scenario should fail");
+        assert!(
+            timeout_err.to_string().contains("timeout"),
+            "expected timeout error, got: {timeout_err}"
+        );
+        let timeout_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-905-questions-a.log");
+        let timeout_raw = fs::read_to_string(&timeout_log).expect("timeout log should exist");
+        assert!(
+            timeout_raw.contains("--- execution: timeout ---"),
+            "timeout marker missing:\n{timeout_raw}"
+        );
+
+        let error_script = dh
+            .write_mock_script(
+                "prd_log_error.sh",
+                "#!/bin/sh\ncat >/dev/null\necho 'boom from backend' >&2\nexit 1\n",
+            )
+            .expect("write error script");
+        let error_config = make_logging_prd_config(
+            dh.temp_dir.path(),
+            "acme",
+            "widgets",
+            &error_script.to_string_lossy(),
+            &error_script.to_string_lossy(),
+            30,
+            1,
+        );
+        let error_config_for_run = error_config.clone();
+        let error = run_off_runtime_thread(move || {
+            tests_generate_questions_with_timeout(&error_config_for_run, 906, "Issue text")
+        })
+        .expect_err("error scenario should fail");
+        assert!(
+            error.to_string().contains("backend execution failed"),
+            "unexpected error output: {error}"
+        );
+        let error_log = dh
+            .temp_dir
+            .path()
+            .join("acme/widgets/.ralph/interactive-prd/logs/issue-906-questions-a.log");
+        let error_raw = fs::read_to_string(&error_log).expect("error log should exist");
+        assert!(
+            error_raw.contains("--- execution: error"),
+            "error marker missing:\n{error_raw}"
+        );
+    })
+}
+
+fn logging_utf8_prompt_truncation_safe(_harness: &RalphHarness) -> TestResult {
+    let prompt = "多字节🙂".repeat(600);
+    let (byte_len, preview) = truncate_prompt_for_log(&prompt);
+    if byte_len != prompt.len() {
+        return TestResult::Fail(format!(
+            "byte length mismatch: expected {}, got {}",
+            prompt.len(),
+            byte_len
+        ));
+    }
+    if preview.chars().count() != 500 {
+        return TestResult::Fail(format!(
+            "preview should be truncated to 500 chars, got {}",
+            preview.chars().count()
+        ));
+    }
+    let expected = prompt.chars().take(500).collect::<String>();
+    if preview != expected {
+        return TestResult::Fail(
+            "preview does not match UTF-8-safe truncation expectation".to_owned(),
+        );
+    }
+    TestResult::Pass
+}
+
+fn quick_prd_review_logging_backward_compatibility(_harness: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let writer_spec = "\
+## Summary\nS\n\n\
+## Acceptance Criteria\n- [ ] AC\n\n\
+## Technical Approach\nA\n\n\
+## Files & Modules\n- src/a.rs\n\n\
+## Testing Strategy\n- t\n\n\
+## Out of Scope\n- o";
+        let writer = Arc::new(MockBackend::new("writer", vec![writer_spec.to_owned()]));
+        let reviewer = Arc::new(MockBackend::new(
+            "reviewer",
+            vec!["```json\n{\"approved\": true, \"issues\": []}\n```".to_owned()],
+        ));
+
+        let options = QuickPrdOptions {
+            idea: "compat test".to_owned(),
+            writer_spec: "claude".to_owned(),
+            reviewer_spec: "codex".to_owned(),
+            max_revisions: 1,
+            dry_run: false,
+        };
+        let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
+        let run_dir = tempfile::tempdir().expect("create tempdir");
+        let run_path = run_dir.path().to_path_buf();
+        let result = run_off_runtime_thread(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build tokio runtime");
+            rt.block_on(async { pipeline.run_in(run_path).await })
+        })
+        .expect("quick-prd pipeline should succeed with None logging params");
+        assert!(result.approved, "expected approved quick-prd result");
     })
 }
 
