@@ -59,7 +59,7 @@ args = [
     "-",
 ]
 timeout_seconds = 7200
-enabled = "auto"
+enabled = false
 
 [backends.codex.env]
 
