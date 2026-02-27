@@ -95,6 +95,11 @@ pub struct BackendConfigs {
         deserialize_with = "deserialize_gemini_backend_config"
     )]
     pub gemini: BackendConfig,
+    #[serde(
+        default = "default_openrouter_backend_config",
+        deserialize_with = "deserialize_openrouter_backend_config"
+    )]
+    pub openrouter: BackendConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -515,6 +520,7 @@ impl Default for BackendConfigs {
             claude: default_claude_backend_config(),
             codex: default_codex_backend_config(),
             gemini: default_gemini_backend_config(),
+            openrouter: default_openrouter_backend_config(),
         }
     }
 }
@@ -602,6 +608,16 @@ where
 {
     let partial = PartialBackendConfig::deserialize(deserializer)?;
     Ok(partial.into_backend_config_with_defaults(default_gemini_backend_config()))
+}
+
+fn deserialize_openrouter_backend_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BackendConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let partial = PartialBackendConfig::deserialize(deserializer)?;
+    Ok(partial.into_backend_config_with_defaults(default_openrouter_backend_config()))
 }
 
 impl Default for WorkflowConfig {
@@ -780,6 +796,40 @@ fn default_gemini_backend_config() -> BackendConfig {
             completer: Some("gemini-3-pro-preview".to_owned()),
             acceptance_qa: None,
             reformatter: None,
+        },
+        role_timeouts: RoleTimeouts::default(),
+    }
+}
+
+fn default_openrouter_backend_config() -> BackendConfig {
+    BackendConfig {
+        command: "claude".to_owned(),
+        args: vec![
+            "-p".to_owned(),
+            "--permission-mode".to_owned(),
+            "acceptEdits".to_owned(),
+            "--allowedTools".to_owned(),
+            "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop".to_owned(),
+        ],
+        timeout_seconds: default_backend_timeout_seconds(),
+        enabled: BackendEnabled::Disabled,
+        env: BTreeMap::from([
+            (
+                "ANTHROPIC_BASE_URL".to_owned(),
+                "https://openrouter.ai/api".to_owned(),
+            ),
+            ("ANTHROPIC_API_KEY".to_owned(), String::new()),
+        ]),
+        models: BackendRoleModels {
+            planner: Some("opus".to_owned()),
+            implementer: Some("opus".to_owned()),
+            reviewer: Some("opus".to_owned()),
+            final_reviewer: Some("opus".to_owned()),
+            arbiter: Some("opus".to_owned()),
+            qa: Some("opus".to_owned()),
+            completer: Some("opus".to_owned()),
+            acceptance_qa: Some("opus".to_owned()),
+            reformatter: Some("sonnet".to_owned()),
         },
         role_timeouts: RoleTimeouts::default(),
     }
@@ -1082,6 +1132,7 @@ impl GlobalConfig {
             "claude" => Some(&self.backends.claude),
             "codex" => Some(&self.backends.codex),
             "gemini" => Some(&self.backends.gemini),
+            "openrouter" => Some(&self.backends.openrouter),
             _ => None,
         }
     }
@@ -1091,6 +1142,7 @@ impl GlobalConfig {
             "claude" => Some(&mut self.backends.claude),
             "codex" => Some(&mut self.backends.codex),
             "gemini" => Some(&mut self.backends.gemini),
+            "openrouter" => Some(&mut self.backends.openrouter),
             _ => None,
         }
     }
