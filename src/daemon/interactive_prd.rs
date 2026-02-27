@@ -991,6 +991,8 @@ fn transition_pending_to_awaiting_answers(
 
     eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
@@ -1047,8 +1049,6 @@ fn do_pending_to_awaiting(
             "ralph:ready",
         );
     }
-
-    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
 
     // 3. Check if questions marker already exists (idempotent restart/retry).
     //    If it does, skip question generation entirely to avoid unnecessary
@@ -1160,6 +1160,8 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         config.owner, config.repo
     );
 
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
     let result = get_or_fetch_bot_login(config, bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
     });
@@ -1175,8 +1177,6 @@ fn do_awaiting_answers_to_awaiting_feedback(
     let issue_number = issue.number;
     let owner = &config.owner;
     let repo = &config.repo;
-
-    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
 
     let questions_posted_at = state.questions_posted_at.ok_or_else(|| {
         RalphError::InteractivePrdFailed(format!(
@@ -1302,6 +1302,8 @@ fn transition_awaiting_feedback(
         config.owner, config.repo
     );
 
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
@@ -1316,8 +1318,6 @@ fn do_awaiting_feedback(
     let issue_number = issue.number;
     let owner = &config.owner;
     let repo = &config.repo;
-
-    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
 
     // Fetch current labels and comments
     let labels = github::fetch_issue_labels_with_gh_bin(&config.gh_bin, owner, repo, issue_number)

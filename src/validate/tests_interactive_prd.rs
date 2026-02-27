@@ -2724,6 +2724,10 @@ esac; exit 0
 
         let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
         assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+        );
+        assert!(
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed should be added: {label_raw}"
         );
@@ -2837,6 +2841,10 @@ esac; exit 0
         }
 
         let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+            "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+        );
         assert!(
             label_raw.contains("ralph:prd-failed"),
             "ralph:prd-failed should be added: {label_raw}"

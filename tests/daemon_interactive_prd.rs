@@ -1751,8 +1751,13 @@ esac; exit 0
         }
     }
 
-    // Verify ralph:prd-failed label was applied
+    // Verify waiting-label reconciliation happens even when bot login fails,
+    // and that failure labeling still occurs on retry exhaustion.
     let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+        "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+    );
     assert!(
         label_raw.contains("ralph:prd-failed"),
         "ralph:prd-failed label should be added: {label_raw}"
@@ -1897,8 +1902,13 @@ esac; exit 0
         }
     }
 
-    // Verify ralph:prd-failed label was applied
+    // Verify waiting-label reconciliation happens even when bot login fails,
+    // and that failure labeling still occurs on retry exhaustion.
     let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+        "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+    );
     assert!(
         label_raw.contains("ralph:prd-failed"),
         "ralph:prd-failed label should be added: {label_raw}"
@@ -2690,10 +2700,22 @@ case "$1" in
         exit 0
         ;;
       edit)
-        # Count every label edit for issue #50 as a processing side-effect
-        count=$(cat "$ADVANCE_COUNT" 2>/dev/null || printf '0')
-        count=$((count + 1))
-        printf '%d' "$count" > "$ADVANCE_COUNT"
+        # Count only remove-label ralph:prd as the dedup side-effect.
+        # Waiting-label reconciliation can legitimately add extra issue edits.
+        saw_remove=0
+        saw_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            --remove-label) saw_remove=1 ;;
+            ralph:prd) saw_prd=1 ;;
+            --remove-label=ralph:prd) saw_remove=1; saw_prd=1 ;;
+          esac
+        done
+        if [ "$saw_remove" = "1" ] && [ "$saw_prd" = "1" ]; then
+          count=$(cat "$ADVANCE_COUNT" 2>/dev/null || printf '0')
+          count=$((count + 1))
+          printf '%d' "$count" > "$ADVANCE_COUNT"
+        fi
         exit 0
         ;;
       view)
