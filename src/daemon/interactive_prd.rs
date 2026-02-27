@@ -2212,6 +2212,19 @@ fn run_review_with_retry_sync(
     let initial_prompt = prompt.clone();
     let mut attempt_events: Vec<crate::prd::quick::ReviewAttemptEvent> = Vec::new();
     let mut on_attempt = |event: crate::prd::quick::ReviewAttemptEvent| {
+        attempt_events.push(event);
+    };
+
+    let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
+    let result = rt.block_on(async {
+        tokio::time::timeout(
+            remaining,
+            run_review_with_retry(backend, prompt, Some(&mut on_attempt)),
+        )
+        .await
+    });
+
+    for event in &attempt_events {
         let label = format!("{label_prefix}-{}-of-3", event.attempt);
         let validation = match &event.parse_error {
             Some(error) => ValidationResult::ReviewParseFailed {
@@ -2227,17 +2240,7 @@ fn run_review_with_retry_sync(
             None,
             validation,
         );
-        attempt_events.push(event);
-    };
-
-    let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
-    let result = rt.block_on(async {
-        tokio::time::timeout(
-            remaining,
-            run_review_with_retry(backend, prompt, Some(&mut on_attempt)),
-        )
-        .await
-    });
+    }
 
     match result {
         Ok(Ok(feedback)) => Ok(feedback),
@@ -2403,12 +2406,34 @@ fn run_backend_sync(
             RalphError::InteractivePrdFailed(msg)
         })?;
 
-    let result =
+    let timeout_result =
         rt.block_on(async { tokio::time::timeout(remaining, backend.execute(prompt)).await });
 
-    match result {
+    enum BackendAttemptOutcome {
+        Success {
+            output: String,
+            validation: ValidationResult,
+        },
+        Failure {
+            error: String,
+        },
+    }
+
+    let outcome = match timeout_result {
         Ok(Ok(output)) => {
             let validation = validation_fn(&output);
+            BackendAttemptOutcome::Success { output, validation }
+        }
+        Ok(Err(err)) => BackendAttemptOutcome::Failure {
+            error: format!("backend execution failed: {err}"),
+        },
+        Err(_) => BackendAttemptOutcome::Failure {
+            error: "PRD backend timeout exceeded".to_owned(),
+        },
+    };
+
+    match outcome {
+        BackendAttemptOutcome::Success { output, validation } => {
             logger.log_attempt(
                 backend_spec,
                 label,
@@ -2419,29 +2444,16 @@ fn run_backend_sync(
             );
             Ok(output)
         }
-        Ok(Err(err)) => {
-            let msg = format!("backend execution failed: {err}");
+        BackendAttemptOutcome::Failure { error } => {
             logger.log_attempt(
                 backend_spec,
                 label,
                 prompt,
                 None,
-                Some(msg.clone()),
+                Some(error.clone()),
                 ValidationResult::NotChecked,
             );
-            Err(RalphError::InteractivePrdFailed(msg))
-        }
-        Err(_) => {
-            let msg = "PRD backend timeout exceeded".to_owned();
-            logger.log_attempt(
-                backend_spec,
-                label,
-                prompt,
-                None,
-                Some(msg.clone()),
-                ValidationResult::NotChecked,
-            );
-            Err(RalphError::InteractivePrdFailed(msg))
+            Err(RalphError::InteractivePrdFailed(error))
         }
     }
 }
