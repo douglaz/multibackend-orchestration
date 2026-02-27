@@ -11,7 +11,7 @@ use crate::backend::MockBackend;
 use crate::daemon::interactive_prd::{
     InteractivePrdState, PrdDebugLogEntry, PrdDebugLogger, PrdWorkflowState, ValidationResult,
 };
-use crate::prd::quick::{run_review_with_retry, ReviewAttemptEvent};
+use crate::prd::quick::{parse_review_feedback, run_review_with_retry, ReviewAttemptEvent};
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts;
@@ -156,35 +156,98 @@ fn prompt_truncation_metadata(h: &RalphHarness) -> TestResult {
     })
 }
 
-fn review_retry_callback_captures_malformed_attempts(_h: &RalphHarness) -> TestResult {
+fn review_retry_callback_captures_malformed_attempts(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
+        let data_dir = h.data_dir().to_path_buf();
+        let logs_dir = data_dir.join("acme/widgets/.ralph/interactive-prd/14/logs");
 
-        rt.block_on(async {
-            let backend = std::sync::Arc::new(MockBackend::new(
-                "reviewer",
-                vec!["bad1".to_owned(), "bad2".to_owned(), "bad3".to_owned()],
-            ));
-            let mut events: Vec<ReviewAttemptEvent> = Vec::new();
-            let mut on_attempt = |event: ReviewAttemptEvent| events.push(event);
+        let thread = std::thread::spawn(move || {
+            let logger = PrdDebugLogger::new(&data_dir, "acme", "widgets", 14);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
 
-            let _ = run_review_with_retry(
-                backend,
-                "review prompt".to_owned(),
-                Some(&mut on_attempt),
-            )
-            .await
-            .expect_err("malformed output should exhaust retries");
+            rt.block_on(async move {
+                let backend = std::sync::Arc::new(MockBackend::new(
+                    "reviewer",
+                    vec!["bad1".to_owned(), "bad2".to_owned(), "bad3".to_owned()],
+                ));
+                let mut events: Vec<ReviewAttemptEvent> = Vec::new();
+                let mut on_attempt = |event: ReviewAttemptEvent| {
+                    let validation = match &event.parse_error {
+                        Some(error) => ValidationResult::ReviewParseFailed {
+                            error: error.clone(),
+                        },
+                        None => ValidationResult::Ok,
+                    };
+                    logger.log_attempt(
+                        "claude(opus)",
+                        &format!("review-attempt-{}-of-3", event.attempt),
+                        &event.prompt,
+                        Some(event.raw_output.clone()),
+                        None,
+                        validation,
+                    );
+                    events.push(event);
+                };
 
-            assert_eq!(events.len(), 3, "expected callback for all 3 attempts");
-            assert!(events.iter().all(|e| e.parse_error.is_some()));
-            assert_eq!(events[0].attempt, 1);
-            assert_eq!(events[1].attempt, 2);
-            assert_eq!(events[2].attempt, 3);
+                let _ = run_review_with_retry(
+                    backend,
+                    "review prompt".to_owned(),
+                    Some(&mut on_attempt),
+                )
+                .await
+                .expect_err("malformed output should exhaust retries");
+
+                events
+            })
         });
+
+        let events = thread.join().expect("review thread should complete");
+        assert_eq!(events.len(), 3, "expected callback for all 3 attempts");
+        assert_eq!(events[0].attempt, 1);
+        assert_eq!(events[1].attempt, 2);
+        assert_eq!(events[2].attempt, 3);
+
+        for event in &events {
+            let expected_error = parse_review_feedback(&event.raw_output)
+                .expect_err("mock output should fail parsing")
+                .to_string();
+            assert_eq!(
+                event.parse_error.as_deref(),
+                Some(expected_error.as_str()),
+                "parse_error mismatch for attempt {}",
+                event.attempt
+            );
+        }
+
+        let mut log_files: Vec<String> = fs::read_dir(&logs_dir)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", logs_dir.display()))
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        log_files.sort();
+
+        assert_eq!(log_files.len(), 3, "expected one log file per review attempt");
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("review-attempt-1-of-3.json")),
+            "missing review-attempt-1-of-3 file"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("review-attempt-2-of-3.json")),
+            "missing review-attempt-2-of-3 file"
+        );
+        assert!(
+            log_files
+                .iter()
+                .any(|name| name.contains("review-attempt-3-of-3.json")),
+            "missing review-attempt-3-of-3 file"
+        );
     })
 }
 
