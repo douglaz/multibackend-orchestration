@@ -739,7 +739,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| String::new());
+                    .unwrap_or_default();
                 completers.push(backend);
                 if let Some(pv) = parse_completion_verdict(&v.body) {
                     any_verdict = true;
@@ -775,7 +775,7 @@ fn reconstruct_completion_attempt(
                 .frontmatter
                 .get("backend")
                 .cloned()
-                .unwrap_or_else(|| String::new());
+                .unwrap_or_default();
             let verdict = parse_completion_verdict(&single.body);
             (vec![backend], Some(single), verdict)
         } else {
@@ -792,7 +792,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| String::new()),
+                    .unwrap_or_default(),
                 passed: true,
                 artifact: artifact.rel_path.clone(),
             });
@@ -807,7 +807,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| String::new()),
+                    .unwrap_or_default(),
                 passed: false,
                 artifact: artifact.rel_path.clone(),
             });
@@ -827,7 +827,7 @@ fn reconstruct_completion_attempt(
 
     let planner_backend = termination
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-        .unwrap_or_else(|| String::new());
+        .unwrap_or_default();
 
     CompletionLoopState {
         loop_number,

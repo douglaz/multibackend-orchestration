@@ -227,7 +227,7 @@ impl CliBackend {
             Some(id) => match self.name.as_str() {
                 n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
                 n if n.starts_with("openrouter") || n == "openrouter" => {
-                    self.effective_args_claude(id)
+                    self.effective_args_opencode(id)
                 }
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
@@ -243,11 +243,7 @@ impl CliBackend {
     /// For Codex: adds --json.
     fn ensure_json_output_args(&self) -> Result<Vec<String>> {
         match self.name.as_str() {
-            n if n.starts_with("claude")
-                || n == "claude"
-                || n.starts_with("openrouter")
-                || n == "openrouter" =>
-            {
+            n if n.starts_with("claude") || n == "claude" => {
                 let mut args = self.args.clone();
                 // Only add if not already present
                 if !args
@@ -290,6 +286,27 @@ impl CliBackend {
                     args.push(arg.clone());
                 }
                 args.push("--output-format".to_owned());
+                args.push("json".to_owned());
+                Ok(args)
+            }
+            n if n.starts_with("openrouter") || n == "openrouter" => {
+                let mut args = Vec::with_capacity(self.args.len() + 2);
+                let mut skip_next = false;
+                for arg in &self.args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if arg == "--format" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if arg.starts_with("--format=") {
+                        continue;
+                    }
+                    args.push(arg.clone());
+                }
+                args.push("--format".to_owned());
                 args.push("json".to_owned());
                 Ok(args)
             }
@@ -438,6 +455,36 @@ impl CliBackend {
         result.push("--resume".to_owned());
         result.push(session_id.to_owned());
         result.push("--output-format".to_owned());
+        result.push("json".to_owned());
+        Ok(result)
+    }
+
+    fn effective_args_opencode(&self, session_id: &str) -> Result<Vec<String>> {
+        // OpenCode resume rules:
+        // 1. Keep all existing args.
+        // 2. Remove existing --session and --format forms.
+        // 3. Add --session <id> and --format json.
+        let mut result = Vec::new();
+        let mut skip_next = false;
+
+        for arg in self.args.iter() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--session" || arg == "-s" || arg == "--format" || arg == "-f" {
+                skip_next = true;
+                continue;
+            }
+            if arg.starts_with("--session=") || arg.starts_with("--format=") {
+                continue;
+            }
+            result.push(arg.clone());
+        }
+
+        result.push("--session".to_owned());
+        result.push(session_id.to_owned());
+        result.push("--format".to_owned());
         result.push("json".to_owned());
         Ok(result)
     }
@@ -970,10 +1017,8 @@ impl BackendRegistry {
         };
         // If the primary opposite is unavailable, try openrouter as substitute
         // for codex (since openrouter provides codex-equivalent models).
-        if !self.is_backend_available(primary) && primary == "codex" {
-            if self.is_backend_available("openrouter") {
-                return Ok("openrouter");
-            }
+        if !self.is_backend_available(primary) && primary == "codex" && self.is_backend_available("openrouter") {
+            return Ok("openrouter");
         }
         Ok(primary)
     }
@@ -2280,7 +2325,7 @@ done
             .expect("should assign backends");
         assert_eq!(backends.planner, "claude(opus)");
         assert!(
-            backends.implementer.starts_with("openrouter("),
+            backends.implementer == "openrouter" || backends.implementer.starts_with("openrouter("),
             "implementer should be openrouter, got: {}",
             backends.implementer
         );
@@ -2290,7 +2335,7 @@ done
             .assign_feature_backends(6, "claude", &no_overrides)
             .expect("should assign backends");
         assert!(
-            backends.planner.starts_with("openrouter("),
+            backends.planner == "openrouter" || backends.planner.starts_with("openrouter("),
             "planner should be openrouter, got: {}",
             backends.planner
         );
