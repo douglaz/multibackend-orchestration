@@ -2197,7 +2197,16 @@ fn run_review_with_retry_sync(
         .enable_all()
         .build()
         .map_err(|err| {
-            RalphError::InteractivePrdFailed(format!("failed to create tokio runtime: {err}"))
+            let msg = format!("failed to create tokio runtime: {err}");
+            logger.log_attempt(
+                reviewer_backend_spec,
+                &format!("{label_prefix}-1-of-3"),
+                &prompt,
+                None,
+                Some(msg.clone()),
+                ValidationResult::NotChecked,
+            );
+            RalphError::InteractivePrdFailed(msg)
         })?;
 
     let initial_prompt = prompt.clone();
