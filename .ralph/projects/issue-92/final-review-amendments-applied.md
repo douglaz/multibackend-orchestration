@@ -131,3 +131,31 @@ Make post-save `Done` cleanup failures retryable instead of terminally committed
 ### Reviewer
 codex
 
+
+## Round 3
+
+### Amendment: FR-PRD-WAITING-POSTSAVE-001
+
+### Problem
+`Done` can be durably saved even when terminal label cleanup fails, which can leave stale `ralph:prd-active` and `ralph:waiting-feedback` labels indefinitely.
+
+In [interactive_prd.rs:1505](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/src/daemon/interactive_prd.rs:1505), removal of `ralph:prd-active` is fallible (`?`). If it fails, execution returns before the new waiting-label removal at [interactive_prd.rs:1518](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/src/daemon/interactive_prd.rs:1518).  
+Then `finish_transition` persists state again on error paths at [interactive_prd.rs:1675](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/src/daemon/interactive_prd.rs:1675) without reverting `Done` unless save itself fails. This makes the issue terminal in state storage, so subsequent ticks skip transition logic and cleanup is never retried.
+
+### Proposed Change
+Make post-save `Done` cleanup failures retryable instead of terminally committed:
+
+1. In `finish_transition`, when `result.is_err()` and `state.state == Done`, revert to `pre_transition_state` before saving so retries remain possible.
+2. In `do_approval_transition`, attempt waiting-label removal even if active-label removal fails (collect cleanup errors, don’t short-circuit before trying both).
+3. Add tests for the exact case “save succeeds, `--remove-label ralph:prd-active` fails” to prove state remains non-terminal and cleanup retries on next tick.
+
+### Affected Files
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/src/daemon/interactive_prd.rs` - fix `Done` error-path state handling and cleanup sequencing.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/tests/daemon_interactive_prd.rs` - add integration coverage for post-save active-label removal failure.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-92/src/validate/tests_interactive_prd.rs` - add conformance coverage for the same failure mode.
+
+---
+
+### Reviewer
+codex
+
