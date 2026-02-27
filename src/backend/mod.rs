@@ -948,6 +948,7 @@ impl BackendRegistry {
         match parsed.name.as_str() {
             "claude" => Ok("codex"),
             "codex" => Ok("claude"),
+            "openrouter" => Ok("claude"),
             _ => Err(RalphError::Validation(format!(
                 "unknown backend for opposite lookup: {backend}"
             ))),
