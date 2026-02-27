@@ -3941,7 +3941,8 @@ fn max_concurrent_zero_treated_as_one(_harness: &RalphHarness) -> TestResult {
 
 /// Conformance: dedup invariant via real poll_and_advance_prd path.
 /// Issue #50 appears in both ralph:prd and ralph:prd-active polls.
-/// Assert it is processed exactly once per tick (counted via label-edit calls).
+/// Assert it is processed exactly once per tick (counted via remove-label
+/// `ralph:prd`, which is a stable per-processing side-effect in this fixture).
 fn concurrent_dedup_invariant(_harness: &RalphHarness) -> TestResult {
     use crate::config::GlobalConfig;
     use crate::daemon::interactive_prd::{poll_and_advance_prd, PrdPollConfig};
@@ -3972,7 +3973,20 @@ case "$1" in
         fi
         exit 0 ;;
       edit)
-        c=$(cat "$COUNTER" 2>/dev/null || printf '0'); c=$((c+1)); printf '%d' "$c" > "$COUNTER"
+        saw_remove=0
+        saw_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            --remove-label) saw_remove=1 ;;
+            ralph:prd) saw_prd=1 ;;
+            --remove-label=ralph:prd) saw_remove=1; saw_prd=1 ;;
+          esac
+        done
+        if [ "$saw_remove" = "1" ] && [ "$saw_prd" = "1" ]; then
+          c=$(cat "$COUNTER" 2>/dev/null || printf '0')
+          c=$((c+1))
+          printf '%d' "$c" > "$COUNTER"
+        fi
         exit 0 ;;
       view)
         for arg in "$@"; do case "$arg" in comments) printf '{{"comments":[]}}'; exit 0 ;; esac; done

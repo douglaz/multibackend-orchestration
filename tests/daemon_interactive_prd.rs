@@ -2668,8 +2668,8 @@ fn dedup_invariant_issue_processed_at_most_once() {
     let tmp = TempDir::new().expect("create tempdir");
     let data_dir = tmp.path();
 
-    // Counter file: counts how many times gh receives a label-edit call for
-    // issue #50 (the side-effect of advance_issue doing Pending->AwaitingAnswers).
+    // Counter file: counts how many times gh removes `ralph:prd` for issue #50
+    // (a stable side-effect of Pending->AwaitingAnswers in this fixture).
     let advance_count = tmp.path().join("advance_count");
     fs::write(&advance_count, "0").expect("init counter");
 
@@ -2789,8 +2789,8 @@ exit 0
 
     assert!(result.is_ok(), "poll_and_advance_prd should succeed");
 
-    // Read the counter: label-edit calls are the side-effect of advance_issue
-    // running the Pending->AwaitingAnswers transition (adds ralph:prd-active).
+    // Read the counter: remove-label ralph:prd is a stable side-effect of
+    // Pending->AwaitingAnswers for this fixture and occurs once per processing.
     // If dedup failed, the issue would be processed twice and the counter would
     // be >= 2. With correct dedup, it should be processed exactly once.
     let count_str = fs::read_to_string(&advance_count).expect("read counter");
