@@ -1,0 +1,79 @@
+{
+  "project_id": "task-summary-replace-the-current-backend",
+  "project_name": "# Task Summary\n\nReplace the current backend-based timeout co",
+  "created_at": "2026-02-16T16:13:24.331348236Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "bb8ee859f9f253b2ddc67155d72ff750d06b4ef984194a8eab481113d897fcbb",
+  "prompt_hash_at_loop_start": "bb8ee859f9f253b2ddc67155d72ff750d06b4ef984194a8eab481113d897fcbb",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "qa",
+  "phase_iteration": 2,
+  "status": "failed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "roletimeouts-data-model-and-config-parsing",
+      "feature_name": "RoleTimeouts Data Model and Config Parsing",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-roletimeouts-data-model-and-config-parsing/20260216161932-spec.md",
+        "impl_notes": "loops/001-roletimeouts-data-model-and-config-parsing/20260216162756-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-roletimeouts-data-model-and-config-parsing/20260216164623-review-approved.md",
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": true,
+            "report": "loops/001-roletimeouts-data-model-and-config-parsing/20260216164555-qa-001-pass.md",
+            "implementer_response": null
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": "e7adf385b683e219affa2a992726d0bcd2630e31",
+      "started_at": "2026-02-16T16:19:32.034643881Z",
+      "completed_at": "2026-02-16T16:46:23.659907789Z"
+    },
+    {
+      "loop_number": 2,
+      "slug": "role-aware-backend-registry-timeout-resolution",
+      "feature_name": "Role-Aware Backend Registry Timeout Resolution",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "implementer": "claude(opus)",
+        "reviewer": "codex(gpt-5.3-codex-high)",
+        "qa": "claude(opus)"
+      },
+      "artifacts": {
+        "spec": "loops/002-role-aware-backend-registry-timeout-resolution/20260216164700-spec.md",
+        "impl_notes": "loops/002-role-aware-backend-registry-timeout-resolution/20260216165048-impl-notes.md",
+        "reviews": [],
+        "approval": null,
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/002-role-aware-backend-registry-timeout-resolution/20260216170708-qa-001-fail.md",
+            "implementer_response": "loops/002-role-aware-backend-registry-timeout-resolution/20260216171411-impl-qa-response-001.md"
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-16T16:47:00.634333599Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
