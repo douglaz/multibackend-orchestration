@@ -703,6 +703,25 @@ impl Orchestrator {
                         )
                     };
 
+                    // If the stored backend is missing or disabled, recalculate
+                    // from the loop alternation cycle.
+                    let implementer_backend_name =
+                        if registry.is_backend_available(&implementer_backend_name) {
+                            implementer_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %implementer_backend_name,
+                                recalculated = %recalc.implementer,
+                                loop_number,
+                                "implementer backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.implementer
+                        };
                     let implementer_backend =
                         registry.get_or_create_for_role(&implementer_backend_name, "implementer")?;
 
@@ -1241,6 +1260,23 @@ impl Orchestrator {
                         });
                     }
 
+                    let qa_backend_name =
+                        if registry.is_backend_available(&qa_backend_name) {
+                            qa_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %qa_backend_name,
+                                recalculated = %recalc.qa,
+                                loop_number,
+                                "qa backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.qa
+                        };
                     let qa_backend = registry.get_or_create_for_role(&qa_backend_name, "qa")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
@@ -1473,6 +1509,23 @@ impl Orchestrator {
                         )
                     };
 
+                    let reviewer_backend_name =
+                        if registry.is_backend_available(&reviewer_backend_name) {
+                            reviewer_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %reviewer_backend_name,
+                                recalculated = %recalc.reviewer,
+                                loop_number,
+                                "reviewer backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.reviewer
+                        };
                     if state.phase_iteration > effective.workflow.max_review_iterations {
                         review_limit_hit =
                             Some((loop_number, effective.workflow.max_review_iterations));
