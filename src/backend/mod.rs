@@ -911,6 +911,20 @@ impl BackendRegistry {
         self.get_or_create_inner(spec, Some(role))
     }
 
+    /// Check whether a backend spec refers to a known, enabled backend.
+    /// Returns false for empty strings, unknown backends, or disabled backends.
+    pub fn is_backend_available(&self, spec: &str) -> bool {
+        if spec.is_empty() {
+            return false;
+        }
+        let Ok(parsed) = parse_backend_spec(spec) else {
+            return false;
+        };
+        self.config
+            .backend_config(&parsed.name)
+            .is_some_and(|cfg| cfg.enabled != BackendEnabled::Disabled)
+    }
+
     fn get_or_create_inner(&mut self, spec: &str, role: Option<&str>) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
         if self
@@ -2180,5 +2194,92 @@ done
         assert!(logged.contains("chunk-1"));
         assert!(logged.contains("chunk-6"));
         assert!(!logged.contains("--- timeout ts="));
+    }
+
+    #[test]
+    fn is_backend_available_returns_true_for_enabled_backend() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(registry.is_backend_available("claude"));
+        assert!(registry.is_backend_available("claude(opus)"));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_disabled_backend() {
+        let mut config = GlobalConfig::default();
+        config.backends.gemini.enabled = BackendEnabled::Disabled;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available("gemini"));
+        assert!(!registry.is_backend_available("gemini(gemini-3-pro-preview)"));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_empty_string() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available(""));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_unknown_backend() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available("unknown"));
+        assert!(!registry.is_backend_available("foobar(model)"));
+    }
+
+    #[test]
+    fn assign_feature_backends_recalculates_when_codex_disabled() {
+        let mut config = GlobalConfig::default();
+        config.backends.codex.enabled = BackendEnabled::Disabled;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        let no_overrides = super::RoleOverrides {
+            planner: None,
+            implementer: None,
+            reviewer: None,
+            qa: None,
+            completer: None,
+        };
+
+        // Loop 5 (odd): planner = starting_backend = claude, implementer = opposite = codex.
+        // But codex is disabled, so if we recalculate we still get codex from alternation.
+        // The recalculation just gives the cycle answer; availability is checked separately.
+        let backends = registry
+            .assign_feature_backends(5, "claude", &no_overrides)
+            .expect("should assign backends");
+        // Odd loop: planner=claude, implementer=opposite(claude)=codex
+        assert_eq!(backends.planner, "claude(opus)");
+        assert_eq!(backends.implementer, "codex(gpt-5.3-codex-high)");
+
+        // Even loop: planner=opposite(claude)=codex, implementer=opposite(codex)=claude
+        let backends = registry
+            .assign_feature_backends(6, "claude", &no_overrides)
+            .expect("should assign backends");
+        assert_eq!(backends.planner, "codex(gpt-5.3-codex-xhigh)");
+        assert_eq!(backends.implementer, "claude(opus)");
+    }
+
+    #[test]
+    fn is_backend_available_with_recalculation_workflow() {
+        // Simulate the orchestrator's fallback logic:
+        // stored backend is empty (missing frontmatter), recalculate from cycle.
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        let no_overrides = super::RoleOverrides {
+            planner: None,
+            implementer: None,
+            reviewer: None,
+            qa: None,
+            completer: None,
+        };
+
+        let stored_backend = ""; // empty from missing frontmatter
+        assert!(!registry.is_backend_available(stored_backend));
+
+        // Recalculate for loop 5
+        let recalc = registry
+            .assign_feature_backends(5, "claude", &no_overrides)
+            .expect("should recalculate");
+        assert!(registry.is_backend_available(&recalc.implementer));
     }
 }

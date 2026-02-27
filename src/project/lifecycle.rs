@@ -605,12 +605,12 @@ fn reconstruct_feature_loop(
         .and_then(|artifact| first_feature_name(&artifact.body))
         .unwrap_or_else(|| loop_slug.replace('-', " "));
 
-    // When backend frontmatter is missing from artifacts, default to "claude"
-    // rather than "unknown" which is not a valid backend name and would cause
-    // resolution failures on resume.
+    // Use empty string as sentinel when backend frontmatter is missing.
+    // The orchestrator will recalculate the correct backend from the loop
+    // alternation cycle when it encounters an empty backend name.
     let planner_backend = spec
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-        .unwrap_or_else(|| "claude".to_owned());
+        .unwrap_or_default();
     let implementer_backend = impl_notes
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
         .or_else(|| {
@@ -623,7 +623,7 @@ fn reconstruct_feature_loop(
                 })
                 .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
         })
-        .unwrap_or_else(|| "claude".to_owned());
+        .unwrap_or_default();
     let reviewer_backend = approval
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
         .or_else(|| {
@@ -633,13 +633,13 @@ fn reconstruct_feature_loop(
                 .find(|artifact| artifact.base_name.starts_with("review-"))
                 .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
         })
-        .unwrap_or_else(|| "claude".to_owned());
+        .unwrap_or_default();
     let qa_backend = artifacts
         .iter()
         .rev()
         .find(|artifact| artifact.base_name.starts_with("qa-"))
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-        .unwrap_or_else(|| "claude".to_owned());
+        .unwrap_or_default();
 
     let completed_at = approval.map(|artifact| artifact.observed_at);
     let status = if completed_at.is_some() {
@@ -739,7 +739,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| "claude".to_owned());
+                    .unwrap_or_else(|| String::new());
                 completers.push(backend);
                 if let Some(pv) = parse_completion_verdict(&v.body) {
                     any_verdict = true;
@@ -775,7 +775,7 @@ fn reconstruct_completion_attempt(
                 .frontmatter
                 .get("backend")
                 .cloned()
-                .unwrap_or_else(|| "claude".to_owned());
+                .unwrap_or_else(|| String::new());
             let verdict = parse_completion_verdict(&single.body);
             (vec![backend], Some(single), verdict)
         } else {
@@ -792,7 +792,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| "claude".to_owned()),
+                    .unwrap_or_else(|| String::new()),
                 passed: true,
                 artifact: artifact.rel_path.clone(),
             });
@@ -807,7 +807,7 @@ fn reconstruct_completion_attempt(
                     .frontmatter
                     .get("backend")
                     .cloned()
-                    .unwrap_or_else(|| "claude".to_owned()),
+                    .unwrap_or_else(|| String::new()),
                 passed: false,
                 artifact: artifact.rel_path.clone(),
             });
@@ -827,7 +827,7 @@ fn reconstruct_completion_attempt(
 
     let planner_backend = termination
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
-        .unwrap_or_else(|| "claude".to_owned());
+        .unwrap_or_else(|| String::new());
 
     CompletionLoopState {
         loop_number,
