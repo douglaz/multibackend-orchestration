@@ -131,6 +131,8 @@ pub struct RunOptions {
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
     pub skip_prompt_review: bool,
+    /// PR URL passed from the daemon's draft-PR watcher.
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

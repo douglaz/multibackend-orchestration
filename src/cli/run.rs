@@ -24,6 +24,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             skip_commit: args.skip_commit,
             skip_prompt_review: args.skip_prompt_review,
             tmux: args.tmux.or(args.no_tmux),
+            pr_url: args.pr_url,
         })
         .await;
 

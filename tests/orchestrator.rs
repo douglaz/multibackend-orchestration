@@ -311,6 +311,7 @@ fn run_options(project_id: &str) -> RunOptions {
         on_prompt_change: None,
         skip_commit: false,
         skip_prompt_review: false,
+        pr_url: None,
     }
 }
 
