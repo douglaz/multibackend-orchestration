@@ -1,0 +1,13 @@
+Here's a summary of how each review issue was addressed in the revised spec:
+
+**Issue 1 (Technical Feasibility — missed cleanup path in `dispatch_task()`):** Added **Change 3** covering the `dispatch_task()` CAS failure path at lines 546-576. This path unconditionally removed worktrees when a task was already terminal at activation time. The fix reads the stored task state and skips removal when it is `Failed`. The acceptance criteria and Files & Modules table now explicitly list all three cleanup sites.
+
+**Issue 2 (Acceptance Criteria Completeness — no test for the failure transition itself):** Added a new required test `runtime_task_fails_worktree_preserved` that seeds a *pending* task, lets it fail during runtime (mock ralph exits non-zero), and asserts the worktree remains on disk. The distinction from the existing `runtime_failed_worktree_preserved_and_reused_on_retry` test is explicitly documented — the existing test only validates the retry path from an already-failed state, not the `complete_task()` cleanup-skip behavior.
+
+**Issue 3 (Resume Semantics — loop-level resume test):** Explicitly scoped out with justification. The daemon's contract is to preserve the worktree, persist the project_id, and dispatch via `spawn_ralph_run` — all tested by the listed tests. The loop-resumption behavior is owned by `ralph run --project`, and an integration test for it belongs in that command's test suite, not the daemon's.
+
+**Issue 4 (Dispatch Routing — discovery can route fresh tasks to resume path):** Added **Change 6** fixing the dispatch gate to use `task.project_id.as_deref()` instead of `effective_project_id.as_deref()`. Added a new required test `runtime_fresh_dispatch_ignores_discovered_project` that validates fresh tasks use `ralph auto --idea` even when a workspace project exists.
+
+**Issue 5 (Aborted cleanup policy):** The spec now explicitly documents the product decision: aborted tasks are always cleaned up because they represent deliberate user cancellation. This is stated in the Summary, noted in the Out of Scope section as a deliberate choice, and the rationale is given.
+
+**Issue 6 (Internal inconsistency on test requirements):** The Testing Strategy section now has two clearly labeled subsections: "Required new conformance tests" (3 tests that must be written and pass before merge) and "Existing tests that must continue to pass" (4 tests). Each test is numbered and described with its exact purpose and assertion set.
