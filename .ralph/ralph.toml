@@ -146,6 +146,11 @@ final_review_arbiter_backend = "openrouter"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
 max_final_review_restarts = 15
+completion_backends = [
+    "claude",
+    "openrouter",
+]
+completion_min_completers = 2
 qa_enabled = false
 max_qa_iterations = 3
 planner_state_in_prompt = "summary"
