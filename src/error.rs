@@ -109,6 +109,9 @@ pub enum RalphError {
     #[error("git conflict: {details}")]
     GitConflict { details: String },
 
+    #[error("branch mismatch: expected '{expected}', got '{actual}'")]
+    BranchMismatch { expected: String, actual: String },
+
     #[error("orchestration error: {0}")]
     Orchestration(String),
 
@@ -247,5 +250,18 @@ mod tests {
     fn interactive_prd_failed_has_expected_exit_code() {
         let err = RalphError::InteractivePrdFailed("boom".to_owned());
         assert_eq!(err.exit_code(), 14);
+    }
+
+    #[test]
+    fn branch_mismatch_display_includes_expected_and_actual() {
+        let err = RalphError::BranchMismatch {
+            expected: "ralph/issue-93".to_owned(),
+            actual: "main".to_owned(),
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("branch mismatch"));
+        assert!(message.contains("ralph/issue-93"));
+        assert!(message.contains("main"));
     }
 }
