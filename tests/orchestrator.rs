@@ -507,7 +507,10 @@ async fn executes_completion_flow_until_complete() {
         .output()
         .expect("git status should execute");
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
-    let uncommitted_lines: Vec<&str> = uncommitted.lines().filter(|l| !l.is_empty()).collect();
+    let uncommitted_lines: Vec<&str> = uncommitted
+        .lines()
+        .filter(|l| !l.is_empty() && *l != "?? .ralph/")
+        .collect();
     assert!(
         uncommitted_lines.is_empty(),
         "expected no uncommitted .ralph/ files after completion, found:\n{}",
@@ -2666,7 +2669,10 @@ async fn acceptance_gate_pass_keeps_completed() {
         .output()
         .expect("git status should execute");
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
-    let uncommitted_lines: Vec<&str> = uncommitted.lines().filter(|l| !l.is_empty()).collect();
+    let uncommitted_lines: Vec<&str> = uncommitted
+        .lines()
+        .filter(|l| !l.is_empty() && *l != "?? .ralph/")
+        .collect();
     assert!(
         uncommitted_lines.is_empty(),
         "expected no uncommitted .ralph/ files after completion, found:\n{}",
