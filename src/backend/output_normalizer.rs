@@ -117,6 +117,7 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
 pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
     let mut output = NormalizedOutput::default();
     let mut json_event_count = 0_usize;
+    let mut last_goose_msg_id: Option<String> = None;
     let mut result_text: Option<String> = None;
 
     for line in raw.lines() {
@@ -201,14 +202,26 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 if let Some(inner) = event.get("message") {
                     // Goose format: extract text from inner message.content[]
                     // Only extract "text" type content, skip "reasoning" and "toolRequest".
+                    // Goose streams token-by-token: each token arrives as a separate
+                    // "message" event sharing the same message ID. We concatenate
+                    // tokens from the same message directly (no separator), but insert
+                    // a newline when a new message ID appears (different assistant turn).
                     let role = inner.get("role").and_then(Value::as_str);
                     if role == Some("assistant") {
+                        let msg_id = inner.get("id").and_then(Value::as_str);
+                        let is_new_message = msg_id.is_some_and(|id| {
+                            last_goose_msg_id.as_deref().is_some_and(|prev| prev != id)
+                        });
+                        if let Some(id) = msg_id {
+                            last_goose_msg_id = Some(id.to_owned());
+                        }
                         if let Some(items) = inner.pointer("/content").and_then(Value::as_array) {
                             for item in items {
                                 let ct = item.get("type").and_then(Value::as_str);
                                 if ct == Some("text") {
                                     if let Some(text) = item.get("text").and_then(Value::as_str) {
-                                        if !output.text.is_empty()
+                                        if is_new_message
+                                            && !output.text.is_empty()
                                             && !output.text.ends_with('\n')
                                         {
                                             output.text.push('\n');
@@ -1103,7 +1116,7 @@ Done."#;
             "\n",
             r#"{"type":"message","message":{"id":"gen-1","role":"user","created":2,"content":[{"type":"toolResponse","id":"call_1","toolResult":{}}],"metadata":{}}}"#,
             "\n",
-            "{\"type\":\"message\",\"message\":{\"id\":\"gen-1\",\"role\":\"assistant\",\"created\":3,\"content\":[{\"type\":\"text\",\"text\":\"# Final Answer\\n\\nAll done.\"}],\"metadata\":{}}}",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-2\",\"role\":\"assistant\",\"created\":3,\"content\":[{\"type\":\"text\",\"text\":\"# Final Answer\\n\\nAll done.\"}],\"metadata\":{}}}",
             "\n",
             r#"{"type":"complete","total_tokens":2000}"#,
         );
@@ -1117,6 +1130,33 @@ Done."#;
             normalized.text,
             "First part.\n# Final Answer\n\nAll done."
         );
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_token_streaming_preserves_fenced_json() {
+        // Goose streams token-by-token with the same message ID.
+        // Tokens must be concatenated directly without inserting newlines,
+        // otherwise "```json" gets split into "```\njson" and fenced JSON parsing breaks.
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"```"}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"json"}],"metadata":{}}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-abc\",\"role\":\"assistant\",\"created\":1,\"content\":[{\"type\":\"text\",\"text\":\"\\n\"}],\"metadata\":{}}}",
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-abc\",\"role\":\"assistant\",\"created\":1,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"approved\\\": true}\\n\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"```"}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"complete","total_tokens":100}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose token streaming");
+        assert!(
+            normalized.text.contains("```json"),
+            "fenced JSON opener must not be split; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(normalized.text, "```json\n{\"approved\": true}\n```");
     }
 
     // --- OpenCode CLI output ---
