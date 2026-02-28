@@ -83,8 +83,12 @@ Examples:
 
 - `claude`
 - `codex`
+- `openrouter`
 - `claude(opus)`
 - `codex(gpt-5.3-codex-xhigh)`
+- `openrouter(openai/gpt-5.3-codex)`
+
+The `openrouter` backend routes model requests through the [OpenRouter](https://openrouter.ai/) API (a model-routing API) and uses [Goose](https://github.com/block/goose) as its CLI runner. It provides access to models from multiple providers (for example OpenAI, Anthropic, and Google) through one backend. This backend is disabled by default (`enabled = false`) and requires an OpenRouter API key.
 
 Role-specific overrides are available on `run` and in config:
 
