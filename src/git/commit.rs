@@ -12,6 +12,7 @@ use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
 pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph";
+const GENERATED_ARTIFACT_PATHS: &[&str] = &["SPEC.md"];
 
 /// Returns the diff of both staged and unstaged changes against HEAD.
 pub fn working_tree_diff(workdir: &Path) -> Result<String> {
@@ -120,11 +121,8 @@ pub fn commit_feature_loop(
     }
 
     run_git(workdir, &["add", "-A"])?;
-    // Unstage .ralph/ entries to avoid committing orchestration state.
-    let _ = run_git(
-        workdir,
-        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
-    );
+    // Unstage runtime and generated artifacts to avoid git pollution.
+    unstage_non_commit_artifacts(workdir);
 
     let mut commit_args = vec!["commit", "--allow-empty", "-m", message];
     if sign_commits {
@@ -216,11 +214,8 @@ pub fn commit_and_push_phase_transition(
     }
 
     run_git(repo_root, &["add", "-A"])?;
-    // Unstage .ralph/ entries to avoid committing orchestration state.
-    let _ = run_git(
-        repo_root,
-        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
-    );
+    // Unstage runtime and generated artifacts to avoid git pollution.
+    unstage_non_commit_artifacts(repo_root);
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
@@ -263,14 +258,27 @@ pub fn count_phase_transition_checkpoints(
 pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     ensure_git_repo(workdir)?;
     run_git(workdir, &["add", "-A"])?;
-    // Unstage any .ralph/ entries that slipped in (e.g. repos where .ralph
-    // is not gitignored).  --ignore-unmatch avoids errors when nothing was
-    // staged.  Best-effort: errors are harmless.
+    // Unstage runtime and generated artifacts to avoid git pollution.
+    // --ignore-unmatch avoids errors when nothing was staged.
+    // Best-effort: errors are harmless.
+    unstage_non_commit_artifacts(workdir);
+    Ok(())
+}
+
+fn unstage_non_commit_artifacts(workdir: &Path) {
+    // Never delete working-tree files: `git rm --cached` only removes index
+    // entries and `--ignore-unmatch` keeps this best-effort.
     let _ = run_git(
         workdir,
         &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
     );
-    Ok(())
+
+    for artifact in GENERATED_ARTIFACT_PATHS {
+        let _ = run_git(
+            workdir,
+            &["rm", "--cached", "--ignore-unmatch", "--", artifact],
+        );
+    }
 }
 
 /// Undo non-orchestration working-tree/index changes and remove non-orchestration

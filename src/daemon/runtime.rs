@@ -93,6 +93,13 @@ const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
 const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DraftPrTransition {
+    None,
+    MarkReady,
+    CloseNoDiff,
+}
+
 #[derive(Default)]
 struct ArtifactWatcherState {
     quick_prd_posted: bool,
@@ -1545,6 +1552,32 @@ pub(crate) fn should_close_no_diff_draft_pr(has_changes: bool, pr_is_draft: bool
     !has_changes && pr_is_draft
 }
 
+pub(crate) fn decide_draft_pr_transition(
+    has_changes: bool,
+    pr_is_draft: bool,
+    terminal_label: &str,
+) -> DraftPrTransition {
+    if should_close_no_diff_draft_pr(has_changes, pr_is_draft) {
+        return DraftPrTransition::CloseNoDiff;
+    }
+    if should_mark_draft_pr_ready(has_changes, pr_is_draft, terminal_label) {
+        return DraftPrTransition::MarkReady;
+    }
+    DraftPrTransition::None
+}
+
+pub(crate) fn complete_task_retry_limits() -> (u32, u64) {
+    (COMPLETE_TASK_MAX_ATTEMPTS, COMPLETE_TASK_RETRY_DELAY_SECS)
+}
+
+pub(crate) fn complete_task_retry_delay(err: &RalphError, attempt: u32) -> Option<Duration> {
+    if should_retry_complete_task(err, attempt) {
+        Some(Duration::from_secs(COMPLETE_TASK_RETRY_DELAY_SECS))
+    } else {
+        None
+    }
+}
+
 async fn complete_task(
     config: &DaemonRuntimeConfig,
     issue_number: u32,
@@ -1555,11 +1588,11 @@ async fn complete_task(
         match complete_task_attempt(config, issue_number, task_id, terminal_label).await {
             Ok(()) => return,
             Err(err) => {
-                if should_retry_complete_task(&err, attempt) {
+                if let Some(delay) = complete_task_retry_delay(&err, attempt) {
                     eprintln!(
                         "warning: complete_task transient failure for {task_id} on attempt {attempt}/{COMPLETE_TASK_MAX_ATTEMPTS}: {err}; retrying in {COMPLETE_TASK_RETRY_DELAY_SECS}s"
                     );
-                    tokio::time::sleep(Duration::from_secs(COMPLETE_TASK_RETRY_DELAY_SECS)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
 
@@ -2200,7 +2233,9 @@ async fn handle_pr_flow(
                 })
                 .await?;
 
-                if should_close_no_diff_draft_pr(has_changes, pr_is_draft) {
+                if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
+                    == DraftPrTransition::CloseNoDiff
+                {
                     let owner_for_close = owner.clone();
                     let repo_for_close = repo.clone();
                     spawn_blocking_op(move || {
@@ -2375,7 +2410,9 @@ async fn handle_pr_flow(
                 })
                 .await?;
 
-                if should_mark_draft_pr_ready(has_changes, pr_is_draft, "ralph:completed") {
+                if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
+                    == DraftPrTransition::MarkReady
+                {
                     let owner_for_ready = config.owner.clone();
                     let repo_for_ready = config.repo.clone();
                     spawn_blocking_op(move || {
