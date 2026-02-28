@@ -13,8 +13,14 @@ pub fn backend_from_config(
     let backend = &config.backends.openrouter;
     let mut args = backend.args.clone();
     let name = if let Some(model_name) = model {
-        // Inject -m <model> before the "run" subcommand.
-        args.splice(0..0, ["-m".to_owned(), model_name.to_owned()]);
+        // Inject --model <model> after the "run" subcommand (or at end if no "run").
+        if let Some(pos) = args.iter().position(|a| a == "run") {
+            args.insert(pos + 1, model_name.to_owned());
+            args.insert(pos + 1, "--model".to_owned());
+        } else {
+            args.push("--model".to_owned());
+            args.push(model_name.to_owned());
+        }
         format!("openrouter({model_name})")
     } else {
         "openrouter".to_owned()

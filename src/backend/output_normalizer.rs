@@ -38,6 +38,9 @@ const STREAM_EVENT_TYPES: &[&str] = &[
     "message",
     "tool_use",
     "tool_result",
+    // Goose CLI
+    "complete",
+    "notification",
     // OpenCode CLI
     "step_start",
 ];
@@ -193,7 +196,38 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 }
             }
             "message" => {
-                if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                // Goose CLI wraps messages in {"type":"message","message":{...}}.
+                // Gemini CLI has {"type":"message","role":"assistant","content":"..."}.
+                if let Some(inner) = event.get("message") {
+                    // Goose format: extract text from inner message.content[]
+                    // Only extract "text" type content, skip "reasoning" and "toolRequest".
+                    let role = inner.get("role").and_then(Value::as_str);
+                    if role == Some("assistant") {
+                        if let Some(items) = inner.pointer("/content").and_then(Value::as_array) {
+                            for item in items {
+                                let ct = item.get("type").and_then(Value::as_str);
+                                if ct == Some("text") {
+                                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                        if !output.text.is_empty()
+                                            && !output.text.ends_with('\n')
+                                        {
+                                            output.text.push('\n');
+                                        }
+                                        output.text.push_str(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Extract session from inner message.id
+                    if output.session_id.is_none() {
+                        output.session_id = inner
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                } else if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                    // Gemini format: role at top level
                     if let Some(content) = event.get("content") {
                         if let Some(text) = extract_text_from_content(content) {
                             if !output.text.is_empty() && !output.text.ends_with('\n') {
@@ -264,6 +298,21 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 merge_usage_from_event(&event, &mut output);
             }
             "turn.started" => {}
+
+            // --- Goose CLI events ---
+            "complete" => {
+                // Final event: {"type":"complete","total_tokens":N}
+                if let Some(total) = event.get("total_tokens").and_then(Value::as_u64) {
+                    // total_tokens is the sum; we don't get a breakdown, but
+                    // store in tokens_in if no prior value (best-effort).
+                    if output.tokens_in.is_none() && output.tokens_out.is_none() {
+                        output.tokens_in = Some(total);
+                    }
+                }
+            }
+            "notification" => {
+                // Log/notification events from goose extensions; skip.
+            }
 
             // --- OpenCode CLI events ---
             "step_start" => {
@@ -1010,6 +1059,63 @@ Done."#;
         assert!(
             !normalized.text.contains("written to file"),
             "should not use the short summary result"
+        );
+    }
+
+    // --- Goose CLI output ---
+
+    #[test]
+    fn normalize_output_goose_cli_extracts_text_and_tokens() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-abc123","role":"assistant","created":1772238503,"content":[{"type":"text","text":"Hello from goose!"}],"metadata":{"userVisible":true}}}"#,
+            "\n",
+            r#"{"type":"complete","total_tokens":1073}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose cli");
+        assert_eq!(normalized.text, "Hello from goose!");
+        assert_eq!(normalized.session_id.as_deref(), Some("gen-abc123"));
+        assert_eq!(normalized.tokens_in, Some(1073));
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_filters_reasoning_and_notifications() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-xyz","role":"assistant","created":1,"content":[{"type":"reasoning","text":"thinking..."}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"notification","extension_id":"call_1","log":{"message":"running shell"}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-xyz\",\"role\":\"assistant\",\"created\":2,\"content\":[{\"type\":\"text\",\"text\":\"# Implementation Notes\\n\\nDone.\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"complete","total_tokens":500}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose filters reasoning");
+        assert_eq!(normalized.text, "# Implementation Notes\n\nDone.");
+        assert!(
+            !normalized.text.contains("thinking"),
+            "reasoning text should be filtered out"
+        );
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_multiple_text_messages() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-1","role":"assistant","created":1,"content":[{"type":"text","text":"First part."}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-1","role":"user","created":2,"content":[{"type":"toolResponse","id":"call_1","toolResult":{}}],"metadata":{}}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-1\",\"role\":\"assistant\",\"created\":3,\"content\":[{\"type\":\"text\",\"text\":\"# Final Answer\\n\\nAll done.\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"complete","total_tokens":2000}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose multi text");
+        assert!(
+            normalized.text.contains("\n# Final Answer"),
+            "H1 heading must be on its own line; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(
+            normalized.text,
+            "First part.\n# Final Answer\n\nAll done."
         );
     }
 
