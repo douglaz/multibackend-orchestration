@@ -18,9 +18,9 @@ const MAX_PROJECT_NAME_LEN: usize = 60;
 pub struct AutoArgs {
     #[arg(long, value_parser = parse_non_empty_idea)]
     pub idea: String,
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = "")]
     pub spec_writer: String,
-    #[arg(long, default_value = "codex")]
+    #[arg(long, default_value = "")]
     pub spec_reviewer: String,
     #[arg(long, default_value_t = 1, value_parser = parse_positive_u32)]
     pub max_spec_revisions: u32,
@@ -142,12 +142,12 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
     let workspace = ensure_workspace()?;
 
     let writer_spec = if spec_writer.trim().is_empty() {
-        workspace.config.workspace.default_backend.clone()
+        workspace.config.workspace.daemon_prd_writer_backend.clone()
     } else {
         spec_writer
     };
     let reviewer_spec = if spec_reviewer.trim().is_empty() {
-        workspace.config.workspace.default_backend.clone()
+        workspace.config.workspace.daemon_prd_reviewer_backend.clone()
     } else {
         spec_reviewer
     };
@@ -336,8 +336,8 @@ mod tests {
         };
 
         assert_eq!(args.idea, "test feature");
-        assert_eq!(args.spec_writer, "claude");
-        assert_eq!(args.spec_reviewer, "codex");
+        assert_eq!(args.spec_writer, "");
+        assert_eq!(args.spec_reviewer, "");
         assert_eq!(args.max_spec_revisions, 1);
         assert!(args.project_id.is_none());
         assert!(args.backend.is_none());
