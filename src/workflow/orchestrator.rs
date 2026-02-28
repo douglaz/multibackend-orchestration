@@ -18,7 +18,8 @@ use crate::config::{
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
+    changed_paths_excluding_prefixes, commit_and_push_initial_prompt,
+    commit_and_push_phase_transition, commit_feature_loop,
     reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
     working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
 };
@@ -259,6 +260,19 @@ impl Orchestrator {
                     if branch_exists(repo_root, &branch)? {
                         checkout_branch(repo_root, &branch)?;
                         merge_base_branch(repo_root, &self.workspace.config.git.base_branch)?;
+                        commit_and_push_initial_prompt(
+                            repo_root,
+                            &project_id,
+                            &branch,
+                            effective.global.git.sign_commits,
+                        )?;
+                    } else {
+                        // Branch safety is enforced within commit_and_push_initial_prompt,
+                        // but if no project branch exists yet we skip early prompt push.
+                        debug!(
+                            project = %project_id,
+                            "project branch missing; skipping early prompt push"
+                        );
                     }
                 }
             }

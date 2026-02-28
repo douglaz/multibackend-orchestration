@@ -15,8 +15,14 @@
 .DS_Store
 
 # Ralph orchestration artifacts
+.ralph/daemon/
 .ralph/**/*.log
 .ralph/quick-prd/
+.ralph/tmp/
+.ralph/sessions/
+.ralph/index.json
+.ralph/workspace.lock
+.ralph/repo.lock
 
 # Backend side-effect artifacts (codex CLI writes these during prompt review)
 /SPEC.md

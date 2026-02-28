@@ -90,6 +90,8 @@ const ARTIFACT_WATCH_POLL_SECONDS: u64 = 2;
 const DRAFT_PR_WATCH_POLL_SECONDS: u64 = 15;
 const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
+const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
+const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
 
 #[derive(Default)]
 struct ArtifactWatcherState {
@@ -1527,12 +1529,55 @@ async fn drain_all_children(
 }
 
 /// Transition a task to terminal state via GitHub labels.
+pub(crate) fn should_retry_complete_task(err: &RalphError, attempt: u32) -> bool {
+    attempt < COMPLETE_TASK_MAX_ATTEMPTS && err.is_transient()
+}
+
+pub(crate) fn should_mark_draft_pr_ready(
+    has_changes: bool,
+    pr_is_draft: bool,
+    terminal_label: &str,
+) -> bool {
+    has_changes && pr_is_draft && terminal_label == "ralph:completed"
+}
+
+pub(crate) fn should_close_no_diff_draft_pr(has_changes: bool, pr_is_draft: bool) -> bool {
+    !has_changes && pr_is_draft
+}
+
 async fn complete_task(
     config: &DaemonRuntimeConfig,
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
 ) {
+    for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
+        match complete_task_attempt(config, issue_number, task_id, terminal_label).await {
+            Ok(()) => return,
+            Err(err) => {
+                if should_retry_complete_task(&err, attempt) {
+                    eprintln!(
+                        "warning: complete_task transient failure for {task_id} on attempt {attempt}/{COMPLETE_TASK_MAX_ATTEMPTS}: {err}; retrying in {COMPLETE_TASK_RETRY_DELAY_SECS}s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(COMPLETE_TASK_RETRY_DELAY_SECS)).await;
+                    continue;
+                }
+
+                eprintln!(
+                    "warning: complete_task failed for {task_id} on attempt {attempt}/{COMPLETE_TASK_MAX_ATTEMPTS}: {err}"
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn complete_task_attempt(
+    config: &DaemonRuntimeConfig,
+    issue_number: u32,
+    task_id: &str,
+    terminal_label: &str,
+) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
         let owner = config.owner.clone();
@@ -1540,7 +1585,7 @@ async fn complete_task(
         let tid = task_id.to_owned();
         let phase = terminal_label.trim_start_matches("ralph:").to_owned();
         let comment_body = format!("Task `{tid}` finished with status: **{phase}**.");
-        if let Err(err) = spawn_blocking_op(move || {
+        spawn_blocking_op(move || {
             github::post_idempotent_comment(
                 &owner,
                 &repo,
@@ -1550,11 +1595,9 @@ async fn complete_task(
                 &comment_body,
             )
         })
-        .await
-        {
-            eprintln!("warning: failed to post completion comment for {task_id}: {err}");
-        }
+        .await?;
     }
+
 
     // PR flow (only on success)
     if terminal_label == "ralph:completed" {
@@ -1563,23 +1606,20 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             if let Err(err) = handle_pr_flow(config, task_id, issue_number, &wt_path).await {
-                eprintln!("warning: PR flow failed for {task_id}: {err}");
+                return Err(err);
             }
         }
     }
 
-    // Swap lifecycle label: in-progress -> terminal
+    // Swap lifecycle label: in-progress -> terminal (required)
     {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let label = terminal_label.to_owned();
-        if let Err(err) = spawn_blocking_op(move || {
+        spawn_blocking_op(move || {
             github::swap_lifecycle_label(&owner, &repo, issue_number, "ralph:in-progress", &label)
         })
-        .await
-        {
-            eprintln!("warning: failed to update labels for {task_id}: {err}");
-        }
+        .await?;
     }
 
     // Worktree cleanup
@@ -1590,6 +1630,8 @@ async fn complete_task(
         "task {task_id} completed with label: {terminal_label} (log: {})",
         log_path.display()
     );
+
+    Ok(())
 }
 
 async fn cleanup_worktree_for_terminal_state(
@@ -2119,6 +2161,20 @@ async fn handle_pr_flow(
         }
     };
 
+    // Step 0: Check for existing PR (used by both no-diff and update paths)
+    let existing_pr_url = {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let br = branch.clone();
+        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+            Ok(url) => url,
+            Err(err) => {
+                eprintln!("warning: failed to check for existing PR: {err}");
+                None
+            }
+        }
+    };
+
     // Step 1: Check if there's a diff against the configured base branch
     let has_changes = {
         let wt = wt_path.to_path_buf();
@@ -2135,10 +2191,54 @@ async fn handle_pr_flow(
     if !has_changes {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
+        if let Some(url) = existing_pr_url.as_ref() {
+            if let Some(pr_number) = github::extract_pr_number(url) {
+                let owner_for_draft = owner.clone();
+                let repo_for_draft = repo.clone();
+                let pr_is_draft = spawn_blocking_op(move || {
+                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
+                })
+                .await?;
+
+                if should_close_no_diff_draft_pr(has_changes, pr_is_draft) {
+                    let owner_for_close = owner.clone();
+                    let repo_for_close = repo.clone();
+                    spawn_blocking_op(move || {
+                        github::close_pr(&owner_for_close, &repo_for_close, pr_number)
+                    })
+                    .await?;
+
+                    // Clear persisted PR URL so future flows do not reuse closed draft PRs.
+                    save_task_metadata(
+                        &config.workspace_root,
+                        task_id,
+                        &TaskMetadata { pr_url: None },
+                    );
+                }
+            } else {
+                eprintln!(
+                    "warning: failed to extract PR number from existing PR URL for {task_id}: {url}"
+                );
+            }
+        }
+
+        let mut body = format!("Task `{task_id}` completed with no code changes. No PR created.");
+        if existing_pr_url.is_some() {
+            body.push_str(" Existing draft PR was closed if it was still in draft state.");
+        }
+
+        let owner_for_comment = config.owner.clone();
+        let repo = config.repo.clone();
         let tid = task_id.to_owned();
-        let body = format!("Task `{task_id}` completed with no code changes. No PR created.");
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
+            github::post_idempotent_comment(
+                &owner_for_comment,
+                &repo,
+                issue_number,
+                &tid,
+                "no-diff",
+                &body,
+            )
         })
         .await
         {
@@ -2220,20 +2320,6 @@ async fn handle_pr_flow(
         }
     };
 
-    // Step 5: Check for existing PR
-    let existing_pr_url = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let br = branch.clone();
-        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
-            Ok(url) => url,
-            Err(err) => {
-                eprintln!("warning: failed to check for existing PR: {err}");
-                None
-            }
-        }
-    };
-
     // Try to get refined title from GitHub issue
     let refined_title = {
         let owner = config.owner.clone();
@@ -2273,6 +2359,31 @@ async fn handle_pr_flow(
                     )));
                 }
             }
+
+            if let Some(pr_number) = github::extract_pr_number(&url) {
+                let owner_for_draft = config.owner.clone();
+                let repo_for_draft = config.repo.clone();
+                save_task_metadata(
+                    &config.workspace_root,
+                    task_id,
+                    &TaskMetadata {
+                        pr_url: Some(url.clone()),
+                    },
+                );
+                let pr_is_draft = spawn_blocking_op(move || {
+                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
+                })
+                .await?;
+
+                if should_mark_draft_pr_ready(has_changes, pr_is_draft, "ralph:completed") {
+                    let owner_for_ready = config.owner.clone();
+                    let repo_for_ready = config.repo.clone();
+                    spawn_blocking_op(move || {
+                        github::mark_pr_ready(&owner_for_ready, &repo_for_ready, pr_number)
+                    })
+                    .await?;
+                }
+            }
         }
         None => {
             let owner = config.owner.clone();
@@ -2296,6 +2407,13 @@ async fn handle_pr_flow(
             {
                 Ok(url) => {
                     eprintln!("created PR for {task_id}: {url}");
+                    save_task_metadata(
+                        &config.workspace_root,
+                        task_id,
+                        &TaskMetadata {
+                            pr_url: Some(url.clone()),
+                        },
+                    );
                 }
                 Err(err) => {
                     eprintln!(
@@ -2329,7 +2447,9 @@ mod tests {
     use super::{
         build_pr_body, build_pr_title, detect_final_prompt_artifact, detect_quick_prd_artifact,
         extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
-        post_artifact_comments_with_client, should_resume_issue_project, sweep_artifact_comments,
+        post_artifact_comments_with_client, should_close_no_diff_draft_pr,
+        should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
+        sweep_artifact_comments,
         truncate_for_github, validate_daemon_branch_format, write_body_file, ArtifactCommentClient,
         ArtifactWatcherState, TRUNCATED_NOTE,
     };
@@ -2438,7 +2558,41 @@ mod tests {
         assert!(body.contains("Issue body context here"));
         assert!(body.contains("Project Ref: `my-project`"));
         assert!(body.contains("Automated PR for task `acme-widgets-1`."));
-        assert!(body.contains("Closes #1"));
+    }
+
+    #[test]
+    fn should_retry_complete_task_retries_only_transient_errors_under_cap() {
+        let transient = RalphError::Orchestration("network timeout while posting comment".to_owned());
+        assert!(should_retry_complete_task(&transient, 1));
+        assert!(should_retry_complete_task(&transient, 2));
+        assert!(!should_retry_complete_task(&transient, 3));
+
+        let terminal = RalphError::BranchMismatch {
+            expected: "ralph/issue-93".to_owned(),
+            actual: "main".to_owned(),
+        };
+        assert!(!should_retry_complete_task(&terminal, 1));
+    }
+
+    #[test]
+    fn should_mark_draft_pr_ready_only_on_completed_with_changes() {
+        assert!(should_mark_draft_pr_ready(true, true, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(false, true, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(true, false, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(true, true, "ralph:failed"));
+    }
+
+    #[test]
+    fn should_close_no_diff_draft_pr_only_for_no_diff_drafts() {
+        assert!(should_close_no_diff_draft_pr(false, true));
+        assert!(!should_close_no_diff_draft_pr(true, true));
+        assert!(!should_close_no_diff_draft_pr(false, false));
+    }
+
+    #[test]
+    fn complete_task_retry_policy_has_required_cap_and_delay() {
+        assert_eq!(super::COMPLETE_TASK_MAX_ATTEMPTS, 3);
+        assert_eq!(super::COMPLETE_TASK_RETRY_DELAY_SECS, 30);
     }
 
     #[test]

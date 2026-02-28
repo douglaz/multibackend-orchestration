@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use crate::error::RalphError;
+use crate::git::branch::current_branch;
 use crate::git::ralph_commit::build_ralph_commit_message;
 use crate::git::{
     conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
-    run_git_status,
+    run_git_status
 };
 use crate::project::state::Phase;
 use crate::Result;
@@ -136,6 +137,61 @@ pub fn commit_feature_loop(
     Ok(commit_hash)
 }
 
+pub fn commit_and_push_initial_prompt(
+    repo_root: &Path,
+    project_id: &str,
+    expected_branch: &str,
+    sign_commits: bool,
+) -> Result<()> {
+    ensure_git_repo(repo_root)?;
+
+    let actual_branch = current_branch(repo_root)?;
+    if actual_branch != expected_branch {
+        return Err(RalphError::BranchMismatch {
+            expected: expected_branch.to_owned(),
+            actual: actual_branch,
+        });
+    }
+
+    // Stage only prompt-input files created during project setup.
+    let mut staged_any = false;
+    for rel in [
+        format!(".ralph/projects/{project_id}/prompt.md"),
+        format!(".ralph/projects/{project_id}/project.toml"),
+        format!(".ralph/projects/{project_id}/config.toml"),
+    ] {
+        if repo_root.join(&rel).exists() {
+            run_git(repo_root, &["add", "--", &rel])?;
+            staged_any = true;
+        }
+    }
+
+    if !staged_any {
+        return Ok(());
+    }
+
+    let has_staged_changes = {
+        let status = run_git_status(repo_root, &["diff", "--cached", "--quiet"])?;
+        !status.success()
+    };
+
+    if !has_staged_changes {
+        return Ok(());
+    }
+
+    let message = format!("chore({project_id}): sync initial prompt inputs");
+    let mut commit_args = vec!["commit", "-m", &message];
+    if sign_commits {
+        commit_args.insert(1, "-S");
+    }
+    run_git(repo_root, &commit_args)?;
+    run_git(
+        repo_root,
+        &["push", "origin", &format!("HEAD:{expected_branch}")],
+    )?;
+    Ok(())
+}
+
 pub fn commit_and_push_phase_transition(
     repo_root: &Path,
     project_id: &str,
@@ -160,6 +216,11 @@ pub fn commit_and_push_phase_transition(
     }
 
     run_git(repo_root, &["add", "-A"])?;
+    // Unstage .ralph/ entries to avoid committing orchestration state.
+    let _ = run_git(
+        repo_root,
+        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
+    );
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
@@ -325,8 +386,10 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        commit_and_push_phase_transition, commit_feature_loop, count_phase_transition_checkpoints,
+        commit_and_push_initial_prompt, commit_and_push_phase_transition, commit_feature_loop,
+        count_phase_transition_checkpoints,
     };
+    use crate::error::RalphError;
     use crate::git::branch::sync_project_branch;
     use crate::git::ralph_commit::{build_ralph_commit_message, derive_position};
     use crate::project::state::Phase;
@@ -547,6 +610,62 @@ mod tests {
             (1, Phase::Implementing),
             "position should revert to last pushed checkpoint after sync"
         );
+    }
+
+    #[test]
+    fn commit_and_push_initial_prompt_stages_only_prompt_inputs() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+
+        git_ok(&work, &["checkout", "-b", "ralph/issue-99"]);
+        git_ok(&work, &["push", "-u", "origin", "ralph/issue-99"]);
+
+        let project_dir = work.join(".ralph/projects/issue-99");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "initial prompt\n").expect("write prompt");
+        fs::write(project_dir.join("project.toml"), "name = \"Issue 99\"\n")
+            .expect("write project metadata");
+        fs::write(project_dir.join("config.toml"), "[workflow]\n").expect("write config");
+        fs::write(work.join("src-extra.txt"), "not prompt input\n").expect("write extra file");
+
+        commit_and_push_initial_prompt(&work, "issue-99", "ralph/issue-99", false)
+            .expect("initial prompt commit should succeed");
+
+        let changed = git_output(&work, &["show", "--name-only", "--pretty=format:", "HEAD"]);
+        let mut files: Vec<&str> = changed.lines().filter(|l| !l.trim().is_empty()).collect();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                ".ralph/projects/issue-99/config.toml",
+                ".ralph/projects/issue-99/project.toml",
+                ".ralph/projects/issue-99/prompt.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_and_push_initial_prompt_fails_on_branch_mismatch() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+
+        git_ok(&work, &["checkout", "-b", "ralph/issue-99"]);
+        let project_dir = work.join(".ralph/projects/issue-99");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "initial prompt\n").expect("write prompt");
+
+        let before = git_output(&work, &["rev-parse", "HEAD"]);
+        let err = commit_and_push_initial_prompt(&work, "issue-99", "ralph/issue-100", false)
+            .expect_err("branch mismatch should fail");
+
+        match err {
+            RalphError::BranchMismatch { expected, actual } => {
+                assert_eq!(expected, "ralph/issue-100");
+                assert_eq!(actual, "ralph/issue-99");
+            }
+            other => panic!("expected BranchMismatch, got {other:?}"),
+        }
+
+        let after = git_output(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(before, after, "HEAD should not move on branch mismatch");
     }
 
     fn init_repo() -> tempfile::TempDir {
