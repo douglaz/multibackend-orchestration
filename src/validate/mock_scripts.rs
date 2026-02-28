@@ -10,7 +10,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Project Completion Request
@@ -42,8 +42,8 @@ Mock feature used by validate tests.
 - Blocks: none
 EOF
   fi
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -69,14 +69,14 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
 ## Summary
 The project is complete and requires no further amendments.
 EOF
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -86,7 +86,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -99,7 +99,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -112,7 +112,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -149,7 +149,7 @@ set -euo pipefail
 INPUT="$(cat)"
 
 # --- Quick-PRD prompts ---
-if echo "$INPUT" | grep -q "You are a senior software engineer writing a focused engineering specification."; then
+if grep -q "You are a senior software engineer writing a focused engineering specification." <<< "$INPUT"; then
   cat <<'EOF'
 ## Summary
 Auto-generated mock feature spec.
@@ -169,13 +169,13 @@ Manual verification.
 ## Out of Scope
 Nothing.
 EOF
-elif echo "$INPUT" | grep -q "You are a senior engineer reviewing an engineering specification"; then
+elif grep -q "You are a senior engineer reviewing an engineering specification" <<< "$INPUT"; then
   cat <<'EOF'
 ```json
 {"approved": true, "issues": []}
 ```
 EOF
-elif echo "$INPUT" | grep -q "You are a senior software engineer revising an engineering specification"; then
+elif grep -q "You are a senior software engineer revising an engineering specification" <<< "$INPUT"; then
   cat <<'EOF'
 ## Summary
 Revised mock spec.
@@ -196,7 +196,7 @@ Manual verification.
 Nothing.
 EOF
 # --- Standard orchestration prompts ---
-elif echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+elif grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" && "${RALPH_E2E_FORCE_FEATURE:-no}" != "yes" ]]; then
     cat <<'EOF'
 # Project Completion Request
@@ -228,8 +228,8 @@ Mock feature used by validate tests.
 - Blocks: none
 EOF
   fi
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -255,14 +255,14 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
 ## Summary
 The project is complete and requires no further amendments.
 EOF
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -272,7 +272,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -285,7 +285,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
+elif grep -q "You are a QA engineer validating" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -300,7 +300,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer validating"; then
 ## Acceptance Criteria Verification
 All acceptance criteria from the spec have been verified.
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -340,7 +340,7 @@ pwd > "${RALPH_PWD_LOG:-/tmp/ralph-pwd.log}"
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Project Completion Request
@@ -372,8 +372,8 @@ Feature to verify working directory invariant.
 - Blocks: none
 EOF
   fi
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -399,14 +399,14 @@ EOF
   fi
   echo "cwd-ok" > cwd_test.txt
   git add cwd_test.txt
-elif echo "$INPUT" | grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness."; then
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
 ## Summary
 The project is complete and requires no further amendments.
 EOF
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -416,7 +416,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -429,7 +429,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All criteria verified.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -442,7 +442,7 @@ CWD is correct.
 ## Commit Message
 feat: verify cwd invariant
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -653,7 +653,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Project Completion Request
@@ -685,8 +685,8 @@ Mock feature used by validate tests.
 - Blocks: none
 EOF
   fi
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -712,7 +712,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -738,7 +738,7 @@ Each component registers via a unique key.
 ## Technical Notes
 Use the observer pattern for event dispatch.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -751,7 +751,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -764,7 +764,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -1649,7 +1649,7 @@ INPUT="$(cat)"
 
 REVIEW_COUNTER="{review_counter}"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   cat <<'EOF'
 # Feature: Feedback Feature
 
@@ -1666,8 +1666,8 @@ Mock feature used by impl-response conformance tests.
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -1696,7 +1696,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -1706,7 +1706,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -1719,7 +1719,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   RCOUNT="$(cat "$REVIEW_COUNTER" 2>/dev/null || echo 0)"
   RCOUNT=$((RCOUNT + 1))
   echo "$RCOUNT" > "$REVIEW_COUNTER"
@@ -1744,7 +1744,7 @@ Feedback addressed.
 feat: apply mock implementation after review feedback
 EOF
   fi
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   cat <<'EOF'
 # Verdict: CONTINUE
 
@@ -1769,7 +1769,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   cat <<'EOF'
 # Feature: Review Retry Feature
 
@@ -1786,8 +1786,8 @@ Mock feature used by validate tests.
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -1813,7 +1813,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -1823,7 +1823,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -1836,14 +1836,14 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: SUGGESTIONS
 
 ## Required Changes
 1. Tighten mock validation behavior.
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   cat <<'EOF'
 # Verdict: CONTINUE
 
@@ -1872,7 +1872,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   COUNTER_FILE="{counter}"
   COUNT="$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)"
   COUNT=$((COUNT + 1))
@@ -1914,8 +1914,8 @@ Mock feature used by validate tests.
 EOF
     fi
   fi
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -1941,7 +1941,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -1951,7 +1951,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -1964,7 +1964,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -1977,7 +1977,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [ "${{RALPH_COMPLETE:-no}}" = "yes" ]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -1996,7 +1996,7 @@ EOF
 1. Implement another mock feature.
 EOF
   fi
-elif echo "$INPUT" | grep -q "CRITICAL: Your previous response could not be parsed."; then
+elif grep -q "CRITICAL: Your previous response could not be parsed." <<< "$INPUT"; then
   # Reformatter/parse-retry: return valid planner output
   cat <<'EOF'
 # Feature: Demo Feature
@@ -2014,7 +2014,7 @@ Mock feature used by validate tests.
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "IMPORTANT: Format your response as parseable markdown."; then
+elif grep -q "IMPORTANT: Format your response as parseable markdown." <<< "$INPUT"; then
   # Format reminder retry: return valid planner output
   cat <<'EOF'
 # Feature: Demo Feature
@@ -2049,7 +2049,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   printf '# Feature: Slow Streaming Feature\n'
   sleep 1
   cat <<'EOF'
@@ -2067,8 +2067,8 @@ Planner output emitted in delayed chunks.
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -2094,7 +2094,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -2104,7 +2104,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -2117,7 +2117,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -2130,7 +2130,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -2165,7 +2165,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   printf '# Feature: Idle Timeout Reset Feature\n'
   sleep 0.45
   printf '\n## Description\n'
@@ -2184,8 +2184,8 @@ if echo "$INPUT" | grep -q "You are a software architect planning features for a
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -2211,7 +2211,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -2221,7 +2221,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -2234,7 +2234,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -2247,7 +2247,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
     cat <<'EOF'
 # Verdict: COMPLETE
@@ -2283,11 +2283,11 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   echo $$ > "{pid_file}"
   printf 'planner-partial-before-timeout'
   sleep 30
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
   cat <<'EOF'
 # Implementation Notes
 
@@ -2300,7 +2300,7 @@ elif echo "$INPUT" | grep -q "You are a software developer implementing a featur
 ## Testing
 - Mock script execution only
 EOF
-elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
   cat <<'EOF'
 # Prompt Review
 
@@ -2310,7 +2310,7 @@ elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
 ## Refined Prompt
 This is the refined prompt from the mock reviewer.
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -2323,7 +2323,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -2336,7 +2336,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   cat <<'EOF'
 # Verdict: CONTINUE
 
@@ -2364,7 +2364,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   # Emit output every 0.2s for ~1.2s total (> 1s timeout configured in test)
   printf '# Feature: Active Stream Feature\n'
   for i in $(seq 1 6); do
@@ -2386,8 +2386,8 @@ Planner output emitted in slow but steady chunks.
 - Requires: none
 - Blocks: none
 EOF
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
-  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
     cat <<'EOF'
 # Implementation Response (Iteration 1)
 
@@ -2413,7 +2413,7 @@ EOF
   fi
   echo "implemented" > mock_file.txt
   git add mock_file.txt
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -2426,7 +2426,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -2439,7 +2439,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   cat <<'EOF'
 # Verdict: CONTINUE
 
@@ -2525,11 +2525,11 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
   echo $$ > "{pid_file}"
   printf 'partial-output-before-stall'
   sleep 30
-elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
   cat <<'EOF'
 # Implementation Notes
 
@@ -2542,7 +2542,7 @@ elif echo "$INPUT" | grep -q "You are a software developer implementing a featur
 ## Testing
 - Mock script execution only
 EOF
-elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
   cat <<'EOF'
 # Review: APPROVED
 
@@ -2555,7 +2555,7 @@ Looks good.
 ## Commit Message
 feat: apply mock implementation
 EOF
-elif echo "$INPUT" | grep -q "You are a QA engineer"; then
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
   cat <<'EOF'
 # QA: PASS
 
@@ -2568,7 +2568,7 @@ elif echo "$INPUT" | grep -q "You are a QA engineer"; then
 ## Acceptance Criteria Verification
 All acceptance criteria verified by mock QA.
 EOF
-elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
   cat <<'EOF'
 # Verdict: CONTINUE
 
