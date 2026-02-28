@@ -30,8 +30,9 @@ pub async fn spawn_ralph_auto(
     idea: &str,
     log_file: &Path,
     project_id: Option<&str>,
+    pr_url: Option<&str>,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file, project_id)?;
+    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file, project_id, pr_url)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
@@ -73,8 +74,9 @@ pub async fn spawn_ralph_run(
     worktree_path: &Path,
     project_id: &str,
     log_file: &Path,
+    pr_url: Option<&str>,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_run_command(ralph_bin, worktree_path, project_id, log_file)?;
+    let mut cmd = build_ralph_run_command(ralph_bin, worktree_path, project_id, log_file, pr_url)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
@@ -113,6 +115,7 @@ fn build_ralph_auto_command(
     idea: &str,
     log_file: &Path,
     project_id: Option<&str>,
+    pr_url: Option<&str>,
 ) -> Result<Command> {
     let file = std::fs::File::create(log_file).map_err(|err| {
         RalphError::Orchestration(format!(
@@ -129,6 +132,9 @@ fn build_ralph_auto_command(
     if let Some(project_id) = project_id {
         cmd.args(["--project-id", project_id]);
     }
+    if let Some(url) = pr_url {
+        cmd.args(["--pr-url", url]);
+    }
     cmd.current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(file))
@@ -141,6 +147,7 @@ fn build_ralph_run_command(
     worktree_path: &Path,
     project_id: &str,
     log_file: &Path,
+    pr_url: Option<&str>,
 ) -> Result<Command> {
     let file = std::fs::File::create(log_file).map_err(|err| {
         RalphError::Orchestration(format!(
@@ -153,8 +160,11 @@ fn build_ralph_run_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
-    cmd.args(["run", "--project", project_id, "--until-complete"])
-        .current_dir(worktree_path)
+    cmd.args(["run", "--project", project_id, "--until-complete"]);
+    if let Some(url) = pr_url {
+        cmd.args(["--pr-url", url]);
+    }
+    cmd.current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(file))
         .stderr(std::process::Stdio::from(file_clone));
@@ -307,6 +317,7 @@ mod tests {
             "implement feature",
             tmp.path(),
             None,
+            None,
         )
         .expect("build command");
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
@@ -329,6 +340,7 @@ mod tests {
             "implement feature",
             tmp.path(),
             Some("issue-42"),
+            None,
         )
         .expect("build command");
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
@@ -345,6 +357,33 @@ mod tests {
     }
 
     #[test]
+    fn spawn_auto_command_includes_pr_url() {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let cmd = build_ralph_auto_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "implement feature",
+            tmp.path(),
+            Some("issue-42"),
+            Some("https://github.com/acme/widgets/pull/99"),
+        )
+        .expect("build command");
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("auto"),
+                OsStr::new("--idea"),
+                OsStr::new("implement feature"),
+                OsStr::new("--project-id"),
+                OsStr::new("issue-42"),
+                OsStr::new("--pr-url"),
+                OsStr::new("https://github.com/acme/widgets/pull/99"),
+            ]
+        );
+    }
+
+    #[test]
     fn spawn_run_command_uses_project_flag() {
         let tmp = tempfile::NamedTempFile::new().expect("create temp file");
         let cmd = build_ralph_run_command(
@@ -352,6 +391,7 @@ mod tests {
             Path::new("/tmp/worktree"),
             "retry-project",
             tmp.path(),
+            None,
         )
         .expect("build command");
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
@@ -362,6 +402,31 @@ mod tests {
                 OsStr::new("--project"),
                 OsStr::new("retry-project"),
                 OsStr::new("--until-complete"),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_run_command_includes_pr_url() {
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let cmd = build_ralph_run_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "retry-project",
+            tmp.path(),
+            Some("https://github.com/acme/widgets/pull/7"),
+        )
+        .expect("build command");
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("run"),
+                OsStr::new("--project"),
+                OsStr::new("retry-project"),
+                OsStr::new("--until-complete"),
+                OsStr::new("--pr-url"),
+                OsStr::new("https://github.com/acme/widgets/pull/7"),
             ]
         );
     }

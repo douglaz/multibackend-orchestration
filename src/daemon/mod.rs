@@ -28,6 +28,10 @@ pub struct ChildHandle {
     pub child: tokio::process::Child,
     pub watcher_cancel: CancellationToken,
     pub watcher_handle: Option<JoinHandle<()>>,
+    /// Cancellation token for the draft-PR watcher task.
+    pub draft_pr_cancel: CancellationToken,
+    /// Join handle for the draft-PR watcher task.
+    pub draft_pr_handle: Option<JoinHandle<()>>,
     pub branch: String,
     pub log_file: PathBuf,
     pub last_rebase_at: Option<Instant>,

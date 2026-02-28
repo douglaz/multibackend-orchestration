@@ -87,6 +87,7 @@ where
 }
 
 const ARTIFACT_WATCH_POLL_SECONDS: u64 = 2;
+const DRAFT_PR_WATCH_POLL_SECONDS: u64 = 15;
 const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 
@@ -168,6 +169,104 @@ impl ArtifactCommentClient for GitHubArtifactCommentClient {
             )
         })
         .await
+    }
+}
+
+/// Draft-PR watcher: polls branch divergence on a fixed interval and creates
+/// a draft PR when the branch first moves ahead of the base branch.
+///
+/// Uses `tokio::select!` with cancellation for immediate shutdown.
+/// Only one draft creation attempt is active at a time (single-flight guard).
+/// Performs an unconditional push before draft PR creation.
+#[allow(clippy::too_many_arguments)]
+async fn draft_pr_watcher(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    cancel: CancellationToken,
+) {
+    let poll_interval = Duration::from_secs(DRAFT_PR_WATCH_POLL_SECONDS);
+    let mut pr_created = false;
+
+    loop {
+        // Check if branch has commits ahead of base
+        let has_ahead = {
+            let wt = worktree_path.clone();
+            let base = base_branch.clone();
+            match spawn_blocking_op(move || github::has_commits_ahead_of_base(&wt, &base)).await {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!(
+                        "draft-pr-watcher: failed to check ahead status for {task_id}: {err}"
+                    );
+                    false
+                }
+            }
+        };
+
+        if has_ahead && !pr_created {
+            // Step 1: push unconditionally before creating draft PR
+            let push_ok = {
+                let wt = worktree_path.clone();
+                let br = branch.clone();
+                match spawn_blocking_op(move || github::push_branch(&wt, &br)).await {
+                    Ok(()) => {
+                        eprintln!("draft-pr-watcher: pushed branch {branch} for {task_id}");
+                        true
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "draft-pr-watcher: push failed for {task_id} branch {branch}: {err}"
+                        );
+                        false
+                    }
+                }
+            };
+
+            // Step 2: create draft PR
+            if push_ok {
+                let owner_c = owner.clone();
+                let repo_c = repo.clone();
+                let br = branch.clone();
+                let tid = task_id.clone();
+                let title = format!("[Draft] {tid}");
+                let body = format!("Automated draft PR for task `{tid}` (issue #{issue_number}).");
+                match spawn_blocking_op(move || {
+                    github::create_pr(&owner_c, &repo_c, &br, &title, &body, true)
+                })
+                .await
+                {
+                    Ok(url) => {
+                        eprintln!(
+                            "draft-pr-watcher: created draft PR for {task_id}: {url}"
+                        );
+                        pr_created = true;
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "draft-pr-watcher: failed to create draft PR for {task_id}: {err}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // If PR is created, watcher job is done.
+        if pr_created {
+            break;
+        }
+
+        // Wait for next poll or cancellation
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                break;
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
     }
 }
 
@@ -1059,6 +1158,20 @@ async fn dispatch_task(
     // (e.g. tmpfs in nix build sandboxes).
     let child_start_time = SystemTime::now() - Duration::from_secs(2);
 
+    // Resolve existing PR URL by exact head-branch match before spawning
+    let pr_url: Option<String> = {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let br = branch_name.clone();
+        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+            Ok(url) => url,
+            Err(err) => {
+                eprintln!("dispatch: PR URL lookup failed for {task_id}: {err}");
+                None
+            }
+        }
+    };
+
     // Spawn child process
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
@@ -1066,12 +1179,12 @@ async fn dispatch_task(
         let idea_clone = idea.clone();
         if resume_existing_project {
             eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id}");
-            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path).await?
+            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref()).await?
         } else {
             eprintln!(
                 "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id}"
             );
-            process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id))
+            process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id), pr_url.as_deref())
                 .await?
         }
     };
@@ -1091,6 +1204,24 @@ async fn dispatch_task(
         None
     };
 
+    // Start draft-PR watcher: polls for branch divergence and creates a
+    // draft PR when the branch first moves ahead of the base branch.
+    let draft_pr_cancel = CancellationToken::new();
+    let draft_pr_handle = if !config.owner.is_empty() && !config.repo.is_empty() && pr_url.is_none() {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let base_branch = config.base_branch.clone();
+        let wt = wt_path.clone();
+        let branch = branch_name.clone();
+        let cancel = draft_pr_cancel.clone();
+        let tid = task_id.clone();
+        Some(tokio::spawn(async move {
+            draft_pr_watcher(owner, repo, base_branch, wt, branch, tid, issue_number, cancel).await;
+        }))
+    } else {
+        None
+    };
+
     children.insert(
         issue_number,
         ChildHandle {
@@ -1099,6 +1230,8 @@ async fn dispatch_task(
             child: spawned.child,
             watcher_cancel,
             watcher_handle,
+            draft_pr_cancel,
+            draft_pr_handle,
             branch: branch_name,
             log_file: log_path,
             last_rebase_at: None,
@@ -1184,6 +1317,12 @@ async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u
                 eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
             }
         }
+        handle.draft_pr_cancel.cancel();
+        if let Some(join_handle) = handle.draft_pr_handle.take() {
+            if let Err(err) = join_handle.await {
+                eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
+            }
+        }
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
@@ -1238,6 +1377,12 @@ async fn kill_aborted_children(
                     eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
                 }
             }
+            handle.draft_pr_cancel.cancel();
+            if let Some(join_handle) = handle.draft_pr_handle.take() {
+                if let Err(err) = join_handle.await {
+                    eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
+                }
+            }
             eprintln!(
                 "abort-check: killed {task_id} (pid={} pgid={})",
                 handle.pid, handle.pgid
@@ -1281,6 +1426,12 @@ async fn drain_all_children(
                 if let Some(join_handle) = handle.watcher_handle.take() {
                     if let Err(err) = join_handle.await {
                         eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
+                    }
+                }
+                handle.draft_pr_cancel.cancel();
+                if let Some(join_handle) = handle.draft_pr_handle.take() {
+                    if let Err(err) = join_handle.await {
+                        eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
                     }
                 }
             }

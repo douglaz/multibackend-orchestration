@@ -148,6 +148,9 @@ pub struct RunArgs {
         conflicts_with = "tmux"
     )]
     pub no_tmux: Option<bool>,
+    /// PR URL to pass through to the orchestration context.
+    #[arg(long = "pr-url")]
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
