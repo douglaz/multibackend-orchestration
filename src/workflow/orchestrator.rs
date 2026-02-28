@@ -1261,12 +1261,6 @@ impl Orchestrator {
                             state = state_before_rollback;
                             return Err(err);
                         }
-                        if options.until_complete {
-                            logs.push(format!(
-                                "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
-                            ));
-                            continue;
-                        }
                         return Err(RalphError::QaIterationLimitExceeded {
                             loop_number: ln,
                             max_iterations: max_iter,
@@ -2302,12 +2296,6 @@ impl Orchestrator {
                 ) {
                     state = state_before_rollback;
                     return Err(err);
-                }
-                if options.until_complete {
-                    logs.push(format!(
-                        "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
-                    ));
-                    continue;
                 }
                 return Err(RalphError::ReviewIterationLimitExceeded {
                     loop_number: ln,
@@ -5187,6 +5175,28 @@ where
         repo_root,
     )
     .await?;
+
+    // Detect quota/credits exhaustion in raw output. Some backends (e.g. OpenRouter)
+    // exit 0 but return only a notification instead of content. Catch this early to avoid
+    // sending empty/garbage output to the reformatter, which would fabricate a fake response.
+    const QUOTA_OUTPUT_PATTERNS: &[&str] = &[
+        "creditsExhausted",
+        "add more credits",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+    ];
+    if let Some(pat) = QUOTA_OUTPUT_PATTERNS
+        .iter()
+        .find(|p| first_raw.contains(**p))
+    {
+        return Err(RalphError::BackendCommandFailed {
+            backend: backend_name.clone(),
+            details: format!(
+                "quota/credits error detected in output ({pat}): \
+                 backend returned a credits-exhausted notification instead of content"
+            ),
+        });
+    }
 
     // If output is empty/near-empty, retry with the same backend before going to the
     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
