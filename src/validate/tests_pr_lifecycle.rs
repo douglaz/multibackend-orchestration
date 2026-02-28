@@ -106,42 +106,139 @@ fn early_prompt_push_fails_on_branch_mismatch(h: &RalphHarness) -> TestResult {
 
 fn draft_pr_marked_ready_transition(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        assert!(crate::daemon::runtime::should_mark_draft_pr_ready(
-            true,
-            true,
-            "ralph:completed"
-        ));
-        assert!(!crate::daemon::runtime::should_mark_draft_pr_ready(
-            false,
-            true,
-            "ralph:completed"
-        ));
+        use crate::daemon::runtime::{decide_draft_pr_transition, DraftPrTransition};
+
+        let scenarios = [
+            // completed + has changes + draft => mark ready
+            (true, true, "ralph:completed", DraftPrTransition::MarkReady),
+            // no changes + draft => close draft even on completed
+            (false, true, "ralph:completed", DraftPrTransition::CloseNoDiff),
+            // completed + has changes + not draft => no-op
+            (true, false, "ralph:completed", DraftPrTransition::None),
+            // terminal failed does not mark ready
+            (true, true, "ralph:failed", DraftPrTransition::None),
+            // non-terminal-ish label with no changes + draft still closes
+            (false, true, "ralph:in-progress", DraftPrTransition::CloseNoDiff),
+        ];
+
+        for (has_changes, is_draft, terminal_label, expected) in scenarios {
+            let actual = decide_draft_pr_transition(has_changes, is_draft, terminal_label);
+            assert_eq!(
+                actual, expected,
+                "transition mismatch for has_changes={has_changes}, is_draft={is_draft}, terminal_label={terminal_label}"
+            );
+        }
     })
 }
 
 fn no_diff_draft_pr_closed_transition(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        assert!(crate::daemon::runtime::should_close_no_diff_draft_pr(false, true));
-        assert!(!crate::daemon::runtime::should_close_no_diff_draft_pr(true, true));
-        assert!(!crate::daemon::runtime::should_close_no_diff_draft_pr(false, false));
+        use crate::daemon::runtime::{
+            decide_draft_pr_transition, should_close_no_diff_draft_pr, DraftPrTransition,
+        };
+
+        let matrix = [
+            (false, true, true, DraftPrTransition::CloseNoDiff),
+            (true, true, false, DraftPrTransition::MarkReady),
+            (false, false, false, DraftPrTransition::None),
+            (true, false, false, DraftPrTransition::None),
+        ];
+
+        for (has_changes, is_draft, expect_close_predicate, expected_transition) in matrix {
+            assert_eq!(
+                should_close_no_diff_draft_pr(has_changes, is_draft),
+                expect_close_predicate,
+                "close predicate mismatch for has_changes={has_changes}, is_draft={is_draft}"
+            );
+
+            let transition = decide_draft_pr_transition(has_changes, is_draft, "ralph:completed");
+            assert_eq!(
+                transition, expected_transition,
+                "decision mismatch for has_changes={has_changes}, is_draft={is_draft}"
+            );
+        }
     })
 }
 
 fn complete_task_retries_transient_up_to_three(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let transient = crate::error::RalphError::Orchestration(
-            "network timeout from gh api".to_owned(),
-        );
-        assert!(crate::daemon::runtime::should_retry_complete_task(&transient, 1));
-        assert!(crate::daemon::runtime::should_retry_complete_task(&transient, 2));
-        assert!(!crate::daemon::runtime::should_retry_complete_task(&transient, 3));
+        use crate::daemon::runtime::{
+            complete_task_retry_delay, complete_task_retry_limits, should_retry_complete_task,
+        };
+
+        let (max_attempts, retry_delay_secs) = complete_task_retry_limits();
+        assert_eq!(max_attempts, 3, "spec requires exactly 3 attempts");
+        assert_eq!(retry_delay_secs, 30, "spec requires 30s retry delay");
+
+        let transient_cases = [
+            crate::error::RalphError::Orchestration("network timeout from gh api".to_owned()),
+            crate::error::RalphError::Orchestration("transport unavailable".to_owned()),
+            crate::error::RalphError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "io timeout",
+            )),
+            crate::error::RalphError::BackendTimeout {
+                backend: "claude".to_owned(),
+                idle_seconds: 90,
+                timeout_kind: crate::error::TimeoutKind::Idle,
+            },
+            crate::error::RalphError::BackendCommandFailed {
+                backend: "codex".to_owned(),
+                details: "subprocess broken pipe".to_owned(),
+            },
+        ];
+
+        for err in transient_cases {
+            assert!(err.is_transient(), "expected transient classification for {err:?}");
+            assert!(should_retry_complete_task(&err, 1));
+            assert!(should_retry_complete_task(&err, 2));
+            assert!(!should_retry_complete_task(&err, 3));
+
+            let d1 = complete_task_retry_delay(&err, 1).expect("attempt 1 should delay");
+            let d2 = complete_task_retry_delay(&err, 2).expect("attempt 2 should delay");
+            assert_eq!(d1.as_secs(), retry_delay_secs);
+            assert_eq!(d2.as_secs(), retry_delay_secs);
+            assert!(
+                complete_task_retry_delay(&err, 3).is_none(),
+                "attempt 3 should not schedule another retry"
+            );
+        }
     })
 }
 
 fn complete_task_no_retry_terminal(_h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let terminal = crate::error::RalphError::Validation("bad config".to_owned());
-        assert!(!crate::daemon::runtime::should_retry_complete_task(&terminal, 1));
+        use crate::daemon::runtime::{complete_task_retry_delay, should_retry_complete_task};
+
+        let terminal_cases = [
+            crate::error::RalphError::Validation("bad config".to_owned()),
+            crate::error::RalphError::BranchMismatch {
+                expected: "ralph/issue-93".to_owned(),
+                actual: "main".to_owned(),
+            },
+            crate::error::RalphError::GitConflict {
+                details: "conflict in src/main.rs".to_owned(),
+            },
+            crate::error::RalphError::WorkspaceNotFound,
+            crate::error::RalphError::ProjectNotFound("issue-93".to_owned()),
+            crate::error::RalphError::PrdValidationFailed("schema mismatch".to_owned()),
+            crate::error::RalphError::Unsupported("disabled in this mode".to_owned()),
+        ];
+
+        for err in terminal_cases {
+            assert!(
+                !err.is_transient(),
+                "expected terminal classification for {err:?}"
+            );
+            assert!(
+                !should_retry_complete_task(&err, 1),
+                "terminal errors must not retry at attempt 1: {err:?}"
+            );
+            assert!(
+                complete_task_retry_delay(&err, 1).is_none(),
+                "terminal errors must not schedule retry delay: {err:?}"
+            );
+        }
     })
 }
 

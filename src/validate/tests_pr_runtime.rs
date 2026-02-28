@@ -1,5 +1,7 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use super::*;
 
@@ -28,8 +30,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: e2e_draft_create_via_binary,
         },
         ConformanceTest {
-            name: "pr_runtime::pr_url_persisted_across_restarts",
-            func: pr_url_persisted_across_restarts,
+            name: "pr_runtime::create_pr_honors_draft_true",
+            func: create_pr_honors_draft_true,
         },
     ]
 }
@@ -205,89 +207,156 @@ fn pr_url_plumbed_through_child_args(_h: &RalphHarness) -> TestResult {
     })
 }
 
-/// E2E test: verify that the binary accepts --pr-url flag without errors.
-/// This is a smoke test that exercises the real binary's CLI parsing.
+/// E2E test: verify --pr-url propagates through real-binary invocation paths
+/// for both `run` and `auto`.
 fn e2e_draft_create_via_binary(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        // Initialize workspace
         h.init_workspace().expect("init workspace");
+        h.create_project("issue-93", "Issue 93", "Prompt body")
+            .expect("create project");
 
-        // Verify the binary accepts --pr-url flag (will fail due to missing
-        // project, but should NOT fail due to unrecognized flag)
-        let output = h
+        // run --pr-url should propagate into project state (resolved args path)
+        let run_pr_url = "https://github.com/acme/widgets/pull/71";
+        let run_output = h
             .ralph([
                 "run",
                 "--project",
-                "nonexistent",
+                "issue-93",
+                "--dry-run",
                 "--pr-url",
-                "https://github.com/acme/widgets/pull/1",
+                run_pr_url,
             ])
-            .expect("ralph run with --pr-url should execute");
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let combined = format!("{stderr}\n{stdout}");
-
-        // Should NOT fail with "unrecognized argument" or similar
+            .expect("ralph run should execute");
         assert!(
-            !combined.contains("unexpected argument")
-                && !combined.contains("unrecognized")
-                && !combined.contains("error: Found argument"),
-            "binary should accept --pr-url without argument errors, got: {combined}"
+            run_output.status.success(),
+            "run --dry-run should succeed: {}",
+            String::from_utf8_lossy(&run_output.stderr)
         );
-
-        // Should fail with project not found (expected)
-        assert!(
-            !output.status.success(),
-            "should fail because project doesn't exist"
-        );
-    })
-}
-
-/// Verify that task metadata (PR URL) persists to disk and can be recovered,
-/// simulating the daemon restart scenario.  The save/load round-trip must
-/// preserve the PR URL so the watcher does not create a duplicate PR.
-fn pr_url_persisted_across_restarts(h: &RalphHarness) -> TestResult {
-    run_case(|| {
-        use crate::daemon::runtime::{load_task_metadata, save_task_metadata, TaskMetadata};
-
-        let workspace_root = h.repo_root.join(".ralph");
-        let task_id = "acme-widgets-99";
-
-        // Initially no metadata exists — load should return default.
-        let meta = load_task_metadata(&workspace_root, task_id);
-        assert_eq!(meta.pr_url, None, "fresh load should return None");
-
-        // Persist a PR URL.
-        let pr_url = "https://github.com/acme/widgets/pull/99".to_owned();
-        save_task_metadata(
-            &workspace_root,
-            task_id,
-            &TaskMetadata {
-                pr_url: Some(pr_url.clone()),
-            },
-        );
-
-        // Reload — should recover the URL (simulating daemon restart).
-        let recovered = load_task_metadata(&workspace_root, task_id);
+        let run_state = h.load_state("issue-93").expect("load run state");
         assert_eq!(
-            recovered.pr_url.as_deref(),
-            Some(pr_url.as_str()),
-            "recovered PR URL should match persisted value"
+            run_state.get("pr_url").and_then(|v| v.as_str()),
+            Some(run_pr_url),
+            "run --pr-url should persist to project state"
         );
 
-        // Overwrite with None — should clear the URL.
-        save_task_metadata(
-            &workspace_root,
-            task_id,
-            &TaskMetadata { pr_url: None },
+        // auto --pr-url should also propagate into project state via orchestrator run.
+        let mock = h
+            .write_mock_script("mock-auto.sh", &crate::validate::mock_scripts::auto_mock_script())
+            .expect("write mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        let auto_pr_url = "https://github.com/acme/widgets/pull/72";
+        let auto_output = h
+            .ralph([
+                "auto",
+                "--idea",
+                "Implement issue 94",
+                "--project-id",
+                "issue-94",
+                "--skip-commit",
+                "--skip-prompt-review",
+                "--pr-url",
+                auto_pr_url,
+            ])
+            .expect("ralph auto should execute");
+        assert!(
+            auto_output.status.success(),
+            "auto invocation should succeed with mock backends; stderr: {}",
+            String::from_utf8_lossy(&auto_output.stderr)
         );
-        let cleared = load_task_metadata(&workspace_root, task_id);
-        assert_eq!(cleared.pr_url, None, "cleared PR URL should be None");
+
+        let auto_state = h.load_state("issue-94").expect("load auto state");
+        assert_eq!(
+            auto_state.get("pr_url").and_then(|v| v.as_str()),
+            Some(auto_pr_url),
+            "auto --pr-url should persist to project state"
+        );
     })
 }
 
-fn git(repo_root: &std::path::Path, args: &[&str]) {
+/// Verify create_pr constructs gh args with --draft when draft=true.
+fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let _guard = env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mock_dir = temp.path().join("bin");
+        fs::create_dir_all(&mock_dir).expect("mkdir mock bin");
+
+        let args_log = temp.path().join("gh-args.log");
+        let gh_path = mock_dir.join("gh");
+        let script = format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> '{}'\necho 'https://github.com/acme/widgets/pull/99'\n",
+            args_log.display()
+        );
+        fs::write(&gh_path, script).expect("write gh mock");
+        let mut perms = fs::metadata(&gh_path).expect("gh meta").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        fs::set_permissions(&gh_path, perms).expect("set perms");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let composed = format!("{}:{}", mock_dir.display(), original_path);
+        unsafe { std::env::set_var("PATH", &composed) };
+        let _path_restore = PathEnvGuard::new(original_path.clone());
+
+        let url = crate::daemon::github::create_pr(
+            "acme",
+            "widgets",
+            "ralph/issue-93",
+            "Draft PR title",
+            "Body",
+            true,
+        )
+        .expect("create_pr draft=true");
+        assert_eq!(url, "https://github.com/acme/widgets/pull/99");
+
+        let logged = fs::read_to_string(&args_log).expect("read gh args log");
+        assert!(
+            logged.lines().any(|line| line == "--draft"),
+            "expected --draft arg in gh invocation, got: {logged}"
+        );
+
+        let _ = crate::daemon::github::create_pr(
+            "acme",
+            "widgets",
+            "ralph/issue-93",
+            "Ready PR",
+            "Body",
+            false,
+        )
+        .expect("create_pr draft=false");
+        let logged_after = fs::read_to_string(&args_log).expect("read gh args log after second call");
+        let draft_count = logged_after.lines().filter(|line| *line == "--draft").count();
+        assert_eq!(draft_count, 1, "--draft should only appear for draft=true call");
+    })
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct PathEnvGuard {
+    original_path: String,
+}
+
+impl PathEnvGuard {
+    fn new(original_path: String) -> Self {
+        Self { original_path }
+    }
+}
+
+impl Drop for PathEnvGuard {
+    fn drop(&mut self) {
+        unsafe { std::env::set_var("PATH", &self.original_path) };
+    }
+}
+
+fn git(repo_root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo_root)
