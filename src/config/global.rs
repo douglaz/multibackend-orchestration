@@ -803,11 +803,17 @@ fn default_gemini_backend_config() -> BackendConfig {
 
 fn default_openrouter_backend_config() -> BackendConfig {
     BackendConfig {
-        command: "opencode".to_owned(),
+        command: "goose".to_owned(),
         args: vec![
             "run".to_owned(),
-            "--format".to_owned(),
-            "json".to_owned(),
+            "--no-profile".to_owned(),
+            "--quiet".to_owned(),
+            "--with-builtin".to_owned(),
+            "developer".to_owned(),
+            "--output-format".to_owned(),
+            "stream-json".to_owned(),
+            "-i".to_owned(),
+            "-".to_owned(),
         ],
         timeout_seconds: default_backend_timeout_seconds(),
         enabled: BackendEnabled::Disabled,

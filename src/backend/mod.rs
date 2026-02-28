@@ -227,7 +227,7 @@ impl CliBackend {
             Some(id) => match self.name.as_str() {
                 n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
                 n if n.starts_with("openrouter") || n == "openrouter" => {
-                    self.effective_args_opencode(id)
+                    self.effective_args_goose(id)
                 }
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
@@ -297,17 +297,17 @@ impl CliBackend {
                         skip_next = false;
                         continue;
                     }
-                    if arg == "--format" {
+                    if arg == "--output-format" {
                         skip_next = true;
                         continue;
                     }
-                    if arg.starts_with("--format=") {
+                    if arg.starts_with("--output-format=") {
                         continue;
                     }
                     args.push(arg.clone());
                 }
-                args.push("--format".to_owned());
-                args.push("json".to_owned());
+                args.push("--output-format".to_owned());
+                args.push("stream-json".to_owned());
                 Ok(args)
             }
             _ => Ok(self.args.clone()),
@@ -459,11 +459,11 @@ impl CliBackend {
         Ok(result)
     }
 
-    fn effective_args_opencode(&self, session_id: &str) -> Result<Vec<String>> {
-        // OpenCode resume rules:
+    fn effective_args_goose(&self, session_id: &str) -> Result<Vec<String>> {
+        // Goose resume rules:
         // 1. Keep all existing args.
-        // 2. Remove existing --session and --format forms.
-        // 3. Add --session <id> and --format json.
+        // 2. Remove existing --name, --session-id, --output-format forms and --resume flag.
+        // 3. Add --name <id> --resume --output-format stream-json.
         let mut result = Vec::new();
         let mut skip_next = false;
 
@@ -472,20 +472,28 @@ impl CliBackend {
                 skip_next = false;
                 continue;
             }
-            if arg == "--session" || arg == "-s" || arg == "--format" || arg == "-f" {
+            if arg == "--name" || arg == "-n" || arg == "--session-id" || arg == "--output-format"
+            {
                 skip_next = true;
                 continue;
             }
-            if arg.starts_with("--session=") || arg.starts_with("--format=") {
+            if arg.starts_with("--name=")
+                || arg.starts_with("--session-id=")
+                || arg.starts_with("--output-format=")
+            {
+                continue;
+            }
+            if arg == "--resume" || arg == "-r" {
                 continue;
             }
             result.push(arg.clone());
         }
 
-        result.push("--session".to_owned());
+        result.push("--name".to_owned());
         result.push(session_id.to_owned());
-        result.push("--format".to_owned());
-        result.push("json".to_owned());
+        result.push("--resume".to_owned());
+        result.push("--output-format".to_owned());
+        result.push("stream-json".to_owned());
         Ok(result)
     }
 
