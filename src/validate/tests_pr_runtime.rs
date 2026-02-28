@@ -27,6 +27,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_runtime::e2e_draft_create_via_binary",
             func: e2e_draft_create_via_binary,
         },
+        ConformanceTest {
+            name: "pr_runtime::pr_url_persisted_across_restarts",
+            func: pr_url_persisted_across_restarts,
+        },
     ]
 }
 
@@ -237,6 +241,49 @@ fn e2e_draft_create_via_binary(h: &RalphHarness) -> TestResult {
             !output.status.success(),
             "should fail because project doesn't exist"
         );
+    })
+}
+
+/// Verify that task metadata (PR URL) persists to disk and can be recovered,
+/// simulating the daemon restart scenario.  The save/load round-trip must
+/// preserve the PR URL so the watcher does not create a duplicate PR.
+fn pr_url_persisted_across_restarts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        use crate::daemon::runtime::{load_task_metadata, save_task_metadata, TaskMetadata};
+
+        let workspace_root = h.repo_root.join(".ralph");
+        let task_id = "acme-widgets-99";
+
+        // Initially no metadata exists — load should return default.
+        let meta = load_task_metadata(&workspace_root, task_id);
+        assert_eq!(meta.pr_url, None, "fresh load should return None");
+
+        // Persist a PR URL.
+        let pr_url = "https://github.com/acme/widgets/pull/99".to_owned();
+        save_task_metadata(
+            &workspace_root,
+            task_id,
+            &TaskMetadata {
+                pr_url: Some(pr_url.clone()),
+            },
+        );
+
+        // Reload — should recover the URL (simulating daemon restart).
+        let recovered = load_task_metadata(&workspace_root, task_id);
+        assert_eq!(
+            recovered.pr_url.as_deref(),
+            Some(pr_url.as_str()),
+            "recovered PR URL should match persisted value"
+        );
+
+        // Overwrite with None — should clear the URL.
+        save_task_metadata(
+            &workspace_root,
+            task_id,
+            &TaskMetadata { pr_url: None },
+        );
+        let cleared = load_task_metadata(&workspace_root, task_id);
+        assert_eq!(cleared.pr_url, None, "cleared PR URL should be None");
     })
 }
 

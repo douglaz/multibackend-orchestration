@@ -131,7 +131,9 @@ pub struct RunOptions {
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
     pub skip_prompt_review: bool,
-    /// PR URL passed from the daemon's draft-PR watcher.
+    /// PR URL resolved before child spawn (from existing PR lookup or passed
+    /// via CLI `--pr-url`).  If `None`, the draft-PR watcher will create a new
+    /// draft PR when the branch diverges.
     pub pr_url: Option<String>,
 }
 
@@ -232,6 +234,15 @@ impl Orchestrator {
 
         let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
+
+        // Propagate PR URL from CLI / daemon into project state so it is
+        // available across orchestration phases (completion, final review, etc.).
+        if let Some(ref url) = options.pr_url {
+            if state.pr_url.as_ref() != Some(url) {
+                info!(pr_url = %url, "propagating PR URL into project state");
+                state.pr_url = Some(url.clone());
+            }
+        }
 
         // Compute repo root for cwd invariant assertions (spec D6).
         let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
