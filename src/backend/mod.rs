@@ -472,8 +472,7 @@ impl CliBackend {
                 skip_next = false;
                 continue;
             }
-            if arg == "--name" || arg == "-n" || arg == "--session-id" || arg == "--output-format"
-            {
+            if arg == "--name" || arg == "-n" || arg == "--session-id" || arg == "--output-format" {
                 skip_next = true;
                 continue;
             }
@@ -742,8 +741,7 @@ impl CliBackend {
                 let stderr_bytes = self.collect_stderr(stderr_handle).await?;
 
                 if !status.success() {
-                    let stderr_text =
-                        String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
+                    let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
                     // Some backends (e.g. codex) report errors via stdout JSON
                     // rather than stderr. When stderr is empty, include stdout
                     // so quota/error messages are visible to callers.
@@ -1025,7 +1023,10 @@ impl BackendRegistry {
         };
         // If the primary opposite is unavailable, try openrouter as substitute
         // for codex (since openrouter provides codex-equivalent models).
-        if !self.is_backend_available(primary) && primary == "codex" && self.is_backend_available("openrouter") {
+        if !self.is_backend_available(primary)
+            && primary == "codex"
+            && self.is_backend_available("openrouter")
+        {
             return Ok("openrouter");
         }
         Ok(primary)

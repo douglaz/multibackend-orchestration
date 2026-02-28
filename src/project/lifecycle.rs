@@ -735,11 +735,7 @@ fn reconstruct_completion_attempt(
             let mut any_verdict = false;
             let mut latest_verdict: Option<&ArtifactEntry> = None;
             for v in &per_backend_verdicts {
-                let backend = v
-                    .frontmatter
-                    .get("backend")
-                    .cloned()
-                    .unwrap_or_default();
+                let backend = v.frontmatter.get("backend").cloned().unwrap_or_default();
                 completers.push(backend);
                 if let Some(pv) = parse_completion_verdict(&v.body) {
                     any_verdict = true;

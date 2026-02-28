@@ -147,7 +147,11 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         spec_writer
     };
     let reviewer_spec = if spec_reviewer.trim().is_empty() {
-        workspace.config.workspace.daemon_prd_reviewer_backend.clone()
+        workspace
+            .config
+            .workspace
+            .daemon_prd_reviewer_backend
+            .clone()
     } else {
         spec_reviewer
     };

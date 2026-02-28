@@ -16,9 +16,7 @@ pub fn backend_from_config(
     // Resolve model: explicit spec model > role-based config model > implementer fallback
     let resolved_model = model
         .map(|m| m.to_owned())
-        .or_else(|| {
-            role.and_then(|r| backend.models.for_role(r).map(|m| m.to_owned()))
-        })
+        .or_else(|| role.and_then(|r| backend.models.for_role(r).map(|m| m.to_owned())))
         .or_else(|| backend.models.implementer.clone());
 
     let name = if let Some(ref model_name) = resolved_model {
@@ -40,6 +38,12 @@ pub fn backend_from_config(
         None => Duration::from_secs(backend.timeout_seconds),
     };
 
-    CliBackend::new(&name, backend.command.clone(), args, timeout, backend.env.clone())
-        .with_cwd(cwd)
+    CliBackend::new(
+        &name,
+        backend.command.clone(),
+        args,
+        timeout,
+        backend.env.clone(),
+    )
+    .with_cwd(cwd)
 }
