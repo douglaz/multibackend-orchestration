@@ -1,0 +1,74 @@
+{
+  "project_id": "summary-normalize-codex-jsonl-in-src-bac",
+  "project_name": "## Summary\n\n`normalize_codex_jsonl()` in `src/backend/output",
+  "created_at": "2026-02-18T03:58:35.025217421Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "5d7678345295debb3bd96398fe27e9307b699c517f29d1008b265ae0142c8c7d",
+  "prompt_hash_at_loop_start": "5d7678345295debb3bd96398fe27e9307b699c517f29d1008b265ae0142c8c7d",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 2,
+  "current_phase": "completing",
+  "phase_iteration": 1,
+  "status": "completed",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "implement-codex-jsonl-event-stream-normalizer",
+      "feature_name": "Implement Codex JSONL event-stream normalizer with explicit scoping and precedence",
+      "loop_type": "feature",
+      "status": "completed",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-implement-codex-jsonl-event-stream-normalizer/20260218040135-spec.md",
+        "impl_notes": "loops/001-implement-codex-jsonl-event-stream-normalizer/20260218040532-impl-notes.md",
+        "reviews": [],
+        "approval": "loops/001-implement-codex-jsonl-event-stream-normalizer/20260218040645-review-approved.md",
+        "qa_results": [],
+        "pending_qa_feedback": null
+      },
+      "commit": "392a6dfa54d2264df5075a51634d93ed402a9688",
+      "started_at": "2026-02-18T04:01:35.492063219Z",
+      "completed_at": "2026-02-18T04:06:45.987857322Z"
+    }
+  ],
+  "completion_attempts": [
+    {
+      "loop_number": 2,
+      "slug": "completion",
+      "loop_type": "completion",
+      "status": "completed",
+      "backends": {
+        "planner": "codex(gpt-5.3-codex-xhigh)",
+        "completer": "claude(opus)"
+      },
+      "artifacts": {
+        "termination_request": "loops/002-completion/20260218040811-termination-request.md",
+        "verdict": "loops/002-completion/20260218040958-completer-verdict.md",
+        "acceptance_results": []
+      },
+      "verdict": "complete",
+      "started_at": "2026-02-18T04:08:11.029946660Z",
+      "completed_at": "2026-02-18T04:09:58.437893591Z"
+    }
+  ],
+  "session_store": {
+    "records": [
+      {
+        "session_id": "6c0d3595-723b-4280-aad4-cc716f6629c2",
+        "backend_spec": "claude(opus)",
+        "role": "reviewer",
+        "loop_number": 1,
+        "bootstrap_hash": "45cf18bc3211e0c761da33ac44843957a0e05d165989b3ea3d5ce7d0f680ab05",
+        "call_count": 1,
+        "created_at": "2026-02-18T04:06:45.955235937Z",
+        "last_used_at": "2026-02-18T04:06:45.955236548Z"
+      }
+    ]
+  }
+}
