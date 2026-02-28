@@ -1,0 +1,48 @@
+{
+  "project_id": "test-daemon-on-empty-dirs-and-new-projec",
+  "project_name": "Test daemon on empty dirs and new projects\n\nWe can give a re",
+  "created_at": "2026-02-14T17:20:13.037226918Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "fd1ded71008360a62e0f10e243a447e97bf4a7fbb87f8f6cab7ee06c6413834c",
+  "prompt_hash_at_loop_start": "fd1ded71008360a62e0f10e243a447e97bf4a7fbb87f8f6cab7ee06c6413834c",
+  "prompt_review_completed": true,
+  "parent_project": null,
+  "current_loop": 1,
+  "current_phase": "qa",
+  "phase_iteration": 2,
+  "status": "in_progress",
+  "loops": [
+    {
+      "loop_number": 1,
+      "slug": "repository-bootstrap-and-dispatch-integration",
+      "feature_name": "Repository Bootstrap and Dispatch Integration",
+      "loop_type": "feature",
+      "status": "in_progress",
+      "backends": {
+        "planner": "claude(opus)",
+        "implementer": "codex(gpt-5.3-codex-high)",
+        "reviewer": "claude(opus)",
+        "qa": "codex(gpt-5.3-codex-high)"
+      },
+      "artifacts": {
+        "spec": "loops/001-repository-bootstrap-and-dispatch-integration/20260214172356-spec.md",
+        "impl_notes": "loops/001-repository-bootstrap-and-dispatch-integration/20260214172720-impl-notes.md",
+        "reviews": [],
+        "approval": null,
+        "qa_results": [
+          {
+            "iteration": 1,
+            "passed": false,
+            "report": "loops/001-repository-bootstrap-and-dispatch-integration/20260214174714-qa-001-fail.md",
+            "implementer_response": "loops/001-repository-bootstrap-and-dispatch-integration/20260214175315-impl-qa-response-001.md"
+          }
+        ],
+        "pending_qa_feedback": null
+      },
+      "commit": null,
+      "started_at": "2026-02-14T17:23:56.649041276Z",
+      "completed_at": null
+    }
+  ],
+  "completion_attempts": []
+}
