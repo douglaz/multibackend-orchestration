@@ -59,7 +59,11 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
         args.writer_backend.clone()
     };
     let reviewer_spec = if args.reviewer_backend.trim().is_empty() {
-        workspace.config.workspace.daemon_prd_reviewer_backend.clone()
+        workspace
+            .config
+            .workspace
+            .daemon_prd_reviewer_backend
+            .clone()
     } else {
         args.reviewer_backend.clone()
     };

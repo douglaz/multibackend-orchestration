@@ -234,10 +234,8 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                     }
                     // Extract session from inner message.id
                     if output.session_id.is_none() {
-                        output.session_id = inner
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
+                        output.session_id =
+                            inner.get("id").and_then(Value::as_str).map(str::to_owned);
                     }
                 } else if event.get("role").and_then(Value::as_str) == Some("assistant") {
                     // Gemini format: role at top level
@@ -353,13 +351,10 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             "step_finish" => {
                 // Extract tokens from part.tokens: {input, output, reasoning, cache: {read, write}}
                 if let Some(tokens) = event.pointer("/part/tokens") {
-                    output.tokens_in =
-                        extract_u64(tokens, &["input"]).or(output.tokens_in);
-                    output.tokens_out =
-                        extract_u64(tokens, &["output"]).or(output.tokens_out);
+                    output.tokens_in = extract_u64(tokens, &["input"]).or(output.tokens_in);
+                    output.tokens_out = extract_u64(tokens, &["output"]).or(output.tokens_out);
                     if let Some(cache) = tokens.get("cache") {
-                        output.cached_in =
-                            extract_u64(cache, &["read"]).or(output.cached_in);
+                        output.cached_in = extract_u64(cache, &["read"]).or(output.cached_in);
                     }
                 }
                 if output.session_id.is_none() {
@@ -1126,10 +1121,7 @@ Done."#;
             "H1 heading must be on its own line; got: {:?}",
             normalized.text,
         );
-        assert_eq!(
-            normalized.text,
-            "First part.\n# Final Answer\n\nAll done."
-        );
+        assert_eq!(normalized.text, "First part.\n# Final Answer\n\nAll done.");
     }
 
     #[test]
