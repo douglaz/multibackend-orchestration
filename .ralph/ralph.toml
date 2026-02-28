@@ -17,10 +17,10 @@ daemon_rebase_agent_backend = "claude(opus)"
 daemon_prd_enabled = true
 daemon_prd_question_backends = [
     "claude",
-    "codex",
+    "openrouter",
 ]
 daemon_prd_writer_backend = "claude"
-daemon_prd_reviewer_backend = "codex"
+daemon_prd_reviewer_backend = "openrouter"
 daemon_prd_max_revisions = 3
 daemon_prd_backend_timeout_secs = 3600
 
@@ -52,7 +52,7 @@ reformatter = "sonnet"
 [backends.claude.role_timeouts]
 
 [backends.codex]
-command = "codex"
+command = "openrouter"
 args = [
     "exec",
     "--dangerously-bypass-approvals-and-sandbox",
@@ -77,9 +77,11 @@ reformatter = "gpt-5.3-codex-medium"
 [backends.codex.role_timeouts]
 
 [backends.openrouter]
-command = "goose"
+command = "/root/.local/bin/goose"
 args = [
     "run",
+    "--provider",
+    "openrouter",
     "--no-profile",
     "--quiet",
     "--with-builtin",
@@ -134,13 +136,13 @@ commit_message_style = "conventional"
 commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = true
-prompt_review_backend = "codex(gpt-5.3-codex-xhigh)"
+prompt_review_backend = "openrouter"
 final_review_enabled = true
 final_review_backends = [
     "claude",
-    "codex",
+    "openrouter",
 ]
-final_review_arbiter_backend = "codex"
+final_review_arbiter_backend = "openrouter"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
 max_final_review_restarts = 15
