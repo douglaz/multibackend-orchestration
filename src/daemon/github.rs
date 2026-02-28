@@ -581,6 +581,116 @@ pub fn create_pr(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Returns true when HEAD is ahead of `base_branch` by one or more commits.
+pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &str) -> Result<bool> {
+    let range = format!("{base_branch}..HEAD");
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run git rev-list --count {range}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git rev-list --count {range} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let count_raw = String::from_utf8_lossy(&output.stdout);
+    let count = count_raw.trim().parse::<u64>().map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to parse git rev-list --count output '{value}' for {range}: {err}",
+            value = count_raw.trim()
+        ))
+    })?;
+
+    Ok(count > 0)
+}
+
+/// Mark a draft pull request as ready for review.
+pub fn mark_pr_ready(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "ready", &pr_number_str, "--repo", &full_repo])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr ready for {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr ready failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Return whether a pull request is currently a draft.
+pub fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number_str,
+            "--repo",
+            &full_repo,
+            "--json",
+            "isDraft",
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr view for draft state on {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr view (isDraft) failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_pr_is_draft(raw.trim())
+}
+
+/// Close a pull request.
+pub fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "close", &pr_number_str, "--repo", &full_repo])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr close for {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr close failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+
 /// Get a diff stat summary (committed changes vs merge-base of default branch).
 ///
 /// Returns `Ok(Some(stat))` on success, `Ok(None)` if the diff stat cannot be
