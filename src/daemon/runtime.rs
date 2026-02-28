@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -92,6 +93,18 @@ const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
 const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
+
+fn draft_pr_watch_poll_seconds() -> u64 {
+    std::env::var("RALPH_DRAFT_PR_WATCH_POLL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DRAFT_PR_WATCH_POLL_SECONDS)
+}
+
+fn default_sleep(duration: Duration) -> impl Future<Output = ()> {
+    tokio::time::sleep(duration)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DraftPrTransition {
@@ -188,7 +201,7 @@ impl ArtifactCommentClient for GitHubArtifactCommentClient {
 /// Only one draft creation attempt is active at a time (single-flight guard).
 /// Performs an unconditional push before draft PR creation.
 #[allow(clippy::too_many_arguments)]
-async fn draft_pr_watcher(
+pub(crate) async fn draft_pr_watcher(
     owner: String,
     repo: String,
     base_branch: String,
@@ -199,7 +212,38 @@ async fn draft_pr_watcher(
     cancel: CancellationToken,
     workspace_root: PathBuf,
 ) {
-    let poll_interval = Duration::from_secs(DRAFT_PR_WATCH_POLL_SECONDS);
+    draft_pr_watcher_with_sleep(
+        owner,
+        repo,
+        base_branch,
+        worktree_path,
+        branch,
+        task_id,
+        issue_number,
+        cancel,
+        workspace_root,
+        default_sleep,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn draft_pr_watcher_with_sleep<S, SFut>(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    cancel: CancellationToken,
+    workspace_root: PathBuf,
+    mut sleep_fn: S,
+) where
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+{
+    let poll_interval = Duration::from_secs(draft_pr_watch_poll_seconds());
     let mut pr_created = false;
 
     loop {
@@ -300,9 +344,64 @@ async fn draft_pr_watcher(
             _ = cancel.cancelled() => {
                 break;
             }
-            _ = tokio::time::sleep(poll_interval) => {}
+            _ = sleep_fn(poll_interval) => {}
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn draft_pr_watcher_single_iteration_for_test(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    workspace_root: PathBuf,
+) {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    draft_pr_watcher_with_sleep(
+        owner,
+        repo,
+        base_branch,
+        worktree_path,
+        branch,
+        task_id,
+        issue_number,
+        cancel,
+        workspace_root,
+        |_| async {},
+    )
+    .await;
+}
+
+pub(crate) async fn complete_task_with_retry_for_test<F, Fut, S, SFut>(
+    mut attempt_op: F,
+    mut sleep_fn: S,
+) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<()>>,
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+{
+    for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
+        match attempt_op().await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if let Some(delay) = complete_task_retry_delay(&err, attempt) {
+                    sleep_fn(delay).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(RalphError::Orchestration(
+        "complete_task retry loop exhausted unexpectedly".to_owned(),
+    ))
 }
 
 async fn post_artifact_comments(
@@ -2176,7 +2275,7 @@ pub(crate) fn build_pr_body(
 }
 
 /// Handle the PR creation/update flow for a completed task.
-async fn handle_pr_flow(
+pub(crate) async fn handle_pr_flow(
     config: &DaemonRuntimeConfig,
     task_id: &str,
     issue_number: u32,
