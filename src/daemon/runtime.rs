@@ -2043,6 +2043,7 @@ async fn handle_pr_flow(
                     &title_clone,
                     &body_path,
                     Some(&base),
+                    false,
                 )
             })
             .await

@@ -551,13 +551,23 @@ pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<
 }
 
 /// Create a pull request. Returns the PR URL on success, or an error.
-pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str) -> Result<String> {
+pub fn create_pr(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
+    let mut args = vec![
+        "pr", "create", "--repo", &full_repo, "--head", branch, "--title", title, "--body", body,
+    ];
+    if draft {
+        args.push("--draft");
+    }
     let output = Command::new("gh")
-        .args([
-            "pr", "create", "--repo", &full_repo, "--head", branch, "--title", title, "--body",
-            body,
-        ])
+        .args(&args)
         .output()
         .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
@@ -606,6 +616,7 @@ pub fn create_pr_with_body_file(
     title: &str,
     body_file: &std::path::Path,
     base_branch: Option<&str>,
+    draft: bool,
 ) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
     let body_file_str = body_file.to_string_lossy();
@@ -626,6 +637,9 @@ pub fn create_pr_with_body_file(
         base_owned = base.to_owned();
         args.push("--base");
         args.push(&base_owned);
+    }
+    if draft {
+        args.push("--draft");
     }
     let output = Command::new("gh")
         .args(&args)
@@ -1360,6 +1374,12 @@ struct RawPrMergeInfo {
     head_ref_oid: String,
 }
 
+#[derive(Deserialize)]
+struct RawPrDraftInfo {
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+}
+
 /// A structured issue comment returned by [`fetch_issue_comments`].
 #[derive(Debug, Clone)]
 pub struct IssueComment {
@@ -1780,6 +1800,13 @@ fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
     })
 }
 
+fn parse_pr_is_draft(raw: &str) -> Result<bool> {
+    let parsed: RawPrDraftInfo = serde_json::from_str(raw).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh pr view isDraft output: {err}"))
+    })?;
+    Ok(parsed.is_draft)
+}
+
 fn parse_authenticated_login(raw: &str) -> Result<String> {
     let login = raw.trim();
     if login.is_empty() {
@@ -1798,8 +1825,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
-        PrMergeStatus, REQUIRED_LABELS,
+        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_is_draft,
+        parse_pr_merge_info, GhIssue, PrMergeStatus, REQUIRED_LABELS,
     };
 
     #[test]
@@ -1941,6 +1968,20 @@ mod tests {
         }"#;
         let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
         assert_eq!(info.merge_status, PrMergeStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_pr_is_draft_true() {
+        let raw = r#"{"isDraft":true}"#;
+        let is_draft = parse_pr_is_draft(raw).expect("draft state should parse");
+        assert!(is_draft);
+    }
+
+    #[test]
+    fn parse_pr_is_draft_false() {
+        let raw = r#"{"isDraft":false}"#;
+        let is_draft = parse_pr_is_draft(raw).expect("draft state should parse");
+        assert!(!is_draft);
     }
 
     #[test]
