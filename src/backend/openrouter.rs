@@ -12,7 +12,16 @@ pub fn backend_from_config(
 ) -> CliBackend {
     let backend = &config.backends.openrouter;
     let mut args = backend.args.clone();
-    let name = if let Some(model_name) = model {
+
+    // Resolve model: explicit spec model > role-based config model > implementer fallback
+    let resolved_model = model
+        .map(|m| m.to_owned())
+        .or_else(|| {
+            role.and_then(|r| backend.models.for_role(r).map(|m| m.to_owned()))
+        })
+        .or_else(|| backend.models.implementer.clone());
+
+    let name = if let Some(ref model_name) = resolved_model {
         // Inject --model <model> after the "run" subcommand (or at end if no "run").
         if let Some(pos) = args.iter().position(|a| a == "run") {
             args.insert(pos + 1, model_name.to_owned());
