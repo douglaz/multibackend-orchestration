@@ -188,6 +188,7 @@ async fn draft_pr_watcher(
     task_id: String,
     issue_number: u32,
     cancel: CancellationToken,
+    workspace_root: PathBuf,
 ) {
     let poll_interval = Duration::from_secs(DRAFT_PR_WATCH_POLL_SECONDS);
     let mut pr_created = false;
@@ -245,11 +246,36 @@ async fn draft_pr_watcher(
                             "draft-pr-watcher: created draft PR for {task_id}: {url}"
                         );
                         pr_created = true;
+                        // Persist PR URL to durable storage for daemon restart recovery.
+                        save_task_metadata(
+                            &workspace_root,
+                            &task_id,
+                            &TaskMetadata { pr_url: Some(url) },
+                        );
                     }
                     Err(err) => {
                         eprintln!(
                             "draft-pr-watcher: failed to create draft PR for {task_id}: {err}"
                         );
+                        // Re-check: another process may have created the PR concurrently.
+                        let owner_retry = owner.clone();
+                        let repo_retry = repo.clone();
+                        let br_retry = branch.clone();
+                        if let Ok(Some(url)) = spawn_blocking_op(move || {
+                            github::find_existing_pr(&owner_retry, &repo_retry, &br_retry)
+                        })
+                        .await
+                        {
+                            eprintln!(
+                                "draft-pr-watcher: found existing PR for {task_id}: {url}"
+                            );
+                            pr_created = true;
+                            save_task_metadata(
+                                &workspace_root,
+                                &task_id,
+                                &TaskMetadata { pr_url: Some(url) },
+                            );
+                        }
                     }
                 }
             }
@@ -578,6 +604,51 @@ fn task_log_path(workspace_root: &Path, task_id: &str) -> PathBuf {
         .join("tmp")
         .join("logs")
         .join(format!("{task_id}.log"))
+}
+
+/// Return the durable metadata file path for a task.
+///
+/// Stored under `.ralph/daemon/tasks/{task_id}.json` so it survives daemon
+/// restarts while the workspace root persists.
+fn task_metadata_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    workspace_root
+        .join("daemon")
+        .join("tasks")
+        .join(format!("{task_id}.json"))
+}
+
+/// Durable per-task metadata persisted across daemon restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct TaskMetadata {
+    #[serde(default)]
+    pub pr_url: Option<String>,
+}
+
+/// Load task metadata from disk.  Returns `Default` if the file does not exist.
+pub fn load_task_metadata(workspace_root: &Path, task_id: &str) -> TaskMetadata {
+    let path = task_metadata_path(workspace_root, task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => TaskMetadata::default(),
+    }
+}
+
+/// Persist task metadata to disk (best-effort: logs on failure).
+pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetadata) {
+    let path = task_metadata_path(workspace_root, task_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(meta) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(&path, json) {
+                eprintln!("warning: failed to persist task metadata for {task_id}: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("warning: failed to serialize task metadata for {task_id}: {err}");
+        }
+    }
 }
 
 /// Print the last 50 lines of a task's log file to stderr for diagnostics.
@@ -1158,8 +1229,16 @@ async fn dispatch_task(
     // (e.g. tmpfs in nix build sandboxes).
     let child_start_time = SystemTime::now() - Duration::from_secs(2);
 
-    // Resolve existing PR URL by exact head-branch match before spawning
-    let pr_url: Option<String> = {
+    // Resolve PR URL: first check durable metadata (survives daemon restarts),
+    // then fall back to GitHub API lookup by exact head-branch match.
+    let persisted_meta = load_task_metadata(&config.workspace_root, &task_id);
+    let pr_url: Option<String> = if persisted_meta.pr_url.is_some() {
+        eprintln!(
+            "dispatch: recovered persisted PR URL for {task_id}: {}",
+            persisted_meta.pr_url.as_deref().unwrap_or("none")
+        );
+        persisted_meta.pr_url
+    } else {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let br = branch_name.clone();
@@ -1172,17 +1251,22 @@ async fn dispatch_task(
         }
     };
 
+    eprintln!(
+        "dispatch: resolved PR URL for {task_id}: {}",
+        pr_url.as_deref().unwrap_or("none")
+    );
+
     // Spawn child process
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
         if resume_existing_project {
-            eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id}");
+            eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none"));
             process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref()).await?
         } else {
             eprintln!(
-                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id}"
+                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none")
             );
             process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id), pr_url.as_deref())
                 .await?
@@ -1215,8 +1299,9 @@ async fn dispatch_task(
         let branch = branch_name.clone();
         let cancel = draft_pr_cancel.clone();
         let tid = task_id.clone();
+        let ws_root = config.workspace_root.clone();
         Some(tokio::spawn(async move {
-            draft_pr_watcher(owner, repo, base_branch, wt, branch, tid, issue_number, cancel).await;
+            draft_pr_watcher(owner, repo, base_branch, wt, branch, tid, issue_number, cancel, ws_root).await;
         }))
     } else {
         None
@@ -1236,6 +1321,7 @@ async fn dispatch_task(
             log_file: log_path,
             last_rebase_at: None,
             last_rebase_failure_sha: None,
+            pr_url,
         },
     );
 
@@ -1560,11 +1646,12 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
     let mut rebase_count = 0u32;
 
     for issue_number in &issue_numbers {
-        let (branch, last_rebase_at, last_failure_sha) = match children.get(issue_number) {
+        let (branch, last_rebase_at, last_failure_sha, cached_pr_url) = match children.get(issue_number) {
             Some(h) => (
                 h.branch.clone(),
                 h.last_rebase_at,
                 h.last_rebase_failure_sha.clone(),
+                h.pr_url.clone(),
             ),
             None => continue,
         };
@@ -1594,13 +1681,21 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
 
         let branch = &branch;
 
-        // Check if there's an existing PR for this branch
-        let pr_url = {
+        // Use cached PR URL from ChildHandle when available; fall back to API.
+        let pr_url = if let Some(url) = cached_pr_url {
+            url
+        } else {
             let owner = config.owner.clone();
             let repo = config.repo.clone();
             let br = branch.clone();
             match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
-                Ok(Some(url)) => url,
+                Ok(Some(url)) => {
+                    // Back-fill cached PR URL so future cycles skip the lookup.
+                    if let Some(h) = children.get_mut(issue_number) {
+                        h.pr_url = Some(url.clone());
+                    }
+                    url
+                }
                 Ok(None) => {
                     eprintln!("auto-rebase: skip {task_id} — no PR URL");
                     continue;

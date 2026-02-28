@@ -26,6 +26,11 @@ pub struct ProjectState {
     pub completion_attempts: Vec<CompletionLoopState>,
     #[serde(default)]
     pub session_store: SessionStore,
+    /// PR URL associated with this project (set by daemon draft-PR watcher or
+    /// passed via `--pr-url`).  Persisted so the orchestrator can reference it
+    /// across phases (e.g. marking PRs ready, updating descriptions).
+    #[serde(default)]
+    pub pr_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +283,7 @@ impl ProjectState {
             loops: Vec::new(),
             completion_attempts: Vec::new(),
             session_store: SessionStore::default(),
+            pr_url: None,
         }
     }
 
