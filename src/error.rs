@@ -145,6 +145,10 @@ impl RalphError {
                     || details.contains("MODEL_CAPACITY_EXHAUSTED")
                     || details.contains("quota will reset")
                     || details.contains("hit your usage limit")
+                    || details.contains("creditsExhausted")
+                    || details.contains("add more credits")
+                    || details.contains("insufficient_quota")
+                    || details.contains("billing_hard_limit_reached")
             }
             _ => false,
         }
@@ -206,6 +210,37 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("idle_seconds: 30"));
         assert!(debug.contains("timeout_kind: Walltime"));
+    }
+
+    #[test]
+    fn is_quota_error_matches_known_patterns() {
+        let patterns = [
+            "TerminalQuotaError",
+            "RESOURCE_EXHAUSTED",
+            "MODEL_CAPACITY_EXHAUSTED",
+            "quota will reset",
+            "hit your usage limit",
+            "creditsExhausted",
+            "add more credits",
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+        ];
+        for pat in patterns {
+            let err = RalphError::BackendCommandFailed {
+                backend: "test".to_owned(),
+                details: format!("error: {pat} occurred"),
+            };
+            assert!(err.is_quota_error(), "expected is_quota_error() for: {pat}");
+        }
+    }
+
+    #[test]
+    fn is_quota_error_rejects_unrelated_errors() {
+        let err = RalphError::BackendCommandFailed {
+            backend: "test".to_owned(),
+            details: "parse error: missing top-level H1".to_owned(),
+        };
+        assert!(!err.is_quota_error());
     }
 
     #[test]
