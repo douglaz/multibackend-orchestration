@@ -34,6 +34,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_lifecycle::complete_task_no_retry_terminal",
             func: complete_task_no_retry_terminal,
         },
+        ConformanceTest {
+            name: "pr_lifecycle::phase_transition_preserves_tracked_ralph_prompt_files",
+            func: phase_transition_preserves_tracked_ralph_prompt_files,
+        },
     ]
 }
 
@@ -305,6 +309,68 @@ fn complete_task_no_retry_terminal(_h: &RalphHarness) -> TestResult {
             sleeps.load(Ordering::SeqCst),
             0,
             "terminal failure must not schedule retries"
+        );
+    })
+}
+
+/// Verify that `commit_and_push_phase_transition` does not stage deletions for
+/// tracked `.ralph/projects/<id>/` prompt/config files.  This ensures the
+/// non-destructive `git reset HEAD -- .ralph` unstaging (replacing the old
+/// `git rm --cached -r .ralph`) preserves tracked prompt inputs.
+fn phase_transition_preserves_tracked_ralph_prompt_files(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let repo = &h.repo_root;
+
+        // Create and track prompt inputs on a project branch.
+        git(repo, &["checkout", "-b", "ralph/issue-preserve"]);
+        let project_dir = repo.join(".ralph/projects/issue-preserve");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "Prompt content\n").expect("write prompt");
+        fs::write(project_dir.join("project.toml"), "name = \"preserve\"\n")
+            .expect("write project toml");
+        fs::write(project_dir.join("config.toml"), "[workflow]\n").expect("write config");
+        git(repo, &["add", "--", ".ralph/projects/issue-preserve/"]);
+        git(repo, &["commit", "-m", "chore: track prompt inputs"]);
+        git(repo, &["push", "-u", "origin", "ralph/issue-preserve"]);
+
+        // Add implementation work (non-.ralph file).
+        fs::write(repo.join("impl.txt"), "implementation\n").expect("write impl file");
+
+        // Run phase transition commit.
+        crate::git::commit::commit_and_push_phase_transition(
+            repo,
+            "issue-preserve",
+            1,
+            crate::project::state::Phase::Planning,
+            crate::project::state::Phase::Implementing,
+            "ralph/issue-preserve",
+            false,
+        )
+        .expect("phase transition commit should succeed");
+
+        // Verify that the tracked prompt files still exist in the latest commit.
+        let tree_files = git_output(repo, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        for expected in [
+            ".ralph/projects/issue-preserve/prompt.md",
+            ".ralph/projects/issue-preserve/project.toml",
+            ".ralph/projects/issue-preserve/config.toml",
+        ] {
+            assert!(
+                tree_files.lines().any(|l| l == expected),
+                "tracked prompt file {expected} must still be present in HEAD after phase transition, tree:\n{tree_files}"
+            );
+        }
+
+        // Also verify no deletion was staged (check the diff of the last commit).
+        let diff = git_output(repo, &["diff", "--name-status", "HEAD~1..HEAD"]);
+        let deletions: Vec<&str> = diff
+            .lines()
+            .filter(|l| l.starts_with('D') && l.contains(".ralph/projects/"))
+            .collect();
+        assert!(
+            deletions.is_empty(),
+            "phase transition must not delete tracked .ralph/projects/ files:\n{}",
+            deletions.join("\n")
         );
     })
 }

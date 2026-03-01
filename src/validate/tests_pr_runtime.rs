@@ -34,6 +34,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_runtime::create_pr_honors_draft_true",
             func: create_pr_honors_draft_true,
         },
+        ConformanceTest {
+            name: "pr_runtime::draft_watcher_fallback_base_when_configured_missing",
+            func: draft_watcher_fallback_base_when_configured_missing,
+        },
     ]
 }
 
@@ -392,6 +396,80 @@ fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
             .filter(|line| *line == "--draft")
             .count();
         assert_eq!(draft_count, 1, "--draft should only appear for draft=true call");
+    })
+}
+
+/// Verify that draft PR creation succeeds even when the configured base branch
+/// (e.g. "master") does not exist as a remote ref, as long as a default branch
+/// (e.g. "main") is resolvable.
+fn draft_watcher_fallback_base_when_configured_missing(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let _guard = env_lock().lock().expect("env lock");
+        let repo = &h.repo_root;
+
+        // Rename the remote default branch to "main" and delete "master" so
+        // that "master" is no longer resolvable.
+        git(repo, &["branch", "-m", "master", "main"]);
+        git(repo, &["push", "origin", "main"]);
+        // Delete the old remote master ref (best-effort, may not exist).
+        let _ = Command::new("git")
+            .args(["push", "origin", "--delete", "master"])
+            .current_dir(repo)
+            .output();
+        git(repo, &["remote", "set-head", "origin", "main"]);
+
+        git(repo, &["checkout", "-b", "ralph/test-fallback-base"]);
+        fs::write(repo.join("fallback-base.txt"), "content\n").expect("write file");
+        git(repo, &["add", "fallback-base.txt"]);
+        git(repo, &["commit", "-m", "ahead commit for fallback test"]);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mock_bin = temp.path().join("bin");
+        fs::create_dir_all(&mock_bin).expect("mkdir mock bin");
+        let gh_log = temp.path().join("gh-fallback.log");
+
+        let gh_script = format!(
+            "#!/bin/sh\nset -eu\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then\n  printf 'create %s\\n' \"$*\" >> '{}'\n  echo 'https://github.com/acme/widgets/pull/555'\n  exit 0\nfi\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n  printf ''\n  exit 0\nfi\nprintf 'unexpected gh call: %s\\n' \"$*\" >&2\nexit 1\n",
+            gh_log.display()
+        );
+        write_executable(&mock_bin.join("gh"), &gh_script);
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let path_guard = PathEnvGuard::new(original_path.clone());
+        let composed = format!("{}:{}", mock_bin.display(), original_path);
+        unsafe { std::env::set_var("PATH", composed) };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build runtime");
+
+        // Pass "master" as the configured base — it no longer exists; the
+        // watcher should resolve the fallback ("main") and still create the PR.
+        rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::daemon::runtime::draft_pr_watcher(
+                    "acme".to_owned(),
+                    "widgets".to_owned(),
+                    "master".to_owned(),
+                    repo.to_path_buf(),
+                    "ralph/test-fallback-base".to_owned(),
+                    "acme/widgets#555".to_owned(),
+                    555,
+                    tokio_util::sync::CancellationToken::new(),
+                    repo.join(".ralph"),
+                ),
+            )
+            .await
+            .expect("watcher should complete after creating draft PR with fallback base");
+        });
+
+        let log = fs::read_to_string(&gh_log).expect("read gh fallback log");
+        assert!(log.contains("pr create"), "expected gh pr create invocation, got: {log}");
+        assert!(log.contains("--draft"), "expected --draft flag, got: {log}");
+
+        drop(path_guard);
     })
 }
 

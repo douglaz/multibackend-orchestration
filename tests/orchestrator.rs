@@ -499,7 +499,10 @@ async fn executes_completion_flow_until_complete() {
         "verdict artifact should contain completer-verdict: {verdict_path}"
     );
 
-    // Completion artifacts should be auto-committed
+    // Completion artifacts should be auto-committed.  Use targeted assertions
+    // instead of blanket filtering: verify no tracked prompt/config files under
+    // `.ralph/projects/` are staged for deletion (which would indicate the
+    // destructive `git rm --cached -r .ralph` pattern leaked through).
     let repo_root = workspace_root.parent().expect("repo root");
     let status_output = Command::new("git")
         .args(["status", "--porcelain", ".ralph/"])
@@ -507,9 +510,28 @@ async fn executes_completion_flow_until_complete() {
         .output()
         .expect("git status should execute");
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
+    let staged_deletions: Vec<&str> = uncommitted
+        .lines()
+        .filter(|l| {
+            l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/")
+        })
+        .collect();
+    assert!(
+        staged_deletions.is_empty(),
+        "tracked .ralph/projects/ files must not be staged for deletion:\n{}",
+        staged_deletions.join("\n")
+    );
+    // Allow untracked (`?? `), ignored (`!! `), and working-tree-only
+    // modifications (` M `) of .ralph/ files — these are expected when the
+    // non-destructive reset-based unstaging preserves tracked prompt inputs.
     let uncommitted_lines: Vec<&str> = uncommitted
         .lines()
-        .filter(|l| !l.is_empty() && *l != "?? .ralph/")
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("?? ")
+                && !l.starts_with("!! ")
+                && !(l.starts_with(" M ") && l.contains(".ralph/"))
+        })
         .collect();
     assert!(
         uncommitted_lines.is_empty(),
@@ -2661,7 +2683,9 @@ async fn acceptance_gate_pass_keeps_completed() {
         "acceptance QA should run once per required backend family on COMPLETE"
     );
 
-    // Completion artifacts should be auto-committed
+    // Completion artifacts should be auto-committed.  Use targeted assertions
+    // instead of blanket filtering: verify no tracked prompt/config files under
+    // `.ralph/projects/` are staged for deletion.
     let repo_root = workspace_root.parent().expect("repo root");
     let status_output = Command::new("git")
         .args(["status", "--porcelain", ".ralph/"])
@@ -2669,9 +2693,26 @@ async fn acceptance_gate_pass_keeps_completed() {
         .output()
         .expect("git status should execute");
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
+    let staged_deletions: Vec<&str> = uncommitted
+        .lines()
+        .filter(|l| {
+            l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/")
+        })
+        .collect();
+    assert!(
+        staged_deletions.is_empty(),
+        "tracked .ralph/projects/ files must not be staged for deletion:\n{}",
+        staged_deletions.join("\n")
+    );
+    // Allow untracked, ignored, and working-tree-only modifications of .ralph/ files.
     let uncommitted_lines: Vec<&str> = uncommitted
         .lines()
-        .filter(|l| !l.is_empty() && *l != "?? .ralph/")
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("?? ")
+                && !l.starts_with("!! ")
+                && !(l.starts_with(" M ") && l.contains(".ralph/"))
+        })
         .collect();
     assert!(
         uncommitted_lines.is_empty(),

@@ -93,6 +93,8 @@ const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
 const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
+/// Maximum consecutive ahead-check failures before the watcher gives up.
+const DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 fn draft_pr_watch_poll_seconds() -> u64 {
     std::env::var("RALPH_DRAFT_PR_WATCH_POLL_SECS")
@@ -245,6 +247,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
 {
     let poll_interval = Duration::from_secs(draft_pr_watch_poll_seconds());
     let mut pr_created = false;
+    let mut consecutive_failures: u32 = 0;
 
     loop {
         // Check if branch has commits ahead of base
@@ -252,10 +255,22 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
             let wt = worktree_path.clone();
             let base = base_branch.clone();
             match spawn_blocking_op(move || github::has_commits_ahead_of_base(&wt, &base)).await {
-                Ok(v) => v,
+                Ok(v) => {
+                    consecutive_failures = 0;
+                    v
+                }
                 Err(err) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES {
+                        eprintln!(
+                            "draft-pr-watcher: ahead-check failed {consecutive_failures} consecutive times \
+                             for {task_id}, giving up: {err}"
+                        );
+                        break;
+                    }
                     eprintln!(
-                        "draft-pr-watcher: failed to check ahead status for {task_id}: {err}"
+                        "draft-pr-watcher: ahead-check failed for {task_id} \
+                         ({consecutive_failures}/{DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES}): {err}"
                     );
                     false
                 }
