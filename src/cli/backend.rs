@@ -114,10 +114,12 @@ async fn execute_exec(args: BackendExecArgs) -> Result<()> {
         .stderr(std::process::Stdio::inherit())
         .envs(backend.env().clone());
 
-    let mut child = cmd.spawn().map_err(|e| crate::error::RalphError::BackendCommandFailed {
-        backend: args.backend.clone(),
-        details: format!("failed to spawn: {e}"),
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| crate::error::RalphError::BackendCommandFailed {
+            backend: args.backend.clone(),
+            details: format!("failed to spawn: {e}"),
+        })?;
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
