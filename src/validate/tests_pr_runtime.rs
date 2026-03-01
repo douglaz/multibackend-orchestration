@@ -305,7 +305,9 @@ case "${1:-}" in
     echo "work" >> e2e-draft.txt
     git add e2e-draft.txt
     git commit -m "mock impl" >/dev/null 2>&1 || true
-    sleep 1
+    # Sleep long enough for the draft-PR watcher (poll_secs=1) to detect the
+    # commit, push, and create the draft PR before this child exits.
+    sleep 10
     exit 0
     ;;
   *)
@@ -327,6 +329,10 @@ esac
                     ("PATH", &gh_path),
                     ("RALPH_DAEMON_BIN", &ralph_path_str),
                     ("MOCK_GH_ISSUES", issues),
+                    // Short poll interval so the draft-PR watcher detects the
+                    // child commit and creates the draft PR before the child
+                    // exits, making the lifecycle ordering deterministic.
+                    ("RALPH_DRAFT_PR_WATCH_POLL_SECS", "1"),
                 ],
             )
             .expect("daemon start should execute");
