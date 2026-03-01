@@ -266,13 +266,20 @@ pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
 }
 
 fn unstage_non_commit_artifacts(workdir: &Path) {
-    // Never delete working-tree files: `git rm --cached` only removes index
-    // entries and `--ignore-unmatch` keeps this best-effort.
-    let _ = run_git(
-        workdir,
-        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
-    );
+    // Use `git reset HEAD -- .ralph` to unstage any .ralph/ entries that were
+    // picked up by `git add -A`.  Unlike `git rm --cached -r`, this restores
+    // the index entry to match HEAD rather than staging a deletion, so tracked
+    // files under `.ralph/` (e.g. prompt inputs committed via early-prompt-push)
+    // are preserved in the index without being re-staged or marked for removal.
+    //
+    // Best-effort: errors (e.g. unborn HEAD) are harmless — if HEAD doesn't
+    // exist the entries simply stay staged, which only matters for the very
+    // first commit where `.ralph` content is intentionally committed anyway.
+    let _ = run_git(workdir, &["reset", "HEAD", "--", ".ralph"]);
 
+    // Explicitly remove generated artifacts from the index.  These are files
+    // that should never be committed (e.g. SPEC.md), so `git rm --cached` is
+    // correct here — they are not tracked prompt inputs.
     for artifact in GENERATED_ARTIFACT_PATHS {
         let _ = run_git(
             workdir,

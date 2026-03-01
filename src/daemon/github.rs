@@ -582,8 +582,14 @@ pub fn create_pr(
 }
 
 /// Returns true when HEAD is ahead of `base_branch` by one or more commits.
+///
+/// Resolves the comparison ref robustly: prefers `origin/{base_branch}` if it
+/// exists, otherwise falls back to `detect_base_branch` (which tries
+/// `origin/HEAD`, common default branch names, etc.).  Returns a typed error
+/// when no valid base ref can be resolved.
 pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &str) -> Result<bool> {
-    let range = format!("{base_branch}..HEAD");
+    let base = resolve_ahead_base(worktree_path, base_branch)?;
+    let range = format!("{base}..HEAD");
     let output = Command::new("git")
         .args(["rev-list", "--count", &range])
         .current_dir(worktree_path)
@@ -595,9 +601,10 @@ pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &
         })?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(RalphError::Orchestration(format!(
-            "git rev-list --count {range} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "git rev-list --count {range} failed (resolved base: {base}): {}",
+            stderr.trim()
         )));
     }
 
@@ -610,6 +617,40 @@ pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &
     })?;
 
     Ok(count > 0)
+}
+
+/// Resolve a valid base ref for ahead-of-base comparison.
+///
+/// Tries `origin/{base_branch}` first, then falls back to auto-detection via
+/// `detect_base_branch`.  Returns an error only if no resolvable base ref can
+/// be found at all.
+fn resolve_ahead_base(worktree_path: &std::path::Path, configured_base: &str) -> Result<String> {
+    // Try the configured base as a remote ref first.
+    let candidate = format!("origin/{configured_base}");
+    let check = Command::new("git")
+        .args(["rev-parse", "--verify", &candidate])
+        .current_dir(worktree_path)
+        .output();
+    if check.map(|o| o.status.success()).unwrap_or(false) {
+        return Ok(candidate);
+    }
+
+    // Configured base not found as remote ref — fall back to auto-detection.
+    let detected = detect_base_branch(worktree_path);
+
+    // Verify the detected ref actually resolves.
+    let verify = Command::new("git")
+        .args(["rev-parse", "--verify", &detected])
+        .current_dir(worktree_path)
+        .output();
+    if verify.map(|o| o.status.success()).unwrap_or(false) {
+        return Ok(detected);
+    }
+
+    Err(RalphError::Orchestration(format!(
+        "cannot resolve base branch for ahead-of-base check: configured '{configured_base}' \
+         (tried origin/{configured_base}) and auto-detected '{detected}' are both unresolvable"
+    )))
 }
 
 /// Mark a draft pull request as ready for review.
