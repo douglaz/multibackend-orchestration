@@ -1,4 +1,5 @@
 mod auto;
+mod backend;
 pub(crate) mod backend_spec;
 mod config;
 mod daemon;
@@ -34,6 +35,7 @@ pub enum Commands {
     Init(InitArgs),
     Project(ProjectArgs),
     Run(RunArgs),
+    Backend(backend::BackendArgs),
     Prd(prd::PrdArgs),
     QuickPrd(quick_prd::QuickPrdArgs),
     Auto(auto::AutoArgs),
@@ -279,6 +281,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Init(args) => init::execute(args),
         Commands::Project(args) => project::execute(args),
         Commands::Run(args) => run::execute(args).await,
+        Commands::Backend(args) => backend::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
         Commands::QuickPrd(args) => quick_prd::execute(args).await,
         Commands::Auto(args) => auto::execute(args).await,
