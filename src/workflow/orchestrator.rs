@@ -5760,8 +5760,7 @@ mod tests {
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
         collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
         latest_completion_feedback_context, preload_role_model_backends, resolve_tmux_settings,
-        summarize_previous_specs_for_planner, summarize_state_for_planner,
-        validate_tmux_preflight,
+        summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
@@ -7590,9 +7589,10 @@ mod tests {
     #[test]
     fn latest_completion_feedback_none_when_verdict_complete() {
         let mut state = make_empty_state();
-        state
-            .completion_attempts
-            .push(make_completion_attempt(4, Some(CompletionVerdict::Complete)));
+        state.completion_attempts.push(make_completion_attempt(
+            4,
+            Some(CompletionVerdict::Complete),
+        ));
         let dir = tempdir().unwrap();
         let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
         assert!(result.is_none());
@@ -7601,17 +7601,17 @@ mod tests {
     #[test]
     fn latest_completion_feedback_returns_verdicts_on_continue() {
         let mut state = make_empty_state();
-        state
-            .completion_attempts
-            .push(make_completion_attempt(11, Some(CompletionVerdict::Continue)));
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
 
         let dir = tempdir().unwrap();
         let loop_dir = dir.path().join("loops/011-completion");
         fs::create_dir_all(&loop_dir).unwrap();
 
         let verdict_claude = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Stray file\n";
-        let verdict_or =
-            "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Branch mismatch\n";
+        let verdict_or = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Branch mismatch\n";
         fs::write(
             loop_dir.join("20260301-completer-verdict-claude-opus.md"),
             verdict_claude,
@@ -7648,13 +7648,15 @@ mod tests {
         let mut state = make_empty_state();
         let mut attempt = make_completion_attempt(8, Some(CompletionVerdict::Continue));
         // Add a verdict path and a failed acceptance result
-        attempt.artifacts.verdict =
-            Some("loops/008-completion/completer-verdict.md".to_owned());
-        attempt.artifacts.acceptance_results.push(AcceptanceQaResult {
-            backend: "claude(opus)".to_owned(),
-            passed: false,
-            artifact: "loops/008-completion/acceptance-fail.md".to_owned(),
-        });
+        attempt.artifacts.verdict = Some("loops/008-completion/completer-verdict.md".to_owned());
+        attempt
+            .artifacts
+            .acceptance_results
+            .push(AcceptanceQaResult {
+                backend: "claude(opus)".to_owned(),
+                passed: false,
+                artifact: "loops/008-completion/acceptance-fail.md".to_owned(),
+            });
         state.completion_attempts.push(attempt);
 
         let dir = tempdir().unwrap();
@@ -7692,12 +7694,14 @@ mod tests {
     #[test]
     fn latest_completion_feedback_uses_latest_attempt() {
         let mut state = make_empty_state();
-        state
-            .completion_attempts
-            .push(make_completion_attempt(11, Some(CompletionVerdict::Continue)));
-        state
-            .completion_attempts
-            .push(make_completion_attempt(13, Some(CompletionVerdict::Continue)));
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
+        state.completion_attempts.push(make_completion_attempt(
+            13,
+            Some(CompletionVerdict::Continue),
+        ));
 
         let dir = tempdir().unwrap();
         // Only create verdict files for loop 13
