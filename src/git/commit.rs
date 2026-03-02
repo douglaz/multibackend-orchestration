@@ -214,8 +214,6 @@ pub fn commit_and_push_phase_transition(
     }
 
     run_git(repo_root, &["add", "-A"])?;
-    // Unstage runtime and generated artifacts to avoid git pollution.
-    unstage_non_commit_artifacts(repo_root);
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
