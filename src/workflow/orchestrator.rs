@@ -3532,7 +3532,19 @@ async fn run_final_review_phase(
                         review_quota_skipped.push(reviewer_backend.clone());
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // Upsert session before propagating error (D6)
+                        upsert_session_after_execution(
+                            state,
+                            "final_reviewer",
+                            reviewer_backend,
+                            loop_number,
+                            &fr_bootstrap,
+                            fr_out_session_id.as_deref(),
+                            session_id.is_some(),
+                        );
+                        return Err(e);
+                    }
                 };
             // Session lifecycle: upsert even if parse failed (D6)
             let effective_sid = retry_result.session_id.clone().or(fr_out_session_id);
