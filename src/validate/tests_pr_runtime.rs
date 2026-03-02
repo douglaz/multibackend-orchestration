@@ -102,7 +102,10 @@ fn draft_watcher_creates_draft_when_branch_ahead(h: &RalphHarness) -> TestResult
         });
 
         let log = fs::read_to_string(&gh_log).expect("read gh log");
-        assert!(log.contains("pr create"), "expected gh pr create invocation, got: {log}");
+        assert!(
+            log.contains("pr create"),
+            "expected gh pr create invocation, got: {log}"
+        );
         assert!(log.contains("--draft"), "expected --draft flag, got: {log}");
 
         drop(path_guard);
@@ -166,8 +169,14 @@ fn draft_watcher_pushes_before_create(h: &RalphHarness) -> TestResult {
         let lines: Vec<&str> = ordering.lines().collect();
         let push_pos = lines.iter().position(|line| *line == "push");
         let create_pos = lines.iter().position(|line| *line == "create");
-        assert!(push_pos.is_some(), "expected git push log entry, got: {ordering}");
-        assert!(create_pos.is_some(), "expected gh pr create log entry, got: {ordering}");
+        assert!(
+            push_pos.is_some(),
+            "expected git push log entry, got: {ordering}"
+        );
+        assert!(
+            create_pos.is_some(),
+            "expected gh pr create log entry, got: {ordering}"
+        );
         assert!(
             push_pos.expect("push pos") < create_pos.expect("create pos"),
             "expected push before create, got: {ordering}"
@@ -223,7 +232,10 @@ fn draft_watcher_exits_cleanly_on_cancellation(h: &RalphHarness) -> TestResult {
             let result = tokio::time::timeout(Duration::from_secs(2), join)
                 .await
                 .expect("watcher join should resolve within timeout");
-            assert!(result.is_ok(), "watcher should exit without panic: {result:?}");
+            assert!(
+                result.is_ok(),
+                "watcher should exit without panic: {result:?}"
+            );
         });
 
         drop(poll_guard);
@@ -274,7 +286,13 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
 
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[
                     ("PATH", &gh_path),
                     ("RALPH_DAEMON_BIN", &ralph_path_str),
@@ -303,7 +321,10 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
         let lines: Vec<&str> = ordering.lines().collect();
         let resolved_pos = lines.iter().position(|line| *line == resolved_line);
         let spawned_pos = lines.iter().position(|line| *line == spawned_line);
-        assert!(resolved_pos.is_some(), "missing resolved marker: {ordering}");
+        assert!(
+            resolved_pos.is_some(),
+            "missing resolved marker: {ordering}"
+        );
         assert!(spawned_pos.is_some(), "missing spawn marker: {ordering}");
         assert!(
             resolved_pos.expect("resolved pos") < spawned_pos.expect("spawn pos"),
@@ -387,7 +408,13 @@ esac
         let issues = r#"[{"number":901,"title":"Draft lifecycle","labels":[{"name":"ralph:ready"}],"body":"run flow"}]"#;
         let output = dh
             .daemon_env(
-                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
                 &[
                     ("PATH", &gh_path),
                     ("RALPH_DAEMON_BIN", &ralph_path_str),
@@ -404,8 +431,14 @@ esac
         let log = fs::read_to_string(&gh_log).expect("read gh e2e log");
         let create_pos = log.find("create");
         let ready_pos = log.find("ready");
-        assert!(create_pos.is_some(), "expected draft PR creation in log, got: {log}");
-        assert!(ready_pos.is_some(), "expected draft PR ready transition in log, got: {log}");
+        assert!(
+            create_pos.is_some(),
+            "expected draft PR creation in log, got: {log}"
+        );
+        assert!(
+            ready_pos.is_some(),
+            "expected draft PR ready transition in log, got: {log}"
+        );
         assert!(
             create_pos.expect("create") < ready_pos.expect("ready"),
             "expected create before ready, got: {log}"
@@ -459,12 +492,16 @@ fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
             false,
         )
         .expect("create_pr draft=false");
-        let logged_after = fs::read_to_string(&args_log).expect("read gh args log after second call");
+        let logged_after =
+            fs::read_to_string(&args_log).expect("read gh args log after second call");
         let draft_count = logged_after
             .lines()
             .filter(|line| *line == "--draft")
             .count();
-        assert_eq!(draft_count, 1, "--draft should only appear for draft=true call");
+        assert_eq!(
+            draft_count, 1,
+            "--draft should only appear for draft=true call"
+        );
     })
 }
 
@@ -535,7 +572,10 @@ fn draft_watcher_fallback_base_when_configured_missing(h: &RalphHarness) -> Test
         });
 
         let log = fs::read_to_string(&gh_log).expect("read gh fallback log");
-        assert!(log.contains("pr create"), "expected gh pr create invocation, got: {log}");
+        assert!(
+            log.contains("pr create"),
+            "expected gh pr create invocation, got: {log}"
+        );
         assert!(log.contains("--draft"), "expected --draft flag, got: {log}");
 
         drop(path_guard);

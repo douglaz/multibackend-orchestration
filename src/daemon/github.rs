@@ -587,7 +587,10 @@ pub fn create_pr(
 /// exists, otherwise falls back to `detect_base_branch` (which tries
 /// `origin/HEAD`, common default branch names, etc.).  Returns a typed error
 /// when no valid base ref can be resolved.
-pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &str) -> Result<bool> {
+pub fn has_commits_ahead_of_base(
+    worktree_path: &std::path::Path,
+    base_branch: &str,
+) -> Result<bool> {
     let base = resolve_ahead_base(worktree_path, base_branch)?;
     let range = format!("{base}..HEAD");
     let output = Command::new("git")
@@ -595,9 +598,7 @@ pub fn has_commits_ahead_of_base(worktree_path: &std::path::Path, base_branch: &
         .current_dir(worktree_path)
         .output()
         .map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to run git rev-list --count {range}: {err}"
-            ))
+            RalphError::Orchestration(format!("failed to run git rev-list --count {range}: {err}"))
         })?;
 
     if !output.status.success() {
@@ -730,7 +731,6 @@ pub fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
 
     Ok(())
 }
-
 
 /// Get a diff stat summary (committed changes vs merge-base of default branch).
 ///

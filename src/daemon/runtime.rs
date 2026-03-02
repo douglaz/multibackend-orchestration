@@ -310,9 +310,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
                 .await
                 {
                     Ok(url) => {
-                        eprintln!(
-                            "draft-pr-watcher: created draft PR for {task_id}: {url}"
-                        );
+                        eprintln!("draft-pr-watcher: created draft PR for {task_id}: {url}");
                         pr_created = true;
                         // Persist PR URL to durable storage for daemon restart recovery.
                         save_task_metadata(
@@ -334,9 +332,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
                         })
                         .await
                         {
-                            eprintln!(
-                                "draft-pr-watcher: found existing PR for {task_id}: {url}"
-                            );
+                            eprintln!("draft-pr-watcher: found existing PR for {task_id}: {url}");
                             pr_created = true;
                             save_task_metadata(
                                 &workspace_root,
@@ -1385,14 +1381,25 @@ async fn dispatch_task(
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
         if resume_existing_project {
-            eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none"));
-            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref()).await?
+            eprintln!(
+                "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
+                pr_url.as_deref().unwrap_or("none")
+            );
+            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
+                .await?
         } else {
             eprintln!(
                 "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none")
             );
-            process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id), pr_url.as_deref())
-                .await?
+            process::spawn_ralph_auto(
+                &ralph_bin,
+                &wt,
+                &idea_clone,
+                &log_path,
+                Some(&project_id),
+                pr_url.as_deref(),
+            )
+            .await?
         }
     };
 
@@ -1414,7 +1421,8 @@ async fn dispatch_task(
     // Start draft-PR watcher: polls for branch divergence and creates a
     // draft PR when the branch first moves ahead of the base branch.
     let draft_pr_cancel = CancellationToken::new();
-    let draft_pr_handle = if !config.owner.is_empty() && !config.repo.is_empty() && pr_url.is_none() {
+    let draft_pr_handle = if !config.owner.is_empty() && !config.repo.is_empty() && pr_url.is_none()
+    {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let base_branch = config.base_branch.clone();
@@ -1424,7 +1432,18 @@ async fn dispatch_task(
         let tid = task_id.clone();
         let ws_root = config.workspace_root.clone();
         Some(tokio::spawn(async move {
-            draft_pr_watcher(owner, repo, base_branch, wt, branch, tid, issue_number, cancel, ws_root).await;
+            draft_pr_watcher(
+                owner,
+                repo,
+                base_branch,
+                wt,
+                branch,
+                tid,
+                issue_number,
+                cancel,
+                ws_root,
+            )
+            .await;
         }))
     } else {
         None
@@ -1680,10 +1699,6 @@ pub(crate) fn decide_draft_pr_transition(
     DraftPrTransition::None
 }
 
-pub(crate) fn complete_task_retry_limits() -> (u32, u64) {
-    (COMPLETE_TASK_MAX_ATTEMPTS, COMPLETE_TASK_RETRY_DELAY_SECS)
-}
-
 pub(crate) fn complete_task_retry_delay(err: &RalphError, attempt: u32) -> Option<Duration> {
     if should_retry_complete_task(err, attempt) {
         Some(Duration::from_secs(COMPLETE_TASK_RETRY_DELAY_SECS))
@@ -1745,16 +1760,13 @@ async fn complete_task_attempt(
         .await?;
     }
 
-
     // PR flow (only on success)
     if terminal_label == "ralph:completed" {
         // Resolve actual worktree branch for PR creation
         let workspace_root = config.workspace_root.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
-            if let Err(err) = handle_pr_flow(config, task_id, issue_number, &wt_path).await {
-                return Err(err);
-            }
+            handle_pr_flow(config, task_id, issue_number, &wt_path).await?;
         }
     }
 
@@ -1835,15 +1847,16 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
     let mut rebase_count = 0u32;
 
     for issue_number in &issue_numbers {
-        let (branch, last_rebase_at, last_failure_sha, cached_pr_url) = match children.get(issue_number) {
-            Some(h) => (
-                h.branch.clone(),
-                h.last_rebase_at,
-                h.last_rebase_failure_sha.clone(),
-                h.pr_url.clone(),
-            ),
-            None => continue,
-        };
+        let (branch, last_rebase_at, last_failure_sha, cached_pr_url) =
+            match children.get(issue_number) {
+                Some(h) => (
+                    h.branch.clone(),
+                    h.last_rebase_at,
+                    h.last_rebase_failure_sha.clone(),
+                    h.pr_url.clone(),
+                ),
+                None => continue,
+            };
 
         if rebase_count >= config.max_rebases_per_cycle {
             eprintln!(
@@ -2600,9 +2613,8 @@ mod tests {
         extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
         post_artifact_comments_with_client, should_close_no_diff_draft_pr,
         should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
-        sweep_artifact_comments,
-        truncate_for_github, validate_daemon_branch_format, write_body_file, ArtifactCommentClient,
-        ArtifactWatcherState, TRUNCATED_NOTE,
+        sweep_artifact_comments, truncate_for_github, validate_daemon_branch_format,
+        write_body_file, ArtifactCommentClient, ArtifactWatcherState, TRUNCATED_NOTE,
     };
     use crate::error::RalphError;
     use crate::Result;
@@ -2713,7 +2725,8 @@ mod tests {
 
     #[test]
     fn should_retry_complete_task_retries_only_transient_errors_under_cap() {
-        let transient = RalphError::Orchestration("network timeout while posting comment".to_owned());
+        let transient =
+            RalphError::Orchestration("network timeout while posting comment".to_owned());
         assert!(should_retry_complete_task(&transient, 1));
         assert!(should_retry_complete_task(&transient, 2));
         assert!(!should_retry_complete_task(&transient, 3));

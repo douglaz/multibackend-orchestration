@@ -512,9 +512,7 @@ async fn executes_completion_flow_until_complete() {
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
     let staged_deletions: Vec<&str> = uncommitted
         .lines()
-        .filter(|l| {
-            l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/")
-        })
+        .filter(|l| l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/"))
         .collect();
     assert!(
         staged_deletions.is_empty(),
@@ -527,10 +525,10 @@ async fn executes_completion_flow_until_complete() {
     let uncommitted_lines: Vec<&str> = uncommitted
         .lines()
         .filter(|l| {
-            !l.is_empty()
-                && !l.starts_with("?? ")
-                && !l.starts_with("!! ")
-                && !(l.starts_with(" M ") && l.contains(".ralph/"))
+            !(l.is_empty()
+                || l.starts_with("?? ")
+                || l.starts_with("!! ")
+                || l.starts_with(" M ") && l.contains(".ralph/"))
         })
         .collect();
     assert!(
@@ -2695,9 +2693,7 @@ async fn acceptance_gate_pass_keeps_completed() {
     let uncommitted = String::from_utf8_lossy(&status_output.stdout);
     let staged_deletions: Vec<&str> = uncommitted
         .lines()
-        .filter(|l| {
-            l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/")
-        })
+        .filter(|l| l.starts_with("D  .ralph/projects/") || l.starts_with("D .ralph/projects/"))
         .collect();
     assert!(
         staged_deletions.is_empty(),
@@ -2708,10 +2704,10 @@ async fn acceptance_gate_pass_keeps_completed() {
     let uncommitted_lines: Vec<&str> = uncommitted
         .lines()
         .filter(|l| {
-            !l.is_empty()
-                && !l.starts_with("?? ")
-                && !l.starts_with("!! ")
-                && !(l.starts_with(" M ") && l.contains(".ralph/"))
+            !(l.is_empty()
+                || l.starts_with("?? ")
+                || l.starts_with("!! ")
+                || l.starts_with(" M ") && l.contains(".ralph/"))
         })
         .collect();
     assert!(

@@ -32,7 +32,8 @@ pub async fn spawn_ralph_auto(
     project_id: Option<&str>,
     pr_url: Option<&str>,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file, project_id, pr_url)?;
+    let mut cmd =
+        build_ralph_auto_command(ralph_bin, worktree_path, idea, log_file, project_id, pr_url)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.
