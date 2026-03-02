@@ -4614,38 +4614,83 @@ fn latest_completion_feedback_context(
         return Ok(None);
     };
 
+    // Case 1: Failed acceptance QA results take priority (existing behavior).
     let failed_acceptance_results = completion
         .artifacts
         .acceptance_results
         .iter()
         .filter(|result| !result.passed)
         .collect::<Vec<_>>();
-    if failed_acceptance_results.is_empty() {
-        return Ok(None);
+    if !failed_acceptance_results.is_empty() {
+        let completer_verdict_content = completion
+            .artifacts
+            .verdict
+            .as_deref()
+            .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
+            .transpose()?
+            .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
+
+        let mut sections = vec![format!(
+            "### Completer Verdict Artifact\n\n{completer_verdict_content}"
+        )];
+        for (idx, result) in failed_acceptance_results.iter().enumerate() {
+            let acceptance_fail_content =
+                read_project_relative_file(project_dir, &result.artifact)?;
+            sections.push(format!(
+                "### Acceptance QA Failure Artifact {} (backend: {})\n\n{}",
+                idx + 1,
+                result.backend,
+                acceptance_fail_content
+            ));
+        }
+        return Ok(Some(sections.join("\n\n")));
     }
 
-    let completer_verdict_content = completion
-        .artifacts
-        .verdict
-        .as_deref()
-        .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
-        .transpose()?
-        .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
+    // Case 2: Completion verdict was Continue — feed back all completer verdicts
+    // so the planner knows exactly what the dissenting completer(s) found missing.
+    if completion.verdict == Some(CompletionVerdict::Continue) {
+        let loop_dir = project_dir
+            .join("loops")
+            .join(format!("{:03}-completion", completion.loop_number));
+        if loop_dir.is_dir() {
+            let mut entries: Vec<_> = fs::read_dir(&loop_dir)
+                .map_err(|e| {
+                    RalphError::Orchestration(format!(
+                        "failed to read completion loop dir '{}': {e}",
+                        loop_dir.display()
+                    ))
+                })?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.contains("completer-verdict"))
+                })
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
 
-    let mut sections = vec![format!(
-        "### Completer Verdict Artifact\n\n{completer_verdict_content}"
-    )];
-    for (idx, result) in failed_acceptance_results.iter().enumerate() {
-        let acceptance_fail_content = read_project_relative_file(project_dir, &result.artifact)?;
-        sections.push(format!(
-            "### Acceptance QA Failure Artifact {} (backend: {})\n\n{}",
-            idx + 1,
-            result.backend,
-            acceptance_fail_content
-        ));
+            let mut verdict_sections = Vec::new();
+            for entry in entries {
+                let content = fs::read_to_string(entry.path()).map_err(|e| {
+                    RalphError::Orchestration(format!(
+                        "failed to read verdict artifact '{}': {e}",
+                        entry.path().display()
+                    ))
+                })?;
+                verdict_sections.push(format!(
+                    "### Completer Verdict ({})\n\n{}",
+                    entry.file_name().to_string_lossy(),
+                    content
+                ));
+            }
+
+            if !verdict_sections.is_empty() {
+                return Ok(Some(verdict_sections.join("\n\n")));
+            }
+        }
     }
 
-    Ok(Some(sections.join("\n\n")))
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5729,6 +5774,7 @@ mod tests {
     use std::sync::Once;
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
@@ -5740,8 +5786,8 @@ mod tests {
     use super::{
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
         collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
-        preload_role_model_backends, resolve_tmux_settings, summarize_previous_specs_for_planner,
-        summarize_state_for_planner, validate_tmux_preflight,
+        latest_completion_feedback_context, preload_role_model_backends, resolve_tmux_settings,
+        summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
@@ -5749,8 +5795,9 @@ mod tests {
     use crate::error::RalphError;
     use crate::output_log::LogWriter;
     use crate::project::state::{
-        FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType,
-        ProjectState, QaExchange, ReviewExchange,
+        AcceptanceQaResult, CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState,
+        CompletionVerdict, FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus,
+        LoopType, Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
     };
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
@@ -7506,5 +7553,198 @@ mod tests {
     fn consensus_single_completer_continue() {
         // 0/1 complete, min=1, threshold=1.0 → false
         assert!(!super::compute_completion_consensus(0, 1, 1, 1.0));
+    }
+
+    // --- latest_completion_feedback_context tests ---
+
+    fn make_empty_state() -> ProjectState {
+        ProjectState {
+            project_id: "test".to_owned(),
+            project_name: "test".to_owned(),
+            created_at: Utc::now(),
+            prompt_file: "prompt.md".to_owned(),
+            prompt_hash: String::new(),
+            prompt_hash_at_loop_start: String::new(),
+            prompt_review_completed: false,
+            parent_project: None,
+            current_loop: 1,
+            current_phase: Phase::Planning,
+            phase_iteration: 1,
+            status: ProjectStatus::InProgress,
+            loops: vec![],
+            completion_attempts: vec![],
+            session_store: Default::default(),
+        }
+    }
+
+    fn make_completion_attempt(
+        loop_number: u32,
+        verdict: Option<CompletionVerdict>,
+    ) -> CompletionLoopState {
+        CompletionLoopState {
+            loop_number,
+            slug: "completion".to_owned(),
+            loop_type: LoopType::Completion,
+            status: LoopStatus::Completed,
+            backends: CompletionLoopBackends::new(
+                "claude(opus)".to_owned(),
+                vec!["claude(opus)".to_owned(), "openrouter".to_owned()],
+            ),
+            artifacts: CompletionLoopArtifacts {
+                termination_request: format!(
+                    "loops/{loop_number:03}-completion/termination-request.md"
+                ),
+                verdict: None,
+                acceptance_results: vec![],
+                acceptance_result: None,
+                acceptance_passed: None,
+            },
+            verdict,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        }
+    }
+
+    #[test]
+    fn latest_completion_feedback_none_when_no_attempts() {
+        let state = make_empty_state();
+        let dir = tempdir().unwrap();
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn latest_completion_feedback_none_when_verdict_complete() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            4,
+            Some(CompletionVerdict::Complete),
+        ));
+        let dir = tempdir().unwrap();
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn latest_completion_feedback_returns_verdicts_on_continue() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
+
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/011-completion");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        let verdict_claude = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Stray file\n";
+        let verdict_or = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Branch mismatch\n";
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-claude-opus.md"),
+            verdict_claude,
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-openrouter.md"),
+            verdict_or,
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback for Continue verdict");
+        assert!(
+            feedback.contains("Stray file"),
+            "should include claude verdict content"
+        );
+        assert!(
+            feedback.contains("Branch mismatch"),
+            "should include openrouter verdict content"
+        );
+        assert!(
+            feedback.contains("completer-verdict-claude-opus"),
+            "should reference claude verdict filename"
+        );
+        assert!(
+            feedback.contains("completer-verdict-openrouter"),
+            "should reference openrouter verdict filename"
+        );
+    }
+
+    #[test]
+    fn latest_completion_feedback_acceptance_failures_take_priority() {
+        let mut state = make_empty_state();
+        let mut attempt = make_completion_attempt(8, Some(CompletionVerdict::Continue));
+        // Add a verdict path and a failed acceptance result
+        attempt.artifacts.verdict = Some("loops/008-completion/completer-verdict.md".to_owned());
+        attempt
+            .artifacts
+            .acceptance_results
+            .push(AcceptanceQaResult {
+                backend: "claude(opus)".to_owned(),
+                passed: false,
+                artifact: "loops/008-completion/acceptance-fail.md".to_owned(),
+            });
+        state.completion_attempts.push(attempt);
+
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/008-completion");
+        fs::create_dir_all(&loop_dir).unwrap();
+        fs::write(
+            loop_dir.join("completer-verdict.md"),
+            "# Verdict: COMPLETE\n\nAll good",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("acceptance-fail.md"),
+            "Acceptance QA failed: test X broke",
+        )
+        .unwrap();
+        // Also write a Continue verdict file that should NOT be used
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-openrouter.md"),
+            "# Verdict: CONTINUE\n\nShouldn't see this",
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback");
+        assert!(
+            feedback.contains("Acceptance QA failed"),
+            "should include acceptance failure content"
+        );
+        assert!(
+            !feedback.contains("Shouldn't see this"),
+            "should NOT include Continue verdict when acceptance failures exist"
+        );
+    }
+
+    #[test]
+    fn latest_completion_feedback_uses_latest_attempt() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
+        state.completion_attempts.push(make_completion_attempt(
+            13,
+            Some(CompletionVerdict::Continue),
+        ));
+
+        let dir = tempdir().unwrap();
+        // Only create verdict files for loop 13
+        let loop_dir_13 = dir.path().join("loops/013-completion");
+        fs::create_dir_all(&loop_dir_13).unwrap();
+        fs::write(
+            loop_dir_13.join("20260301-completer-verdict-claude-opus.md"),
+            "# Verdict: CONTINUE\n\n## Missing\n1. Loop 13 issue\n",
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback from latest attempt");
+        assert!(
+            feedback.contains("Loop 13 issue"),
+            "should use loop 13 (latest), not loop 11"
+        );
     }
 }
