@@ -1766,7 +1766,9 @@ async fn complete_task_attempt(
         let workspace_root = config.workspace_root.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
-            handle_pr_flow(config, task_id, issue_number, &wt_path).await?;
+            if let Err(err) = handle_pr_flow(config, task_id, issue_number, &wt_path).await {
+                eprintln!("warning: PR flow failed for {task_id} (best-effort, continuing to label swap): {err}");
+            }
         }
     }
 
