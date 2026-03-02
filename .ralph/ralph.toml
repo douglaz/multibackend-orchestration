@@ -17,10 +17,10 @@ daemon_rebase_agent_backend = "claude(opus)"
 daemon_prd_enabled = true
 daemon_prd_question_backends = [
     "claude",
-    "codex",
+    "openrouter",
 ]
 daemon_prd_writer_backend = "claude"
-daemon_prd_reviewer_backend = "codex"
+daemon_prd_reviewer_backend = "openrouter"
 daemon_prd_max_revisions = 3
 daemon_prd_backend_timeout_secs = 3600
 
@@ -52,14 +52,14 @@ reformatter = "sonnet"
 [backends.claude.role_timeouts]
 
 [backends.codex]
-command = "codex"
+command = "openrouter"
 args = [
     "exec",
     "--dangerously-bypass-approvals-and-sandbox",
     "-",
 ]
 timeout_seconds = 7200
-enabled = "auto"
+enabled = false
 
 [backends.codex.env]
 
@@ -75,6 +75,39 @@ acceptance_qa = "gpt-5.3-codex-xhigh"
 reformatter = "gpt-5.3-codex-medium"
 
 [backends.codex.role_timeouts]
+
+[backends.openrouter]
+command = "/root/.local/bin/goose"
+args = [
+    "run",
+    "--provider",
+    "openrouter",
+    "--no-profile",
+    "--quiet",
+    "--with-builtin",
+    "developer",
+    "--output-format",
+    "stream-json",
+    "-i",
+    "-",
+]
+timeout_seconds = 7200
+enabled = "auto"
+
+[backends.openrouter.env]
+
+[backends.openrouter.models]
+planner = "openai/gpt-5.3-codex"
+implementer = "openai/gpt-5.3-codex"
+reviewer = "openai/gpt-5.3-codex"
+final_reviewer = "openai/gpt-5.3-codex"
+arbiter = "openai/gpt-5.3-codex"
+qa = "openai/gpt-5.3-codex"
+completer = "openai/gpt-5.3-codex"
+acceptance_qa = "openai/gpt-5.3-codex"
+reformatter = "openai/gpt-5.2-codex"
+
+[backends.openrouter.role_timeouts]
 
 [backends.gemini]
 command = "gemini"
@@ -103,16 +136,21 @@ commit_message_style = "conventional"
 commit_tag_format = "ralph/{project_id}/loop-{loop_number}"
 prompt_change_action = "abort"
 prompt_review_enabled = true
-prompt_review_backend = "codex(gpt-5.3-codex-xhigh)"
+prompt_review_backend = "openrouter"
 final_review_enabled = true
 final_review_backends = [
     "claude",
-    "codex",
+    "openrouter",
 ]
-final_review_arbiter_backend = "codex"
+final_review_arbiter_backend = "openrouter"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
 max_final_review_restarts = 15
+completion_backends = [
+    "claude",
+    "openrouter",
+]
+completion_min_completers = 2
 qa_enabled = false
 max_qa_iterations = 3
 planner_state_in_prompt = "summary"

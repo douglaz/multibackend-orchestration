@@ -18,9 +18,10 @@ use crate::config::{
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
-    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
-    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
+    changed_paths_excluding_prefixes, commit_and_push_initial_prompt,
+    commit_and_push_phase_transition, commit_feature_loop, reset_and_clean_working_tree, rev_parse,
+    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
+    ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
@@ -131,6 +132,10 @@ pub struct RunOptions {
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
     pub skip_prompt_review: bool,
+    /// PR URL resolved before child spawn (from existing PR lookup or passed
+    /// via CLI `--pr-url`).  If `None`, the draft-PR watcher will create a new
+    /// draft PR when the branch diverges.
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +236,15 @@ impl Orchestrator {
         let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
+        // Propagate PR URL from CLI / daemon into project state so it is
+        // available across orchestration phases (completion, final review, etc.).
+        if let Some(ref url) = options.pr_url {
+            if state.pr_url.as_ref() != Some(url) {
+                info!(pr_url = %url, "propagating PR URL into project state");
+                state.pr_url = Some(url.clone());
+            }
+        }
+
         // Compute repo root for cwd invariant assertions (spec D6).
         let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
         let repo_root_ref = repo_root.as_deref();
@@ -246,6 +260,21 @@ impl Orchestrator {
                     if branch_exists(repo_root, &branch)? {
                         checkout_branch(repo_root, &branch)?;
                         merge_base_branch(repo_root, &self.workspace.config.git.base_branch)?;
+                        if !options.skip_commit {
+                            commit_and_push_initial_prompt(
+                                repo_root,
+                                &project_id,
+                                &branch,
+                                effective.global.git.sign_commits,
+                            )?;
+                        }
+                    } else {
+                        // Branch safety is enforced within commit_and_push_initial_prompt,
+                        // but if no project branch exists yet we skip early prompt push.
+                        debug!(
+                            project = %project_id,
+                            "project branch missing; skipping early prompt push"
+                        );
                     }
                 }
             }
@@ -703,6 +732,25 @@ impl Orchestrator {
                         )
                     };
 
+                    // If the stored backend is missing or disabled, recalculate
+                    // from the loop alternation cycle.
+                    let implementer_backend_name =
+                        if registry.is_backend_available(&implementer_backend_name) {
+                            implementer_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %implementer_backend_name,
+                                recalculated = %recalc.implementer,
+                                loop_number,
+                                "implementer backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.implementer
+                        };
                     let implementer_backend =
                         registry.get_or_create_for_role(&implementer_backend_name, "implementer")?;
 
@@ -1229,18 +1277,29 @@ impl Orchestrator {
                             state = state_before_rollback;
                             return Err(err);
                         }
-                        if options.until_complete {
-                            logs.push(format!(
-                                "loop {ln}: QA iteration limit ({max_iter}) exceeded; rolled back, retrying"
-                            ));
-                            continue;
-                        }
                         return Err(RalphError::QaIterationLimitExceeded {
                             loop_number: ln,
                             max_iterations: max_iter,
                         });
                     }
 
+                    let qa_backend_name =
+                        if registry.is_backend_available(&qa_backend_name) {
+                            qa_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %qa_backend_name,
+                                recalculated = %recalc.qa,
+                                loop_number,
+                                "qa backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.qa
+                        };
                     let qa_backend = registry.get_or_create_for_role(&qa_backend_name, "qa")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
@@ -1473,6 +1532,23 @@ impl Orchestrator {
                         )
                     };
 
+                    let reviewer_backend_name =
+                        if registry.is_backend_available(&reviewer_backend_name) {
+                            reviewer_backend_name
+                        } else {
+                            let recalc = registry.assign_feature_backends(
+                                loop_number,
+                                &effective.workflow.starting_backend,
+                                &role_overrides,
+                            )?;
+                            warn!(
+                                original = %reviewer_backend_name,
+                                recalculated = %recalc.reviewer,
+                                loop_number,
+                                "reviewer backend unavailable, recalculated from loop cycle"
+                            );
+                            recalc.reviewer
+                        };
                     if state.phase_iteration > effective.workflow.max_review_iterations {
                         review_limit_hit =
                             Some((loop_number, effective.workflow.max_review_iterations));
@@ -2236,12 +2312,6 @@ impl Orchestrator {
                 ) {
                     state = state_before_rollback;
                     return Err(err);
-                }
-                if options.until_complete {
-                    logs.push(format!(
-                        "loop {ln}: review iteration limit ({max_iter}) exceeded; rolled back, retrying"
-                    ));
-                    continue;
                 }
                 return Err(RalphError::ReviewIterationLimitExceeded {
                     loop_number: ln,
@@ -4546,38 +4616,83 @@ fn latest_completion_feedback_context(
         return Ok(None);
     };
 
+    // Case 1: Failed acceptance QA results take priority (existing behavior).
     let failed_acceptance_results = completion
         .artifacts
         .acceptance_results
         .iter()
         .filter(|result| !result.passed)
         .collect::<Vec<_>>();
-    if failed_acceptance_results.is_empty() {
-        return Ok(None);
+    if !failed_acceptance_results.is_empty() {
+        let completer_verdict_content = completion
+            .artifacts
+            .verdict
+            .as_deref()
+            .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
+            .transpose()?
+            .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
+
+        let mut sections = vec![format!(
+            "### Completer Verdict Artifact\n\n{completer_verdict_content}"
+        )];
+        for (idx, result) in failed_acceptance_results.iter().enumerate() {
+            let acceptance_fail_content =
+                read_project_relative_file(project_dir, &result.artifact)?;
+            sections.push(format!(
+                "### Acceptance QA Failure Artifact {} (backend: {})\n\n{}",
+                idx + 1,
+                result.backend,
+                acceptance_fail_content
+            ));
+        }
+        return Ok(Some(sections.join("\n\n")));
     }
 
-    let completer_verdict_content = completion
-        .artifacts
-        .verdict
-        .as_deref()
-        .map(|verdict_rel| read_project_relative_file(project_dir, verdict_rel))
-        .transpose()?
-        .unwrap_or_else(|| "(missing completer verdict artifact)".to_owned());
+    // Case 2: Completion verdict was Continue — feed back all completer verdicts
+    // so the planner knows exactly what the dissenting completer(s) found missing.
+    if completion.verdict == Some(CompletionVerdict::Continue) {
+        let loop_dir = project_dir
+            .join("loops")
+            .join(format!("{:03}-completion", completion.loop_number));
+        if loop_dir.is_dir() {
+            let mut entries: Vec<_> = fs::read_dir(&loop_dir)
+                .map_err(|e| {
+                    RalphError::Orchestration(format!(
+                        "failed to read completion loop dir '{}': {e}",
+                        loop_dir.display()
+                    ))
+                })?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.contains("completer-verdict"))
+                })
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
 
-    let mut sections = vec![format!(
-        "### Completer Verdict Artifact\n\n{completer_verdict_content}"
-    )];
-    for (idx, result) in failed_acceptance_results.iter().enumerate() {
-        let acceptance_fail_content = read_project_relative_file(project_dir, &result.artifact)?;
-        sections.push(format!(
-            "### Acceptance QA Failure Artifact {} (backend: {})\n\n{}",
-            idx + 1,
-            result.backend,
-            acceptance_fail_content
-        ));
+            let mut verdict_sections = Vec::new();
+            for entry in entries {
+                let content = fs::read_to_string(entry.path()).map_err(|e| {
+                    RalphError::Orchestration(format!(
+                        "failed to read verdict artifact '{}': {e}",
+                        entry.path().display()
+                    ))
+                })?;
+                verdict_sections.push(format!(
+                    "### Completer Verdict ({})\n\n{}",
+                    entry.file_name().to_string_lossy(),
+                    content
+                ));
+            }
+
+            if !verdict_sections.is_empty() {
+                return Ok(Some(verdict_sections.join("\n\n")));
+            }
+        }
     }
 
-    Ok(Some(sections.join("\n\n")))
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5122,6 +5237,28 @@ where
     )
     .await?;
 
+    // Detect quota/credits exhaustion in raw output. Some backends (e.g. OpenRouter)
+    // exit 0 but return only a notification instead of content. Catch this early to avoid
+    // sending empty/garbage output to the reformatter, which would fabricate a fake response.
+    const QUOTA_OUTPUT_PATTERNS: &[&str] = &[
+        "creditsExhausted",
+        "add more credits",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+    ];
+    if let Some(pat) = QUOTA_OUTPUT_PATTERNS
+        .iter()
+        .find(|p| first_raw.contains(**p))
+    {
+        return Err(RalphError::BackendCommandFailed {
+            backend: backend_name.clone(),
+            details: format!(
+                "quota/credits error detected in output ({pat}): \
+                 backend returned a credits-exhausted notification instead of content"
+            ),
+        });
+    }
+
     // If output is empty/near-empty, retry with the same backend before going to the
     // reformatter. Empty responses indicate a backend execution issue (e.g. token limits,
     // overloaded API), not a formatting problem. Sending empty output to the reformatter
@@ -5639,6 +5776,7 @@ mod tests {
     use std::sync::Once;
 
     use async_trait::async_trait;
+    use chrono::Utc;
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
@@ -5650,8 +5788,8 @@ mod tests {
     use super::{
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
         collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
-        preload_role_model_backends, resolve_tmux_settings, summarize_previous_specs_for_planner,
-        summarize_state_for_planner, validate_tmux_preflight,
+        latest_completion_feedback_context, preload_role_model_backends, resolve_tmux_settings,
+        summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
@@ -5659,8 +5797,9 @@ mod tests {
     use crate::error::RalphError;
     use crate::output_log::LogWriter;
     use crate::project::state::{
-        FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus, LoopType,
-        ProjectState, QaExchange, ReviewExchange,
+        AcceptanceQaResult, CompletionLoopArtifacts, CompletionLoopBackends, CompletionLoopState,
+        CompletionVerdict, FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus,
+        LoopType, Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
     };
 
     fn tmux_disabled() -> BackendRegistryTmuxConfig {
@@ -7416,5 +7555,199 @@ mod tests {
     fn consensus_single_completer_continue() {
         // 0/1 complete, min=1, threshold=1.0 → false
         assert!(!super::compute_completion_consensus(0, 1, 1, 1.0));
+    }
+
+    // --- latest_completion_feedback_context tests ---
+
+    fn make_empty_state() -> ProjectState {
+        ProjectState {
+            project_id: "test".to_owned(),
+            project_name: "test".to_owned(),
+            created_at: Utc::now(),
+            prompt_file: "prompt.md".to_owned(),
+            prompt_hash: String::new(),
+            prompt_hash_at_loop_start: String::new(),
+            prompt_review_completed: false,
+            parent_project: None,
+            current_loop: 1,
+            current_phase: Phase::Planning,
+            phase_iteration: 1,
+            status: ProjectStatus::InProgress,
+            loops: vec![],
+            completion_attempts: vec![],
+            session_store: Default::default(),
+            pr_url: None,
+        }
+    }
+
+    fn make_completion_attempt(
+        loop_number: u32,
+        verdict: Option<CompletionVerdict>,
+    ) -> CompletionLoopState {
+        CompletionLoopState {
+            loop_number,
+            slug: "completion".to_owned(),
+            loop_type: LoopType::Completion,
+            status: LoopStatus::Completed,
+            backends: CompletionLoopBackends::new(
+                "claude(opus)".to_owned(),
+                vec!["claude(opus)".to_owned(), "openrouter".to_owned()],
+            ),
+            artifacts: CompletionLoopArtifacts {
+                termination_request: format!(
+                    "loops/{loop_number:03}-completion/termination-request.md"
+                ),
+                verdict: None,
+                acceptance_results: vec![],
+                acceptance_result: None,
+                acceptance_passed: None,
+            },
+            verdict,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        }
+    }
+
+    #[test]
+    fn latest_completion_feedback_none_when_no_attempts() {
+        let state = make_empty_state();
+        let dir = tempdir().unwrap();
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn latest_completion_feedback_none_when_verdict_complete() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            4,
+            Some(CompletionVerdict::Complete),
+        ));
+        let dir = tempdir().unwrap();
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn latest_completion_feedback_returns_verdicts_on_continue() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
+
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/011-completion");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        let verdict_claude = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Stray file\n";
+        let verdict_or = "# Verdict: CONTINUE\n\n## Missing Requirements\n1. Branch mismatch\n";
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-claude-opus.md"),
+            verdict_claude,
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-openrouter.md"),
+            verdict_or,
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback for Continue verdict");
+        assert!(
+            feedback.contains("Stray file"),
+            "should include claude verdict content"
+        );
+        assert!(
+            feedback.contains("Branch mismatch"),
+            "should include openrouter verdict content"
+        );
+        assert!(
+            feedback.contains("completer-verdict-claude-opus"),
+            "should reference claude verdict filename"
+        );
+        assert!(
+            feedback.contains("completer-verdict-openrouter"),
+            "should reference openrouter verdict filename"
+        );
+    }
+
+    #[test]
+    fn latest_completion_feedback_acceptance_failures_take_priority() {
+        let mut state = make_empty_state();
+        let mut attempt = make_completion_attempt(8, Some(CompletionVerdict::Continue));
+        // Add a verdict path and a failed acceptance result
+        attempt.artifacts.verdict = Some("loops/008-completion/completer-verdict.md".to_owned());
+        attempt
+            .artifacts
+            .acceptance_results
+            .push(AcceptanceQaResult {
+                backend: "claude(opus)".to_owned(),
+                passed: false,
+                artifact: "loops/008-completion/acceptance-fail.md".to_owned(),
+            });
+        state.completion_attempts.push(attempt);
+
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/008-completion");
+        fs::create_dir_all(&loop_dir).unwrap();
+        fs::write(
+            loop_dir.join("completer-verdict.md"),
+            "# Verdict: COMPLETE\n\nAll good",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("acceptance-fail.md"),
+            "Acceptance QA failed: test X broke",
+        )
+        .unwrap();
+        // Also write a Continue verdict file that should NOT be used
+        fs::write(
+            loop_dir.join("20260301-completer-verdict-openrouter.md"),
+            "# Verdict: CONTINUE\n\nShouldn't see this",
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback");
+        assert!(
+            feedback.contains("Acceptance QA failed"),
+            "should include acceptance failure content"
+        );
+        assert!(
+            !feedback.contains("Shouldn't see this"),
+            "should NOT include Continue verdict when acceptance failures exist"
+        );
+    }
+
+    #[test]
+    fn latest_completion_feedback_uses_latest_attempt() {
+        let mut state = make_empty_state();
+        state.completion_attempts.push(make_completion_attempt(
+            11,
+            Some(CompletionVerdict::Continue),
+        ));
+        state.completion_attempts.push(make_completion_attempt(
+            13,
+            Some(CompletionVerdict::Continue),
+        ));
+
+        let dir = tempdir().unwrap();
+        // Only create verdict files for loop 13
+        let loop_dir_13 = dir.path().join("loops/013-completion");
+        fs::create_dir_all(&loop_dir_13).unwrap();
+        fs::write(
+            loop_dir_13.join("20260301-completer-verdict-claude-opus.md"),
+            "# Verdict: CONTINUE\n\n## Missing\n1. Loop 13 issue\n",
+        )
+        .unwrap();
+
+        let result = latest_completion_feedback_context(&state, dir.path()).unwrap();
+        let feedback = result.expect("should return feedback from latest attempt");
+        assert!(
+            feedback.contains("Loop 13 issue"),
+            "should use loop 13 (latest), not loop 11"
+        );
     }
 }

@@ -1,4 +1,5 @@
 mod auto;
+mod backend;
 pub(crate) mod backend_spec;
 mod config;
 mod daemon;
@@ -34,6 +35,7 @@ pub enum Commands {
     Init(InitArgs),
     Project(ProjectArgs),
     Run(RunArgs),
+    Backend(backend::BackendArgs),
     Prd(prd::PrdArgs),
     QuickPrd(quick_prd::QuickPrdArgs),
     Auto(auto::AutoArgs),
@@ -146,6 +148,9 @@ pub struct RunArgs {
         conflicts_with = "tmux"
     )]
     pub no_tmux: Option<bool>,
+    /// PR URL to pass through to the orchestration context.
+    #[arg(long = "pr-url")]
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -276,6 +281,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Init(args) => init::execute(args),
         Commands::Project(args) => project::execute(args),
         Commands::Run(args) => run::execute(args).await,
+        Commands::Backend(args) => backend::execute(args).await,
         Commands::Prd(args) => prd::execute(args).await,
         Commands::QuickPrd(args) => quick_prd::execute(args).await,
         Commands::Auto(args) => auto::execute(args).await,
@@ -465,8 +471,8 @@ mod tests {
         };
 
         assert_eq!(args.idea, "add retry logic");
-        assert_eq!(args.writer_backend, "claude");
-        assert_eq!(args.reviewer_backend, "codex");
+        assert_eq!(args.writer_backend, "");
+        assert_eq!(args.reviewer_backend, "");
         assert_eq!(args.max_revisions, 1);
         assert!(!args.non_interactive);
         assert!(!args.interactive);

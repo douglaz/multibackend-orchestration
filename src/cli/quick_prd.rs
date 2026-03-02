@@ -14,9 +14,9 @@ use crate::Result;
 pub struct QuickPrdArgs {
     #[arg(long)]
     pub idea: String,
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = "")]
     pub writer_backend: String,
-    #[arg(long, default_value = "codex")]
+    #[arg(long, default_value = "")]
     pub reviewer_backend: String,
     #[arg(long, default_value_t = 1, value_parser = parse_positive_u32)]
     pub max_revisions: u32,
@@ -54,12 +54,16 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
     );
 
     let writer_spec = if args.writer_backend.trim().is_empty() {
-        workspace.config.workspace.default_backend.clone()
+        workspace.config.workspace.daemon_prd_writer_backend.clone()
     } else {
         args.writer_backend.clone()
     };
     let reviewer_spec = if args.reviewer_backend.trim().is_empty() {
-        workspace.config.workspace.default_backend.clone()
+        workspace
+            .config
+            .workspace
+            .daemon_prd_reviewer_backend
+            .clone()
     } else {
         args.reviewer_backend.clone()
     };

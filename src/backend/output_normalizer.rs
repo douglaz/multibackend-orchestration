@@ -38,6 +38,11 @@ const STREAM_EVENT_TYPES: &[&str] = &[
     "message",
     "tool_use",
     "tool_result",
+    // Goose CLI
+    "complete",
+    "notification",
+    // OpenCode CLI
+    "step_start",
 ];
 
 pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
@@ -112,6 +117,7 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
 pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
     let mut output = NormalizedOutput::default();
     let mut json_event_count = 0_usize;
+    let mut last_goose_msg_id: Option<String> = None;
     let mut result_text: Option<String> = None;
 
     for line in raw.lines() {
@@ -191,7 +197,48 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 }
             }
             "message" => {
-                if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                // Goose CLI wraps messages in {"type":"message","message":{...}}.
+                // Gemini CLI has {"type":"message","role":"assistant","content":"..."}.
+                if let Some(inner) = event.get("message") {
+                    // Goose format: extract text from inner message.content[]
+                    // Only extract "text" type content, skip "reasoning" and "toolRequest".
+                    // Goose streams token-by-token: each token arrives as a separate
+                    // "message" event sharing the same message ID. We concatenate
+                    // tokens from the same message directly (no separator), but insert
+                    // a newline when a new message ID appears (different assistant turn).
+                    let role = inner.get("role").and_then(Value::as_str);
+                    if role == Some("assistant") {
+                        let msg_id = inner.get("id").and_then(Value::as_str);
+                        let is_new_message = msg_id.is_some_and(|id| {
+                            last_goose_msg_id.as_deref().is_some_and(|prev| prev != id)
+                        });
+                        if let Some(id) = msg_id {
+                            last_goose_msg_id = Some(id.to_owned());
+                        }
+                        if let Some(items) = inner.pointer("/content").and_then(Value::as_array) {
+                            for item in items {
+                                let ct = item.get("type").and_then(Value::as_str);
+                                if ct == Some("text") {
+                                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                        if is_new_message
+                                            && !output.text.is_empty()
+                                            && !output.text.ends_with('\n')
+                                        {
+                                            output.text.push('\n');
+                                        }
+                                        output.text.push_str(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Extract session from inner message.id
+                    if output.session_id.is_none() {
+                        output.session_id =
+                            inner.get("id").and_then(Value::as_str).map(str::to_owned);
+                    }
+                } else if event.get("role").and_then(Value::as_str) == Some("assistant") {
+                    // Gemini format: role at top level
                     if let Some(content) = event.get("content") {
                         if let Some(text) = extract_text_from_content(content) {
                             if !output.text.is_empty() && !output.text.ends_with('\n') {
@@ -262,6 +309,61 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                 merge_usage_from_event(&event, &mut output);
             }
             "turn.started" => {}
+
+            // --- Goose CLI events ---
+            "complete" => {
+                // Final event: {"type":"complete","total_tokens":N}
+                if let Some(total) = event.get("total_tokens").and_then(Value::as_u64) {
+                    // total_tokens is the sum; we don't get a breakdown, but
+                    // store in tokens_in if no prior value (best-effort).
+                    if output.tokens_in.is_none() && output.tokens_out.is_none() {
+                        output.tokens_in = Some(total);
+                    }
+                }
+            }
+            "notification" => {
+                // Log/notification events from goose extensions; skip.
+            }
+
+            // --- OpenCode CLI events ---
+            "step_start" => {
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "text" => {
+                if let Some(text) = event.pointer("/part/text").and_then(Value::as_str) {
+                    if !output.text.is_empty() && !output.text.ends_with('\n') {
+                        output.text.push('\n');
+                    }
+                    output.text.push_str(text);
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            "step_finish" => {
+                // Extract tokens from part.tokens: {input, output, reasoning, cache: {read, write}}
+                if let Some(tokens) = event.pointer("/part/tokens") {
+                    output.tokens_in = extract_u64(tokens, &["input"]).or(output.tokens_in);
+                    output.tokens_out = extract_u64(tokens, &["output"]).or(output.tokens_out);
+                    if let Some(cache) = tokens.get("cache") {
+                        output.cached_in = extract_u64(cache, &["read"]).or(output.cached_in);
+                    }
+                }
+                if output.session_id.is_none() {
+                    output.session_id = event
+                        .get("sessionID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
 
             _ => {}
         }
@@ -966,5 +1068,127 @@ Done."#;
             !normalized.text.contains("written to file"),
             "should not use the short summary result"
         );
+    }
+
+    // --- Goose CLI output ---
+
+    #[test]
+    fn normalize_output_goose_cli_extracts_text_and_tokens() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-abc123","role":"assistant","created":1772238503,"content":[{"type":"text","text":"Hello from goose!"}],"metadata":{"userVisible":true}}}"#,
+            "\n",
+            r#"{"type":"complete","total_tokens":1073}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose cli");
+        assert_eq!(normalized.text, "Hello from goose!");
+        assert_eq!(normalized.session_id.as_deref(), Some("gen-abc123"));
+        assert_eq!(normalized.tokens_in, Some(1073));
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_filters_reasoning_and_notifications() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-xyz","role":"assistant","created":1,"content":[{"type":"reasoning","text":"thinking..."}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"notification","extension_id":"call_1","log":{"message":"running shell"}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-xyz\",\"role\":\"assistant\",\"created\":2,\"content\":[{\"type\":\"text\",\"text\":\"# Implementation Notes\\n\\nDone.\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"complete","total_tokens":500}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose filters reasoning");
+        assert_eq!(normalized.text, "# Implementation Notes\n\nDone.");
+        assert!(
+            !normalized.text.contains("thinking"),
+            "reasoning text should be filtered out"
+        );
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_multiple_text_messages() {
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-1","role":"assistant","created":1,"content":[{"type":"text","text":"First part."}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-1","role":"user","created":2,"content":[{"type":"toolResponse","id":"call_1","toolResult":{}}],"metadata":{}}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-2\",\"role\":\"assistant\",\"created\":3,\"content\":[{\"type\":\"text\",\"text\":\"# Final Answer\\n\\nAll done.\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"complete","total_tokens":2000}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose multi text");
+        assert!(
+            normalized.text.contains("\n# Final Answer"),
+            "H1 heading must be on its own line; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(normalized.text, "First part.\n# Final Answer\n\nAll done.");
+    }
+
+    #[test]
+    fn normalize_output_goose_cli_token_streaming_preserves_fenced_json() {
+        // Goose streams token-by-token with the same message ID.
+        // Tokens must be concatenated directly without inserting newlines,
+        // otherwise "```json" gets split into "```\njson" and fenced JSON parsing breaks.
+        let raw = concat!(
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"```"}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"json"}],"metadata":{}}}"#,
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-abc\",\"role\":\"assistant\",\"created\":1,\"content\":[{\"type\":\"text\",\"text\":\"\\n\"}],\"metadata\":{}}}",
+            "\n",
+            "{\"type\":\"message\",\"message\":{\"id\":\"gen-abc\",\"role\":\"assistant\",\"created\":1,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"approved\\\": true}\\n\"}],\"metadata\":{}}}",
+            "\n",
+            r#"{"type":"message","message":{"id":"gen-abc","role":"assistant","created":1,"content":[{"type":"text","text":"```"}],"metadata":{}}}"#,
+            "\n",
+            r#"{"type":"complete","total_tokens":100}"#,
+        );
+        let normalized = normalize_output(raw).expect("goose token streaming");
+        assert!(
+            normalized.text.contains("```json"),
+            "fenced JSON opener must not be split; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(normalized.text, "```json\n{\"approved\": true}\n```");
+    }
+
+    // --- OpenCode CLI output ---
+
+    #[test]
+    fn normalize_output_opencode_cli_extracts_text_and_metadata() {
+        let raw = concat!(
+            r#"{"type":"step_start","timestamp":1772226736532,"sessionID":"ses_abc123","part":{"id":"prt_1","sessionID":"ses_abc123","messageID":"msg_1","type":"step-start","snapshot":"abc"}}"#,
+            "\n",
+            r#"{"type":"text","timestamp":1772226737081,"sessionID":"ses_abc123","part":{"id":"prt_2","sessionID":"ses_abc123","messageID":"msg_1","type":"text","text":"Hello from opencode!","time":{"start":1772226737080,"end":1772226737080}}}"#,
+            "\n",
+            r#"{"type":"step_finish","timestamp":1772226737089,"sessionID":"ses_abc123","part":{"id":"prt_3","sessionID":"ses_abc123","messageID":"msg_1","type":"step-finish","reason":"stop","snapshot":"abc","cost":0.001888,"tokens":{"input":248,"output":65,"reasoning":51,"cache":{"read":12220,"write":0}}}}"#,
+        );
+        let normalized = normalize_output(raw).expect("opencode cli");
+        assert_eq!(normalized.text, "Hello from opencode!");
+        assert_eq!(normalized.session_id.as_deref(), Some("ses_abc123"));
+        assert_eq!(normalized.tokens_in, Some(248));
+        assert_eq!(normalized.tokens_out, Some(65));
+        assert_eq!(normalized.cached_in, Some(12220));
+    }
+
+    #[test]
+    fn normalize_output_opencode_cli_multiple_text_events() {
+        let raw = concat!(
+            r#"{"type":"step_start","timestamp":1,"sessionID":"ses_multi","part":{"type":"step-start"}}"#,
+            "\n",
+            r#"{"type":"text","timestamp":2,"sessionID":"ses_multi","part":{"type":"text","text":"First part."}}"#,
+            "\n",
+            "{\"type\":\"text\",\"timestamp\":3,\"sessionID\":\"ses_multi\",\"part\":{\"type\":\"text\",\"text\":\"# Implementation Notes\\n\\nDone.\"}}",
+            "\n",
+            r#"{"type":"step_finish","timestamp":4,"sessionID":"ses_multi","part":{"type":"step-finish","tokens":{"input":100,"output":50}}}"#,
+        );
+        let normalized = normalize_output(raw).expect("opencode multi text");
+        assert!(
+            normalized.text.contains("\n# Implementation Notes"),
+            "H1 heading must be on its own line; got: {:?}",
+            normalized.text,
+        );
+        assert_eq!(normalized.session_id.as_deref(), Some("ses_multi"));
+        assert_eq!(normalized.tokens_in, Some(100));
+        assert_eq!(normalized.tokens_out, Some(50));
     }
 }

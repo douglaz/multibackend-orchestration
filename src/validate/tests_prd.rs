@@ -131,7 +131,7 @@ set -euo pipefail
 
 INPUT="$(cat)"
 
-if echo "$INPUT" | grep -q "You are a product ideation specialist"; then
+if grep -q "You are a product ideation specialist" <<< "$INPUT"; then
   cat <<'EOF'
 ## Core Concept
 Clear idea framing for the proposed product.
@@ -151,7 +151,7 @@ Clear idea framing for the proposed product.
 ## Constraints & Assumptions
 - Basic implementation assumptions
 EOF
-elif echo "$INPUT" | grep -q "You are a technical research analyst"; then
+elif grep -q "You are a technical research analyst" <<< "$INPUT"; then
   cat <<'EOF'
 ## Market Context
 - Market overview
@@ -168,7 +168,7 @@ elif echo "$INPUT" | grep -q "You are a technical research analyst"; then
 ## Risk Assessment
 - Low risk scope
 EOF
-elif echo "$INPUT" | grep -q "You are a product strategist"; then
+elif grep -q "You are a product strategist" <<< "$INPUT"; then
   cat <<'EOF'
 ## Product Vision
 - Vision summary
@@ -188,7 +188,7 @@ elif echo "$INPUT" | grep -q "You are a product strategist"; then
 ## Open Questions
 - None
 EOF
-elif echo "$INPUT" | grep -q "You are a technical product manager"; then
+elif grep -q "You are a technical product manager" <<< "$INPUT"; then
   cat <<'EOF'
 ## Executive Summary
 - Summary
@@ -229,7 +229,7 @@ elif echo "$INPUT" | grep -q "You are a technical product manager"; then
 ## Open Questions
 - None
 EOF
-elif echo "$INPUT" | grep -q "You are a requirements analyst"; then
+elif grep -q "You are a requirements analyst" <<< "$INPUT"; then
   cat <<'EOF'
 ```json
 {
@@ -240,7 +240,7 @@ elif echo "$INPUT" | grep -q "You are a requirements analyst"; then
 }
 ```
 EOF
-elif echo "$INPUT" | grep -q "You are a PRD reviewer."; then
+elif grep -q "You are a PRD reviewer." <<< "$INPUT"; then
   cat <<'EOF'
 ```json
 {

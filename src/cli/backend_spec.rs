@@ -24,7 +24,7 @@ pub fn validate_backend_spec(spec: &str, config: &GlobalConfig) -> Result<()> {
 pub fn validate_backend_spec_name(spec: &str) -> Result<()> {
     let parsed = parse_backend_spec(spec)?;
     match parsed.name.as_str() {
-        "claude" | "codex" | "gemini" => Ok(()),
+        "claude" | "codex" | "gemini" | "openrouter" => Ok(()),
         _ => Err(RalphError::Validation(format!(
             "unknown backend: {}",
             parsed.name

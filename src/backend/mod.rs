@@ -2,6 +2,7 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod mock;
+pub mod openrouter;
 pub mod output_normalizer;
 pub mod tmux;
 pub mod tmux_backend;
@@ -225,6 +226,9 @@ impl CliBackend {
         match &ctx.session_id {
             Some(id) => match self.name.as_str() {
                 n if n.starts_with("claude") || n == "claude" => self.effective_args_claude(id),
+                n if n.starts_with("openrouter") || n == "openrouter" => {
+                    self.effective_args_goose(id)
+                }
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
                 n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
                 _ => Ok(self.args.clone()),
@@ -283,6 +287,27 @@ impl CliBackend {
                 }
                 args.push("--output-format".to_owned());
                 args.push("json".to_owned());
+                Ok(args)
+            }
+            n if n.starts_with("openrouter") || n == "openrouter" => {
+                let mut args = Vec::with_capacity(self.args.len() + 2);
+                let mut skip_next = false;
+                for arg in &self.args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if arg == "--output-format" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if arg.starts_with("--output-format=") {
+                        continue;
+                    }
+                    args.push(arg.clone());
+                }
+                args.push("--output-format".to_owned());
+                args.push("stream-json".to_owned());
                 Ok(args)
             }
             _ => Ok(self.args.clone()),
@@ -431,6 +456,43 @@ impl CliBackend {
         result.push(session_id.to_owned());
         result.push("--output-format".to_owned());
         result.push("json".to_owned());
+        Ok(result)
+    }
+
+    fn effective_args_goose(&self, session_id: &str) -> Result<Vec<String>> {
+        // Goose resume rules:
+        // 1. Keep all existing args.
+        // 2. Remove existing --name, --session-id, --output-format forms and --resume flag.
+        // 3. Add --name <id> --resume --output-format stream-json.
+        let mut result = Vec::new();
+        let mut skip_next = false;
+
+        for arg in self.args.iter() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--name" || arg == "-n" || arg == "--session-id" || arg == "--output-format" {
+                skip_next = true;
+                continue;
+            }
+            if arg.starts_with("--name=")
+                || arg.starts_with("--session-id=")
+                || arg.starts_with("--output-format=")
+            {
+                continue;
+            }
+            if arg == "--resume" || arg == "-r" {
+                continue;
+            }
+            result.push(arg.clone());
+        }
+
+        result.push("--name".to_owned());
+        result.push(session_id.to_owned());
+        result.push("--resume".to_owned());
+        result.push("--output-format".to_owned());
+        result.push("stream-json".to_owned());
         Ok(result)
     }
 
@@ -679,9 +741,18 @@ impl CliBackend {
                 let stderr_bytes = self.collect_stderr(stderr_handle).await?;
 
                 if !status.success() {
+                    let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
+                    // Some backends (e.g. codex) report errors via stdout JSON
+                    // rather than stderr. When stderr is empty, include stdout
+                    // so quota/error messages are visible to callers.
+                    let details = if stderr_text.is_empty() {
+                        String::from_utf8_lossy(&captured_stdout).trim().to_owned()
+                    } else {
+                        stderr_text
+                    };
                     return Err(RalphError::BackendCommandFailed {
                         backend: self.name.clone(),
-                        details: String::from_utf8_lossy(&stderr_bytes).trim().to_owned(),
+                        details,
                     });
                 }
 
@@ -833,6 +904,12 @@ impl BackendRegistry {
             "gemini".to_owned(),
             backend_with_optional_tmux(gemini_backend, &tmux, shared_ctx.clone()),
         );
+        let mut openrouter_backend = openrouter::backend_from_config(config, None, None, None);
+        openrouter_backend.invocation_ctx = shared_invocation.clone();
+        backends.insert(
+            "openrouter".to_owned(),
+            backend_with_optional_tmux(openrouter_backend, &tmux, shared_ctx.clone()),
+        );
 
         Self {
             backends,
@@ -887,6 +964,20 @@ impl BackendRegistry {
         self.get_or_create_inner(spec, Some(role))
     }
 
+    /// Check whether a backend spec refers to a known, enabled backend.
+    /// Returns false for empty strings, unknown backends, or disabled backends.
+    pub fn is_backend_available(&self, spec: &str) -> bool {
+        if spec.is_empty() {
+            return false;
+        }
+        let Ok(parsed) = parse_backend_spec(spec) else {
+            return false;
+        };
+        self.config
+            .backend_config(&parsed.name)
+            .is_some_and(|cfg| cfg.enabled != BackendEnabled::Disabled)
+    }
+
     fn get_or_create_inner(&mut self, spec: &str, role: Option<&str>) -> Result<Arc<dyn Backend>> {
         let parsed = parse_backend_spec(spec)?;
         if self
@@ -921,13 +1012,24 @@ impl BackendRegistry {
 
     pub fn opposite(&self, backend: &str) -> Result<&str> {
         let parsed = parse_backend_spec(backend)?;
-        match parsed.name.as_str() {
-            "claude" => Ok("codex"),
-            "codex" => Ok("claude"),
-            _ => Err(RalphError::Validation(format!(
-                "unknown backend for opposite lookup: {backend}"
-            ))),
+        let primary = match parsed.name.as_str() {
+            "claude" => "codex",
+            "codex" | "openrouter" => "claude",
+            _ => {
+                return Err(RalphError::Validation(format!(
+                    "unknown backend for opposite lookup: {backend}"
+                )));
+            }
+        };
+        // If the primary opposite is unavailable, try openrouter as substitute
+        // for codex (since openrouter provides codex-equivalent models).
+        if !self.is_backend_available(primary)
+            && primary == "codex"
+            && self.is_backend_available("openrouter")
+        {
+            return Ok("openrouter");
         }
+        Ok(primary)
     }
 
     pub fn planner_for_loop(&self, loop_number: u32, starting_backend: &str) -> Result<String> {
@@ -1121,6 +1223,11 @@ impl BackendRegistry {
                 &self.config.backends.gemini.models,
                 &self.config.backends.gemini.enabled,
             ),
+            (
+                "openrouter",
+                &self.config.backends.openrouter.models,
+                &self.config.backends.openrouter.enabled,
+            ),
         ] {
             if *enabled == BackendEnabled::Disabled {
                 continue;
@@ -1140,6 +1247,10 @@ impl BackendRegistry {
             ("claude", self.config.backends.claude.enabled.clone()),
             ("codex", self.config.backends.codex.enabled.clone()),
             ("gemini", self.config.backends.gemini.enabled.clone()),
+            (
+                "openrouter",
+                self.config.backends.openrouter.enabled.clone(),
+            ),
         ] {
             if enabled_mode != BackendEnabled::Enabled {
                 continue;
@@ -1216,6 +1327,12 @@ impl BackendRegistry {
                 self.cwd.clone(),
             )),
             "gemini" => Ok(gemini::backend_from_config(
+                &self.config,
+                model,
+                role,
+                self.cwd.clone(),
+            )),
+            "openrouter" => Ok(openrouter::backend_from_config(
                 &self.config,
                 model,
                 role,
@@ -2140,5 +2257,121 @@ done
         assert!(logged.contains("chunk-1"));
         assert!(logged.contains("chunk-6"));
         assert!(!logged.contains("--- timeout ts="));
+    }
+
+    #[test]
+    fn is_backend_available_returns_true_for_enabled_backend() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(registry.is_backend_available("claude"));
+        assert!(registry.is_backend_available("claude(opus)"));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_disabled_backend() {
+        let mut config = GlobalConfig::default();
+        config.backends.gemini.enabled = BackendEnabled::Disabled;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available("gemini"));
+        assert!(!registry.is_backend_available("gemini(gemini-3-pro-preview)"));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_empty_string() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available(""));
+    }
+
+    #[test]
+    fn is_backend_available_returns_false_for_unknown_backend() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert!(!registry.is_backend_available("unknown"));
+        assert!(!registry.is_backend_available("foobar(model)"));
+    }
+
+    #[test]
+    fn opposite_returns_codex_for_claude_when_codex_enabled() {
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        assert_eq!(registry.opposite("claude").unwrap(), "codex");
+        assert_eq!(registry.opposite("codex").unwrap(), "claude");
+        assert_eq!(registry.opposite("openrouter").unwrap(), "claude");
+    }
+
+    #[test]
+    fn opposite_falls_back_to_openrouter_when_codex_disabled() {
+        let mut config = GlobalConfig::default();
+        config.backends.codex.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Auto;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        // claude's opposite is normally codex, but codex is disabled
+        // so it should fall back to openrouter.
+        assert_eq!(registry.opposite("claude").unwrap(), "openrouter");
+        // codex/openrouter opposite is still claude.
+        assert_eq!(registry.opposite("codex").unwrap(), "claude");
+        assert_eq!(registry.opposite("openrouter").unwrap(), "claude");
+    }
+
+    #[test]
+    fn assign_feature_backends_uses_openrouter_when_codex_disabled() {
+        let mut config = GlobalConfig::default();
+        config.backends.codex.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Auto;
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        let no_overrides = super::RoleOverrides {
+            planner: None,
+            implementer: None,
+            reviewer: None,
+            qa: None,
+            completer: None,
+        };
+
+        // Loop 5 (odd): planner=claude, implementer=opposite(claude)=openrouter (codex disabled)
+        let backends = registry
+            .assign_feature_backends(5, "claude", &no_overrides)
+            .expect("should assign backends");
+        assert_eq!(backends.planner, "claude(opus)");
+        assert!(
+            backends.implementer == "openrouter" || backends.implementer.starts_with("openrouter("),
+            "implementer should be openrouter, got: {}",
+            backends.implementer
+        );
+
+        // Loop 6 (even): planner=opposite(claude)=openrouter, implementer=opposite(openrouter)=claude
+        let backends = registry
+            .assign_feature_backends(6, "claude", &no_overrides)
+            .expect("should assign backends");
+        assert!(
+            backends.planner == "openrouter" || backends.planner.starts_with("openrouter("),
+            "planner should be openrouter, got: {}",
+            backends.planner
+        );
+        assert_eq!(backends.implementer, "claude(opus)");
+    }
+
+    #[test]
+    fn is_backend_available_with_recalculation_workflow() {
+        // Simulate the orchestrator's fallback logic:
+        // stored backend is empty (missing frontmatter), recalculate from cycle.
+        let config = GlobalConfig::default();
+        let registry = BackendRegistry::new(&config, tmux_disabled());
+        let no_overrides = super::RoleOverrides {
+            planner: None,
+            implementer: None,
+            reviewer: None,
+            qa: None,
+            completer: None,
+        };
+
+        let stored_backend = ""; // empty from missing frontmatter
+        assert!(!registry.is_backend_available(stored_backend));
+
+        // Recalculate for loop 5
+        let recalc = registry
+            .assign_feature_backends(5, "claude", &no_overrides)
+            .expect("should recalculate");
+        assert!(registry.is_backend_available(&recalc.implementer));
     }
 }
