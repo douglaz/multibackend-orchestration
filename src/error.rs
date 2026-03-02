@@ -109,6 +109,9 @@ pub enum RalphError {
     #[error("git conflict: {details}")]
     GitConflict { details: String },
 
+    #[error("branch mismatch: expected '{expected}', got '{actual}'")]
+    BranchMismatch { expected: String, actual: String },
+
     #[error("orchestration error: {0}")]
     Orchestration(String),
 
@@ -151,6 +154,45 @@ impl RalphError {
                     || details.contains("billing_hard_limit_reached")
             }
             _ => false,
+        }
+    }
+
+    /// Returns true when a failure is likely transient and safe to retry.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            RalphError::Validation(_)
+            | RalphError::InitTargetInvalid { .. }
+            | RalphError::WorkspaceNotFound
+            | RalphError::Json(_)
+            | RalphError::Yaml(_)
+            | RalphError::TomlDecode(_)
+            | RalphError::ActiveProjectNotSet
+            | RalphError::ProjectNotFound(_)
+            | RalphError::GitConflict { .. }
+            | RalphError::BranchMismatch { .. }
+            | RalphError::TmuxUnavailable
+            | RalphError::PrdValidationFailed(_)
+            | RalphError::PrdMissingInfo
+            | RalphError::PrdCacheMismatch(_)
+            | RalphError::TomlEncode(_)
+            | RalphError::Unsupported(_) => false,
+            RalphError::Orchestration(message) => {
+                let lower = message.to_ascii_lowercase();
+                lower.contains("timeout")
+                    || lower.contains("timed out")
+                    || lower.contains("network")
+                    || lower.contains("connection")
+                    || lower.contains("transport")
+                    || lower.contains("rate limit")
+                    || lower.contains("too many requests")
+                    || lower.contains("temporar")
+                    || lower.contains("unavailable")
+                    || lower.contains("try again")
+                    || lower.contains("failed to execute")
+                    || lower.contains("subprocess")
+                    || lower.contains("broken pipe")
+            }
+            _ => true,
         }
     }
 
@@ -247,5 +289,30 @@ mod tests {
     fn interactive_prd_failed_has_expected_exit_code() {
         let err = RalphError::InteractivePrdFailed("boom".to_owned());
         assert_eq!(err.exit_code(), 14);
+    }
+
+    #[test]
+    fn is_transient_distinguishes_terminal_and_transient_errors() {
+        let terminal = RalphError::BranchMismatch {
+            expected: "ralph/issue-93".to_owned(),
+            actual: "main".to_owned(),
+        };
+        assert!(!terminal.is_transient());
+
+        let transient = RalphError::Orchestration("network timeout while calling gh".to_owned());
+        assert!(transient.is_transient());
+    }
+
+    #[test]
+    fn branch_mismatch_display_includes_expected_and_actual() {
+        let err = RalphError::BranchMismatch {
+            expected: "ralph/issue-93".to_owned(),
+            actual: "main".to_owned(),
+        };
+
+        let message = err.to_string();
+        assert!(message.contains("branch mismatch"));
+        assert!(message.contains("ralph/issue-93"));
+        assert!(message.contains("main"));
     }
 }

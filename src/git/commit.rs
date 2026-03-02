@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::error::RalphError;
+use crate::git::branch::current_branch;
 use crate::git::ralph_commit::build_ralph_commit_message;
 use crate::git::{
     conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
@@ -11,6 +12,7 @@ use crate::Result;
 
 pub const ORCHESTRATION_STATE_PATH_PREFIX: &str = ".ralph/";
 pub const ORCHESTRATION_STATE_PATHSPEC: &str = ".ralph";
+const GENERATED_ARTIFACT_PATHS: &[&str] = &["SPEC.md"];
 
 /// Returns the diff of both staged and unstaged changes against HEAD.
 pub fn working_tree_diff(workdir: &Path) -> Result<String> {
@@ -119,11 +121,8 @@ pub fn commit_feature_loop(
     }
 
     run_git(workdir, &["add", "-A"])?;
-    // Unstage .ralph/ entries to avoid committing orchestration state.
-    let _ = run_git(
-        workdir,
-        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
-    );
+    // Unstage runtime and generated artifacts to avoid git pollution.
+    unstage_non_commit_artifacts(workdir);
 
     let mut commit_args = vec!["commit", "--allow-empty", "-m", message];
     if sign_commits {
@@ -134,6 +133,61 @@ pub fn commit_feature_loop(
     let commit_hash = rev_parse(workdir, "HEAD")?;
 
     Ok(commit_hash)
+}
+
+pub fn commit_and_push_initial_prompt(
+    repo_root: &Path,
+    project_id: &str,
+    expected_branch: &str,
+    sign_commits: bool,
+) -> Result<()> {
+    ensure_git_repo(repo_root)?;
+
+    let actual_branch = current_branch(repo_root)?;
+    if actual_branch != expected_branch {
+        return Err(RalphError::BranchMismatch {
+            expected: expected_branch.to_owned(),
+            actual: actual_branch,
+        });
+    }
+
+    // Stage only prompt-input files created during project setup.
+    let mut staged_any = false;
+    for rel in [
+        format!(".ralph/projects/{project_id}/prompt.md"),
+        format!(".ralph/projects/{project_id}/project.toml"),
+        format!(".ralph/projects/{project_id}/config.toml"),
+    ] {
+        if repo_root.join(&rel).exists() {
+            run_git(repo_root, &["add", "--", &rel])?;
+            staged_any = true;
+        }
+    }
+
+    if !staged_any {
+        return Ok(());
+    }
+
+    let has_staged_changes = {
+        let status = run_git_status(repo_root, &["diff", "--cached", "--quiet"])?;
+        !status.success()
+    };
+
+    if !has_staged_changes {
+        return Ok(());
+    }
+
+    let message = format!("chore({project_id}): sync initial prompt inputs");
+    let mut commit_args = vec!["commit", "-m", &message];
+    if sign_commits {
+        commit_args.insert(1, "-S");
+    }
+    run_git(repo_root, &commit_args)?;
+    run_git(
+        repo_root,
+        &["push", "origin", &format!("HEAD:{expected_branch}")],
+    )?;
+    Ok(())
 }
 
 pub fn commit_and_push_phase_transition(
@@ -202,14 +256,34 @@ pub fn count_phase_transition_checkpoints(
 pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     ensure_git_repo(workdir)?;
     run_git(workdir, &["add", "-A"])?;
-    // Unstage any .ralph/ entries that slipped in (e.g. repos where .ralph
-    // is not gitignored).  --ignore-unmatch avoids errors when nothing was
-    // staged.  Best-effort: errors are harmless.
-    let _ = run_git(
-        workdir,
-        &["rm", "--cached", "-r", "--ignore-unmatch", ".ralph"],
-    );
+    // Unstage runtime and generated artifacts to avoid git pollution.
+    // --ignore-unmatch avoids errors when nothing was staged.
+    // Best-effort: errors are harmless.
+    unstage_non_commit_artifacts(workdir);
     Ok(())
+}
+
+fn unstage_non_commit_artifacts(workdir: &Path) {
+    // Use `git reset HEAD -- .ralph` to unstage any .ralph/ entries that were
+    // picked up by `git add -A`.  Unlike `git rm --cached -r`, this restores
+    // the index entry to match HEAD rather than staging a deletion, so tracked
+    // files under `.ralph/` (e.g. prompt inputs committed via early-prompt-push)
+    // are preserved in the index without being re-staged or marked for removal.
+    //
+    // Best-effort: errors (e.g. unborn HEAD) are harmless — if HEAD doesn't
+    // exist the entries simply stay staged, which only matters for the very
+    // first commit where `.ralph` content is intentionally committed anyway.
+    let _ = run_git(workdir, &["reset", "HEAD", "--", ".ralph"]);
+
+    // Explicitly remove generated artifacts from the index.  These are files
+    // that should never be committed (e.g. SPEC.md), so `git rm --cached` is
+    // correct here — they are not tracked prompt inputs.
+    for artifact in GENERATED_ARTIFACT_PATHS {
+        let _ = run_git(
+            workdir,
+            &["rm", "--cached", "--ignore-unmatch", "--", artifact],
+        );
+    }
 }
 
 /// Undo non-orchestration working-tree/index changes and remove non-orchestration
@@ -325,8 +399,10 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::{
-        commit_and_push_phase_transition, commit_feature_loop, count_phase_transition_checkpoints,
+        commit_and_push_initial_prompt, commit_and_push_phase_transition, commit_feature_loop,
+        count_phase_transition_checkpoints,
     };
+    use crate::error::RalphError;
     use crate::git::branch::sync_project_branch;
     use crate::git::ralph_commit::{build_ralph_commit_message, derive_position};
     use crate::project::state::Phase;
@@ -547,6 +623,62 @@ mod tests {
             (1, Phase::Implementing),
             "position should revert to last pushed checkpoint after sync"
         );
+    }
+
+    #[test]
+    fn commit_and_push_initial_prompt_stages_only_prompt_inputs() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+
+        git_ok(&work, &["checkout", "-b", "ralph/issue-99"]);
+        git_ok(&work, &["push", "-u", "origin", "ralph/issue-99"]);
+
+        let project_dir = work.join(".ralph/projects/issue-99");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "initial prompt\n").expect("write prompt");
+        fs::write(project_dir.join("project.toml"), "name = \"Issue 99\"\n")
+            .expect("write project metadata");
+        fs::write(project_dir.join("config.toml"), "[workflow]\n").expect("write config");
+        fs::write(work.join("src-extra.txt"), "not prompt input\n").expect("write extra file");
+
+        commit_and_push_initial_prompt(&work, "issue-99", "ralph/issue-99", false)
+            .expect("initial prompt commit should succeed");
+
+        let changed = git_output(&work, &["show", "--name-only", "--pretty=format:", "HEAD"]);
+        let mut files: Vec<&str> = changed.lines().filter(|l| !l.trim().is_empty()).collect();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                ".ralph/projects/issue-99/config.toml",
+                ".ralph/projects/issue-99/project.toml",
+                ".ralph/projects/issue-99/prompt.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_and_push_initial_prompt_fails_on_branch_mismatch() {
+        let (_temp, _remote, work) = init_repo_with_remote();
+
+        git_ok(&work, &["checkout", "-b", "ralph/issue-99"]);
+        let project_dir = work.join(".ralph/projects/issue-99");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(project_dir.join("prompt.md"), "initial prompt\n").expect("write prompt");
+
+        let before = git_output(&work, &["rev-parse", "HEAD"]);
+        let err = commit_and_push_initial_prompt(&work, "issue-99", "ralph/issue-100", false)
+            .expect_err("branch mismatch should fail");
+
+        match err {
+            RalphError::BranchMismatch { expected, actual } => {
+                assert_eq!(expected, "ralph/issue-100");
+                assert_eq!(actual, "ralph/issue-99");
+            }
+            other => panic!("expected BranchMismatch, got {other:?}"),
+        }
+
+        let after = git_output(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(before, after, "HEAD should not move on branch mismatch");
     }
 
     fn init_repo() -> tempfile::TempDir {

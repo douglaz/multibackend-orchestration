@@ -18,9 +18,10 @@ use crate::config::{
 use crate::error::RalphError;
 use crate::git::branch::{branch_exists, checkout_branch, merge_base_branch, resolve_branch_name};
 use crate::git::commit::{
-    changed_paths_excluding_prefixes, commit_and_push_phase_transition, commit_feature_loop,
-    reset_and_clean_working_tree, rev_parse, stage_implementation_changes,
-    working_tree_diff_excluding_orchestration_state, ORCHESTRATION_STATE_PATH_PREFIX,
+    changed_paths_excluding_prefixes, commit_and_push_initial_prompt,
+    commit_and_push_phase_transition, commit_feature_loop, reset_and_clean_working_tree, rev_parse,
+    stage_implementation_changes, working_tree_diff_excluding_orchestration_state,
+    ORCHESTRATION_STATE_PATH_PREFIX,
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
@@ -131,6 +132,10 @@ pub struct RunOptions {
     pub on_prompt_change: Option<PromptChangeAction>,
     pub skip_commit: bool,
     pub skip_prompt_review: bool,
+    /// PR URL resolved before child spawn (from existing PR lookup or passed
+    /// via CLI `--pr-url`).  If `None`, the draft-PR watcher will create a new
+    /// draft PR when the branch diverges.
+    pub pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +236,15 @@ impl Orchestrator {
         let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
 
+        // Propagate PR URL from CLI / daemon into project state so it is
+        // available across orchestration phases (completion, final review, etc.).
+        if let Some(ref url) = options.pr_url {
+            if state.pr_url.as_ref() != Some(url) {
+                info!(pr_url = %url, "propagating PR URL into project state");
+                state.pr_url = Some(url.clone());
+            }
+        }
+
         // Compute repo root for cwd invariant assertions (spec D6).
         let repo_root: Option<PathBuf> = self.workspace.root.parent().map(|p| p.to_owned());
         let repo_root_ref = repo_root.as_deref();
@@ -246,6 +260,21 @@ impl Orchestrator {
                     if branch_exists(repo_root, &branch)? {
                         checkout_branch(repo_root, &branch)?;
                         merge_base_branch(repo_root, &self.workspace.config.git.base_branch)?;
+                        if !options.skip_commit {
+                            commit_and_push_initial_prompt(
+                                repo_root,
+                                &project_id,
+                                &branch,
+                                effective.global.git.sign_commits,
+                            )?;
+                        }
+                    } else {
+                        // Branch safety is enforced within commit_and_push_initial_prompt,
+                        // but if no project branch exists yet we skip early prompt push.
+                        debug!(
+                            project = %project_id,
+                            "project branch missing; skipping early prompt push"
+                        );
                     }
                 }
             }
@@ -7547,6 +7576,7 @@ mod tests {
             loops: vec![],
             completion_attempts: vec![],
             session_store: Default::default(),
+            pr_url: None,
         }
     }
 

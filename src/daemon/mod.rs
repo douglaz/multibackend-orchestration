@@ -28,12 +28,18 @@ pub struct ChildHandle {
     pub child: tokio::process::Child,
     pub watcher_cancel: CancellationToken,
     pub watcher_handle: Option<JoinHandle<()>>,
+    /// Cancellation token for the draft-PR watcher task.
+    pub draft_pr_cancel: CancellationToken,
+    /// Join handle for the draft-PR watcher task.
+    pub draft_pr_handle: Option<JoinHandle<()>>,
     pub branch: String,
     pub log_file: PathBuf,
     pub last_rebase_at: Option<Instant>,
     /// Head SHA of the last rebase failure comment posted for this task,
     /// used to avoid spamming duplicate comments on persistent failures.
     pub last_rebase_failure_sha: Option<String>,
+    /// PR URL for this task (resolved at spawn or created by draft-PR watcher).
+    pub pr_url: Option<String>,
 }
 
 pub fn format_task_id(owner: &str, repo: &str, issue_number: u32) -> String {

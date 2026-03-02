@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -87,8 +88,32 @@ where
 }
 
 const ARTIFACT_WATCH_POLL_SECONDS: u64 = 2;
+const DRAFT_PR_WATCH_POLL_SECONDS: u64 = 15;
 const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
+const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
+const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
+/// Maximum consecutive ahead-check failures before the watcher gives up.
+const DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+fn draft_pr_watch_poll_seconds() -> u64 {
+    std::env::var("RALPH_DRAFT_PR_WATCH_POLL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DRAFT_PR_WATCH_POLL_SECONDS)
+}
+
+fn default_sleep(duration: Duration) -> impl Future<Output = ()> {
+    tokio::time::sleep(duration)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DraftPrTransition {
+    None,
+    MarkReady,
+    CloseNoDiff,
+}
 
 #[derive(Default)]
 struct ArtifactWatcherState {
@@ -169,6 +194,225 @@ impl ArtifactCommentClient for GitHubArtifactCommentClient {
         })
         .await
     }
+}
+
+/// Draft-PR watcher: polls branch divergence on a fixed interval and creates
+/// a draft PR when the branch first moves ahead of the base branch.
+///
+/// Uses `tokio::select!` with cancellation for immediate shutdown.
+/// Only one draft creation attempt is active at a time (single-flight guard).
+/// Performs an unconditional push before draft PR creation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn draft_pr_watcher(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    cancel: CancellationToken,
+    workspace_root: PathBuf,
+) {
+    draft_pr_watcher_with_sleep(
+        owner,
+        repo,
+        base_branch,
+        worktree_path,
+        branch,
+        task_id,
+        issue_number,
+        cancel,
+        workspace_root,
+        default_sleep,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn draft_pr_watcher_with_sleep<S, SFut>(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    cancel: CancellationToken,
+    workspace_root: PathBuf,
+    mut sleep_fn: S,
+) where
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+{
+    let poll_interval = Duration::from_secs(draft_pr_watch_poll_seconds());
+    let mut pr_created = false;
+    let mut consecutive_failures: u32 = 0;
+
+    loop {
+        // Check if branch has commits ahead of base
+        let has_ahead = {
+            let wt = worktree_path.clone();
+            let base = base_branch.clone();
+            match spawn_blocking_op(move || github::has_commits_ahead_of_base(&wt, &base)).await {
+                Ok(v) => {
+                    consecutive_failures = 0;
+                    v
+                }
+                Err(err) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES {
+                        eprintln!(
+                            "draft-pr-watcher: ahead-check failed {consecutive_failures} consecutive times \
+                             for {task_id}, giving up: {err}"
+                        );
+                        break;
+                    }
+                    eprintln!(
+                        "draft-pr-watcher: ahead-check failed for {task_id} \
+                         ({consecutive_failures}/{DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES}): {err}"
+                    );
+                    false
+                }
+            }
+        };
+
+        if has_ahead && !pr_created {
+            // Step 1: push unconditionally before creating draft PR
+            let push_ok = {
+                let wt = worktree_path.clone();
+                let br = branch.clone();
+                match spawn_blocking_op(move || github::push_branch(&wt, &br)).await {
+                    Ok(()) => {
+                        eprintln!("draft-pr-watcher: pushed branch {branch} for {task_id}");
+                        true
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "draft-pr-watcher: push failed for {task_id} branch {branch}: {err}"
+                        );
+                        false
+                    }
+                }
+            };
+
+            // Step 2: create draft PR
+            if push_ok {
+                let owner_c = owner.clone();
+                let repo_c = repo.clone();
+                let br = branch.clone();
+                let tid = task_id.clone();
+                let title = format!("[Draft] {tid}");
+                let body = format!("Automated draft PR for task `{tid}` (issue #{issue_number}).");
+                match spawn_blocking_op(move || {
+                    github::create_pr(&owner_c, &repo_c, &br, &title, &body, true)
+                })
+                .await
+                {
+                    Ok(url) => {
+                        eprintln!("draft-pr-watcher: created draft PR for {task_id}: {url}");
+                        pr_created = true;
+                        // Persist PR URL to durable storage for daemon restart recovery.
+                        save_task_metadata(
+                            &workspace_root,
+                            &task_id,
+                            &TaskMetadata { pr_url: Some(url) },
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "draft-pr-watcher: failed to create draft PR for {task_id}: {err}"
+                        );
+                        // Re-check: another process may have created the PR concurrently.
+                        let owner_retry = owner.clone();
+                        let repo_retry = repo.clone();
+                        let br_retry = branch.clone();
+                        if let Ok(Some(url)) = spawn_blocking_op(move || {
+                            github::find_existing_pr(&owner_retry, &repo_retry, &br_retry)
+                        })
+                        .await
+                        {
+                            eprintln!("draft-pr-watcher: found existing PR for {task_id}: {url}");
+                            pr_created = true;
+                            save_task_metadata(
+                                &workspace_root,
+                                &task_id,
+                                &TaskMetadata { pr_url: Some(url) },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // If PR is created, watcher job is done.
+        if pr_created {
+            break;
+        }
+
+        // Wait for next poll or cancellation
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                break;
+            }
+            _ = sleep_fn(poll_interval) => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn draft_pr_watcher_single_iteration_for_test(
+    owner: String,
+    repo: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    branch: String,
+    task_id: String,
+    issue_number: u32,
+    workspace_root: PathBuf,
+) {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    draft_pr_watcher_with_sleep(
+        owner,
+        repo,
+        base_branch,
+        worktree_path,
+        branch,
+        task_id,
+        issue_number,
+        cancel,
+        workspace_root,
+        |_| async {},
+    )
+    .await;
+}
+
+pub(crate) async fn complete_task_with_retry_for_test<F, Fut, S, SFut>(
+    mut attempt_op: F,
+    mut sleep_fn: S,
+) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<()>>,
+    S: FnMut(Duration) -> SFut,
+    SFut: Future<Output = ()>,
+{
+    for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
+        match attempt_op().await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if let Some(delay) = complete_task_retry_delay(&err, attempt) {
+                    sleep_fn(delay).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(RalphError::Orchestration(
+        "complete_task retry loop exhausted unexpectedly".to_owned(),
+    ))
 }
 
 async fn post_artifact_comments(
@@ -479,6 +723,51 @@ fn task_log_path(workspace_root: &Path, task_id: &str) -> PathBuf {
         .join("tmp")
         .join("logs")
         .join(format!("{task_id}.log"))
+}
+
+/// Return the durable metadata file path for a task.
+///
+/// Stored under `.ralph/daemon/tasks/{task_id}.json` so it survives daemon
+/// restarts while the workspace root persists.
+fn task_metadata_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+    workspace_root
+        .join("daemon")
+        .join("tasks")
+        .join(format!("{task_id}.json"))
+}
+
+/// Durable per-task metadata persisted across daemon restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct TaskMetadata {
+    #[serde(default)]
+    pub pr_url: Option<String>,
+}
+
+/// Load task metadata from disk.  Returns `Default` if the file does not exist.
+pub fn load_task_metadata(workspace_root: &Path, task_id: &str) -> TaskMetadata {
+    let path = task_metadata_path(workspace_root, task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => TaskMetadata::default(),
+    }
+}
+
+/// Persist task metadata to disk (best-effort: logs on failure).
+pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetadata) {
+    let path = task_metadata_path(workspace_root, task_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(meta) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(&path, json) {
+                eprintln!("warning: failed to persist task metadata for {task_id}: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("warning: failed to serialize task metadata for {task_id}: {err}");
+        }
+    }
 }
 
 /// Print the last 50 lines of a task's log file to stderr for diagnostics.
@@ -1059,20 +1348,58 @@ async fn dispatch_task(
     // (e.g. tmpfs in nix build sandboxes).
     let child_start_time = SystemTime::now() - Duration::from_secs(2);
 
+    // Resolve PR URL: first check durable metadata (survives daemon restarts),
+    // then fall back to GitHub API lookup by exact head-branch match.
+    let persisted_meta = load_task_metadata(&config.workspace_root, &task_id);
+    let pr_url: Option<String> = if persisted_meta.pr_url.is_some() {
+        eprintln!(
+            "dispatch: recovered persisted PR URL for {task_id}: {}",
+            persisted_meta.pr_url.as_deref().unwrap_or("none")
+        );
+        persisted_meta.pr_url
+    } else {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let br = branch_name.clone();
+        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+            Ok(url) => url,
+            Err(err) => {
+                eprintln!("dispatch: PR URL lookup failed for {task_id}: {err}");
+                None
+            }
+        }
+    };
+
+    eprintln!(
+        "dispatch: resolved PR URL for {task_id}: {}",
+        pr_url.as_deref().unwrap_or("none")
+    );
+
     // Spawn child process
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
         if resume_existing_project {
-            eprintln!("dispatch: task {task_id} resuming with ralph run --project {project_id}");
-            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path).await?
+            eprintln!(
+                "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
+                pr_url.as_deref().unwrap_or("none")
+            );
+            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
+                .await?
         } else {
             eprintln!(
-                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id}"
+                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none")
             );
-            process::spawn_ralph_auto(&ralph_bin, &wt, &idea_clone, &log_path, Some(&project_id))
-                .await?
+            process::spawn_ralph_auto(
+                &ralph_bin,
+                &wt,
+                &idea_clone,
+                &log_path,
+                Some(&project_id),
+                pr_url.as_deref(),
+            )
+            .await?
         }
     };
 
@@ -1091,6 +1418,37 @@ async fn dispatch_task(
         None
     };
 
+    // Start draft-PR watcher: polls for branch divergence and creates a
+    // draft PR when the branch first moves ahead of the base branch.
+    let draft_pr_cancel = CancellationToken::new();
+    let draft_pr_handle = if !config.owner.is_empty() && !config.repo.is_empty() && pr_url.is_none()
+    {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let base_branch = config.base_branch.clone();
+        let wt = wt_path.clone();
+        let branch = branch_name.clone();
+        let cancel = draft_pr_cancel.clone();
+        let tid = task_id.clone();
+        let ws_root = config.workspace_root.clone();
+        Some(tokio::spawn(async move {
+            draft_pr_watcher(
+                owner,
+                repo,
+                base_branch,
+                wt,
+                branch,
+                tid,
+                issue_number,
+                cancel,
+                ws_root,
+            )
+            .await;
+        }))
+    } else {
+        None
+    };
+
     children.insert(
         issue_number,
         ChildHandle {
@@ -1099,10 +1457,13 @@ async fn dispatch_task(
             child: spawned.child,
             watcher_cancel,
             watcher_handle,
+            draft_pr_cancel,
+            draft_pr_handle,
             branch: branch_name,
             log_file: log_path,
             last_rebase_at: None,
             last_rebase_failure_sha: None,
+            pr_url,
         },
     );
 
@@ -1184,6 +1545,12 @@ async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u
                 eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
             }
         }
+        handle.draft_pr_cancel.cancel();
+        if let Some(join_handle) = handle.draft_pr_handle.take() {
+            if let Err(err) = join_handle.await {
+                eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
+            }
+        }
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
@@ -1238,6 +1605,12 @@ async fn kill_aborted_children(
                     eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
                 }
             }
+            handle.draft_pr_cancel.cancel();
+            if let Some(join_handle) = handle.draft_pr_handle.take() {
+                if let Err(err) = join_handle.await {
+                    eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
+                }
+            }
             eprintln!(
                 "abort-check: killed {task_id} (pid={} pgid={})",
                 handle.pid, handle.pgid
@@ -1283,6 +1656,12 @@ async fn drain_all_children(
                         eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
                     }
                 }
+                handle.draft_pr_cancel.cancel();
+                if let Some(join_handle) = handle.draft_pr_handle.take() {
+                    if let Err(err) = join_handle.await {
+                        eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
+                    }
+                }
             }
             complete_task(config, issue_number, &task_id, "ralph:failed").await;
         }
@@ -1290,12 +1669,77 @@ async fn drain_all_children(
 }
 
 /// Transition a task to terminal state via GitHub labels.
+pub(crate) fn should_retry_complete_task(err: &RalphError, attempt: u32) -> bool {
+    attempt < COMPLETE_TASK_MAX_ATTEMPTS && err.is_transient()
+}
+
+pub(crate) fn should_mark_draft_pr_ready(
+    has_changes: bool,
+    pr_is_draft: bool,
+    terminal_label: &str,
+) -> bool {
+    has_changes && pr_is_draft && terminal_label == "ralph:completed"
+}
+
+pub(crate) fn should_close_no_diff_draft_pr(has_changes: bool, pr_is_draft: bool) -> bool {
+    !has_changes && pr_is_draft
+}
+
+pub(crate) fn decide_draft_pr_transition(
+    has_changes: bool,
+    pr_is_draft: bool,
+    terminal_label: &str,
+) -> DraftPrTransition {
+    if should_close_no_diff_draft_pr(has_changes, pr_is_draft) {
+        return DraftPrTransition::CloseNoDiff;
+    }
+    if should_mark_draft_pr_ready(has_changes, pr_is_draft, terminal_label) {
+        return DraftPrTransition::MarkReady;
+    }
+    DraftPrTransition::None
+}
+
+pub(crate) fn complete_task_retry_delay(err: &RalphError, attempt: u32) -> Option<Duration> {
+    if should_retry_complete_task(err, attempt) {
+        Some(Duration::from_secs(COMPLETE_TASK_RETRY_DELAY_SECS))
+    } else {
+        None
+    }
+}
+
 async fn complete_task(
     config: &DaemonRuntimeConfig,
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
 ) {
+    for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
+        match complete_task_attempt(config, issue_number, task_id, terminal_label).await {
+            Ok(()) => return,
+            Err(err) => {
+                if let Some(delay) = complete_task_retry_delay(&err, attempt) {
+                    eprintln!(
+                        "warning: complete_task transient failure for {task_id} on attempt {attempt}/{COMPLETE_TASK_MAX_ATTEMPTS}: {err}; retrying in {COMPLETE_TASK_RETRY_DELAY_SECS}s"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+
+                eprintln!(
+                    "warning: complete_task failed for {task_id} on attempt {attempt}/{COMPLETE_TASK_MAX_ATTEMPTS}: {err}"
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn complete_task_attempt(
+    config: &DaemonRuntimeConfig,
+    issue_number: u32,
+    task_id: &str,
+    terminal_label: &str,
+) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
         let owner = config.owner.clone();
@@ -1303,7 +1747,7 @@ async fn complete_task(
         let tid = task_id.to_owned();
         let phase = terminal_label.trim_start_matches("ralph:").to_owned();
         let comment_body = format!("Task `{tid}` finished with status: **{phase}**.");
-        if let Err(err) = spawn_blocking_op(move || {
+        spawn_blocking_op(move || {
             github::post_idempotent_comment(
                 &owner,
                 &repo,
@@ -1313,10 +1757,7 @@ async fn complete_task(
                 &comment_body,
             )
         })
-        .await
-        {
-            eprintln!("warning: failed to post completion comment for {task_id}: {err}");
-        }
+        .await?;
     }
 
     // PR flow (only on success)
@@ -1326,23 +1767,20 @@ async fn complete_task(
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
         if wt_path.exists() {
             if let Err(err) = handle_pr_flow(config, task_id, issue_number, &wt_path).await {
-                eprintln!("warning: PR flow failed for {task_id}: {err}");
+                eprintln!("warning: PR flow failed for {task_id} (best-effort, continuing to label swap): {err}");
             }
         }
     }
 
-    // Swap lifecycle label: in-progress -> terminal
+    // Swap lifecycle label: in-progress -> terminal (required)
     {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
         let label = terminal_label.to_owned();
-        if let Err(err) = spawn_blocking_op(move || {
+        spawn_blocking_op(move || {
             github::swap_lifecycle_label(&owner, &repo, issue_number, "ralph:in-progress", &label)
         })
-        .await
-        {
-            eprintln!("warning: failed to update labels for {task_id}: {err}");
-        }
+        .await?;
     }
 
     // Worktree cleanup
@@ -1353,6 +1791,8 @@ async fn complete_task(
         "task {task_id} completed with label: {terminal_label} (log: {})",
         log_path.display()
     );
+
+    Ok(())
 }
 
 async fn cleanup_worktree_for_terminal_state(
@@ -1409,14 +1849,16 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
     let mut rebase_count = 0u32;
 
     for issue_number in &issue_numbers {
-        let (branch, last_rebase_at, last_failure_sha) = match children.get(issue_number) {
-            Some(h) => (
-                h.branch.clone(),
-                h.last_rebase_at,
-                h.last_rebase_failure_sha.clone(),
-            ),
-            None => continue,
-        };
+        let (branch, last_rebase_at, last_failure_sha, cached_pr_url) =
+            match children.get(issue_number) {
+                Some(h) => (
+                    h.branch.clone(),
+                    h.last_rebase_at,
+                    h.last_rebase_failure_sha.clone(),
+                    h.pr_url.clone(),
+                ),
+                None => continue,
+            };
 
         if rebase_count >= config.max_rebases_per_cycle {
             eprintln!(
@@ -1443,13 +1885,21 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
 
         let branch = &branch;
 
-        // Check if there's an existing PR for this branch
-        let pr_url = {
+        // Use cached PR URL from ChildHandle when available; fall back to API.
+        let pr_url = if let Some(url) = cached_pr_url {
+            url
+        } else {
             let owner = config.owner.clone();
             let repo = config.repo.clone();
             let br = branch.clone();
             match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
-                Ok(Some(url)) => url,
+                Ok(Some(url)) => {
+                    // Back-fill cached PR URL so future cycles skip the lookup.
+                    if let Some(h) = children.get_mut(issue_number) {
+                        h.pr_url = Some(url.clone());
+                    }
+                    url
+                }
                 Ok(None) => {
                     eprintln!("auto-rebase: skip {task_id} — no PR URL");
                     continue;
@@ -1855,7 +2305,7 @@ pub(crate) fn build_pr_body(
 }
 
 /// Handle the PR creation/update flow for a completed task.
-async fn handle_pr_flow(
+pub(crate) async fn handle_pr_flow(
     config: &DaemonRuntimeConfig,
     task_id: &str,
     issue_number: u32,
@@ -1869,6 +2319,20 @@ async fn handle_pr_flow(
             Err(err) => {
                 eprintln!("warning: failed to read current branch for {task_id}: {err}");
                 return Ok(());
+            }
+        }
+    };
+
+    // Step 0: Check for existing PR (used by both no-diff and update paths)
+    let existing_pr_url = {
+        let owner = config.owner.clone();
+        let repo = config.repo.clone();
+        let br = branch.clone();
+        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+            Ok(url) => url,
+            Err(err) => {
+                eprintln!("warning: failed to check for existing PR: {err}");
+                None
             }
         }
     };
@@ -1889,10 +2353,56 @@ async fn handle_pr_flow(
     if !has_changes {
         let owner = config.owner.clone();
         let repo = config.repo.clone();
+        if let Some(url) = existing_pr_url.as_ref() {
+            if let Some(pr_number) = github::extract_pr_number(url) {
+                let owner_for_draft = owner.clone();
+                let repo_for_draft = repo.clone();
+                let pr_is_draft = spawn_blocking_op(move || {
+                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
+                })
+                .await?;
+
+                if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
+                    == DraftPrTransition::CloseNoDiff
+                {
+                    let owner_for_close = owner.clone();
+                    let repo_for_close = repo.clone();
+                    spawn_blocking_op(move || {
+                        github::close_pr(&owner_for_close, &repo_for_close, pr_number)
+                    })
+                    .await?;
+
+                    // Clear persisted PR URL so future flows do not reuse closed draft PRs.
+                    save_task_metadata(
+                        &config.workspace_root,
+                        task_id,
+                        &TaskMetadata { pr_url: None },
+                    );
+                }
+            } else {
+                eprintln!(
+                    "warning: failed to extract PR number from existing PR URL for {task_id}: {url}"
+                );
+            }
+        }
+
+        let mut body = format!("Task `{task_id}` completed with no code changes. No PR created.");
+        if existing_pr_url.is_some() {
+            body.push_str(" Existing draft PR was closed if it was still in draft state.");
+        }
+
+        let owner_for_comment = config.owner.clone();
+        let repo = config.repo.clone();
         let tid = task_id.to_owned();
-        let body = format!("Task `{task_id}` completed with no code changes. No PR created.");
         if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(&owner, &repo, issue_number, &tid, "no-diff", &body)
+            github::post_idempotent_comment(
+                &owner_for_comment,
+                &repo,
+                issue_number,
+                &tid,
+                "no-diff",
+                &body,
+            )
         })
         .await
         {
@@ -1974,20 +2484,6 @@ async fn handle_pr_flow(
         }
     };
 
-    // Step 5: Check for existing PR
-    let existing_pr_url = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let br = branch.clone();
-        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
-            Ok(url) => url,
-            Err(err) => {
-                eprintln!("warning: failed to check for existing PR: {err}");
-                None
-            }
-        }
-    };
-
     // Try to get refined title from GitHub issue
     let refined_title = {
         let owner = config.owner.clone();
@@ -2027,6 +2523,33 @@ async fn handle_pr_flow(
                     )));
                 }
             }
+
+            if let Some(pr_number) = github::extract_pr_number(&url) {
+                let owner_for_draft = config.owner.clone();
+                let repo_for_draft = config.repo.clone();
+                save_task_metadata(
+                    &config.workspace_root,
+                    task_id,
+                    &TaskMetadata {
+                        pr_url: Some(url.clone()),
+                    },
+                );
+                let pr_is_draft = spawn_blocking_op(move || {
+                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
+                })
+                .await?;
+
+                if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
+                    == DraftPrTransition::MarkReady
+                {
+                    let owner_for_ready = config.owner.clone();
+                    let repo_for_ready = config.repo.clone();
+                    spawn_blocking_op(move || {
+                        github::mark_pr_ready(&owner_for_ready, &repo_for_ready, pr_number)
+                    })
+                    .await?;
+                }
+            }
         }
         None => {
             let owner = config.owner.clone();
@@ -2043,12 +2566,20 @@ async fn handle_pr_flow(
                     &title_clone,
                     &body_path,
                     Some(&base),
+                    false,
                 )
             })
             .await
             {
                 Ok(url) => {
                     eprintln!("created PR for {task_id}: {url}");
+                    save_task_metadata(
+                        &config.workspace_root,
+                        task_id,
+                        &TaskMetadata {
+                            pr_url: Some(url.clone()),
+                        },
+                    );
                 }
                 Err(err) => {
                     eprintln!(
@@ -2082,9 +2613,10 @@ mod tests {
     use super::{
         build_pr_body, build_pr_title, detect_final_prompt_artifact, detect_quick_prd_artifact,
         extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
-        post_artifact_comments_with_client, should_resume_issue_project, sweep_artifact_comments,
-        truncate_for_github, validate_daemon_branch_format, write_body_file, ArtifactCommentClient,
-        ArtifactWatcherState, TRUNCATED_NOTE,
+        post_artifact_comments_with_client, should_close_no_diff_draft_pr,
+        should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
+        sweep_artifact_comments, truncate_for_github, validate_daemon_branch_format,
+        write_body_file, ArtifactCommentClient, ArtifactWatcherState, TRUNCATED_NOTE,
     };
     use crate::error::RalphError;
     use crate::Result;
@@ -2191,7 +2723,42 @@ mod tests {
         assert!(body.contains("Issue body context here"));
         assert!(body.contains("Project Ref: `my-project`"));
         assert!(body.contains("Automated PR for task `acme-widgets-1`."));
-        assert!(body.contains("Closes #1"));
+    }
+
+    #[test]
+    fn should_retry_complete_task_retries_only_transient_errors_under_cap() {
+        let transient =
+            RalphError::Orchestration("network timeout while posting comment".to_owned());
+        assert!(should_retry_complete_task(&transient, 1));
+        assert!(should_retry_complete_task(&transient, 2));
+        assert!(!should_retry_complete_task(&transient, 3));
+
+        let terminal = RalphError::BranchMismatch {
+            expected: "ralph/issue-93".to_owned(),
+            actual: "main".to_owned(),
+        };
+        assert!(!should_retry_complete_task(&terminal, 1));
+    }
+
+    #[test]
+    fn should_mark_draft_pr_ready_only_on_completed_with_changes() {
+        assert!(should_mark_draft_pr_ready(true, true, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(false, true, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(true, false, "ralph:completed"));
+        assert!(!should_mark_draft_pr_ready(true, true, "ralph:failed"));
+    }
+
+    #[test]
+    fn should_close_no_diff_draft_pr_only_for_no_diff_drafts() {
+        assert!(should_close_no_diff_draft_pr(false, true));
+        assert!(!should_close_no_diff_draft_pr(true, true));
+        assert!(!should_close_no_diff_draft_pr(false, false));
+    }
+
+    #[test]
+    fn complete_task_retry_policy_has_required_cap_and_delay() {
+        assert_eq!(super::COMPLETE_TASK_MAX_ATTEMPTS, 3);
+        assert_eq!(super::COMPLETE_TASK_RETRY_DELAY_SECS, 30);
     }
 
     #[test]

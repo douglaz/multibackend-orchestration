@@ -551,13 +551,23 @@ pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<
 }
 
 /// Create a pull request. Returns the PR URL on success, or an error.
-pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str) -> Result<String> {
+pub fn create_pr(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
+    let mut args = vec![
+        "pr", "create", "--repo", &full_repo, "--head", branch, "--title", title, "--body", body,
+    ];
+    if draft {
+        args.push("--draft");
+    }
     let output = Command::new("gh")
-        .args([
-            "pr", "create", "--repo", &full_repo, "--head", branch, "--title", title, "--body",
-            body,
-        ])
+        .args(&args)
         .output()
         .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
@@ -569,6 +579,157 @@ pub fn create_pr(owner: &str, repo: &str, branch: &str, title: &str, body: &str)
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Returns true when HEAD is ahead of `base_branch` by one or more commits.
+///
+/// Resolves the comparison ref robustly: prefers `origin/{base_branch}` if it
+/// exists, otherwise falls back to `detect_base_branch` (which tries
+/// `origin/HEAD`, common default branch names, etc.).  Returns a typed error
+/// when no valid base ref can be resolved.
+pub fn has_commits_ahead_of_base(
+    worktree_path: &std::path::Path,
+    base_branch: &str,
+) -> Result<bool> {
+    let base = resolve_ahead_base(worktree_path, base_branch)?;
+    let range = format!("{base}..HEAD");
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to run git rev-list --count {range}: {err}"))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RalphError::Orchestration(format!(
+            "git rev-list --count {range} failed (resolved base: {base}): {}",
+            stderr.trim()
+        )));
+    }
+
+    let count_raw = String::from_utf8_lossy(&output.stdout);
+    let count = count_raw.trim().parse::<u64>().map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to parse git rev-list --count output '{value}' for {range}: {err}",
+            value = count_raw.trim()
+        ))
+    })?;
+
+    Ok(count > 0)
+}
+
+/// Resolve a valid base ref for ahead-of-base comparison.
+///
+/// Tries `origin/{base_branch}` first, then falls back to auto-detection via
+/// `detect_base_branch`.  Returns an error only if no resolvable base ref can
+/// be found at all.
+fn resolve_ahead_base(worktree_path: &std::path::Path, configured_base: &str) -> Result<String> {
+    // Try the configured base as a remote ref first.
+    let candidate = format!("origin/{configured_base}");
+    let check = Command::new("git")
+        .args(["rev-parse", "--verify", &candidate])
+        .current_dir(worktree_path)
+        .output();
+    if check.map(|o| o.status.success()).unwrap_or(false) {
+        return Ok(candidate);
+    }
+
+    // Configured base not found as remote ref — fall back to auto-detection.
+    let detected = detect_base_branch(worktree_path);
+
+    // Verify the detected ref actually resolves.
+    let verify = Command::new("git")
+        .args(["rev-parse", "--verify", &detected])
+        .current_dir(worktree_path)
+        .output();
+    if verify.map(|o| o.status.success()).unwrap_or(false) {
+        return Ok(detected);
+    }
+
+    Err(RalphError::Orchestration(format!(
+        "cannot resolve base branch for ahead-of-base check: configured '{configured_base}' \
+         (tried origin/{configured_base}) and auto-detected '{detected}' are both unresolvable"
+    )))
+}
+
+/// Mark a draft pull request as ready for review.
+pub fn mark_pr_ready(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "ready", &pr_number_str, "--repo", &full_repo])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr ready for {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr ready failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Return whether a pull request is currently a draft.
+pub fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number_str,
+            "--repo",
+            &full_repo,
+            "--json",
+            "isDraft",
+        ])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr view for draft state on {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr view (isDraft) failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_pr_is_draft(raw.trim())
+}
+
+/// Close a pull request.
+pub fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+    let full_repo = format!("{owner}/{repo}");
+    let pr_number_str = pr_number.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "close", &pr_number_str, "--repo", &full_repo])
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to run gh pr close for {full_repo}#{pr_number}: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "gh pr close failed for {full_repo}#{pr_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Get a diff stat summary (committed changes vs merge-base of default branch).
@@ -606,6 +767,7 @@ pub fn create_pr_with_body_file(
     title: &str,
     body_file: &std::path::Path,
     base_branch: Option<&str>,
+    draft: bool,
 ) -> Result<String> {
     let full_repo = format!("{owner}/{repo}");
     let body_file_str = body_file.to_string_lossy();
@@ -626,6 +788,9 @@ pub fn create_pr_with_body_file(
         base_owned = base.to_owned();
         args.push("--base");
         args.push(&base_owned);
+    }
+    if draft {
+        args.push("--draft");
     }
     let output = Command::new("gh")
         .args(&args)
@@ -1360,6 +1525,12 @@ struct RawPrMergeInfo {
     head_ref_oid: String,
 }
 
+#[derive(Deserialize)]
+struct RawPrDraftInfo {
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+}
+
 /// A structured issue comment returned by [`fetch_issue_comments`].
 #[derive(Debug, Clone)]
 pub struct IssueComment {
@@ -1780,6 +1951,13 @@ fn parse_pr_merge_info(raw: &str) -> Result<PrMergeInfo> {
     })
 }
 
+fn parse_pr_is_draft(raw: &str) -> Result<bool> {
+    let parsed: RawPrDraftInfo = serde_json::from_str(raw).map_err(|err| {
+        RalphError::Orchestration(format!("failed to parse gh pr view isDraft output: {err}"))
+    })?;
+    Ok(parsed.is_draft)
+}
+
 fn parse_authenticated_login(raw: &str) -> Result<String> {
     let login = raw.trim();
     if login.is_empty() {
@@ -1798,8 +1976,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_merge_info, GhIssue,
-        PrMergeStatus, REQUIRED_LABELS,
+        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_is_draft,
+        parse_pr_merge_info, GhIssue, PrMergeStatus, REQUIRED_LABELS,
     };
 
     #[test]
@@ -1941,6 +2119,20 @@ mod tests {
         }"#;
         let info = parse_pr_merge_info(raw).expect("pr merge info should parse");
         assert_eq!(info.merge_status, PrMergeStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_pr_is_draft_true() {
+        let raw = r#"{"isDraft":true}"#;
+        let is_draft = parse_pr_is_draft(raw).expect("draft state should parse");
+        assert!(is_draft);
+    }
+
+    #[test]
+    fn parse_pr_is_draft_false() {
+        let raw = r#"{"isDraft":false}"#;
+        let is_draft = parse_pr_is_draft(raw).expect("draft state should parse");
+        assert!(!is_draft);
     }
 
     #[test]

@@ -60,6 +60,9 @@ pub struct AutoArgs {
     pub no_tmux: Option<bool>,
     #[arg(long)]
     pub dry_run: bool,
+    /// PR URL to pass through to the orchestration context.
+    #[arg(long = "pr-url")]
+    pub pr_url: Option<String>,
 }
 
 fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
@@ -130,6 +133,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         tmux,
         no_tmux,
         dry_run,
+        pr_url,
     } = args;
 
     let idea = idea.trim().to_owned();
@@ -268,6 +272,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
             on_prompt_change: None,
             skip_commit,
             skip_prompt_review,
+            pr_url,
         })
         .await?;
     println!("{}", run_result.summary);
