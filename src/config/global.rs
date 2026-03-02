@@ -968,6 +968,7 @@ fn default_session_reuse_roles() -> Vec<String> {
         "implementer".to_owned(),
         "reviewer".to_owned(),
         "qa".to_owned(),
+        "final_reviewer".to_owned(),
     ]
 }
 
@@ -1539,7 +1540,14 @@ fn cfg_ensure_required_backend(raw: &str, label: &str) -> Result<()> {
     cfg_ensure_backend(raw)
 }
 
-const CFG_KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+const CFG_KNOWN_ROLES: &[&str] = &[
+    "planner",
+    "implementer",
+    "reviewer",
+    "qa",
+    "completer",
+    "final_reviewer",
+];
 
 fn cfg_parse_session_reuse_roles(raw: &str) -> Result<Vec<String>> {
     let roles = cfg_parse_string_list(raw)?;
