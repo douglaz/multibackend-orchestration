@@ -5,7 +5,7 @@ use crate::git::branch::current_branch;
 use crate::git::ralph_commit::build_ralph_commit_message;
 use crate::git::{
     conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
-    run_git_status
+    run_git_status,
 };
 use crate::project::state::Phase;
 use crate::Result;

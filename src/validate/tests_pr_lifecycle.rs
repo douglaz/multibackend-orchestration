@@ -64,8 +64,13 @@ fn early_prompt_push_stages_only_prompt_files(h: &RalphHarness) -> TestResult {
         fs::write(project_dir.join("config.toml"), "[workflow]\n").expect("write config");
         fs::write(repo.join("unrelated.txt"), "keep unstaged\n").expect("write unrelated");
 
-        crate::git::commit::commit_and_push_initial_prompt(repo, "issue-93", "ralph/issue-93", false)
-            .expect("early prompt push should succeed");
+        crate::git::commit::commit_and_push_initial_prompt(
+            repo,
+            "issue-93",
+            "ralph/issue-93",
+            false,
+        )
+        .expect("early prompt push should succeed");
 
         let changed = git_output(repo, &["show", "--name-only", "--pretty=format:", "HEAD"]);
         let mut files: Vec<&str> = changed.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -156,9 +161,18 @@ fn draft_pr_marked_ready_transition(h: &RalphHarness) -> TestResult {
         });
 
         let log = fs::read_to_string(&gh_log).expect("read gh log");
-        assert!(log.contains("edit pr edit"), "expected PR edit call, got: {log}");
-        assert!(log.contains("ready pr ready"), "expected gh pr ready call, got: {log}");
-        assert!(!log.contains("close pr close"), "ready path should not close PR: {log}");
+        assert!(
+            log.contains("edit pr edit"),
+            "expected PR edit call, got: {log}"
+        );
+        assert!(
+            log.contains("ready pr ready"),
+            "expected gh pr ready call, got: {log}"
+        );
+        assert!(
+            !log.contains("close pr close"),
+            "ready path should not close PR: {log}"
+        );
     })
 }
 
@@ -207,7 +221,10 @@ fn no_diff_draft_pr_closed_transition(h: &RalphHarness) -> TestResult {
         });
 
         let log = fs::read_to_string(&gh_log).expect("read gh close log");
-        assert!(log.contains("close pr close"), "expected gh pr close call, got: {log}");
+        assert!(
+            log.contains("close pr close"),
+            "expected gh pr close call, got: {log}"
+        );
 
         let meta = crate::daemon::runtime::load_task_metadata(&workspace_root, task_id);
         assert_eq!(
@@ -256,7 +273,10 @@ fn complete_task_retries_transient_up_to_three(_h: &RalphHarness) -> TestResult 
             .await
         });
 
-        assert!(result.is_ok(), "transient failures should succeed by attempt 3: {result:?}");
+        assert!(
+            result.is_ok(),
+            "transient failures should succeed by attempt 3: {result:?}"
+        );
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             3,
