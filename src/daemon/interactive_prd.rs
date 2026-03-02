@@ -1520,22 +1520,25 @@ fn do_approval_transition(
     )
     .err();
 
-    if active_remove_err.is_some() || waiting_remove_err.is_some() {
-        // Keep the transition retryable: re-enter AwaitingFeedback in-memory
-        // so finish_transition persists a non-terminal state.
+    if let Some(err) = &active_remove_err {
+        // ralph:prd-active removal failed — issue is still poll-visible,
+        // so revert to AwaitingFeedback for retry on next tick.
         state.state = PrdWorkflowState::AwaitingFeedback;
-
-        let mut errors = Vec::new();
-        if let Some(err) = active_remove_err {
-            errors.push(format!("failed to remove ralph:prd-active: {err}"));
-        }
-        if let Some(err) = waiting_remove_err {
-            errors.push(format!("failed to remove {WAITING_FEEDBACK_LABEL}: {err}"));
-        }
         return Err(RalphError::InteractivePrdFailed(format!(
-            "post-save Done cleanup failed for {owner}/{repo}#{issue_number}: {}",
-            errors.join("; ")
+            "post-save Done cleanup failed for {owner}/{repo}#{issue_number}: \
+             failed to remove ralph:prd-active: {err}"
         )));
+    }
+
+    // ralph:prd-active was removed — issue is no longer poll-visible via
+    // that label but is discoverable via ralph:prd-done and terminal state.
+    // Waiting-feedback removal is best-effort; don't revert Done state
+    // since the issue would become invisible to retry.
+    if let Some(err) = &waiting_remove_err {
+        eprintln!(
+            "warning: best-effort removal of {WAITING_FEEDBACK_LABEL} failed \
+             for {owner}/{repo}#{issue_number}: {err}"
+        );
     }
 
     Ok(())
