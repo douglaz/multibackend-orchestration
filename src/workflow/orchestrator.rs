@@ -7574,6 +7574,7 @@ mod tests {
             loops: vec![],
             completion_attempts: vec![],
             session_store: Default::default(),
+            pr_url: None,
         }
     }
 
