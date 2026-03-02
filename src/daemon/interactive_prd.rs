@@ -182,6 +182,11 @@ pub const PRD_LABELS: &[(&str, &str, &str)] = &[
         "Interactive PRD workflow is actively processing this issue",
     ),
     (
+        "ralph:waiting-feedback",
+        "#e4e669",
+        "PRD workflow is waiting for user input",
+    ),
+    (
         "ralph:prd-approved",
         "#1d76db",
         "Interactive PRD draft has been approved",
@@ -575,10 +580,13 @@ impl PrdPollConfig {
 pub const PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd",
     "ralph:prd-active",
+    "ralph:waiting-feedback",
     "ralph:prd-approved",
     "ralph:prd-done",
     "ralph:prd-failed",
 ];
+
+const WAITING_FEEDBACK_LABEL: &str = "ralph:waiting-feedback";
 
 const IN_PROGRESS_PRD_LABEL_NAMES: &[&str] = &[
     "ralph:prd",
@@ -603,6 +611,20 @@ pub fn has_in_progress_prd_label(labels: &[String]) -> bool {
     labels
         .iter()
         .any(|l| IN_PROGRESS_PRD_LABEL_NAMES.contains(&l.as_str()))
+}
+
+fn ensure_waiting_feedback_label(config: &PrdPollConfig, issue_number: u32, labels: &[String]) {
+    if labels.iter().any(|label| label == WAITING_FEEDBACK_LABEL) {
+        return;
+    }
+
+    let _ = github::add_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        issue_number,
+        WAITING_FEEDBACK_LABEL,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +991,8 @@ fn transition_pending_to_awaiting_answers(
 
     eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
@@ -1136,6 +1160,8 @@ fn transition_awaiting_answers_to_awaiting_feedback(
         config.owner, config.repo
     );
 
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
     let result = get_or_fetch_bot_login(config, bot_login_cache).and_then(|bot_login| {
         do_awaiting_answers_to_awaiting_feedback(config, issue, state, &bot_login)
     });
@@ -1275,6 +1301,8 @@ fn transition_awaiting_feedback(
         "prd: checking AwaitingFeedback for {}/{}#{issue_number}",
         config.owner, config.repo
     );
+
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
 
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_awaiting_feedback(config, issue, state, &bot_login));
@@ -1472,20 +1500,46 @@ fn do_approval_transition(
         )));
     }
 
-    // Save succeeded — now safe to remove ralph:prd-active (issue will be
-    // polled via ralph:prd-done or terminal state file going forward).
-    github::remove_label_with_retry_with_gh_bin(
+    // Save succeeded — now safe to remove terminal cleanup labels.
+    // Attempt both removals independently so one failure never suppresses
+    // the other cleanup operation.
+    let active_remove_err = github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-active",
     )
-    .map_err(|err| {
-        RalphError::InteractivePrdFailed(format!(
-            "failed to remove ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
-        ))
-    })?;
+    .err();
+    let waiting_remove_err = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        WAITING_FEEDBACK_LABEL,
+    )
+    .err();
+
+    if let Some(err) = &active_remove_err {
+        // ralph:prd-active removal failed — issue is still poll-visible,
+        // so revert to AwaitingFeedback for retry on next tick.
+        state.state = PrdWorkflowState::AwaitingFeedback;
+        return Err(RalphError::InteractivePrdFailed(format!(
+            "post-save Done cleanup failed for {owner}/{repo}#{issue_number}: \
+             failed to remove ralph:prd-active: {err}"
+        )));
+    }
+
+    // ralph:prd-active was removed — issue is no longer poll-visible via
+    // that label but is discoverable via ralph:prd-done and terminal state.
+    // Waiting-feedback removal is best-effort; don't revert Done state
+    // since the issue would become invisible to retry.
+    if let Some(err) = &waiting_remove_err {
+        eprintln!(
+            "warning: best-effort removal of {WAITING_FEEDBACK_LABEL} failed \
+             for {owner}/{repo}#{issue_number}: {err}"
+        );
+    }
 
     Ok(())
 }
@@ -2111,6 +2165,13 @@ fn transition_to_failed(
         issue_number,
         "ralph:prd",
     );
+    let _ = github::remove_label_with_retry_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+        WAITING_FEEDBACK_LABEL,
+    );
 
     Ok(())
 }
@@ -2272,7 +2333,7 @@ mod tests {
         prd_status_approved_marker, render_answer_to_draft_prompt,
         run_draft_with_section_retry_sync, InteractivePrdState, PrdPollConfig, PrdWorkflowState,
         DRAFT_FOOTER, DRAFT_HEADING_PREFIX, DRAFT_SECTION_RETRIES, FEEDBACK_REVISION_PROMPT,
-        PRD_LABELS, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
+        PRD_LABELS, PRD_LABEL_NAMES, PRD_LIFECYCLE_LABELS, REQUIRED_SPEC_SECTION_COUNT,
     };
     use crate::backend::CliBackend;
     use crate::config::GlobalConfig;
@@ -2404,7 +2465,17 @@ mod tests {
     #[test]
     fn prd_labels_alias_matches_lifecycle_labels() {
         assert_eq!(PRD_LABELS, PRD_LIFECYCLE_LABELS);
-        assert_eq!(PRD_LABELS.len(), 5);
+        assert_eq!(PRD_LABELS.len(), 6);
+    }
+
+    #[test]
+    fn prd_label_constants_include_waiting_feedback() {
+        assert!(PRD_LABELS.iter().any(|(name, color, description)| {
+            *name == "ralph:waiting-feedback"
+                && *color == "#e4e669"
+                && *description == "PRD workflow is waiting for user input"
+        }));
+        assert!(PRD_LABEL_NAMES.contains(&"ralph:waiting-feedback"));
     }
 
     #[test]
@@ -2425,6 +2496,9 @@ mod tests {
     #[test]
     fn has_in_progress_prd_label_rejects_done_empty_and_unrelated_labels() {
         assert!(!has_in_progress_prd_label(&["ralph:prd-done".to_owned()]));
+        assert!(!has_in_progress_prd_label(&[
+            "ralph:waiting-feedback".to_owned()
+        ]));
         assert!(!has_in_progress_prd_label(&[]));
         assert!(!has_in_progress_prd_label(&[
             "bug".to_owned(),
@@ -2445,6 +2519,11 @@ mod tests {
     #[test]
     fn has_prd_label_still_matches_done_label() {
         assert!(has_prd_label(&["ralph:prd-done".to_owned()]));
+    }
+
+    #[test]
+    fn has_prd_label_matches_waiting_feedback_label() {
+        assert!(has_prd_label(&["ralph:waiting-feedback".to_owned()]));
     }
 
     #[test]

@@ -63,7 +63,8 @@ const MAX_DIRTY_PATHS_IN_ERROR: usize = 10;
 
 const PLANNER_GUARDRAILS: &str = r#"- Propose only work that is still missing from the project.
 - Do not re-plan features that are already implemented in baseline code or completed loops.
-- If all requirements are already satisfied, output `# Project Completion Request` instead of another feature."#;
+- If all requirements are already satisfied, output `# Project Completion Request` instead of another feature.
+- For features involving error handling or partial failures, specify state invariants that must hold after each failure mode. Example: "If label-A removal fails but label-B removal is cosmetic, only label-A failure should trigger retry." Do not treat independent failure paths as equivalent without justification."#;
 
 const IMPLEMENTER_GUARDRAILS: &str = r#"- Keep edits scoped to this loop's feature and acceptance criteria.
 - In review responses, address each required change explicitly.
@@ -90,7 +91,9 @@ const FINAL_REVIEWER_GUARDRAILS: &str = r#"- Evaluate project-wide outcomes agai
 - Check for stray/orphaned files (e.g. `git status`, unexpected files in repo root).
 - Verify that new code follows existing patterns and conventions in the codebase.
 - Propose only concrete, high-signal amendments with clear affected files.
-- Use globally unique amendment IDs within your response."#;
+- Use globally unique amendment IDs within your response.
+- **State invariant verification**: For error-handling and cleanup code paths, verify that each distinct failure mode produces the correct system state. Do not accept code that treats independent failures identically without justification — trace each failure path separately and verify the resulting state is correct and recoverable.
+- **Amendment replay check**: If this review round follows an amendment round, read each prior amendment's acceptance criteria and verify the implementation satisfies them. Do not rely solely on the implementer's self-reported changes — trace the actual code paths to confirm correctness."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct FinalReviewConfigSnapshot {
@@ -3422,6 +3425,7 @@ async fn run_final_review_phase(
     }
 
     let mut reviewer_decisions: Vec<(String, FinalReviewerDecision)> = Vec::new();
+    let mut review_quota_skipped: Vec<String> = Vec::new();
     for reviewer_backend in &reviewers {
         let artifact_kind = ArtifactKind::FinalReviewProposals {
             backend: reviewer_backend.clone(),
@@ -3484,6 +3488,7 @@ async fn run_final_review_phase(
                             backend = reviewer_backend.as_str(),
                             "final reviewer backend hit quota limit; skipping"
                         );
+                        review_quota_skipped.push(reviewer_backend.clone());
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -3508,6 +3513,20 @@ async fn run_final_review_phase(
             decision
         };
         reviewer_decisions.push((reviewer_backend.clone(), decision));
+    }
+
+    let min_reviewers = effective.workflow.final_review_min_reviewers as usize;
+    if reviewer_decisions.len() < min_reviewers {
+        return Err(RalphError::Validation(format!(
+            "final review: only {} of {} required reviewer(s) completed; quota-skipped backends: {}",
+            reviewer_decisions.len(),
+            min_reviewers,
+            if review_quota_skipped.is_empty() {
+                "none".to_owned()
+            } else {
+                review_quota_skipped.join(", ")
+            },
+        )));
     }
 
     let amendments = merge_final_review_amendments(&reviewer_decisions);
@@ -3615,6 +3634,7 @@ async fn run_final_review_phase(
         &planner_positions.body,
     )?;
     let mut vote_decisions: Vec<(String, VoteDecision)> = Vec::new();
+    let mut vote_quota_skipped: Vec<String> = Vec::new();
     for reviewer_backend in &reviewers {
         let vote_kind = ArtifactKind::FinalReviewVotes {
             backend: reviewer_backend.clone(),
@@ -3669,6 +3689,7 @@ async fn run_final_review_phase(
                         backend = reviewer_backend.as_str(),
                         "final reviewer vote backend hit quota limit; skipping"
                     );
+                    vote_quota_skipped.push(reviewer_backend.clone());
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -3689,6 +3710,19 @@ async fn run_final_review_phase(
             decision
         };
         vote_decisions.push((reviewer_backend.clone(), decision));
+    }
+
+    if vote_decisions.len() < min_reviewers {
+        return Err(RalphError::Validation(format!(
+            "final review vote: only {} of {} required reviewer(s) completed; quota-skipped backends: {}",
+            vote_decisions.len(),
+            min_reviewers,
+            if vote_quota_skipped.is_empty() {
+                "none".to_owned()
+            } else {
+                vote_quota_skipped.join(", ")
+            },
+        )));
     }
 
     let vote_only = vote_decisions

@@ -4,8 +4,8 @@
 //! idempotent restart handling without requiring live GitHub API access.
 
 use ralph::daemon::interactive_prd::{
-    detect_approval, has_prd_label, prd_marker, prd_status_failed_marker, InteractivePrdState,
-    PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
+    detect_approval, has_in_progress_prd_label, has_prd_label, prd_marker,
+    prd_status_failed_marker, InteractivePrdState, PrdWorkflowState, PRD_LABELS, PRD_LABEL_NAMES,
 };
 use ralph::validate::assertions::assert_exit_code;
 use ralph::validate::harness::RalphHarness;
@@ -80,6 +80,13 @@ fn has_prd_label_returns_false_for_empty() {
     assert!(!has_prd_label(&[]));
 }
 
+#[test]
+fn waiting_feedback_label_classification_matches_exports() {
+    let labels = vec!["ralph:waiting-feedback".to_owned()];
+    assert!(has_prd_label(&labels));
+    assert!(!has_in_progress_prd_label(&labels));
+}
+
 // ---------------------------------------------------------------------------
 // Approval detection edge cases
 // ---------------------------------------------------------------------------
@@ -128,10 +135,11 @@ fn prd_status_failed_marker_format() {
 
 #[test]
 fn prd_labels_have_expected_entries() {
-    assert_eq!(PRD_LABELS.len(), 5);
+    assert_eq!(PRD_LABELS.len(), 6);
     let names: Vec<&str> = PRD_LABELS.iter().map(|(name, _, _)| *name).collect();
     assert!(names.contains(&"ralph:prd"));
     assert!(names.contains(&"ralph:prd-active"));
+    assert!(names.contains(&"ralph:waiting-feedback"));
     assert!(names.contains(&"ralph:prd-approved"));
     assert!(names.contains(&"ralph:prd-done"));
     assert!(names.contains(&"ralph:prd-failed"));
@@ -1743,8 +1751,13 @@ esac; exit 0
         }
     }
 
-    // Verify ralph:prd-failed label was applied
+    // Verify waiting-label reconciliation happens even when bot login fails,
+    // and that failure labeling still occurs on retry exhaustion.
     let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+        "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+    );
     assert!(
         label_raw.contains("ralph:prd-failed"),
         "ralph:prd-failed label should be added: {label_raw}"
@@ -1889,8 +1902,13 @@ esac; exit 0
         }
     }
 
-    // Verify ralph:prd-failed label was applied
+    // Verify waiting-label reconciliation happens even when bot login fails,
+    // and that failure labeling still occurs on retry exhaustion.
     let label_raw = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw.contains("--add-label") && label_raw.contains("ralph:waiting-feedback"),
+        "ralph:waiting-feedback should be reconciled before bot-login lookup: {label_raw}"
+    );
     assert!(
         label_raw.contains("ralph:prd-failed"),
         "ralph:prd-failed label should be added: {label_raw}"
@@ -2166,6 +2184,168 @@ esac; exit 0
     );
     // Done is NOT persisted — approval comment was posted (idempotent) but
     // ralph:prd-active is still present so the issue remains poll-visible.
+}
+
+#[test]
+fn done_post_save_active_label_removal_failure_retries() {
+    let h =
+        RalphHarness::new_daemon(ralph_bin_absolute(), "acme", "widgets").expect("daemon harness");
+    h.init_workspace().expect("init workspace");
+
+    let backend_script = h
+        .write_mock_script("prd_noop.sh", "#!/bin/sh\ncat\n")
+        .expect("write backend");
+    h.setup_mock_backends_stable(&backend_script)
+        .expect("setup mock backends");
+
+    let state_path = h
+        .temp_dir
+        .path()
+        .join("acme/widgets/.ralph/interactive-prd/141.json");
+    fs::create_dir_all(state_path.parent().expect("parent")).expect("create state dir");
+    let seed = serde_json::json!({
+        "issue_number": 141,
+        "owner": "acme",
+        "repo": "widgets",
+        "state": "AwaitingFeedback",
+        "question_revision": 1,
+        "draft_revision": 1,
+        "questions_comment_id": 1410,
+        "questions_posted_at": "2026-01-01T00:00:05Z",
+        "latest_draft_comment_id": 1412,
+        "latest_draft_body": "## Summary\nDraft.",
+        "user_answers": "answers",
+        "last_processed_comment_id": 1411,
+        "error_count": 0,
+        "last_error": null,
+        "last_advanced_at": null
+    });
+    fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&seed).expect("serialize"),
+    )
+    .expect("write state");
+
+    let label_log = h.temp_dir.path().join("done_cleanup_retry_labels.log");
+    let label_log_str = label_log.to_string_lossy().into_owned();
+    let fail_once_path = h.temp_dir.path().join("fail_remove_active_once");
+    let fail_once_str = fail_once_path.to_string_lossy().into_owned();
+
+    // gh mock: first remove of ralph:prd-active fails after Done has been saved.
+    // waiting-feedback removal still succeeds and must be attempted in the same tick.
+    let gh_script = format!(
+        r#"#!/bin/sh
+LLOG="{label_log_str}"
+FAIL_ONCE="{fail_once_str}"
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_active=0
+        for arg in "$@"; do case "$arg" in ralph:prd-active) has_active=1 ;; esac; done
+        if [ "$has_active" = "1" ]; then
+          printf '[{{"number":141,"title":"T","labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}],"body":"B"}}]'
+        else printf '[]'; fi; exit 0 ;;
+      view)
+        want_c=0; want_l=0
+        for arg in "$@"; do case "$arg" in comments) want_c=1 ;; labels) want_l=1 ;; esac; done
+        if [ "$want_c" = "1" ]; then
+          printf '{{"comments":[{{"id":1410,"author":{{"login":"ralph-bot"}},"body":"questions","createdAt":"2026-01-01T00:00:05Z"}},{{"id":1411,"author":{{"login":"alice"}},"body":"answers","createdAt":"2026-01-01T00:00:10Z"}},{{"id":1412,"author":{{"login":"ralph-bot"}},"body":"<!-- ralph:prd:141:draft-v1 -->\\nDraft","createdAt":"2026-01-01T00:00:15Z"}},{{"id":1413,"author":{{"login":"alice"}},"body":"LGTM!","createdAt":"2026-01-01T00:00:25Z"}}]}}'
+          exit 0; fi
+        if [ "$want_l" = "1" ]; then printf '{{"labels":[{{"name":"ralph:prd-active"}},{{"name":"ralph:waiting-feedback"}}]}}'; exit 0; fi
+        exit 0 ;;
+      comment) exit 0 ;;
+      edit)
+        echo "$@" >> "$LLOG"
+        case "$*" in
+          *"--remove-label ralph:prd-active"*)
+            if [ ! -f "$FAIL_ONCE" ]; then
+              : > "$FAIL_ONCE"
+              echo "gh: transient remove failure for ralph:prd-active" >&2
+              exit 1
+            fi
+            ;;
+        esac
+        exit 0 ;;
+    esac ;;
+  api) if [ "$2" = "user" ]; then printf 'ralph-bot\n'; exit 0; fi ;;
+  pr) case "$2" in list) printf '' ;; *) ;; esac; exit 0 ;;
+  repo) printf 'acme/widgets\n'; exit 0 ;;
+  label) exit 0 ;;
+esac; exit 0
+"#
+    );
+    let gh_path = h.write_mock_script("gh", &gh_script).expect("write gh");
+    let path_env = format!(
+        "{}:{}",
+        gh_path.parent().expect("parent").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mock_ralph = h
+        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
+        .expect("write mock ralph");
+    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
+
+    // Tick 1: active-label removal fails post-save; state should be reverted
+    // to AwaitingFeedback so retry logic can run on the next tick.
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start tick 1");
+
+    let state_tick_1: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state after tick 1"))
+            .expect("parse state after tick 1");
+    assert_eq!(
+        state_tick_1.state,
+        PrdWorkflowState::AwaitingFeedback,
+        "state should be reverted to AwaitingFeedback after post-save cleanup failure"
+    );
+    assert!(
+        state_tick_1.error_count >= 1,
+        "error_count should increment after cleanup failure: {}",
+        state_tick_1.error_count
+    );
+    let label_raw_tick_1 = fs::read_to_string(&label_log).unwrap_or_default();
+    assert!(
+        label_raw_tick_1.contains("--remove-label ralph:prd-active"),
+        "active label removal should be attempted: {label_raw_tick_1}"
+    );
+    assert!(
+        label_raw_tick_1.contains("--remove-label ralph:waiting-feedback"),
+        "waiting label removal should still be attempted after active failure: {label_raw_tick_1}"
+    );
+
+    // Tick 2: active-label removal now succeeds; transition should complete.
+    let _output = h
+        .daemon_env(
+            [
+                "daemon",
+                "start",
+                "--repo",
+                "acme/widgets",
+                "--single-iteration",
+            ],
+            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+        )
+        .expect("daemon start tick 2");
+
+    let state_tick_2: InteractivePrdState =
+        serde_json::from_str(&fs::read_to_string(&state_path).expect("read state after tick 2"))
+            .expect("parse state after tick 2");
+    assert_eq!(
+        state_tick_2.state,
+        PrdWorkflowState::Done,
+        "state should transition to Done after cleanup retry succeeds"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2650,8 +2830,8 @@ fn dedup_invariant_issue_processed_at_most_once() {
     let tmp = TempDir::new().expect("create tempdir");
     let data_dir = tmp.path();
 
-    // Counter file: counts how many times gh receives a label-edit call for
-    // issue #50 (the side-effect of advance_issue doing Pending->AwaitingAnswers).
+    // Counter file: counts how many times gh removes `ralph:prd` for issue #50
+    // (a stable side-effect of Pending->AwaitingAnswers in this fixture).
     let advance_count = tmp.path().join("advance_count");
     fs::write(&advance_count, "0").expect("init counter");
 
@@ -2682,10 +2862,22 @@ case "$1" in
         exit 0
         ;;
       edit)
-        # Count every label edit for issue #50 as a processing side-effect
-        count=$(cat "$ADVANCE_COUNT" 2>/dev/null || printf '0')
-        count=$((count + 1))
-        printf '%d' "$count" > "$ADVANCE_COUNT"
+        # Count only remove-label ralph:prd as the dedup side-effect.
+        # Waiting-label reconciliation can legitimately add extra issue edits.
+        saw_remove=0
+        saw_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            --remove-label) saw_remove=1 ;;
+            ralph:prd) saw_prd=1 ;;
+            --remove-label=ralph:prd) saw_remove=1; saw_prd=1 ;;
+          esac
+        done
+        if [ "$saw_remove" = "1" ] && [ "$saw_prd" = "1" ]; then
+          count=$(cat "$ADVANCE_COUNT" 2>/dev/null || printf '0')
+          count=$((count + 1))
+          printf '%d' "$count" > "$ADVANCE_COUNT"
+        fi
         exit 0
         ;;
       view)
@@ -2759,8 +2951,8 @@ exit 0
 
     assert!(result.is_ok(), "poll_and_advance_prd should succeed");
 
-    // Read the counter: label-edit calls are the side-effect of advance_issue
-    // running the Pending->AwaitingAnswers transition (adds ralph:prd-active).
+    // Read the counter: remove-label ralph:prd is a stable side-effect of
+    // Pending->AwaitingAnswers for this fixture and occurs once per processing.
     // If dedup failed, the issue would be processed twice and the counter would
     // be >= 2. With correct dedup, it should be processed exactly once.
     let count_str = fs::read_to_string(&advance_count).expect("read counter");
