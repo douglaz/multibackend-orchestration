@@ -231,47 +231,110 @@ fn draft_watcher_exits_cleanly_on_cancellation(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verify that --pr-url is accepted by both `run` and `auto` subcommands.
-fn pr_url_plumbed_through_child_args(_h: &RalphHarness) -> TestResult {
+/// Verify runtime PR URL resolution and forwarding order:
+/// 1) `gh pr list --head <daemon-branch>` exact-match lookup is used,
+/// 2) resolved PR URL is forwarded into spawned child args,
+/// 3) PR URL resolution happens before child spawn.
+fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        use clap::Parser;
-        use crate::cli::{Cli, Commands};
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init workspace");
 
-        let cli = Cli::parse_from([
-            "ralph",
-            "run",
-            "--pr-url",
-            "https://github.com/acme/widgets/pull/42",
-        ]);
-        let Commands::Run(args) = cli.command else {
-            panic!("expected run command");
-        };
-        assert_eq!(
-            args.pr_url.as_deref(),
-            Some("https://github.com/acme/widgets/pull/42")
+        let issue_number = 77_u32;
+        let task_id = crate::daemon::format_task_id("acme", "widgets", issue_number);
+        let expected_branch = format!("ralph/daemon/{task_id}");
+        let expected_pr_url = "https://github.com/acme/widgets/pull/777";
+
+        let ordering_log = dh.temp_dir.path().join("pr-url-ordering.log");
+        let gh_log = dh.temp_dir.path().join("pr-url-gh.log");
+
+        let gh_script = format!(
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  issue)\n    case \"${{2:-}}\" in\n      list)\n        printf '%s' \"${{MOCK_GH_ISSUES:-[]}}\"\n        exit 0\n        ;;\n      edit|comment)\n        exit 0\n        ;;\n      view)\n        if [ \"${{6:-}}\" = \"title,body\" ] || [ \"${{7:-}}\" = \"title,body\" ]; then\n          printf '{{\"title\":\"Runtime PR URL test\",\"body\":\"body\"}}'\n          exit 0\n        fi\n        printf ''\n        exit 0\n        ;;\n    esac\n    ;;\n  label)\n    [ \"${{2:-}}\" = \"create\" ] && exit 0\n    ;;\n  pr)\n    case \"${{2:-}}\" in\n      list)\n        printf 'lookup %s\\n' \"$*\" >> '{ordering_log_a}'\n        head=''\n        prev=''\n        for arg in \"$@\"; do\n          if [ \"$prev\" = \"--head\" ]; then\n            head=\"$arg\"\n          fi\n          prev=\"$arg\"\n        done\n        if [ \"$head\" = '{expected_branch}' ]; then\n          printf 'resolved {expected_pr_url}\\n' >> '{ordering_log_b}'\n          printf '{expected_pr_url}\\n'\n          exit 0\n        fi\n        printf 'resolved none for-head=%s\\n' \"$head\" >> '{ordering_log_c}'\n        printf ''\n        exit 0\n        ;;\n      create)\n        printf 'unexpected-create %s\\n' \"$*\" >> '{gh_log_a}'\n        exit 1\n        ;;\n      edit|ready|close)\n        printf ''\n        exit 0\n        ;;\n      view)\n        printf '{{\"isDraft\":false}}'\n        exit 0\n        ;;\n    esac\n    ;;\n  api)\n    [ \"${{2:-}}\" = \"user\" ] && printf 'ralph-bot\\n' && exit 0\n    ;;\n  repo)\n    [ \"${{2:-}}\" = \"view\" ] && printf 'acme/widgets\\n' && exit 0\n    ;;\nesac\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
+            ordering_log_a = ordering_log.display(),
+            ordering_log_b = ordering_log.display(),
+            ordering_log_c = ordering_log.display(),
+            gh_log_a = gh_log.display(),
+            expected_branch = expected_branch,
+            expected_pr_url = expected_pr_url,
+        );
+        let gh_path = write_mock_gh_path(&dh, &gh_script).expect("write mock gh");
+
+        let ralph_script = format!(
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  auto|run)\n    pr_url='none'\n    prev=''\n    for arg in \"$@\"; do\n      if [ \"$prev\" = \"--pr-url\" ]; then\n        pr_url=\"$arg\"\n      fi\n      prev=\"$arg\"\n    done\n    printf 'spawn-pr-url %s\\n' \"$pr_url\" >> '{ordering_log}'\n    exit 0\n    ;;\n  *)\n    echo \"mock ralph: unhandled command: $1\" >&2\n    exit 1\n    ;;\nesac\n",
+            ordering_log = ordering_log.display(),
+        );
+        let ralph_path = dh
+            .write_mock_script("mock-daemon-ralph-pr-url", &ralph_script)
+            .expect("write mock daemon ralph");
+        let ralph_path_str = ralph_path.to_string_lossy().into_owned();
+
+        let issues = format!(
+            "[{{\"number\":{issue_number},\"title\":\"PR URL dispatch\",\"labels\":[{{\"name\":\"ralph:ready\"}}],\"body\":\"runtime check\"}}]"
         );
 
-        let cli = Cli::parse_from([
-            "ralph",
-            "auto",
-            "--idea",
-            "test feature",
-            "--pr-url",
-            "https://github.com/acme/widgets/pull/99",
-        ]);
-        let Commands::Auto(args) = cli.command else {
-            panic!("expected auto command");
-        };
-        assert_eq!(
-            args.pr_url.as_deref(),
-            Some("https://github.com/acme/widgets/pull/99")
+        let output = dh
+            .daemon_env(
+                ["daemon", "start", "--repo", "acme/widgets", "--single-iteration"],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path_str),
+                    ("MOCK_GH_ISSUES", &issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        crate::validate::assertions::assert_exit_code(&output, 0);
+
+        let ordering = fs::read_to_string(&ordering_log).expect("read ordering log");
+        assert!(
+            ordering.contains(&format!("--head {expected_branch}")),
+            "expected exact --head branch lookup in gh call, got: {ordering}"
+        );
+        assert!(
+            ordering.contains(&format!("resolved {expected_pr_url}")),
+            "expected resolved PR URL marker in ordering log, got: {ordering}"
+        );
+        assert!(
+            ordering.contains(&format!("spawn-pr-url {expected_pr_url}")),
+            "expected spawned child to receive --pr-url value, got: {ordering}"
         );
 
-        let cli = Cli::parse_from(["ralph", "run"]);
-        let Commands::Run(args) = cli.command else {
-            panic!("expected run command");
-        };
-        assert_eq!(args.pr_url, None);
+        let resolved_line = format!("resolved {expected_pr_url}");
+        let spawned_line = format!("spawn-pr-url {expected_pr_url}");
+        let lines: Vec<&str> = ordering.lines().collect();
+        let resolved_pos = lines.iter().position(|line| *line == resolved_line);
+        let spawned_pos = lines.iter().position(|line| *line == spawned_line);
+        assert!(resolved_pos.is_some(), "missing resolved marker: {ordering}");
+        assert!(spawned_pos.is_some(), "missing spawn marker: {ordering}");
+        assert!(
+            resolved_pos.expect("resolved pos") < spawned_pos.expect("spawn pos"),
+            "expected resolution before child spawn marker, got: {ordering}"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let resolved_log = format!("dispatch: resolved PR URL for {task_id}: {expected_pr_url}");
+        let spawn_log = format!(
+            "dispatch: task {task_id} starting fresh with ralph auto --project-id issue-{issue_number} pr_url={expected_pr_url}"
+        );
+        let resolved_idx = stderr.find(&resolved_log);
+        let spawn_idx = stderr.find(&spawn_log);
+        assert!(
+            resolved_idx.is_some(),
+            "expected runtime resolution log line in stderr, got:\n{stderr}"
+        );
+        assert!(
+            spawn_idx.is_some(),
+            "expected runtime child-spawn log line in stderr, got:\n{stderr}"
+        );
+        assert!(
+            resolved_idx.expect("resolved idx") < spawn_idx.expect("spawn idx"),
+            "expected runtime resolution log to precede child-spawn log, got:\n{stderr}"
+        );
+
+        let unexpected_create = fs::read_to_string(&gh_log).unwrap_or_default();
+        assert!(
+            unexpected_create.trim().is_empty(),
+            "did not expect draft PR creation when existing PR URL is resolved, got: {unexpected_create}"
+        );
     })
 }
 
