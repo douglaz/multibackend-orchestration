@@ -76,6 +76,8 @@ pub struct WorkspaceConfig {
     pub daemon_prd_max_revisions: u32,
     #[serde(default = "default_daemon_prd_backend_timeout_secs")]
     pub daemon_prd_backend_timeout_secs: u64,
+    #[serde(default = "default_daemon_prd_shutdown_timeout_secs")]
+    pub daemon_prd_shutdown_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -511,6 +513,7 @@ impl Default for WorkspaceConfig {
             daemon_prd_reviewer_backend: default_daemon_prd_reviewer_backend(),
             daemon_prd_max_revisions: default_daemon_prd_max_revisions(),
             daemon_prd_backend_timeout_secs: default_daemon_prd_backend_timeout_secs(),
+            daemon_prd_shutdown_timeout_secs: default_daemon_prd_shutdown_timeout_secs(),
         }
     }
 }
@@ -946,6 +949,10 @@ fn default_daemon_prd_max_revisions() -> u32 {
 
 fn default_daemon_prd_backend_timeout_secs() -> u64 {
     3600
+}
+
+fn default_daemon_prd_shutdown_timeout_secs() -> u64 {
+    60
 }
 
 fn default_planner_max_prior_loops() -> Option<usize> {
@@ -1988,6 +1995,7 @@ command = "claude-custom"
         assert_eq!(config.workspace.daemon_prd_reviewer_backend, "codex");
         assert_eq!(config.workspace.daemon_prd_max_revisions, 3);
         assert_eq!(config.workspace.daemon_prd_backend_timeout_secs, 3600);
+        assert_eq!(config.workspace.daemon_prd_shutdown_timeout_secs, 60);
         assert!(config.workflow.qa_enabled);
         assert_eq!(config.workflow.max_qa_iterations, 3);
         assert_eq!(config.workflow.max_review_history_entries_in_prompt, 3);

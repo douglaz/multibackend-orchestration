@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::GlobalConfig;
@@ -71,6 +74,8 @@ pub struct DaemonRuntimeConfig {
     /// Total wall-clock timeout (seconds) for backend calls within a single
     /// PRD state transition.
     pub prd_backend_timeout_secs: u64,
+    /// Timeout (seconds) used when shutting down the PRD background task.
+    pub prd_shutdown_timeout_secs: u64,
     /// Executable used for git invocations in interactive PRD.
     pub git_bin: String,
     /// Executable used for GitHub CLI invocations in interactive PRD.
@@ -814,6 +819,8 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         })?;
     }
 
+    let repo_root_lock = Arc::new(Semaphore::new(1));
+
     // Phase 1: Startup reconciliation — reset all `ralph:in-progress` to `ralph:ready`.
     // Always queries `ralph:in-progress` regardless of configured poll labels.
     {
@@ -823,7 +830,37 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         spawn_blocking_op(move || reconcile_in_progress_labels(&owner, &repo, verbose)).await?;
     }
 
-    // Phase 2: Main loop with in-memory child tracking
+    // Phase 2: PRD background task lifecycle
+    let prd_cancel = CancellationToken::new();
+    let prd_handle: Option<tokio::task::JoinHandle<()>> =
+        if config.prd_enabled && !config.single_iteration {
+            // Continuous mode: spawn background PRD task with immediate first tick
+            let cancel = prd_cancel.clone();
+            let prd_config = config.clone();
+            let prd_lock = repo_root_lock.clone();
+            Some(tokio::spawn(async move {
+                // Immediate first tick
+                if let Err(err) = run_prd_phase(&prd_config, &prd_lock).await {
+                    eprintln!("warning: PRD background tick failed: {err}");
+                }
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(prd_config.poll_seconds)) => {}
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if let Err(err) = run_prd_phase(&prd_config, &prd_lock).await {
+                        eprintln!("warning: PRD background tick failed: {err}");
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+    // Phase 3: Main loop with in-memory child tracking
     let mut children: HashMap<u32, ChildHandle> = HashMap::new();
     let mut iteration: u64 = 0;
 
@@ -834,18 +871,19 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // from ralph:in-progress to ralph:failed via CLI `daemon abort`).
         // Runs before collect_children so that a fast-finishing aborted task
         // is not mistakenly treated as a normal success.
-        kill_aborted_children(config, &mut children).await;
+        kill_aborted_children(config, &mut children, &repo_root_lock).await;
 
         // Collect finished children
-        collect_children(config, &mut children).await;
+        collect_children(config, &mut children, &repo_root_lock).await;
 
         // Auto-rebase phase: rebase eligible PR-backed child branches
-        auto_rebase_phase(config, &mut children).await;
+        auto_rebase_phase(config, &mut children, &repo_root_lock).await;
 
-        // Interactive PRD phase: advance PRD-labeled issues (before claim/dispatch
-        // to prevent dual workflow ownership).
-        if config.prd_enabled {
-            if let Err(err) = run_prd_phase(config).await {
+        // Interactive PRD phase: in single-iteration mode, run exactly one
+        // inline tick (no background task). In continuous mode, PRD runs as
+        // a background task spawned above.
+        if config.prd_enabled && config.single_iteration {
+            if let Err(err) = run_prd_phase(config, &repo_root_lock).await {
                 eprintln!("warning: interactive PRD phase failed: {err}");
             }
         }
@@ -865,22 +903,48 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         if slots > 0 {
-            if let Err(err) = poll_and_claim(config, &mut children, slots).await {
+            if let Err(err) = poll_and_claim(config, &mut children, slots, &repo_root_lock).await {
                 eprintln!("warning: poll/claim cycle failed: {err}");
             }
         }
 
         // Collect again after spawning
-        collect_children(config, &mut children).await;
+        collect_children(config, &mut children, &repo_root_lock).await;
 
         if config.single_iteration {
             // In single-iteration mode, wait for all spawned children to
             // reach a terminal state so the outcome is deterministic.
-            drain_all_children(config, &mut children).await;
+            drain_all_children(config, &mut children, &repo_root_lock).await;
             break;
         }
 
         tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
+    }
+
+    // Phase 4: PRD shutdown — cancel token, bounded await, explicit abort on timeout.
+    //
+    // We capture `abort_handle` before awaiting the `JoinHandle` because
+    // `JoinHandle::abort()` consumes `self` while we need to await first.
+    // `AbortHandle::abort()` is functionally equivalent — both signal the
+    // tokio task to cancel — so this satisfies the spec requirement of
+    // "call handle.abort() if timeout expires" without ownership issues.
+    if let Some(handle) = prd_handle {
+        prd_cancel.cancel();
+        let timeout_dur = Duration::from_secs(config.prd_shutdown_timeout_secs);
+        let abort_handle = handle.abort_handle();
+        match tokio::time::timeout(timeout_dur, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                eprintln!("warning: PRD background task panicked during shutdown: {err}");
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: PRD background task did not stop within {}s, aborting",
+                    config.prd_shutdown_timeout_secs
+                );
+                abort_handle.abort();
+            }
+        }
     }
 
     Ok(())
@@ -890,7 +954,10 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 ///
 /// Builds a `PrdPollConfig` from the runtime config and delegates to
 /// `interactive_prd::poll_and_advance_prd` in a blocking task.
-async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
+async fn run_prd_phase(
+    config: &DaemonRuntimeConfig,
+    repo_root_lock: &Arc<Semaphore>,
+) -> Result<()> {
     // data_dir must be the root above owner/repo so that state_path()
     // constructs {data_dir}/{owner}/{repo}/.ralph/interactive-prd/{issue}.json
     // without duplicating the owner/repo segment already present in repo_root.
@@ -919,6 +986,13 @@ async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         worker_cwd: None,
     };
 
+    // Acquire repo_root_lock so PRD git ops (fetch, reset) are serialized
+    // with dispatch/rebase/cleanup phases that also hold this semaphore.
+    let _permit = repo_root_lock.clone().acquire_owned().await.map_err(|e| {
+        crate::error::RalphError::Orchestration(format!(
+            "failed to acquire repo-root semaphore for PRD: {e}"
+        ))
+    })?;
     spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await
 }
 
@@ -964,11 +1038,47 @@ fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Resul
     Ok(())
 }
 
+/// A claimed issue ready for concurrent dispatch.
+struct ClaimedIssue {
+    issue_number: u32,
+    raw_idea: String,
+}
+
+/// Per-issue outcome from a dispatch worker, preserving `issue_number` identity
+/// even when the worker panics, so rollback can always be applied.
+enum DispatchOutcome {
+    /// Dispatch succeeded — caller inserts the handle into `children`.
+    Success {
+        issue_number: u32,
+        handle: Box<ChildHandle>,
+    },
+    /// Dispatch returned an error — per-issue rollback needed.
+    Failure { issue_number: u32, detail: String },
+    /// Dispatch panicked — per-issue rollback needed (same path as Failure).
+    Panic { issue_number: u32, detail: String },
+}
+
+/// Per-issue outcome from a completion worker in `collect_children`.
+/// Preserves `issue_number` so panic recovery can transition the issue
+/// to a terminal failure state.
+#[allow(dead_code)]
+enum CompletionOutcome {
+    /// Completion finished (success or handled error).
+    Done { issue_number: u32, task_id: String },
+    /// Completion worker panicked — explicit terminalization needed.
+    Panic {
+        issue_number: u32,
+        task_id: String,
+        detail: String,
+    },
+}
+
 /// Poll for new issues, filter, claim, and dispatch.
 async fn poll_and_claim(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, ChildHandle>,
     slots: u32,
+    repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
     let (issues, overflow) = {
         let owner = config.owner.clone();
@@ -981,9 +1091,10 @@ async fn poll_and_claim(
         eprintln!("warning: gh issue list returned exactly 100 issues; results may be truncated");
     }
 
-    let mut claimed = 0u32;
+    // Stage 1: Sequential claim/label-swap and idea extraction
+    let mut claimed_issues: Vec<ClaimedIssue> = Vec::new();
     for issue in &issues {
-        if claimed >= slots {
+        if claimed_issues.len() as u32 >= slots {
             break;
         }
 
@@ -1101,25 +1212,123 @@ async fn poll_and_claim(
         } else {
             compose_raw_idea(&issue.title, issue.body.as_deref())
         };
-        if let Err(err) = dispatch_task(config, children, issue.number, &raw_idea).await {
-            eprintln!("warning: failed to dispatch issue #{}: {err}", issue.number);
-            // Mark as failed since we already claimed it
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            let issue_number = issue.number;
-            let _ = spawn_blocking_op(move || {
-                github::swap_lifecycle_label(
-                    &owner,
-                    &repo,
-                    issue_number,
-                    "ralph:in-progress",
-                    "ralph:failed",
-                )
-            })
-            .await;
-        }
 
-        claimed += 1;
+        claimed_issues.push(ClaimedIssue {
+            issue_number: issue.number,
+            raw_idea,
+        });
+    }
+
+    if claimed_issues.is_empty() {
+        return Ok(());
+    }
+
+    // Stage 2: Dispatch claimed issues concurrently up to available slots.
+    //
+    // Each spawned task catches panics via a nested `tokio::spawn` so the
+    // per-issue `issue_number` is always available in the outcome — even
+    // when the dispatch worker panics.
+    let mut dispatch_set: JoinSet<DispatchOutcome> = JoinSet::new();
+
+    for claimed in claimed_issues {
+        let config = config.clone();
+        let repo_root_lock = repo_root_lock.clone();
+        dispatch_set.spawn(async move {
+            let issue_number = claimed.issue_number;
+            // Inner spawn isolates panics: if dispatch_task panics, the
+            // JoinHandle returns Err(JoinError) while issue_number survives
+            // in the outer task.
+            let inner = tokio::spawn(async move {
+                dispatch_task(&config, issue_number, &claimed.raw_idea, &repo_root_lock).await
+            });
+            match inner.await {
+                Ok(Ok(handle)) => DispatchOutcome::Success {
+                    issue_number,
+                    handle: Box::new(handle),
+                },
+                Ok(Err(err)) => DispatchOutcome::Failure {
+                    issue_number,
+                    detail: format!("{err}"),
+                },
+                Err(join_err) => {
+                    let detail = format!("{join_err}");
+                    DispatchOutcome::Panic {
+                        issue_number,
+                        detail,
+                    }
+                }
+            }
+        });
+    }
+
+    // Stage 3: Collect dispatch results and apply to children
+    while let Some(join_result) = dispatch_set.join_next().await {
+        let outcome = match join_result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // JoinError without issue identity — should not happen since
+                // we catch panics above, but log defensively.
+                eprintln!("warning: dispatch JoinSet task failed unexpectedly: {err}");
+                continue;
+            }
+        };
+
+        match outcome {
+            DispatchOutcome::Success {
+                issue_number,
+                handle,
+            } => {
+                children.insert(issue_number, *handle);
+            }
+            DispatchOutcome::Failure {
+                issue_number,
+                detail,
+            } => {
+                eprintln!("warning: failed to dispatch issue #{issue_number}: {detail}");
+                // Per-issue rollback: swap ralph:in-progress -> ralph:failed
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                if let Err(rollback_err) = spawn_blocking_op(move || {
+                    github::swap_lifecycle_label(
+                        &owner,
+                        &repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                })
+                .await
+                {
+                    eprintln!(
+                        "warning: dispatch rollback failed for issue #{issue_number}: {rollback_err}"
+                    );
+                }
+            }
+            DispatchOutcome::Panic {
+                issue_number,
+                detail,
+            } => {
+                eprintln!("warning: dispatch worker panicked for issue #{issue_number}: {detail}");
+                // Per-issue rollback: same path as Err — swap ralph:in-progress -> ralph:failed
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                if let Err(rollback_err) = spawn_blocking_op(move || {
+                    github::swap_lifecycle_label(
+                        &owner,
+                        &repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                })
+                .await
+                {
+                    eprintln!(
+                        "warning: dispatch panic rollback failed for issue #{issue_number}: {rollback_err}"
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1195,23 +1404,32 @@ fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
 async fn dispatch_task(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
     issue_number: u32,
     raw_idea: &str,
-) -> Result<()> {
+    repo_root_lock: &Arc<Semaphore>,
+) -> Result<ChildHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
 
-    bootstrap::ensure_repo_ready(&config.repo_root).await?;
+    bootstrap::ensure_repo_ready(&config.repo_root, Some(repo_root_lock.clone())).await?;
 
     let workspace_root = config.workspace_root.clone();
 
     // Create worktree (reuses existing branch if present).
     let wt_path = {
+        let _permit = repo_root_lock
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| {
+                RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+            })?;
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
-        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid)).await?
+        let lock = Some(repo_root_lock.clone());
+        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid, lock))
+            .await?
     };
 
     // Clean worktree of any dirty files from previous runs
@@ -1224,6 +1442,13 @@ async fn dispatch_task(
     // `ralph/issue-{n}` (which contains committed project data) is checked
     // out when we scan `.ralph/projects/`.
     {
+        let _permit = repo_root_lock
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| {
+                RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+            })?;
         let wt = wt_path.clone();
         let base_branch = config.base_branch.clone();
         match spawn_blocking_op(move || {
@@ -1449,27 +1674,22 @@ async fn dispatch_task(
         None
     };
 
-    children.insert(
-        issue_number,
-        ChildHandle {
-            pid: spawned.pid,
-            pgid: spawned.pgid,
-            child: spawned.child,
-            watcher_cancel,
-            watcher_handle,
-            draft_pr_cancel,
-            draft_pr_handle,
-            branch: branch_name,
-            log_file: log_path,
-            last_rebase_at: None,
-            last_rebase_failure_sha: None,
-            pr_url,
-        },
-    );
-
     eprintln!("dispatched task {task_id} (pid={})", spawned.pid);
 
-    Ok(())
+    Ok(ChildHandle {
+        pid: spawned.pid,
+        pgid: spawned.pgid,
+        child: spawned.child,
+        watcher_cancel,
+        watcher_handle,
+        draft_pr_cancel,
+        draft_pr_handle,
+        branch: branch_name,
+        log_file: log_path,
+        last_rebase_at: None,
+        last_rebase_failure_sha: None,
+        pr_url,
+    })
 }
 
 fn compose_raw_idea(title: &str, body: Option<&str>) -> String {
@@ -1491,8 +1711,13 @@ pub fn extract_original_title(raw_idea: &str) -> Option<String> {
 }
 
 /// Collect finished children and transition them to terminal states via labels.
-async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u32, ChildHandle>) {
-    let mut finished = Vec::new();
+async fn collect_children(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, ChildHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+) {
+    // Stage 1: Sequential child status scan
+    let mut finished: Vec<(u32, &'static str)> = Vec::new();
     let mut still_running = 0u32;
 
     for (issue_number, handle) in children.iter_mut() {
@@ -1534,6 +1759,9 @@ async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u
         eprintln!("verbose: child collection still_running={still_running}");
     }
 
+    // Stage 2: Per-child teardown (sequential: watcher_cancel -> watcher_join -> draft_pr_cancel -> draft_pr_join)
+    // and print_log_tail for failed children
+    let mut completion_tasks: Vec<(u32, String, &'static str)> = Vec::new();
     for (issue_number, terminal_label) in finished {
         let task_id = format_task_id(&config.owner, &config.repo, issue_number);
         let Some(mut handle) = children.remove(&issue_number) else {
@@ -1554,7 +1782,82 @@ async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
-        complete_task(config, issue_number, &task_id, terminal_label).await;
+        completion_tasks.push((issue_number, task_id, terminal_label));
+    }
+
+    // Stage 3: Run complete_task concurrently across finished children via JoinSet.
+    //
+    // Each completion worker returns a `CompletionOutcome` carrying the
+    // `issue_number` so panics/errors are tied to a specific issue.  If a
+    // worker panics, the issue is explicitly transitioned to `ralph:failed`.
+    if completion_tasks.is_empty() {
+        return;
+    }
+
+    let mut complete_set: JoinSet<CompletionOutcome> = JoinSet::new();
+    for (issue_number, task_id, terminal_label) in completion_tasks {
+        let config = config.clone();
+        let repo_root_lock = repo_root_lock.clone();
+        let tid = task_id.clone();
+        complete_set.spawn(async move {
+            // Inner spawn isolates panics so issue_number is preserved.
+            let inner = tokio::spawn(async move {
+                complete_task(&config, issue_number, &tid, terminal_label, &repo_root_lock).await;
+            });
+            match inner.await {
+                Ok(()) => CompletionOutcome::Done {
+                    issue_number,
+                    task_id,
+                },
+                Err(join_err) => CompletionOutcome::Panic {
+                    issue_number,
+                    task_id,
+                    detail: format!("{join_err}"),
+                },
+            }
+        });
+    }
+
+    while let Some(join_result) = complete_set.join_next().await {
+        let outcome = match join_result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                eprintln!("warning: completion JoinSet task failed unexpectedly: {err}");
+                continue;
+            }
+        };
+
+        match outcome {
+            CompletionOutcome::Done { .. } => {}
+            CompletionOutcome::Panic {
+                issue_number,
+                task_id,
+                detail,
+            } => {
+                eprintln!(
+                    "warning: complete_task panicked for {task_id} (issue #{issue_number}): {detail}"
+                );
+                // Explicitly transition to terminal failure state so the
+                // issue does not remain stuck as ralph:in-progress.
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                if let Err(rollback_err) = spawn_blocking_op(move || {
+                    github::swap_lifecycle_label(
+                        &owner,
+                        &repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                })
+                .await
+                {
+                    eprintln!(
+                        "warning: completion panic rollback failed for {task_id} (issue #{issue_number}): {rollback_err}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1566,32 +1869,67 @@ async fn collect_children(config: &DaemonRuntimeConfig, children: &mut HashMap<u
 async fn kill_aborted_children(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, ChildHandle>,
+    _repo_root_lock: &Arc<Semaphore>,
 ) {
     let issue_numbers: Vec<u32> = children.keys().cloned().collect();
     let mut to_kill = Vec::new();
 
-    for issue_number in issue_numbers {
-        let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        match spawn_blocking_op(move || github::fetch_issue_labels(&owner, &repo, issue_number))
-            .await
-        {
-            Ok(labels) => {
-                if !labels.iter().any(|l| l == "ralph:in-progress") {
-                    eprintln!(
-                        "abort-check: task {task_id} no longer in-progress (labels: {}), killing",
-                        labels.join(", ")
-                    );
-                    to_kill.push(issue_number);
-                }
+    // Query labels concurrently via JoinSet, capped at max(1, config.max_concurrent)
+    let concurrency_cap = std::cmp::max(1, config.max_concurrent) as usize;
+    let mut join_set: JoinSet<(u32, String, std::result::Result<Vec<String>, RalphError>)> =
+        JoinSet::new();
+
+    let mut pending = issue_numbers.into_iter();
+    let mut in_flight = 0usize;
+
+    loop {
+        // Fill up to concurrency cap
+        while in_flight < concurrency_cap {
+            if let Some(issue_number) = pending.next() {
+                let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                join_set.spawn(async move {
+                    let result = spawn_blocking_op(move || {
+                        github::fetch_issue_labels(&owner, &repo, issue_number)
+                    })
+                    .await;
+                    (issue_number, task_id, result)
+                });
+                in_flight += 1;
+            } else {
+                break;
             }
-            Err(err) => {
-                eprintln!("abort-check: failed to query labels for {task_id}: {err}");
+        }
+
+        if in_flight == 0 {
+            break;
+        }
+
+        // Await next completed label fetch
+        if let Some(result) = join_set.join_next().await {
+            in_flight -= 1;
+            match result {
+                Ok((issue_number, task_id, Ok(labels))) => {
+                    if !labels.iter().any(|l| l == "ralph:in-progress") {
+                        eprintln!(
+                            "abort-check: task {task_id} no longer in-progress (labels: {}), killing",
+                            labels.join(", ")
+                        );
+                        to_kill.push(issue_number);
+                    }
+                }
+                Ok((_, task_id, Err(err))) => {
+                    eprintln!("abort-check: failed to query labels for {task_id}: {err}");
+                }
+                Err(err) => {
+                    eprintln!("abort-check: label fetch task panicked: {err}");
+                }
             }
         }
     }
 
+    // Apply kill decisions sequentially against children
     for issue_number in to_kill {
         if let Some(mut handle) = children.remove(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
@@ -1623,11 +1961,12 @@ async fn kill_aborted_children(
 async fn drain_all_children(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, ChildHandle>,
+    repo_root_lock: &Arc<Semaphore>,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
-        collect_children(config, children).await;
+        collect_children(config, children, repo_root_lock).await;
         if children.is_empty() {
             break;
         }
@@ -1663,7 +2002,14 @@ async fn drain_all_children(
                     }
                 }
             }
-            complete_task(config, issue_number, &task_id, "ralph:failed").await;
+            complete_task(
+                config,
+                issue_number,
+                &task_id,
+                "ralph:failed",
+                repo_root_lock,
+            )
+            .await;
         }
     }
 }
@@ -1712,9 +2058,18 @@ async fn complete_task(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    repo_root_lock: &Arc<Semaphore>,
 ) {
     for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
-        match complete_task_attempt(config, issue_number, task_id, terminal_label).await {
+        match complete_task_attempt(
+            config,
+            issue_number,
+            task_id,
+            terminal_label,
+            repo_root_lock,
+        )
+        .await
+        {
             Ok(()) => return,
             Err(err) => {
                 if let Some(delay) = complete_task_retry_delay(&err, attempt) {
@@ -1739,6 +2094,7 @@ async fn complete_task_attempt(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
@@ -1784,7 +2140,7 @@ async fn complete_task_attempt(
     }
 
     // Worktree cleanup
-    cleanup_worktree_for_terminal_state(config, task_id, terminal_label).await;
+    cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
 
     let log_path = task_log_path(&config.workspace_root, task_id);
     eprintln!(
@@ -1799,12 +2155,13 @@ async fn cleanup_worktree_for_terminal_state(
     config: &DaemonRuntimeConfig,
     task_id: &str,
     terminal_label: &str,
+    repo_root_lock: &Arc<Semaphore>,
 ) {
     if should_cleanup_worktree(terminal_label) {
         eprintln!(
             "complete-task-terminal: cleaning worktree for {task_id} (label={terminal_label})"
         );
-        cleanup_worktree(config, task_id).await;
+        cleanup_worktree(config, task_id, repo_root_lock).await;
         return;
     }
 
@@ -1812,12 +2169,24 @@ async fn cleanup_worktree_for_terminal_state(
 }
 
 /// Remove the worktree for a task (best-effort).
-async fn cleanup_worktree(config: &DaemonRuntimeConfig, task_id: &str) {
+async fn cleanup_worktree(
+    config: &DaemonRuntimeConfig,
+    task_id: &str,
+    repo_root_lock: &Arc<Semaphore>,
+) {
     let workspace_root = config.workspace_root.clone();
     let repo_root = config.repo_root.clone();
     let tid = task_id.to_owned();
+    let lock = repo_root_lock.clone();
+
+    let _permit = repo_root_lock
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|err| RalphError::Orchestration(format!("git root semaphore closed: {err}")))
+        .ok();
     if let Err(err) = spawn_blocking_op(move || {
-        worktree::remove_worktree(&repo_root, &workspace_root, &tid);
+        worktree::remove_worktree(&repo_root, &workspace_root, &tid, Some(lock));
         Ok(())
     })
     .await
@@ -1836,7 +2205,40 @@ async fn cleanup_worktree(config: &DaemonRuntimeConfig, task_id: &str) {
 /// Iterates active children in deterministic ascending issue_number order,
 /// capped at `max_rebases_per_cycle`. Each rebase attempt is bounded by
 /// `rebase_timeout_seconds`.
-async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<u32, ChildHandle>) {
+/// Candidate for rebase: contains all metadata needed to execute the rebase
+/// concurrently without needing mutable access to `children`.
+struct RebaseCandidate {
+    issue_number: u32,
+    task_id: String,
+    branch: String,
+    last_failure_sha: Option<String>,
+    rebase_target: String,
+    head_sha: String,
+    pr_number: u32,
+}
+
+/// Outcome of a concurrent rebase operation.
+enum RebaseOutcome {
+    Success {
+        issue_number: u32,
+        task_id: String,
+    },
+    Failure {
+        issue_number: u32,
+        task_id: String,
+        head_sha: String,
+        last_failure_sha: Option<String>,
+        pr_number: u32,
+        error: String,
+        is_lease: bool,
+    },
+}
+
+async fn auto_rebase_phase(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, ChildHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+) {
     if !config.auto_rebase_enabled {
         eprintln!("auto-rebase: skipped (disabled by config)");
         return;
@@ -1846,7 +2248,8 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
     let mut issue_numbers: Vec<u32> = children.keys().cloned().collect();
     issue_numbers.sort();
 
-    let mut rebase_count = 0u32;
+    // Stage 1: Sequential candidate discovery and merge-metadata queries
+    let mut candidates: Vec<RebaseCandidate> = Vec::new();
 
     for issue_number in &issue_numbers {
         let (branch, last_rebase_at, last_failure_sha, cached_pr_url) =
@@ -1860,10 +2263,11 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
                 None => continue,
             };
 
-        if rebase_count >= config.max_rebases_per_cycle {
+        if candidates.len() as u32 >= config.max_rebases_per_cycle {
             eprintln!(
                 "auto-rebase: per-cycle cap reached ({}/{})",
-                rebase_count, config.max_rebases_per_cycle
+                candidates.len() as u32,
+                config.max_rebases_per_cycle
             );
             break;
         }
@@ -1958,7 +2362,6 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
             PrMergeStatus::Mergeable => {}
         }
 
-        // Perform rebase
         let rebase_target = format!("origin/{}", merge_info.base_branch);
         let head_sha = merge_info.head_oid.clone();
 
@@ -1966,63 +2369,69 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
             "auto-rebase: rebasing {task_id} (branch={branch}, target={rebase_target}, head={head_sha})"
         );
 
-        // Create worktree on the task's branch
-        let wt_path = {
-            let repo_root = config.repo_root.clone();
-            let ws_root = config.workspace_root.clone();
-            let tid = task_id.clone();
-            let br = branch.clone();
-            match spawn_blocking_op(move || {
-                worktree::create_worktree_on_branch(&repo_root, &ws_root, &tid, &br)
-            })
-            .await
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    eprintln!("auto-rebase: failed to create worktree for {task_id}: {err}");
-                    rebase_count += 1;
-                    continue;
-                }
+        candidates.push(RebaseCandidate {
+            issue_number: *issue_number,
+            task_id,
+            branch: branch.clone(),
+            last_failure_sha,
+            rebase_target,
+            head_sha,
+            pr_number,
+        });
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Stage 2: Execute rebase operations concurrently via JoinSet
+    let mut rebase_set: JoinSet<RebaseOutcome> = JoinSet::new();
+
+    for candidate in candidates {
+        let config = config.clone();
+        let repo_root_lock = repo_root_lock.clone();
+        rebase_set.spawn(async move {
+            execute_rebase_candidate(&config, &candidate, &repo_root_lock).await
+        });
+    }
+
+    // Stage 3: Collect results and apply child-state mutations sequentially
+    let mut outcomes: Vec<RebaseOutcome> = Vec::new();
+    while let Some(result) = rebase_set.join_next().await {
+        match result {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(err) => {
+                eprintln!("auto-rebase: rebase task panicked: {err}");
             }
-        };
-
-        // Fetch, rebase, push with timeout
-        let timeout = Duration::from_secs(config.rebase_timeout_seconds);
-        let rebase_result = {
-            let wt = wt_path.clone();
-            let target = rebase_target.clone();
-            let br = branch.clone();
-            let timeout_dur = timeout;
-            let backend_str = config.rebase_agent_backend.clone();
-            spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend_str))
-                .await
-        };
-
-        // Clean up rebase worktree (best-effort)
-        {
-            let repo_root = config.repo_root.clone();
-            let ws_root = config.workspace_root.clone();
-            let tid = task_id.clone();
-            let _ = spawn_blocking_op(move || {
-                worktree::remove_rebase_worktree(&repo_root, &ws_root, &tid);
-                Ok(())
-            })
-            .await;
         }
+    }
 
-        rebase_count += 1;
+    // Sort outcomes by issue_number for deterministic application
+    outcomes.sort_by_key(|o| match o {
+        RebaseOutcome::Success { issue_number, .. } => *issue_number,
+        RebaseOutcome::Failure { issue_number, .. } => *issue_number,
+    });
 
-        match rebase_result {
-            Ok(()) => {
+    for outcome in outcomes {
+        match outcome {
+            RebaseOutcome::Success {
+                issue_number,
+                task_id,
+            } => {
                 eprintln!("auto-rebase: success for {task_id}");
-                if let Some(h) = children.get_mut(issue_number) {
+                if let Some(h) = children.get_mut(&issue_number) {
                     h.last_rebase_at = Some(std::time::Instant::now());
                 }
             }
-            Err(err) => {
-                let err_msg = err.to_string();
-                let is_lease = github::is_lease_rejection(&err_msg);
-
+            RebaseOutcome::Failure {
+                issue_number,
+                task_id,
+                head_sha,
+                last_failure_sha,
+                pr_number,
+                error,
+                is_lease,
+            } => {
                 if is_lease {
                     eprintln!(
                         "auto-rebase: lease mismatch for {task_id} — skipping for this cycle"
@@ -2030,7 +2439,7 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
                     continue;
                 }
 
-                eprintln!("auto-rebase: failure for {task_id}: {err_msg}");
+                eprintln!("auto-rebase: failure for {task_id}: {error}");
 
                 // Skip duplicate failure comment for the same head SHA.
                 if last_failure_sha.as_deref() == Some(head_sha.as_str()) {
@@ -2040,7 +2449,7 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
                 } else {
                     let marker = format!("<!-- ralph:rebase:{task_id}:failed:{head_sha} -->");
                     let body = format!(
-                        "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {err_msg}"
+                        "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {error}"
                     );
                     let owner = config.owner.clone();
                     let repo = config.repo.clone();
@@ -2048,13 +2457,173 @@ async fn auto_rebase_phase(config: &DaemonRuntimeConfig, children: &mut HashMap<
                         github::post_pr_comment(&owner, &repo, pr_number, &body)
                     })
                     .await;
-                    if let Some(h) = children.get_mut(issue_number) {
+                    if let Some(h) = children.get_mut(&issue_number) {
                         h.last_rebase_failure_sha = Some(head_sha.clone());
                     }
                 }
             }
         }
     }
+}
+
+/// Execute a single rebase candidate: worktree creation, fetch, rebase, cleanup.
+async fn execute_rebase_candidate(
+    config: &DaemonRuntimeConfig,
+    candidate: &RebaseCandidate,
+    repo_root_lock: &Arc<Semaphore>,
+) -> RebaseOutcome {
+    let task_id = &candidate.task_id;
+    let branch = &candidate.branch;
+
+    // Create worktree on the task's branch
+    let wt_path = {
+        let _permit = match repo_root_lock.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(err) => {
+                return RebaseOutcome::Failure {
+                    issue_number: candidate.issue_number,
+                    task_id: task_id.clone(),
+                    head_sha: candidate.head_sha.clone(),
+                    last_failure_sha: candidate.last_failure_sha.clone(),
+                    pr_number: candidate.pr_number,
+                    error: format!("failed to acquire repo-root semaphore: {err}"),
+                    is_lease: false,
+                };
+            }
+        };
+        let repo_root = config.repo_root.clone();
+        let ws_root = config.workspace_root.clone();
+        let tid = task_id.clone();
+        let br = branch.clone();
+        let lock = Some(repo_root_lock.clone());
+        match spawn_blocking_op(move || {
+            worktree::create_worktree_on_branch(&repo_root, &ws_root, &tid, &br, lock)
+        })
+        .await
+        {
+            Ok(path) => path,
+            Err(err) => {
+                return RebaseOutcome::Failure {
+                    issue_number: candidate.issue_number,
+                    task_id: task_id.clone(),
+                    head_sha: candidate.head_sha.clone(),
+                    last_failure_sha: candidate.last_failure_sha.clone(),
+                    pr_number: candidate.pr_number,
+                    error: format!("failed to create worktree: {err}"),
+                    is_lease: false,
+                };
+            }
+        }
+    };
+
+    // Single deadline for the entire rebase operation (fetch + rebase + push)
+    // to prevent the total wall-clock from exceeding the configured limit.
+    let deadline = Instant::now() + Duration::from_secs(config.rebase_timeout_seconds);
+
+    // Fetch in the repo root with semaphore serialization.
+    let fetch_result = {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wt = wt_path.clone();
+        let _permit = match repo_root_lock.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(err) => {
+                return RebaseOutcome::Failure {
+                    issue_number: candidate.issue_number,
+                    task_id: task_id.clone(),
+                    head_sha: candidate.head_sha.clone(),
+                    last_failure_sha: candidate.last_failure_sha.clone(),
+                    pr_number: candidate.pr_number,
+                    error: format!("failed to acquire repo-root semaphore for fetch: {err}"),
+                    is_lease: false,
+                };
+            }
+        };
+        spawn_blocking_op(move || execute_rebase_fetch(&wt, remaining)).await
+    };
+    if let Err(err) = fetch_result {
+        eprintln!("auto-rebase: fetch failed for {task_id}: {err}");
+        cleanup_rebase_worktree(config, task_id, repo_root_lock).await;
+        return RebaseOutcome::Failure {
+            issue_number: candidate.issue_number,
+            task_id: task_id.clone(),
+            head_sha: candidate.head_sha.clone(),
+            last_failure_sha: candidate.last_failure_sha.clone(),
+            pr_number: candidate.pr_number,
+            error: format!("fetch failed: {err}"),
+            is_lease: false,
+        };
+    }
+
+    // Rebase + push in the worktree without holding the root semaphore.
+    let rebase_result = {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            cleanup_rebase_worktree(config, task_id, repo_root_lock).await;
+            return RebaseOutcome::Failure {
+                issue_number: candidate.issue_number,
+                task_id: task_id.clone(),
+                head_sha: candidate.head_sha.clone(),
+                last_failure_sha: candidate.last_failure_sha.clone(),
+                pr_number: candidate.pr_number,
+                error: "rebase timeout budget exhausted after fetch".to_string(),
+                is_lease: false,
+            };
+        }
+        let wt = wt_path.clone();
+        let target = candidate.rebase_target.clone();
+        let br = branch.clone();
+        let backend_str = config.rebase_agent_backend.clone();
+        spawn_blocking_op(move || execute_rebase(&wt, &target, &br, remaining, &backend_str)).await
+    };
+
+    // Clean up rebase worktree (best-effort)
+    cleanup_rebase_worktree(config, task_id, repo_root_lock).await;
+
+    match rebase_result {
+        Ok(()) => RebaseOutcome::Success {
+            issue_number: candidate.issue_number,
+            task_id: task_id.clone(),
+        },
+        Err(err) => {
+            let err_msg = err.to_string();
+            let is_lease = github::is_lease_rejection(&err_msg);
+            RebaseOutcome::Failure {
+                issue_number: candidate.issue_number,
+                task_id: task_id.clone(),
+                head_sha: candidate.head_sha.clone(),
+                last_failure_sha: candidate.last_failure_sha.clone(),
+                pr_number: candidate.pr_number,
+                error: err_msg,
+                is_lease,
+            }
+        }
+    }
+}
+
+/// Best-effort cleanup of a rebase worktree.
+async fn cleanup_rebase_worktree(
+    config: &DaemonRuntimeConfig,
+    task_id: &str,
+    repo_root_lock: &Arc<Semaphore>,
+) {
+    let repo_root = config.repo_root.clone();
+    let ws_root = config.workspace_root.clone();
+    let tid = task_id.to_owned();
+    let lock = Some(repo_root_lock.clone());
+    let _permit = match repo_root_lock.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(err) => {
+            eprintln!(
+                "auto-rebase: failed to reacquire repo-root semaphore for {task_id} cleanup: {err}"
+            );
+            return;
+        }
+    };
+    let _ = spawn_blocking_op(move || {
+        worktree::remove_rebase_worktree(&repo_root, &ws_root, &tid, lock);
+        Ok(())
+    })
+    .await;
 }
 
 /// Execute fetch + rebase + force-with-lease push in a worktree.
@@ -2103,22 +2672,6 @@ fn execute_rebase(
             abort_budget,
         );
     };
-
-    // Fetch
-    let fetch_budget = remaining("git fetch")?;
-    let fetch_output = process::run_command_with_timeout(
-        std::process::Command::new("git")
-            .args(["fetch", "origin"])
-            .current_dir(worktree_path),
-        fetch_budget,
-    )?;
-
-    if !fetch_output.status.success() {
-        return Err(RalphError::Orchestration(format!(
-            "git fetch failed: {}",
-            String::from_utf8_lossy(&fetch_output.stderr).trim()
-        )));
-    }
 
     // Rebase
     let rebase_budget = remaining("git rebase")?;
@@ -2203,6 +2756,37 @@ fn execute_rebase(
         let stderr = String::from_utf8_lossy(&push_output.stderr).to_string();
         return Err(RalphError::Orchestration(format!(
             "git push --force-with-lease failed for branch {branch}: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn execute_rebase_fetch(worktree_path: &Path, timeout: Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+
+    let remaining = |label: &str| -> Result<Duration> {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(RalphError::Orchestration(format!(
+                "{label}: per-attempt timeout exceeded"
+            )));
+        }
+        Ok(deadline - now)
+    };
+
+    let fetch_budget = remaining("git fetch")?;
+    let fetch_output = process::run_command_with_timeout(
+        std::process::Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(worktree_path),
+        fetch_budget,
+    )?;
+
+    if !fetch_output.status.success() {
+        return Err(RalphError::Orchestration(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&fetch_output.stderr).trim()
         )));
     }
 

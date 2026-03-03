@@ -121,6 +121,7 @@ pub struct EffectiveDaemonConfig {
     pub prd_reviewer_backend: String,
     pub prd_max_revisions: u32,
     pub prd_backend_timeout_secs: u64,
+    pub prd_shutdown_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +475,7 @@ pub fn resolve_daemon_config(
         prd_reviewer_backend: global.workspace.daemon_prd_reviewer_backend.clone(),
         prd_max_revisions: global.workspace.daemon_prd_max_revisions,
         prd_backend_timeout_secs: global.workspace.daemon_prd_backend_timeout_secs,
+        prd_shutdown_timeout_secs: global.workspace.daemon_prd_shutdown_timeout_secs,
     }
 }
 
@@ -581,6 +583,14 @@ pub fn validate_effective_daemon_config(
         &daemon.refinement_backend,
         "daemon.refinement_backend",
     )?;
+
+    if daemon.prd_shutdown_timeout_secs < 1 {
+        return Err(RalphError::Validation(format!(
+            "workspace.daemon_prd_shutdown_timeout_secs must be >= 1, got {}",
+            daemon.prd_shutdown_timeout_secs
+        )));
+    }
+
     Ok(())
 }
 
@@ -1264,6 +1274,7 @@ mod tests {
         assert_eq!(effective.prd_reviewer_backend, "codex");
         assert_eq!(effective.prd_max_revisions, 3);
         assert_eq!(effective.prd_backend_timeout_secs, 120);
+        assert_eq!(effective.prd_shutdown_timeout_secs, 60);
 
         let no_project = resolve_daemon_config(&global, None);
         assert_eq!(no_project.poll_seconds, 60);
@@ -1289,6 +1300,7 @@ mod tests {
         assert_eq!(no_project.prd_reviewer_backend, "codex");
         assert_eq!(no_project.prd_max_revisions, 3);
         assert_eq!(no_project.prd_backend_timeout_secs, 120);
+        assert_eq!(no_project.prd_shutdown_timeout_secs, 60);
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Arc;
 
 use crate::error::RalphError;
 use crate::Result;
+use tokio::sync::Semaphore;
 
 const BOOTSTRAP_COMMIT_MESSAGE: &str = "ralph: bootstrap empty commit";
 const FALLBACK_GIT_NAME: &str = "ralph-daemon";
@@ -15,11 +17,24 @@ const FALLBACK_GIT_EMAIL: &str = "ralph@localhost";
 /// - Rejects bare repositories as unsupported.
 /// - Creates one empty bootstrap commit for unborn HEAD.
 /// - Initializes `.ralph/` workspace if missing.
-pub async fn ensure_repo_ready(repo_root: &Path) -> Result<()> {
+pub async fn ensure_repo_ready(
+    repo_root: &Path,
+    repo_root_lock: Option<Arc<Semaphore>>,
+) -> Result<()> {
+    let _permit = if let Some(lock) = repo_root_lock {
+        Some(lock.acquire_owned().await.map_err(|err| {
+            RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+        })?)
+    } else {
+        None
+    };
+
     let repo_root = repo_root.to_path_buf();
-    tokio::task::spawn_blocking(move || ensure_repo_ready_sync(&repo_root))
+    let result = tokio::task::spawn_blocking(move || ensure_repo_ready_sync(&repo_root))
         .await
-        .map_err(|err| RalphError::Orchestration(format!("bootstrap task join failure: {err}")))?
+        .map_err(|err| RalphError::Orchestration(format!("bootstrap task join failure: {err}")))?;
+
+    result
 }
 
 pub fn ensure_repo_ready_sync(repo_root: &Path) -> Result<()> {
