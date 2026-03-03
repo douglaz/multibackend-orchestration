@@ -2,12 +2,12 @@ use super::*;
 
 use toml_edit::DocumentMut;
 
+use crate::config::GlobalConfig;
 use crate::validate::assertions::{
-    assert_dir_exists, assert_exit_code, assert_file_exists,
-    assert_path_not_exists, assert_stdout_eq,
+    assert_dir_exists, assert_exit_code, assert_file_exists, assert_path_not_exists,
+    assert_stdout_eq,
 };
 use crate::validate::harness::RalphHarness;
-use crate::config::GlobalConfig;
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -296,8 +296,7 @@ fn copy_files_full_scaffold_on_new_target(h: &RalphHarness) -> TestResult {
         // Verify full config is written (not minimal).
         let config_str =
             std::fs::read_to_string(ralph_dir.join("ralph.toml")).expect("read ralph.toml");
-        let parsed: GlobalConfig =
-            toml::from_str(&config_str).expect("ralph.toml should parse");
+        let parsed: GlobalConfig = toml::from_str(&config_str).expect("ralph.toml should parse");
         assert_eq!(parsed, GlobalConfig::default());
 
         // Verify all 11 template files exist.
@@ -317,11 +316,8 @@ fn copy_files_overlay_preserves_custom_values(h: &RalphHarness) -> TestResult {
         let toml_path = ralph_dir.join("ralph.toml");
 
         // Write a config with a custom value.
-        std::fs::write(
-            &toml_path,
-            "[workspace]\ndefault_backend = \"codex\"\n",
-        )
-        .expect("write custom config");
+        std::fs::write(&toml_path, "[workspace]\ndefault_backend = \"codex\"\n")
+            .expect("write custom config");
 
         // Run --copy-files overlay.
         let output = h
@@ -330,10 +326,8 @@ fn copy_files_overlay_preserves_custom_values(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         // Verify the custom value is preserved.
-        let merged_str =
-            std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
-        let parsed: GlobalConfig =
-            toml::from_str(&merged_str).expect("merged config should parse");
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
         assert_eq!(
             parsed.workspace.default_backend, "codex",
             "custom default_backend should be preserved"
@@ -354,10 +348,8 @@ fn copy_files_overlay_fills_missing_keys(h: &RalphHarness) -> TestResult {
 
         let ralph_dir = h.repo_root.join(".ralph");
         let toml_path = ralph_dir.join("ralph.toml");
-        let merged_str =
-            std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
-        let parsed: GlobalConfig =
-            toml::from_str(&merged_str).expect("merged config should parse");
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
 
         // Effective config should match full defaults.
         assert_eq!(parsed, GlobalConfig::default());
@@ -437,7 +429,8 @@ fn copy_files_rejects_non_workspace_nonempty_dir(h: &RalphHarness) -> TestResult
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            combined.contains("directory exists but is not a ralph workspace (no ralph.toml found)"),
+            combined
+                .contains("directory exists but is not a ralph workspace (no ralph.toml found)"),
             "expected exact non-workspace error message, got:\n{combined}"
         );
 
@@ -572,10 +565,8 @@ fn copy_files_overlay_inline_table_merge(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         let toml_path = ralph_dir.join("ralph.toml");
-        let merged_str =
-            std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
-        let parsed: GlobalConfig =
-            toml::from_str(&merged_str).expect("merged config should parse");
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
 
         // User value should be preserved.
         assert_eq!(

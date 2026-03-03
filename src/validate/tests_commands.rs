@@ -654,8 +654,14 @@ fn config_set_global_preserves_comments(h: &RalphHarness) -> TestResult {
         .expect("write custom config");
 
         // Set a value via CLI.
-        h.ralph_ok(["config", "set", "--global", "workspace.default_backend", "codex"])
-            .expect("config set should succeed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "--global",
+            "workspace.default_backend",
+            "codex",
+        ])
+        .expect("config set should succeed");
 
         // Verify comment is preserved.
         let raw = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
@@ -734,15 +740,18 @@ fn config_set_global_inline_table_set(h: &RalphHarness) -> TestResult {
 
         // Write a config with inline-table workspace syntax.
         let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
-        std::fs::write(
-            &toml_path,
-            "workspace = { version = \"1.0\" }\n",
-        )
-        .expect("write inline-table config");
+        std::fs::write(&toml_path, "workspace = { version = \"1.0\" }\n")
+            .expect("write inline-table config");
 
         // Set a value via CLI — this must navigate through the inline table.
-        h.ralph_ok(["config", "set", "--global", "workspace.default_backend", "codex"])
-            .expect("config set should succeed through inline table");
+        h.ralph_ok([
+            "config",
+            "set",
+            "--global",
+            "workspace.default_backend",
+            "codex",
+        ])
+        .expect("config set should succeed through inline table");
 
         // Verify the value was written and the file is valid.
         let raw = std::fs::read_to_string(&toml_path).expect("read ralph.toml");

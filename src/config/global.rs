@@ -1205,18 +1205,15 @@ pub fn save_sparse(path: &Path, canonical_key: &str, config: &GlobalConfig) -> R
 /// - All other keys split on dots normally.
 fn sparse_key_segments(canonical_key: &str) -> Vec<&str> {
     // Check for the `backends.<name>.env.<rest>` pattern.
-    if let Some(rest) = canonical_key
-        .strip_prefix("backends.")
-        .and_then(|s| {
-            // Find the backend name (first segment after "backends.")
-            let dot = s.find('.')?;
-            let after_backend = &s[dot + 1..];
-            // Check if next segment is "env."
-            after_backend
-                .strip_prefix("env.")
-                .map(|env_rest| (s, dot, env_rest))
-        })
-    {
+    if let Some(rest) = canonical_key.strip_prefix("backends.").and_then(|s| {
+        // Find the backend name (first segment after "backends.")
+        let dot = s.find('.')?;
+        let after_backend = &s[dot + 1..];
+        // Check if next segment is "env."
+        after_backend
+            .strip_prefix("env.")
+            .map(|env_rest| (s, dot, env_rest))
+    }) {
         let (s, dot, env_rest) = rest;
         let backend_name = &s[..dot];
         return vec!["backends", backend_name, "env", env_rest];
@@ -3343,12 +3340,8 @@ planner_state_in_prompt = "summary"
             .claude
             .env
             .insert("MY.DOTTED.KEY".to_owned(), "value123".to_owned());
-        super::save_sparse(
-            &path,
-            "backends.claude.env.MY.DOTTED.KEY",
-            &config,
-        )
-        .expect("save_sparse");
+        super::save_sparse(&path, "backends.claude.env.MY.DOTTED.KEY", &config)
+            .expect("save_sparse");
 
         let result = std::fs::read_to_string(&path).expect("read");
         assert!(
@@ -3366,8 +3359,7 @@ planner_state_in_prompt = "summary"
 
         let mut config = GlobalConfig::default();
         config.backends.claude.models.planner = None;
-        super::save_sparse(&path, "backends.claude.models.planner", &config)
-            .expect("save_sparse");
+        super::save_sparse(&path, "backends.claude.models.planner", &config).expect("save_sparse");
 
         let result = std::fs::read_to_string(&path).expect("read");
         // planner should be removed since it's None in the full serialization
@@ -3487,8 +3479,7 @@ planner_state_in_prompt = "summary"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ralph.toml");
         // Inline table with an optional key.
-        let original =
-            "[workflow]\nqa_backend = \"codex\"\nauto_commit = true\n";
+        let original = "[workflow]\nqa_backend = \"codex\"\nauto_commit = true\n";
         std::fs::write(&path, original).expect("write");
 
         let mut config = GlobalConfig::default();

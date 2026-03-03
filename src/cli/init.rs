@@ -325,11 +325,7 @@ fn merge_tables(existing: &mut toml_edit::Table, default: &toml_edit::Table) {
                 .is_some()
             {
                 // Default is an inline table — convert to regular table for merge.
-                let default_inline = default_item
-                    .as_value()
-                    .unwrap()
-                    .as_inline_table()
-                    .unwrap();
+                let default_inline = default_item.as_value().unwrap().as_inline_table().unwrap();
                 let default_as_table = default_inline.clone().into_table();
                 let existing_item = existing.get_mut(key).expect("key exists");
                 if let Some(existing_table) = existing_item.as_table_mut() {
@@ -516,8 +512,8 @@ mod tests {
 
         assert_eq!(workspace.root, workspace_root);
         assert!(!workspace_root.join("templates").exists());
-        let toml = std::fs::read_to_string(workspace_root.join("ralph.toml"))
-            .expect("read minimal toml");
+        let toml =
+            std::fs::read_to_string(workspace_root.join("ralph.toml")).expect("read minimal toml");
         assert!(toml.contains("[workspace]"));
         assert!(!toml.contains("workspace.version"));
         assert!(!toml.contains("backends."));
@@ -553,7 +549,10 @@ mod tests {
             actions.first(),
             Some(InitAction::CreateDir { .. })
         ));
-        assert!(matches!(actions.get(1), Some(InitAction::WriteMinimalConfig { .. })));
+        assert!(matches!(
+            actions.get(1),
+            Some(InitAction::WriteMinimalConfig { .. })
+        ));
 
         let template_actions = actions
             .iter()
@@ -613,11 +612,8 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let workspace_root = temp.path().join(".ralph");
         std::fs::create_dir_all(&workspace_root).expect("create dir");
-        std::fs::write(
-            workspace_root.join("ralph.toml"),
-            super::MINIMAL_TOML,
-        )
-        .expect("write ralph.toml");
+        std::fs::write(workspace_root.join("ralph.toml"), super::MINIMAL_TOML)
+            .expect("write ralph.toml");
         let result = validate_copy_files_target(&workspace_root)
             .expect("existing workspace should be ExistingWorkspace");
         assert!(matches!(result, CopyFilesTarget::ExistingWorkspace));
@@ -630,9 +626,11 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).expect("create dir");
         std::fs::write(workspace_root.join("some_file.txt"), "stuff").expect("write file");
 
-        let err = validate_copy_files_target(&workspace_root)
-            .expect_err("non-workspace should error");
-        assert!(matches!(err, RalphError::Validation(ref msg) if msg.contains("not a ralph workspace")));
+        let err =
+            validate_copy_files_target(&workspace_root).expect_err("non-workspace should error");
+        assert!(
+            matches!(err, RalphError::Validation(ref msg) if msg.contains("not a ralph workspace"))
+        );
     }
 
     #[test]
@@ -646,8 +644,8 @@ mod tests {
         )
         .expect("write bad ralph.toml");
 
-        let err = validate_copy_files_target(&workspace_root)
-            .expect_err("malformed toml should error");
+        let err =
+            validate_copy_files_target(&workspace_root).expect_err("malformed toml should error");
         let msg = err.to_string();
         assert!(
             msg.contains("failed to parse ralph.toml"),
@@ -660,11 +658,13 @@ mod tests {
         let existing = "[workspace]\nversion = \"2.0\"\n";
         let merged = merge_overlay_config(existing).expect("merge should succeed");
 
-        let parsed: GlobalConfig =
-            toml::from_str(&merged).expect("merged config should parse");
+        let parsed: GlobalConfig = toml::from_str(&merged).expect("merged config should parse");
         assert_eq!(parsed.workspace.version, "2.0");
         // Default-filled keys should be present.
-        assert_eq!(parsed.workspace.default_backend, GlobalConfig::default().workspace.default_backend);
+        assert_eq!(
+            parsed.workspace.default_backend,
+            GlobalConfig::default().workspace.default_backend
+        );
     }
 
     #[test]
@@ -672,8 +672,7 @@ mod tests {
         let existing = "[workspace]\ndefault_backend = \"codex\"\n";
         let merged = merge_overlay_config(existing).expect("merge should succeed");
 
-        let parsed: GlobalConfig =
-            toml::from_str(&merged).expect("merged config should parse");
+        let parsed: GlobalConfig = toml::from_str(&merged).expect("merged config should parse");
         assert_eq!(parsed.workspace.default_backend, "codex");
     }
 
@@ -735,8 +734,7 @@ mod tests {
         let existing = "workspace = { default_backend = \"codex\" }\n";
         let merged = merge_overlay_config(existing).expect("merge should succeed");
 
-        let parsed: GlobalConfig =
-            toml::from_str(&merged).expect("merged config should parse");
+        let parsed: GlobalConfig = toml::from_str(&merged).expect("merged config should parse");
         // User value preserved.
         assert_eq!(parsed.workspace.default_backend, "codex");
         // Missing default keys should be filled in.
