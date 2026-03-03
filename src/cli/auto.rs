@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Args;
 
 use super::init;
@@ -63,6 +65,11 @@ pub struct AutoArgs {
     /// PR URL to pass through to the orchestration context.
     #[arg(long = "pr-url")]
     pub pr_url: Option<String>,
+    /// Workspace root directory. When set, config is loaded from this
+    /// directory instead of walking up the directory tree. Used by the
+    /// daemon to isolate each worktree's configuration.
+    #[arg(long = "workspace-root")]
+    pub workspace_root: Option<PathBuf>,
 }
 
 fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
@@ -103,7 +110,17 @@ fn slugify_idea(idea: &str) -> String {
     slug
 }
 
-fn ensure_workspace() -> Result<Workspace> {
+fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
+    if let Some(root) = workspace_root {
+        let ralph_dir = root.join(".ralph");
+        if ralph_dir.join("ralph.toml").is_file() {
+            return Workspace::load(ralph_dir);
+        }
+        let workspace = init::create_workspace(&ralph_dir)?;
+        eprintln!("initialized workspace at {}", ralph_dir.display());
+        return Ok(workspace);
+    }
+
     match Workspace::discover() {
         Ok(workspace) => Ok(workspace),
         Err(RalphError::WorkspaceNotFound) => {
@@ -134,6 +151,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         no_tmux,
         dry_run,
         pr_url,
+        workspace_root,
     } = args;
 
     let idea = idea.trim().to_owned();
@@ -143,7 +161,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         ));
     }
 
-    let workspace = ensure_workspace()?;
+    let workspace = ensure_workspace(workspace_root.as_ref())?;
 
     let writer_spec = if spec_writer.trim().is_empty() {
         workspace.config.workspace.daemon_prd_writer_backend.clone()
@@ -253,7 +271,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
 
     println!();
     println!("Running orchestration until completion...");
-    let workspace = Workspace::discover()?;
+    let workspace = ensure_workspace(workspace_root.as_ref())?;
     let mut orchestrator = Orchestrator::new(workspace);
     let run_result = orchestrator
         .run(RunOptions {
@@ -425,7 +443,7 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let _guard = CwdGuard::set(temp.path());
 
-        let workspace = ensure_workspace().expect("workspace should be created");
+        let workspace = ensure_workspace(None).expect("workspace should be created");
         let workspace_root = temp.path().join(".ralph");
 
         assert_eq!(workspace.root, workspace_root);
@@ -433,5 +451,34 @@ mod tests {
         assert!(workspace_root.join("projects").is_dir());
         assert!(!workspace_root.join("templates").exists());
         assert_eq!(workspace.config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn ensure_workspace_with_explicit_root_creates_workspace() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path().to_path_buf();
+
+        let workspace =
+            ensure_workspace(Some(&root)).expect("workspace should be created at explicit root");
+        let ralph_dir = root.join(".ralph");
+
+        assert_eq!(workspace.root, ralph_dir);
+        assert!(ralph_dir.join("ralph.toml").exists());
+        assert!(ralph_dir.join("projects").is_dir());
+        assert_eq!(workspace.config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn ensure_workspace_with_explicit_root_loads_existing() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path().to_path_buf();
+
+        // Create a workspace first
+        let _ = crate::cli::init::create_workspace(&root.join(".ralph")).expect("create workspace");
+
+        // Loading it again should succeed without re-creating
+        let workspace =
+            ensure_workspace(Some(&root)).expect("workspace should load from explicit root");
+        assert_eq!(workspace.root, root.join(".ralph"));
     }
 }
