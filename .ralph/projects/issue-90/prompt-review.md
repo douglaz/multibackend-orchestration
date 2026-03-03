@@ -1,3 +1,25 @@
+---
+artifact: prompt-review
+project: issue-90
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-03T02:13:57Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The target path is ambiguous (`.ralph/...` in requirements vs `root.join("ralph.toml")` in approach), which can lead to writing files in the wrong directory.
+- `--copy-files` mode selection is underspecified: checking only `ralph.toml.exists()` can produce wrong behavior/error text for non-empty non-workspace directories.
+- Overlay merge rules are incomplete for partially present nested tables and dynamic maps, so different implementations may overwrite user values differently.
+- Alias handling is not wired to sparse persistence (`planner_backend`, `qa_backend`), risking in-memory updates that are not written to the canonical TOML key.
+- The proposed `serde(skip_serializing_if)` changes can alter full-config serialization and conflict with “full scaffold writes fully populated config.”
+- “Null/default-sentinel/None” clearing semantics are mixed and not normalized, which makes `config set` behavior hard to test consistently.
+- Error message expectations are inconsistent (some exact, some contains), creating flaky conformance tests.
+- “All 102+ keys continue to work” is stated, but no explicit regression mechanism is defined.
+- Dry-run output expectations do not fully pin ordering and path format, which can cause false negatives in validate tests.
+
+## Refined Prompt
 ## Goal
 Implement two behavior changes with strict backward compatibility:
 1. `ralph init` becomes minimal by default.
