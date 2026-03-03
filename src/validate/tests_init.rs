@@ -1,11 +1,11 @@
 use super::*;
 
 use crate::validate::assertions::{
-    assert_dir_exists, assert_exit_code, assert_file_exists, assert_file_not_empty,
-    assert_path_not_exists, assert_stdout_eq, assert_toml_field, load_toml,
+    assert_dir_exists, assert_exit_code, assert_file_exists,
+    assert_path_not_exists, assert_stdout_eq,
 };
 use crate::validate::harness::RalphHarness;
-use toml::Value as TomlValue;
+use crate::config::GlobalConfig;
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -14,8 +14,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: creates_workspace_structure,
         },
         ConformanceTest {
-            name: "init::creates_template_files",
-            func: creates_template_files,
+            name: "init::creates_minimal_config",
+            func: creates_minimal_config,
         },
         ConformanceTest {
             name: "init::default_config",
@@ -60,33 +60,21 @@ fn creates_workspace_structure(h: &RalphHarness) -> TestResult {
         assert_dir_exists(&ralph_dir);
         assert_file_exists(&ralph_dir.join("ralph.toml"));
         assert_dir_exists(&ralph_dir.join("projects"));
-        assert_dir_exists(&ralph_dir.join("templates"));
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
     }
 }
 
-fn creates_template_files(h: &RalphHarness) -> TestResult {
+fn creates_minimal_config(h: &RalphHarness) -> TestResult {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         h.init_workspace().expect("ralph init should succeed");
 
-        let templates = h.repo_root.join(".ralph").join("templates");
-        for name in &[
-            "spec.md",
-            "implementation.md",
-            "review.md",
-            "prompt_reviewer.md",
-            "prompt_review_validator.md",
-            "completion.md",
-            "qa.md",
-            "final_reviewer.md",
-            "planner_position.md",
-            "vote.md",
-            "arbiter.md",
-        ] {
-            assert_file_not_empty(&templates.join(name));
-        }
+        let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
+        let raw_toml = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&raw_toml).expect("ralph.toml should parse");
+        assert_eq!(parsed, GlobalConfig::default());
+        assert!(!h.repo_root.join(".ralph").join("templates").exists());
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -98,53 +86,21 @@ fn default_config(h: &RalphHarness) -> TestResult {
         h.init_workspace().expect("ralph init should succeed");
 
         let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
-        let config = load_toml(&toml_path);
+        let config = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        let toml = crate::validate::assertions::load_toml(&toml_path);
 
-        // Workspace section
-        assert_toml_field(
-            &config,
-            "workspace.version",
-            &TomlValue::String("1.0".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "workspace.default_backend",
-            &TomlValue::String("claude".to_owned()),
-        );
+        let workspace_table = toml
+            .get("workspace")
+            .expect("workspace section should exist")
+            .as_table()
+            .expect("workspace section should be a table");
+        assert!(workspace_table.is_empty());
 
-        // Backend commands exist
-        assert_toml_field(
-            &config,
-            "backends.claude.command",
-            &TomlValue::String("claude".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "backends.codex.command",
-            &TomlValue::String("codex".to_owned()),
-        );
-
-        // Template paths
-        assert_toml_field(
-            &config,
-            "templates.planner",
-            &TomlValue::String("templates/spec.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.implementer",
-            &TomlValue::String("templates/implementation.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.reviewer",
-            &TomlValue::String("templates/review.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.completer",
-            &TomlValue::String("templates/completion.md".to_owned()),
-        );
+        let parsed: GlobalConfig = toml::from_str(&config).expect("parse minimal toml");
+        assert_eq!(parsed, GlobalConfig::default());
+        assert_eq!(toml.get("backends"), None);
+        assert_eq!(toml.get("templates"), None);
+        assert_eq!(toml.get("git"), None);
     })) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
@@ -183,19 +139,7 @@ fn dry_run_prints_actions(h: &RalphHarness) -> TestResult {
 
         let expected = r#"
 dry-run: create-dir .ralph/projects
-dry-run: create-dir .ralph/templates
 dry-run: write-config .ralph/ralph.toml
-dry-run: write-template .ralph/templates/spec.md
-dry-run: write-template .ralph/templates/implementation.md
-dry-run: write-template .ralph/templates/review.md
-dry-run: write-template .ralph/templates/prompt_reviewer.md
-dry-run: write-template .ralph/templates/prompt_review_validator.md
-dry-run: write-template .ralph/templates/completion.md
-dry-run: write-template .ralph/templates/qa.md
-dry-run: write-template .ralph/templates/final_reviewer.md
-dry-run: write-template .ralph/templates/planner_position.md
-dry-run: write-template .ralph/templates/vote.md
-dry-run: write-template .ralph/templates/arbiter.md
 "#;
         assert_stdout_eq(&output, expected);
 

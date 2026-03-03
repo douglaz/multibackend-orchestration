@@ -621,7 +621,9 @@ fn template_fallback_when_file_missing(h: &RalphHarness) -> TestResult {
             .expect("config set workflow.qa_enabled true failed");
 
         let qa_template = h.repo_root.join(".ralph").join("templates").join("qa.md");
-        fs::remove_file(&qa_template).expect("failed to remove workspace qa template");
+        if qa_template.exists() {
+            fs::remove_file(&qa_template).expect("failed to remove workspace qa template");
+        }
 
         let output = h
             .ralph(["run", "--loops", "1"])

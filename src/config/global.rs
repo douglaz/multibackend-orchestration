@@ -1673,10 +1673,17 @@ mod tests {
         set_global_config_value, BackendConfig, BackendEnabled, BackendRoleModels, GlobalConfig,
         PartialBackendConfig, PlannerStateInPrompt, PreviousSpecsInPrompt, RoleTimeouts,
     };
+    use crate::cli::init::MINIMAL_TOML;
 
     #[test]
     fn empty_toml_deserializes_to_defaults() {
         let config: GlobalConfig = toml::from_str("").expect("empty TOML should deserialize");
+        assert_eq!(config, GlobalConfig::default());
+    }
+
+    #[test]
+    fn minimal_toml_parses_to_default() {
+        let config: GlobalConfig = toml::from_str(MINIMAL_TOML).expect("minimal TOML should parse");
         assert_eq!(config, GlobalConfig::default());
     }
 

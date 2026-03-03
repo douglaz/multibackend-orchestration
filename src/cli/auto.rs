@@ -431,16 +431,7 @@ mod tests {
         assert_eq!(workspace.root, workspace_root);
         assert!(workspace_root.join("ralph.toml").exists());
         assert!(workspace_root.join("projects").is_dir());
-        assert!(workspace_root.join("templates").is_dir());
-        assert!(workspace_root.join("templates/spec.md").exists());
-        assert!(workspace_root.join("templates/implementation.md").exists());
-        assert!(workspace_root.join("templates/review.md").exists());
-        assert!(workspace_root.join("templates/prompt_reviewer.md").exists());
-        assert!(workspace_root
-            .join("templates/prompt_review_validator.md")
-            .exists());
-        assert!(workspace_root.join("templates/completion.md").exists());
-        assert!(workspace_root.join("templates/qa.md").exists());
+        assert!(!workspace_root.join("templates").exists());
         assert_eq!(workspace.config, GlobalConfig::default());
     }
 }

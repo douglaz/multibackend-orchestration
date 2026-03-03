@@ -16,6 +16,13 @@ use crate::Result;
 
 type TemplateContentFn = fn() -> &'static str;
 
+pub(crate) const MINIMAL_TOML: &str = r#"
+# ralph workspace configuration
+# The defaults are loaded from built-in values in the application and shown here
+# for convenience so this file remains intentionally minimal.
+[workspace]
+"#;
+
 pub(crate) const TEMPLATE_FILES: &[(&str, TemplateContentFn)] = &[
     ("spec.md", default_planner_template),
     ("implementation.md", default_implementer_template),
@@ -38,6 +45,9 @@ pub(crate) enum InitAction {
     CreateDir {
         path: PathBuf,
     },
+    WriteMinimalConfig {
+        path: PathBuf,
+    },
     WriteConfig {
         path: PathBuf,
     },
@@ -51,6 +61,7 @@ impl InitAction {
     fn describe(&self) -> String {
         match self {
             Self::CreateDir { path } => format!("create-dir {}", path.display()),
+            Self::WriteMinimalConfig { path } => format!("write-config {}", path.display()),
             Self::WriteConfig { path } => format!("write-config {}", path.display()),
             Self::WriteTemplate { path, .. } => format!("write-template {}", path.display()),
         }
@@ -121,7 +132,7 @@ pub(crate) fn validate_target(root: &Path) -> Result<()> {
     }
 }
 
-pub(crate) fn plan_actions(root: &Path) -> Vec<InitAction> {
+pub(crate) fn plan_full_actions(root: &Path) -> Vec<InitAction> {
     let templates_dir = root.join("templates");
 
     let mut actions = vec![
@@ -146,10 +157,29 @@ pub(crate) fn plan_actions(root: &Path) -> Vec<InitAction> {
     actions
 }
 
+pub(crate) fn plan_minimal_actions(root: &Path) -> Vec<InitAction> {
+    vec![
+        InitAction::CreateDir {
+            path: root.join("projects"),
+        },
+        InitAction::WriteMinimalConfig {
+            path: root.join("ralph.toml"),
+        },
+    ]
+}
+
+#[allow(dead_code)]
+pub(crate) fn plan_actions(root: &Path) -> Vec<InitAction> {
+    plan_full_actions(root)
+}
+
 pub(crate) fn execute_actions(actions: &[InitAction]) -> Result<()> {
     for action in actions {
         match action {
             InitAction::CreateDir { path } => fs::create_dir_all(path)?,
+            InitAction::WriteMinimalConfig { path } => {
+                fs::write(path, MINIMAL_TOML)?;
+            }
             InitAction::WriteConfig { path } => {
                 GlobalConfig::default().save(path)?;
             }
@@ -169,7 +199,7 @@ fn create_workspace_from_actions(root: &Path, actions: &[InitAction]) -> Result<
 
 pub(crate) fn create_workspace(root: &Path) -> Result<Workspace> {
     validate_target(root)?;
-    let actions = plan_actions(root);
+    let actions = plan_minimal_actions(root);
     create_workspace_from_actions(root, &actions)
 }
 
@@ -179,11 +209,15 @@ pub(crate) fn print_actions(actions: &[InitAction]) {
     }
 }
 
-/// Execute the `ralph init` command, creating a workspace with default configuration,
-/// index, and template files.
+/// Execute the `ralph init` command, creating a workspace with the requested
+/// initialization scaffold.
 pub fn execute(args: InitArgs) -> Result<()> {
     validate_target(&args.dir)?;
-    let actions = plan_actions(&args.dir);
+    let actions = if args.copy_files {
+        plan_full_actions(&args.dir)
+    } else {
+        plan_minimal_actions(&args.dir)
+    };
 
     if args.dry_run {
         print_actions(&actions);
@@ -201,7 +235,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{create_workspace, plan_actions, validate_target, InitAction, TEMPLATE_FILES};
+    use super::{
+        create_workspace, create_workspace_from_actions, plan_full_actions, plan_minimal_actions,
+        validate_target, InitAction, TEMPLATE_FILES,
+    };
     use crate::error::RalphError;
     use crate::prompts::templates::{
         default_arbiter_template, default_completer_template, default_final_reviewer_template,
@@ -211,10 +248,12 @@ mod tests {
     };
 
     #[test]
-    fn create_workspace_writes_all_templates() {
+    fn create_workspace_full_plan_writes_all_templates() {
         let temp = tempdir().expect("temp dir");
         let workspace_root = temp.path().join(".ralph");
-        let workspace = create_workspace(&workspace_root).expect("workspace should be created");
+        let actions = plan_full_actions(&workspace_root);
+        let workspace = create_workspace_from_actions(&workspace_root, &actions)
+            .expect("workspace should be created");
 
         assert_eq!(workspace.root, workspace_root);
         let templates_dir = workspace.root.join("templates");
@@ -273,8 +312,23 @@ mod tests {
     }
 
     #[test]
-    fn plan_actions_uses_shared_constants_in_stable_order() {
-        let actions = plan_actions(Path::new(".ralph"));
+    fn create_workspace_minimal_plan_writes_no_templates() {
+        let temp = tempdir().expect("temp dir");
+        let workspace_root = temp.path().join(".ralph");
+        let workspace = create_workspace(&workspace_root).expect("workspace should be created");
+
+        assert_eq!(workspace.root, workspace_root);
+        assert!(!workspace_root.join("templates").exists());
+        let toml = std::fs::read_to_string(workspace_root.join("ralph.toml"))
+            .expect("read minimal toml");
+        assert!(toml.contains("[workspace]"));
+        assert!(!toml.contains("workspace.version"));
+        assert!(!toml.contains("backends."));
+    }
+
+    #[test]
+    fn plan_full_actions_uses_shared_constants_in_stable_order() {
+        let actions = plan_full_actions(Path::new(".ralph"));
 
         assert!(matches!(
             actions.first(),
@@ -292,6 +346,29 @@ mod tests {
             .count();
 
         assert_eq!(template_actions, TEMPLATE_FILES.len());
+    }
+
+    #[test]
+    fn plan_minimal_actions_keeps_only_minimal_workspace_steps() {
+        let actions = plan_minimal_actions(Path::new(".ralph"));
+
+        assert!(matches!(
+            actions.first(),
+            Some(InitAction::CreateDir { .. })
+        ));
+        assert!(matches!(actions.get(1), Some(InitAction::WriteMinimalConfig { .. })));
+
+        let template_actions = actions
+            .iter()
+            .filter(|action| matches!(action, InitAction::WriteTemplate { .. }))
+            .count();
+        let dir_actions = actions
+            .iter()
+            .filter(|action| matches!(action, InitAction::CreateDir { .. }))
+            .count();
+
+        assert_eq!(template_actions, 0);
+        assert_eq!(dir_actions, 1);
     }
 
     #[test]
