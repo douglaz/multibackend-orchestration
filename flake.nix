@@ -90,6 +90,19 @@
               ];
 
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+
+              shellHook = ''
+                if [ -d .git ] && [ -d .githooks ]; then
+                  current_hooks_path=$(git config core.hooksPath || echo "")
+                  if [ "$current_hooks_path" != ".githooks" ]; then
+                    git config core.hooksPath .githooks
+                    echo "Git hooks configured (.githooks)"
+                    echo "  pre-commit: cargo fmt --check"
+                    echo "  pre-push:   cargo fmt + clippy + nix build"
+                    echo "  Disable: git config --unset core.hooksPath"
+                  fi
+                fi
+              '';
             };
           }
           // pkgs.lib.optionalAttrs isLinux {

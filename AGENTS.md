@@ -58,6 +58,15 @@ src/
   workspace/   # Workspace discovery and management
 ```
 
+## Commit & PR messages
+
+- Never mention Claude, Codex, or any other AI agent name in commit messages or PR descriptions. These are not a place for advertisement.
+
+## Build environment
+
+- Every build should be done through `nix build`.
+- For development tasks, use `nix develop -c` and include any useful dependencies in `flake.nix`.
+
 ## Key conventions
 
 - **Artifact naming**: Implementation response files use timestamp-prefixed filenames (`YYYYMMDDHHMMSS-impl-response-NNN.md`) with YAML frontmatter. See `src/workflow/parser.rs`.
