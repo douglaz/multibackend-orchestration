@@ -269,11 +269,6 @@ fn plan_overlay_actions(root: &Path) -> Vec<InitAction> {
     actions
 }
 
-#[allow(dead_code)]
-pub(crate) fn plan_actions(root: &Path) -> Vec<InitAction> {
-    plan_full_actions(root)
-}
-
 /// Merge missing default keys into an existing TOML document.
 /// Preserves existing values, comments, and formatting. Only adds
 /// keys present in the default reference but absent from the existing doc.
@@ -295,15 +290,56 @@ fn merge_overlay_config(existing_raw: &str) -> Result<String> {
 
 /// Recursively merge missing keys from `default` into `existing`.
 /// Never overwrites values already present in `existing`.
+/// Handles inline tables by converting them to regular tables when
+/// nested defaults need to be merged in.
 fn merge_tables(existing: &mut toml_edit::Table, default: &toml_edit::Table) {
     for (key, default_item) in default.iter() {
         if existing.contains_key(key) {
-            // If both are tables, recurse into them.
-            if let (Some(existing_item), toml_edit::Item::Table(default_table)) =
-                (existing.get_mut(key), default_item)
-            {
+            // Determine if the default side is a table we should recurse into.
+            let default_table = match default_item {
+                toml_edit::Item::Table(t) => Some(t),
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(_)) => {
+                    // Handled in the else-if branch below.
+                    None
+                }
+                _ => None,
+            };
+
+            if let Some(dt) = default_table {
+                // Default is a regular table — recurse if existing is also table-like.
+                let existing_item = existing.get_mut(key).expect("key exists");
                 if let Some(existing_table) = existing_item.as_table_mut() {
-                    merge_tables(existing_table, default_table);
+                    merge_tables(existing_table, dt);
+                } else if existing_item.as_inline_table().is_some() {
+                    // Convert existing inline table to regular table for merging.
+                    let inline = existing_item.as_inline_table().unwrap().clone();
+                    let mut regular = inline.into_table();
+                    regular.set_implicit(true);
+                    merge_tables(&mut regular, dt);
+                    *existing_item = toml_edit::Item::Table(regular);
+                }
+                // Otherwise existing is a scalar — user value takes precedence.
+            } else if default_item
+                .as_value()
+                .and_then(|v| v.as_inline_table())
+                .is_some()
+            {
+                // Default is an inline table — convert to regular table for merge.
+                let default_inline = default_item
+                    .as_value()
+                    .unwrap()
+                    .as_inline_table()
+                    .unwrap();
+                let default_as_table = default_inline.clone().into_table();
+                let existing_item = existing.get_mut(key).expect("key exists");
+                if let Some(existing_table) = existing_item.as_table_mut() {
+                    merge_tables(existing_table, &default_as_table);
+                } else if existing_item.as_inline_table().is_some() {
+                    let inline = existing_item.as_inline_table().unwrap().clone();
+                    let mut regular = inline.into_table();
+                    regular.set_implicit(true);
+                    merge_tables(&mut regular, &default_as_table);
+                    *existing_item = toml_edit::Item::Table(regular);
                 }
             }
             // Otherwise, the existing value takes precedence — do nothing.
@@ -691,5 +727,60 @@ mod tests {
             .iter()
             .any(|a| matches!(a, InitAction::OverlayConfig { .. }));
         assert!(has_overlay, "overlay actions should include OverlayConfig");
+    }
+
+    #[test]
+    fn merge_overlay_config_handles_inline_tables() {
+        // Existing config uses inline table syntax.
+        let existing = "workspace = { default_backend = \"codex\" }\n";
+        let merged = merge_overlay_config(existing).expect("merge should succeed");
+
+        let parsed: GlobalConfig =
+            toml::from_str(&merged).expect("merged config should parse");
+        // User value preserved.
+        assert_eq!(parsed.workspace.default_backend, "codex");
+        // Missing default keys should be filled in.
+        assert_eq!(
+            parsed.workspace.version,
+            GlobalConfig::default().workspace.version,
+            "version should be filled from defaults"
+        );
+
+        // Verify the key is physically present in the merged output.
+        let doc: toml_edit::DocumentMut = merged.parse().expect("parse as doc");
+        let ws = doc.get("workspace").expect("workspace key");
+        assert!(
+            ws.as_table().is_some() || ws.as_inline_table().is_some(),
+            "workspace should be a table type"
+        );
+    }
+
+    #[test]
+    fn merge_overlay_config_fills_missing_keys_verifiable_in_file() {
+        // Minimal config — only [workspace] header.
+        let existing = "[workspace]\n";
+        let merged = merge_overlay_config(existing).expect("merge should succeed");
+
+        // Check that default keys are physically present (not just deserialization defaults).
+        let doc: toml_edit::DocumentMut = merged.parse().expect("parse as doc");
+        let ws = doc
+            .get("workspace")
+            .expect("workspace")
+            .as_table()
+            .expect("workspace is a table");
+        assert!(
+            ws.contains_key("version"),
+            "version should be physically present in merged TOML"
+        );
+        assert!(
+            ws.contains_key("default_backend"),
+            "default_backend should be physically present in merged TOML"
+        );
+
+        // backends section should be present too.
+        assert!(
+            doc.get("backends").is_some(),
+            "backends section should be filled from defaults"
+        );
     }
 }

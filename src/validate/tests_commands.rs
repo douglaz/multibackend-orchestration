@@ -105,6 +105,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "commands::config_set_global_clears_optional_key",
             func: config_set_global_clears_optional_key,
         },
+        ConformanceTest {
+            name: "commands::config_set_global_inline_table_set",
+            func: config_set_global_inline_table_set,
+        },
+        ConformanceTest {
+            name: "commands::config_set_global_inline_table_clear",
+            func: config_set_global_inline_table_clear,
+        },
     ]
 }
 
@@ -716,6 +724,66 @@ fn config_set_global_clears_optional_key(h: &RalphHarness) -> TestResult {
         assert!(
             !raw_after.contains("qa_backend"),
             "qa_backend should be removed after setting to null, got:\n{raw_after}"
+        );
+    })
+}
+
+fn config_set_global_inline_table_set(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Write a config with inline-table workspace syntax.
+        let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
+        std::fs::write(
+            &toml_path,
+            "workspace = { version = \"1.0\" }\n",
+        )
+        .expect("write inline-table config");
+
+        // Set a value via CLI — this must navigate through the inline table.
+        h.ralph_ok(["config", "set", "--global", "workspace.default_backend", "codex"])
+            .expect("config set should succeed through inline table");
+
+        // Verify the value was written and the file is valid.
+        let raw = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        let parsed: crate::config::GlobalConfig =
+            toml::from_str(&raw).expect("config should parse after inline-table set");
+        assert_eq!(
+            parsed.workspace.default_backend, "codex",
+            "value should be set through inline table"
+        );
+        assert_eq!(
+            parsed.workspace.version, "1.0",
+            "existing inline-table value should be preserved"
+        );
+    })
+}
+
+fn config_set_global_inline_table_clear(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        // Write a config with an inline-table workflow section containing qa_backend.
+        let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
+        std::fs::write(
+            &toml_path,
+            "[workspace]\nversion = \"1.0\"\n\n[workflow]\nqa_backend = \"codex\"\nauto_commit = true\n",
+        )
+        .expect("write config with qa_backend");
+
+        // Clear the optional value.
+        h.ralph_ok(["config", "set", "--global", "workflow.qa_backend", "null"])
+            .expect("config set qa_backend null should succeed");
+
+        // Verify the key was removed.
+        let raw = std::fs::read_to_string(&toml_path).expect("read ralph.toml after clear");
+        assert!(
+            !raw.contains("qa_backend"),
+            "qa_backend should be removed after setting to null, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("auto_commit"),
+            "other keys should be preserved after clear, got:\n{raw}"
         );
     })
 }

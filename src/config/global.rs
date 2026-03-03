@@ -1181,12 +1181,12 @@ pub fn save_sparse(path: &Path, canonical_key: &str, config: &GlobalConfig) -> R
     match target_value {
         Some(item) => {
             // Ensure intermediate tables exist in the existing doc.
-            let table = ensure_tables(&mut doc, table_path);
+            let table = ensure_tables(&mut doc, table_path)?;
             table.insert(leaf[0], item.clone());
         }
         None => {
             // Value is absent in full serialization → remove from disk (clear semantics).
-            if let Some(table) = navigate_tables_mut(&mut doc, table_path) {
+            if let Some(table) = navigate_tables_mut(&mut doc, table_path)? {
                 table.remove(leaf[0]);
             }
         }
@@ -1244,32 +1244,90 @@ fn lookup_toml_value<'a>(
 }
 
 /// Navigate to a nested table in the document (mutable), returning `None` if
-/// any segment along the path is missing.
+/// any segment along the path is missing. Returns an error if a path segment
+/// resolves to a non-table value (scalar, array, etc.).
 fn navigate_tables_mut<'a>(
     doc: &'a mut DocumentMut,
     path: &[&str],
-) -> Option<&'a mut toml_edit::Table> {
-    let mut current = doc.as_table_mut();
-    for &segment in path {
-        current = current.get_mut(segment)?.as_table_mut()?;
+) -> Result<Option<&'a mut toml_edit::Table>> {
+    if path.is_empty() {
+        return Ok(Some(doc.as_table_mut()));
     }
-    Some(current)
+    // Use recursive helper to satisfy the borrow checker.
+    navigate_table_recursive(doc.as_table_mut(), path)
+}
+
+fn navigate_table_recursive<'a>(
+    table: &'a mut toml_edit::Table,
+    path: &[&str],
+) -> Result<Option<&'a mut toml_edit::Table>> {
+    if path.is_empty() {
+        return Ok(Some(table));
+    }
+    let segment = path[0];
+    let rest = &path[1..];
+    let Some(item) = table.get_mut(segment) else {
+        return Ok(None);
+    };
+    // Check what kind of item it is before taking a mutable borrow.
+    let is_table = item.as_table().is_some();
+    let is_inline_table = item.as_inline_table().is_some();
+    if is_inline_table {
+        // Convert inline table to a regular table to allow mutable traversal.
+        let inline = item.as_inline_table().unwrap().clone();
+        let mut regular = inline.into_table();
+        regular.set_implicit(true);
+        *item = toml_edit::Item::Table(regular);
+    }
+    if is_table || is_inline_table {
+        let t = item.as_table_mut().expect("verified to be a table");
+        return navigate_table_recursive(t, rest);
+    }
+    Err(crate::error::RalphError::Orchestration(format!(
+        "config path segment '{segment}' is not a table"
+    )))
 }
 
 /// Ensure the table hierarchy exists, creating missing intermediate tables.
-fn ensure_tables<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> &'a mut toml_edit::Table {
-    let mut current = doc.as_table_mut();
-    for &segment in path {
-        if !current.contains_key(segment) {
-            current.insert(segment, toml_edit::Item::Table(toml_edit::Table::new()));
-        }
-        current = current
-            .get_mut(segment)
-            .expect("just inserted")
-            .as_table_mut()
-            .expect("just inserted a table");
+/// If a path segment is an inline table, it is converted to a regular table
+/// preserving existing keys. Returns an error if a path segment is a non-table
+/// value (scalar, array, etc.).
+fn ensure_tables<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> Result<&'a mut toml_edit::Table> {
+    ensure_tables_recursive(doc.as_table_mut(), path)
+}
+
+fn ensure_tables_recursive<'a>(
+    table: &'a mut toml_edit::Table,
+    path: &[&str],
+) -> Result<&'a mut toml_edit::Table> {
+    if path.is_empty() {
+        return Ok(table);
     }
-    current
+    let segment = path[0];
+    let rest = &path[1..];
+    if !table.contains_key(segment) {
+        table.insert(segment, toml_edit::Item::Table(toml_edit::Table::new()));
+    } else {
+        let item = table.get_mut(segment).expect("key exists");
+        if item.as_table().is_some() {
+            // Already a regular table — continue.
+        } else if let Some(inline) = item.as_inline_table() {
+            // Convert inline table to regular table, preserving existing keys.
+            let mut regular = inline.clone().into_table();
+            regular.set_implicit(true);
+            *item = toml_edit::Item::Table(regular);
+        } else {
+            return Err(crate::error::RalphError::Orchestration(format!(
+                "config path segment '{segment}' is not a table"
+            )));
+        }
+    }
+    let child = table
+        .get_mut(segment)
+        .expect("just ensured")
+        .as_table_mut()
+        .expect("ensured to be a table");
+    ensure_tables_recursive(child, rest)
 }
 
 // ---------------------------------------------------------------------------
@@ -3394,5 +3452,102 @@ planner_state_in_prompt = "summary"
             super::sparse_key_segments("backends.codex.role_timeouts.qa"),
             vec!["backends", "codex", "role_timeouts", "qa"]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Inline-table regression tests for save_sparse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_sparse_inline_table_path_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        // Use inline-table syntax for workspace.
+        let original = "workspace = { version = \"1.0\" }\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workspace.default_backend = "codex".to_owned();
+        super::save_sparse(&path, "workspace.default_backend", &config)
+            .expect("save_sparse should handle inline table path");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            result.contains("default_backend"),
+            "default_backend should be written through inline table, got:\n{result}"
+        );
+        // The file should still be valid TOML.
+        let parsed: GlobalConfig = toml::from_str(&result).expect("should parse");
+        assert_eq!(parsed.workspace.default_backend, "codex");
+        assert_eq!(parsed.workspace.version, "1.0");
+    }
+
+    #[test]
+    fn save_sparse_inline_table_path_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        // Inline table with an optional key.
+        let original =
+            "[workflow]\nqa_backend = \"codex\"\nauto_commit = true\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workflow.qa_backend = None;
+        super::save_sparse(&path, "workflow.qa_backend", &config)
+            .expect("save_sparse should handle clear");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !result.contains("qa_backend"),
+            "qa_backend should be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("auto_commit"),
+            "other keys should be preserved, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_errors_on_non_table_path_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        // `workspace` is a string, not a table — traversal should fail.
+        let original = "workspace = \"not-a-table\"\n";
+        std::fs::write(&path, original).expect("write");
+
+        let config = GlobalConfig::default();
+        let err = super::save_sparse(&path, "workspace.version", &config);
+        assert!(
+            err.is_err(),
+            "save_sparse should error on non-table path segment"
+        );
+        let err_msg = err.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a table"),
+            "error should mention 'not a table', got: {err_msg}"
+        );
+
+        // File should be unchanged.
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(result, original, "file should be untouched on error");
+    }
+
+    #[test]
+    fn save_sparse_inline_table_nested_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        // Nested inline tables.
+        let original = "workspace = { version = \"1.0\" }\nworkflow = { auto_commit = true }\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workflow.qa_backend = Some("codex".to_owned());
+        super::save_sparse(&path, "workflow.qa_backend", &config)
+            .expect("save_sparse should handle inline table");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        let parsed: GlobalConfig = toml::from_str(&result).expect("should parse");
+        assert_eq!(parsed.workflow.qa_backend.as_deref(), Some("codex"));
+        assert!(parsed.workflow.auto_commit);
     }
 }

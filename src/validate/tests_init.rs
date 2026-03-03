@@ -1,5 +1,7 @@
 use super::*;
 
+use toml_edit::DocumentMut;
+
 use crate::validate::assertions::{
     assert_dir_exists, assert_exit_code, assert_file_exists,
     assert_path_not_exists, assert_stdout_eq,
@@ -80,6 +82,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "init::copy_files_dry_run_overlay",
             func: copy_files_dry_run_overlay,
+        },
+        ConformanceTest {
+            name: "init::copy_files_overlay_inline_table_merge",
+            func: copy_files_overlay_inline_table_merge,
         },
     ]
 }
@@ -356,6 +362,26 @@ fn copy_files_overlay_fills_missing_keys(h: &RalphHarness) -> TestResult {
         // Effective config should match full defaults.
         assert_eq!(parsed, GlobalConfig::default());
 
+        // Verify file-level key insertion (not just deserialized equality).
+        let doc: toml_edit::DocumentMut = merged_str.parse().expect("parse as doc");
+        let ws = doc
+            .get("workspace")
+            .expect("workspace key should exist")
+            .as_table()
+            .expect("workspace should be a table");
+        assert!(
+            ws.contains_key("version"),
+            "version should be physically present in merged TOML file content"
+        );
+        assert!(
+            ws.contains_key("default_backend"),
+            "default_backend should be physically present in merged TOML file content"
+        );
+        assert!(
+            doc.get("backends").is_some(),
+            "backends section should be physically present in merged TOML"
+        );
+
         // Templates should be created.
         let templates_dir = ralph_dir.join("templates");
         assert_dir_exists(&templates_dir);
@@ -524,6 +550,50 @@ fn copy_files_dry_run_overlay(h: &RalphHarness) -> TestResult {
         assert!(
             !h.repo_root.join(".ralph").join("templates").exists(),
             "templates/ should not be created during dry-run"
+        );
+    })
+}
+
+fn copy_files_overlay_inline_table_merge(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a workspace with inline-table syntax in ralph.toml.
+        let ralph_dir = h.repo_root.join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("projects")).expect("create projects dir");
+        std::fs::write(
+            ralph_dir.join("ralph.toml"),
+            "workspace = { default_backend = \"codex\" }\n",
+        )
+        .expect("write inline-table config");
+
+        // Run --copy-files overlay on existing workspace with inline tables.
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        let toml_path = ralph_dir.join("ralph.toml");
+        let merged_str =
+            std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig =
+            toml::from_str(&merged_str).expect("merged config should parse");
+
+        // User value should be preserved.
+        assert_eq!(
+            parsed.workspace.default_backend, "codex",
+            "inline-table custom value should be preserved"
+        );
+        // Missing default keys should be filled.
+        assert_eq!(
+            parsed.workspace.version,
+            GlobalConfig::default().workspace.version,
+            "missing version should be filled from defaults"
+        );
+
+        // Verify file-level key insertion.
+        let doc: DocumentMut = merged_str.parse().expect("parse as doc");
+        assert!(
+            doc.get("backends").is_some(),
+            "backends section should be physically present after inline-table overlay merge"
         );
     })
 }
