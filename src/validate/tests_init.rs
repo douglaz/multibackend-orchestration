@@ -1,11 +1,13 @@
 use super::*;
 
+use toml_edit::DocumentMut;
+
+use crate::config::GlobalConfig;
 use crate::validate::assertions::{
-    assert_dir_exists, assert_exit_code, assert_file_exists, assert_file_not_empty,
-    assert_path_not_exists, assert_stdout_eq, assert_toml_field, load_toml,
+    assert_dir_exists, assert_exit_code, assert_file_exists, assert_path_not_exists,
+    assert_stdout_eq,
 };
 use crate::validate::harness::RalphHarness;
-use toml::Value as TomlValue;
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -14,8 +16,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: creates_workspace_structure,
         },
         ConformanceTest {
-            name: "init::creates_template_files",
-            func: creates_template_files,
+            name: "init::creates_minimal_config",
+            func: creates_minimal_config,
         },
         ConformanceTest {
             name: "init::default_config",
@@ -49,133 +51,120 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "init::dry_run_rejects_unreadable_target",
             func: dry_run_rejects_unreadable_target,
         },
+        ConformanceTest {
+            name: "init::copy_files_full_scaffold_on_new_target",
+            func: copy_files_full_scaffold_on_new_target,
+        },
+        ConformanceTest {
+            name: "init::copy_files_overlay_preserves_custom_values",
+            func: copy_files_overlay_preserves_custom_values,
+        },
+        ConformanceTest {
+            name: "init::copy_files_overlay_fills_missing_keys",
+            func: copy_files_overlay_fills_missing_keys,
+        },
+        ConformanceTest {
+            name: "init::copy_files_overlay_creates_missing_templates_only",
+            func: copy_files_overlay_creates_missing_templates_only,
+        },
+        ConformanceTest {
+            name: "init::copy_files_rejects_non_workspace_nonempty_dir",
+            func: copy_files_rejects_non_workspace_nonempty_dir,
+        },
+        ConformanceTest {
+            name: "init::copy_files_rejects_malformed_toml",
+            func: copy_files_rejects_malformed_toml,
+        },
+        ConformanceTest {
+            name: "init::copy_files_dry_run_full_scaffold",
+            func: copy_files_dry_run_full_scaffold,
+        },
+        ConformanceTest {
+            name: "init::copy_files_dry_run_overlay",
+            func: copy_files_dry_run_overlay,
+        },
+        ConformanceTest {
+            name: "init::copy_files_overlay_inline_table_merge",
+            func: copy_files_overlay_inline_table_merge,
+        },
     ]
 }
 
+fn run_case<F>(f: F) -> TestResult
+where
+    F: FnOnce(),
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
 fn creates_workspace_structure(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         h.init_workspace().expect("ralph init should succeed");
 
         let ralph_dir = h.repo_root.join(".ralph");
         assert_dir_exists(&ralph_dir);
         assert_file_exists(&ralph_dir.join("ralph.toml"));
         assert_dir_exists(&ralph_dir.join("projects"));
-        assert_dir_exists(&ralph_dir.join("templates"));
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
-fn creates_template_files(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        h.init_workspace().expect("ralph init should succeed");
-
-        let templates = h.repo_root.join(".ralph").join("templates");
-        for name in &[
-            "spec.md",
-            "implementation.md",
-            "review.md",
-            "prompt_reviewer.md",
-            "prompt_review_validator.md",
-            "completion.md",
-            "qa.md",
-            "final_reviewer.md",
-            "planner_position.md",
-            "vote.md",
-            "arbiter.md",
-        ] {
-            assert_file_not_empty(&templates.join(name));
-        }
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
-}
-
-fn default_config(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+fn creates_minimal_config(h: &RalphHarness) -> TestResult {
+    run_case(|| {
         h.init_workspace().expect("ralph init should succeed");
 
         let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
-        let config = load_toml(&toml_path);
+        let raw_toml = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&raw_toml).expect("ralph.toml should parse");
+        assert_eq!(parsed, GlobalConfig::default());
+        assert!(!h.repo_root.join(".ralph").join("templates").exists());
+    })
+}
 
-        // Workspace section
-        assert_toml_field(
-            &config,
-            "workspace.version",
-            &TomlValue::String("1.0".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "workspace.default_backend",
-            &TomlValue::String("claude".to_owned()),
-        );
+fn default_config(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("ralph init should succeed");
 
-        // Backend commands exist
-        assert_toml_field(
-            &config,
-            "backends.claude.command",
-            &TomlValue::String("claude".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "backends.codex.command",
-            &TomlValue::String("codex".to_owned()),
-        );
+        let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
+        let config = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        let toml = crate::validate::assertions::load_toml(&toml_path);
 
-        // Template paths
-        assert_toml_field(
-            &config,
-            "templates.planner",
-            &TomlValue::String("templates/spec.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.implementer",
-            &TomlValue::String("templates/implementation.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.reviewer",
-            &TomlValue::String("templates/review.md".to_owned()),
-        );
-        assert_toml_field(
-            &config,
-            "templates.completer",
-            &TomlValue::String("templates/completion.md".to_owned()),
-        );
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+        let workspace_table = toml
+            .get("workspace")
+            .expect("workspace section should exist")
+            .as_table()
+            .expect("workspace section should be a table");
+        assert!(workspace_table.is_empty());
+
+        let parsed: GlobalConfig = toml::from_str(&config).expect("parse minimal toml");
+        assert_eq!(parsed, GlobalConfig::default());
+        assert_eq!(toml.get("backends"), None);
+        assert_eq!(toml.get("templates"), None);
+        assert_eq!(toml.get("git"), None);
+    })
 }
 
 fn no_index_json(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         h.init_workspace().expect("ralph init should succeed");
         h.assert_no_index_json();
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn rejects_nonempty_dir(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         h.init_workspace().expect("first ralph init should succeed");
 
         // Second init should fail with exit code 2
         h.ralph_exit(["init"], 2)
             .expect("ralph command should execute");
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn dry_run_prints_actions(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         let output = h
             .ralph(["init", "--dry-run"])
             .expect("ralph init --dry-run should execute");
@@ -183,31 +172,16 @@ fn dry_run_prints_actions(h: &RalphHarness) -> TestResult {
 
         let expected = r#"
 dry-run: create-dir .ralph/projects
-dry-run: create-dir .ralph/templates
 dry-run: write-config .ralph/ralph.toml
-dry-run: write-template .ralph/templates/spec.md
-dry-run: write-template .ralph/templates/implementation.md
-dry-run: write-template .ralph/templates/review.md
-dry-run: write-template .ralph/templates/prompt_reviewer.md
-dry-run: write-template .ralph/templates/prompt_review_validator.md
-dry-run: write-template .ralph/templates/completion.md
-dry-run: write-template .ralph/templates/qa.md
-dry-run: write-template .ralph/templates/final_reviewer.md
-dry-run: write-template .ralph/templates/planner_position.md
-dry-run: write-template .ralph/templates/vote.md
-dry-run: write-template .ralph/templates/arbiter.md
 "#;
         assert_stdout_eq(&output, expected);
 
         assert_path_not_exists(&h.repo_root.join(".ralph"));
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn dry_run_short_flag(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         let long_output = h
             .ralph(["init", "--dry-run"])
             .expect("ralph init --dry-run should execute");
@@ -219,28 +193,22 @@ fn dry_run_short_flag(h: &RalphHarness) -> TestResult {
 
         assert_eq!(long_output.stdout, short_output.stdout);
         assert_eq!(long_output.stderr, short_output.stderr);
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn dry_run_rejects_nonempty_dir(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         h.init_workspace().expect("first ralph init should succeed");
 
         let output = h
             .ralph(["init", "--dry-run"])
             .expect("ralph init --dry-run should execute");
         assert_exit_code(&output, 2);
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn dry_run_rejects_file_target(h: &RalphHarness) -> TestResult {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    run_case(|| {
         let target = h.repo_root.join("file-target");
         std::fs::write(&target, "not-a-directory").expect("write target file");
 
@@ -253,10 +221,7 @@ fn dry_run_rejects_file_target(h: &RalphHarness) -> TestResult {
             ])
             .expect("ralph init --dry-run should execute");
         assert_exit_code(&output, 1);
-    })) {
-        Ok(()) => TestResult::Pass,
-        Err(e) => TestResult::Fail(panic_message(e)),
-    }
+    })
 }
 
 fn dry_run_rejects_unreadable_target(h: &RalphHarness) -> TestResult {
@@ -270,7 +235,7 @@ fn dry_run_rejects_unreadable_target(h: &RalphHarness) -> TestResult {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_case(|| {
             let target = h.repo_root.join("unreadable-target");
             std::fs::create_dir_all(&target).expect("create unreadable target");
 
@@ -310,9 +275,316 @@ fn dry_run_rejects_unreadable_target(h: &RalphHarness) -> TestResult {
             restore();
 
             assert_exit_code(&output, 1);
-        })) {
-            Ok(()) => TestResult::Pass,
-            Err(e) => TestResult::Fail(panic_message(e)),
-        }
+        })
     }
+}
+
+// --- copy-files conformance tests ---
+
+fn copy_files_full_scaffold_on_new_target(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        let ralph_dir = h.repo_root.join(".ralph");
+        assert_dir_exists(&ralph_dir.join("projects"));
+        assert_dir_exists(&ralph_dir.join("templates"));
+        assert_file_exists(&ralph_dir.join("ralph.toml"));
+
+        // Verify full config is written (not minimal).
+        let config_str =
+            std::fs::read_to_string(ralph_dir.join("ralph.toml")).expect("read ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&config_str).expect("ralph.toml should parse");
+        assert_eq!(parsed, GlobalConfig::default());
+
+        // Verify all 11 template files exist.
+        let templates_dir = ralph_dir.join("templates");
+        for (name, _) in crate::cli::init::TEMPLATE_FILES {
+            assert_file_exists(&templates_dir.join(name));
+        }
+    })
+}
+
+fn copy_files_overlay_preserves_custom_values(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // First, create a minimal workspace.
+        h.init_workspace().expect("init should succeed");
+
+        let ralph_dir = h.repo_root.join(".ralph");
+        let toml_path = ralph_dir.join("ralph.toml");
+
+        // Write a config with a custom value.
+        std::fs::write(&toml_path, "[workspace]\ndefault_backend = \"codex\"\n")
+            .expect("write custom config");
+
+        // Run --copy-files overlay.
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify the custom value is preserved.
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
+        assert_eq!(
+            parsed.workspace.default_backend, "codex",
+            "custom default_backend should be preserved"
+        );
+    })
+}
+
+fn copy_files_overlay_fills_missing_keys(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a minimal workspace.
+        h.init_workspace().expect("init should succeed");
+
+        // Run --copy-files overlay.
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        let ralph_dir = h.repo_root.join(".ralph");
+        let toml_path = ralph_dir.join("ralph.toml");
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
+
+        // Effective config should match full defaults.
+        assert_eq!(parsed, GlobalConfig::default());
+
+        // Verify file-level key insertion (not just deserialized equality).
+        let doc: toml_edit::DocumentMut = merged_str.parse().expect("parse as doc");
+        let ws = doc
+            .get("workspace")
+            .expect("workspace key should exist")
+            .as_table()
+            .expect("workspace should be a table");
+        assert!(
+            ws.contains_key("version"),
+            "version should be physically present in merged TOML file content"
+        );
+        assert!(
+            ws.contains_key("default_backend"),
+            "default_backend should be physically present in merged TOML file content"
+        );
+        assert!(
+            doc.get("backends").is_some(),
+            "backends section should be physically present in merged TOML"
+        );
+
+        // Templates should be created.
+        let templates_dir = ralph_dir.join("templates");
+        assert_dir_exists(&templates_dir);
+        for (name, _) in crate::cli::init::TEMPLATE_FILES {
+            assert_file_exists(&templates_dir.join(name));
+        }
+    })
+}
+
+fn copy_files_overlay_creates_missing_templates_only(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a workspace with one custom template already present.
+        h.init_workspace().expect("init should succeed");
+        let ralph_dir = h.repo_root.join(".ralph");
+        let templates_dir = ralph_dir.join("templates");
+        std::fs::create_dir_all(&templates_dir).expect("create templates dir");
+        std::fs::write(templates_dir.join("spec.md"), "my custom spec template")
+            .expect("write custom spec.md");
+
+        // Run --copy-files overlay.
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        // Custom spec.md should be unchanged.
+        let spec_content =
+            std::fs::read_to_string(templates_dir.join("spec.md")).expect("read spec.md");
+        assert_eq!(spec_content, "my custom spec template");
+
+        // Other templates should now exist.
+        for (name, _) in crate::cli::init::TEMPLATE_FILES {
+            assert_file_exists(&templates_dir.join(name));
+        }
+    })
+}
+
+fn copy_files_rejects_non_workspace_nonempty_dir(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a non-empty directory without ralph.toml.
+        let ralph_dir = h.repo_root.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("create dir");
+        std::fs::write(ralph_dir.join("random_file.txt"), "stuff").expect("write file");
+
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 2);
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined
+                .contains("directory exists but is not a ralph workspace (no ralph.toml found)"),
+            "expected exact non-workspace error message, got:\n{combined}"
+        );
+
+        // Verify no files were added.
+        assert!(
+            !ralph_dir.join("ralph.toml").exists(),
+            "ralph.toml should not have been created"
+        );
+        assert!(
+            !ralph_dir.join("templates").exists(),
+            "templates/ should not have been created"
+        );
+    })
+}
+
+fn copy_files_rejects_malformed_toml(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a workspace with a malformed ralph.toml.
+        let ralph_dir = h.repo_root.join(".ralph");
+        std::fs::create_dir_all(&ralph_dir).expect("create dir");
+        std::fs::write(
+            ralph_dir.join("ralph.toml"),
+            "[workspace]\nversion = [1, 2, 3]\n",
+        )
+        .expect("write malformed ralph.toml");
+
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 1);
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("failed to parse ralph.toml"),
+            "expected 'failed to parse ralph.toml' in output, got:\n{combined}"
+        );
+
+        // Existing file should be unchanged.
+        let raw = std::fs::read_to_string(ralph_dir.join("ralph.toml")).expect("read ralph.toml");
+        assert!(
+            raw.contains("version = [1, 2, 3]"),
+            "malformed ralph.toml should be unchanged"
+        );
+        assert!(
+            !ralph_dir.join("templates").exists(),
+            "templates/ should not have been created on malformed toml"
+        );
+    })
+}
+
+fn copy_files_dry_run_full_scaffold(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let output = h
+            .ralph(["init", "--copy-files", "--dry-run"])
+            .expect("ralph init --copy-files --dry-run should execute");
+        assert_exit_code(&output, 0);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Should include template actions.
+        assert!(
+            stdout.contains("write-template"),
+            "dry-run --copy-files should show write-template actions, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("write-config"),
+            "dry-run --copy-files should show write-config action, got:\n{stdout}"
+        );
+
+        // Should NOT have created any files.
+        assert_path_not_exists(&h.repo_root.join(".ralph"));
+    })
+}
+
+fn copy_files_dry_run_overlay(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a minimal workspace first.
+        h.init_workspace().expect("init should succeed");
+
+        let output = h
+            .ralph(["init", "--copy-files", "--dry-run"])
+            .expect("ralph init --copy-files --dry-run should execute");
+        assert_exit_code(&output, 0);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Should include overlay config action.
+        assert!(
+            stdout.contains("overlay-config"),
+            "dry-run --copy-files on existing workspace should show overlay-config, got:\n{stdout}"
+        );
+        // Should include template actions (for missing templates).
+        assert!(
+            stdout.contains("write-template"),
+            "dry-run --copy-files on existing workspace should show write-template actions, got:\n{stdout}"
+        );
+
+        // The workspace config should be unchanged (dry-run).
+        let toml_path = h.repo_root.join(".ralph").join("ralph.toml");
+        let raw = std::fs::read_to_string(&toml_path).expect("read ralph.toml");
+        assert!(
+            raw.contains("[workspace]"),
+            "config should still contain [workspace]"
+        );
+        // Templates dir should NOT exist (dry-run).
+        assert!(
+            !h.repo_root.join(".ralph").join("templates").exists(),
+            "templates/ should not be created during dry-run"
+        );
+    })
+}
+
+fn copy_files_overlay_inline_table_merge(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Create a workspace with inline-table syntax in ralph.toml.
+        let ralph_dir = h.repo_root.join(".ralph");
+        std::fs::create_dir_all(ralph_dir.join("projects")).expect("create projects dir");
+        std::fs::write(
+            ralph_dir.join("ralph.toml"),
+            "workspace = { default_backend = \"codex\" }\n",
+        )
+        .expect("write inline-table config");
+
+        // Run --copy-files overlay on existing workspace with inline tables.
+        let output = h
+            .ralph(["init", "--copy-files"])
+            .expect("ralph init --copy-files should execute");
+        assert_exit_code(&output, 0);
+
+        let toml_path = ralph_dir.join("ralph.toml");
+        let merged_str = std::fs::read_to_string(&toml_path).expect("read merged ralph.toml");
+        let parsed: GlobalConfig = toml::from_str(&merged_str).expect("merged config should parse");
+
+        // User value should be preserved.
+        assert_eq!(
+            parsed.workspace.default_backend, "codex",
+            "inline-table custom value should be preserved"
+        );
+        // Missing default keys should be filled.
+        assert_eq!(
+            parsed.workspace.version,
+            GlobalConfig::default().workspace.version,
+            "missing version should be filled from defaults"
+        );
+
+        // Verify file-level key insertion.
+        let doc: DocumentMut = merged_str.parse().expect("parse as doc");
+        assert!(
+            doc.get("backends").is_some(),
+            "backends section should be physically present after inline-table overlay merge"
+        );
+    })
 }

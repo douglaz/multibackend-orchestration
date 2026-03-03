@@ -54,6 +54,8 @@ pub struct InitArgs {
     pub dir: PathBuf,
     #[arg(short = 'n', long = "dry-run")]
     pub dry_run: bool,
+    #[arg(long = "copy-files")]
+    pub copy_files: bool,
 }
 
 #[derive(Debug, Args)]
