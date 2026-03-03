@@ -269,6 +269,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             prd_reviewer_backend: daemon_cfg.prd_reviewer_backend,
             prd_max_revisions: daemon_cfg.prd_max_revisions,
             prd_backend_timeout_secs: daemon_cfg.prd_backend_timeout_secs,
+            prd_shutdown_timeout_secs: daemon_cfg.prd_shutdown_timeout_secs,
             git_bin,
             gh_bin,
         };

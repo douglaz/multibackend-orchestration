@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::daemon::github::has_origin_remote;
 use crate::error::RalphError;
@@ -21,7 +23,12 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 /// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
 /// `.ralph/daemon/worktrees/<task_id>/`. If the branch already exists
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
-pub fn create_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) -> Result<PathBuf> {
+pub fn create_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+    _repo_root_lock: Option<Arc<Semaphore>>,
+) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
     let branch_name = format!("ralph/daemon/{task_id}");
 
@@ -373,6 +380,7 @@ pub fn create_worktree_on_branch(
     workspace_root: &Path,
     task_id: &str,
     branch: &str,
+    _repo_root_lock: Option<Arc<Semaphore>>,
 ) -> Result<PathBuf> {
     let wt_path = worktrees_dir(workspace_root).join(format!("rebase-{task_id}"));
 
@@ -415,7 +423,12 @@ pub fn rebase_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 }
 
 /// Remove a rebase worktree. Best-effort: logs warning on failure.
-pub fn remove_rebase_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
+pub fn remove_rebase_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+    _repo_root_lock: Option<Arc<Semaphore>>,
+) {
     let wt_path = rebase_worktree_path(workspace_root, task_id);
     if !wt_path.exists() {
         return;
@@ -448,7 +461,12 @@ pub fn remove_rebase_worktree(repo_root: &Path, workspace_root: &Path, task_id: 
 }
 
 /// Remove a worktree for a task. Best-effort: logs warning on failure.
-pub fn remove_worktree(repo_root: &Path, workspace_root: &Path, task_id: &str) {
+pub fn remove_worktree(
+    repo_root: &Path,
+    workspace_root: &Path,
+    task_id: &str,
+    _repo_root_lock: Option<Arc<Semaphore>>,
+) {
     let wt_path = task_worktree_path(workspace_root, task_id);
     if !wt_path.exists() {
         return;
@@ -501,7 +519,7 @@ pub fn reconcile_worktrees(repo_root: &Path, workspace_root: &Path, active_task_
         let name = entry.file_name().to_string_lossy().into_owned();
         if !active_task_ids.contains(&name) {
             eprintln!("reconcile: removing stale/orphaned worktree {name}");
-            remove_worktree(repo_root, workspace_root, &name);
+            remove_worktree(repo_root, workspace_root, &name, None);
         }
     }
 
@@ -651,8 +669,8 @@ mod tests {
         let task_id = "acme-widgets-123";
         let expected_path = task_worktree_path(&workspace_root, task_id);
 
-        let wt_path: PathBuf =
-            create_worktree(&repo_root, &workspace_root, task_id).expect("create worktree");
+        let wt_path: PathBuf = create_worktree(&repo_root, &workspace_root, task_id, None)
+            .expect("create worktree");
 
         assert_eq!(wt_path, expected_path);
         assert!(wt_path.is_dir(), "worktree directory should exist");
@@ -662,7 +680,7 @@ mod tests {
     fn verify_worktree_branch_returns_ok_for_matching_branch() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-124";
-        let wt_path = create_worktree(&repo_root, &workspace_root, task_id).expect("worktree");
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
         let expected_branch = format!("ralph/daemon/{task_id}");
 
         let result: crate::Result<()> = verify_worktree_branch(&wt_path, &expected_branch);
@@ -676,7 +694,7 @@ mod tests {
     fn verify_worktree_branch_returns_error_for_missing_expected_branch() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-125";
-        let wt_path = create_worktree(&repo_root, &workspace_root, task_id).expect("worktree");
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
 
         let err = verify_worktree_branch(&wt_path, "ralph/daemon/does-not-exist")
             .expect_err("missing expected branch should fail");

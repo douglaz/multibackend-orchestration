@@ -422,6 +422,7 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         prd_reviewer_backend: "claude".to_owned(),
         prd_max_revisions: 1,
         prd_backend_timeout_secs: 30,
+        prd_shutdown_timeout_secs: 60,
         git_bin: "git".to_owned(),
         gh_bin: "gh".to_owned(),
     }
