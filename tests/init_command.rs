@@ -167,6 +167,7 @@ fn test_init_does_not_partially_overwrite_on_failure() {
     let args = ralph::cli::InitArgs {
         dir: workspace_root.clone(),
         dry_run: false,
+        copy_files: false,
     };
     let _ = ralph::cli::init::execute(args);
 
