@@ -1,3 +1,26 @@
+---
+artifact: prompt-review
+project: issue-105
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-03T16:15:32Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The shutdown behavior is internally inconsistent: acceptance says “abort on timeout,” but the example says dropping `JoinHandle` aborts implicitly; in Tokio it does not. This can leak a background task at shutdown.
+- Timeout is described as configurable (default 60s), but no config key or wiring is defined. This makes implementation and testing ambiguous.
+- Rebase git-lock strategy conflicts across sections: one part says hold the semaphore for full rebase execution, another says release during worktree-local rebase/push. This affects throughput and correctness.
+- Dispatch concurrency uses both `slots` and `max_concurrent` without defining the exact cap formula. Different implementations could diverge.
+- PRD background tick timing is unspecified (immediate first tick vs first tick after `poll_seconds`), which can change behavior and test outcomes.
+- “No new files/modules required” conflicts with “add integration tests.” This creates scope confusion.
+- Heavy reliance on line numbers (`runtime.rs:xxxx`) is brittle and quickly becomes stale during refactors.
+- Some acceptance criteria are not directly observable/testable as written (for example “latency proportional to children” with no measurable threshold).
+- Error-handling policy for panics/errors in spawned phase tasks is partially implied but not fully specified (continue loop vs fail fast).
+- Test plan does not explicitly require/locate validate conformance coverage for this behavioral change, which is a project convention.
+
+## Refined Prompt
 ### Objective
 Refactor the daemon runtime loop in `src/daemon/runtime.rs` so independent I/O-heavy work runs concurrently while preserving existing behavior, safety, and deterministic single-iteration semantics.
 
