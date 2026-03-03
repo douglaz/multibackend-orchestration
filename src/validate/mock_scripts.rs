@@ -2586,3 +2586,202 @@ fi
         pid_file = pid_file.to_string_lossy()
     )
 }
+
+/// Mock `gh` script for daemon concurrency conformance tests.
+///
+/// Extends `daemon_mock_gh_script` with:
+/// - **PRD tick logging**: When `issue list` is called with a `ralph:prd` label,
+///   appends a `prd-tick` line to `MOCK_PRD_TICK_LOG` (if set). This enables
+///   tests to count exactly how many PRD poll ticks occurred.
+/// - **PR URL for rebase candidates**: `gh pr list --head <branch>` returns a
+///   mock PR URL so `find_existing_pr` discovers candidates.
+/// - **PR merge metadata**: `gh pr view --json mergeable,state,baseRefName,headRefOid`
+///   returns configurable JSON (via `MOCK_PR_VIEW_JSON`).
+///
+/// Environment variables:
+/// - `MOCK_GH_ISSUES` — JSON array of issues for `issue list`
+/// - `MOCK_GH_LABEL_LOG` — file to log label add/remove operations
+/// - `MOCK_GH_ISSUE_LABELS` — JSON for `issue view --json labels`
+/// - `MOCK_PRD_TICK_LOG` — file to count PRD tick invocations
+/// - `MOCK_PR_VIEW_JSON` — JSON for `pr view --json` merge metadata
+pub fn daemon_mock_gh_concurrency_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for daemon concurrency conformance tests.
+# Env: MOCK_GH_ISSUES - JSON array of issues for `issue list`
+# Env: MOCK_GH_LABEL_LOG - file to log label add/remove operations
+# Env: MOCK_GH_ISSUE_LABELS - JSON for `issue view --json labels`
+# Env: MOCK_PRD_TICK_LOG - file to log PRD tick invocations
+# Env: MOCK_PR_VIEW_JSON - JSON for `pr view --json` merge metadata
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        # Detect PRD tick: check if any arg is ralph:prd or ralph:prd-active
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd|ralph:prd-active) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ] && [ -n "${MOCK_PRD_TICK_LOG:-}" ]; then
+          echo "prd-tick" >> "$MOCK_PRD_TICK_LOG"
+        fi
+
+        if [ "${MOCK_GH_OVERFLOW:-}" = "true" ]; then
+          printf '['
+          i=1
+          while [ $i -le 100 ]; do
+            if [ $i -gt 1 ]; then printf ','; fi
+            printf '{"number":%d,"title":"issue %d","labels":[]}' $i $i
+            i=$((i + 1))
+          done
+          printf ']'
+          exit 0
+        fi
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        # Check for --head flag to support find_existing_pr
+        has_head=0
+        for arg in "$@"; do
+          if [ "$arg" = "--head" ]; then
+            has_head=1
+          fi
+        done
+        if [ "$has_head" = "1" ]; then
+          # Return a mock PR URL for rebase candidate discovery
+          printf 'https://github.com/mock/repo/pull/1'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      create)
+        printf 'https://github.com/mock/repo/pull/1\n'
+        exit 0
+        ;;
+      view)
+        # Check for merge-info JSON query
+        has_json=0
+        for arg in "$@"; do
+          if [ "$arg" = "mergeable,state,baseRefName,headRefOid" ]; then
+            has_json=1
+          fi
+        done
+        if [ "$has_json" = "1" ]; then
+          if [ -n "${MOCK_PR_VIEW_JSON:-}" ]; then
+            printf '%s' "$MOCK_PR_VIEW_JSON"
+          else
+            printf '{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}'
+          fi
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      edit) exit 0 ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
