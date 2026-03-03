@@ -81,19 +81,13 @@ const REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtim
 - If criteria are already satisfied and no code change is required, return `# Review: APPROVED` with evidence.
 - Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues."#;
 
-const FINAL_REVIEWER_GUARDRAILS: &str = r#"- Evaluate project-wide outcomes against the master prompt.
-- You have full access to the codebase. Use your tools to read files, run git commands, and explore the source code.
+const FINAL_REVIEWER_GUARDRAILS: &str = r#"- You have full access to the codebase. Use your tools to read files, run git commands, and explore the source code.
 - Run `git diff <base_branch>...HEAD -- . ':(exclude).ralph'` to see all source changes, then read key files to review them.
-- Review source code for bugs, correctness issues, error handling edge cases, and cross-cutting side effects on unrelated code paths.
-- **Concurrency safety**: If the code uses threads, async, shared state, or parallel execution, verify: no data races, no shared mutable state without synchronization, proper resource isolation between concurrent workers, and correct thread/task lifecycle management. CRITICAL: setting per-process cwd is NOT filesystem isolation — if N workers all use the same directory path as cwd, they share that directory and can interfere (concurrent git ops, file writes, lock contention). True isolation requires each worker to operate on a DIFFERENT directory. Trace actual path values to verify.
-- **Panic and error path completeness**: Verify that all error and panic paths leave the system in a consistent, recoverable state. Check that panic::catch_unwind handlers persist failure state (not just log it). Ensure errors are accounted for in retry/state machinery so failed operations don't silently retry forever.
-- **Test adequacy**: For each behavioral claim in tests, verify the assertions actually prove what the test name/doc claims. Check for gaps where tests assert side effects on _other_ components but not on the failing component itself. Verify tests have timeouts where hangs are possible.
-- Check for stray/orphaned files (e.g. `git status`, unexpected files in repo root).
-- Verify that new code follows existing patterns and conventions in the codebase.
+- Do a broad, open-ended code review. Do not limit yourself to any specific category of issues — look for anything that is wrong, unsafe, or broken.
+- Evaluate project-wide outcomes against the master prompt.
 - Propose only concrete, high-signal amendments with clear affected files.
 - Use globally unique amendment IDs within your response.
-- **State invariant verification**: For error-handling and cleanup code paths, verify that each distinct failure mode produces the correct system state. Do not accept code that treats independent failures identically without justification — trace each failure path separately and verify the resulting state is correct and recoverable.
-- **Amendment replay check**: If this review round follows an amendment round, read each prior amendment's acceptance criteria and verify the implementation satisfies them. Do not rely solely on the implementer's self-reported changes — trace the actual code paths to confirm correctness."#;
+- If this review round follows an amendment round, read each prior amendment's acceptance criteria and verify the implementation satisfies them. Do not rely solely on the implementer's self-reported changes — trace the actual code paths to confirm correctness."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct FinalReviewConfigSnapshot {
