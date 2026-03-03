@@ -3009,3 +3009,242 @@ esac
 "###
     .to_owned()
 }
+
+/// Mock `ralph` script that logs dispatch start/end timestamps to a
+/// concurrency evidence file. Each invocation appends two lines:
+/// `START:<issue_number>:<epoch_ms>` and `END:<issue_number>:<epoch_ms>`.
+///
+/// If overlapping START/END intervals are observed across different issues,
+/// the test can prove concurrent execution occurred.
+///
+/// Environment variables:
+/// - `MOCK_DISPATCH_EVIDENCE_LOG` — file to append start/end markers
+pub fn daemon_mock_ralph_concurrency_evidence_script() -> String {
+    r###"#!/bin/sh
+# Extract issue number from arguments (match *issue-<N>* pattern)
+issue=""
+for arg in "$@"; do
+  case "$arg" in
+    *issue-*) issue="$(echo "$arg" | sed 's/.*issue-\([0-9]*\).*/\1/')" ;;
+  esac
+done
+
+epoch_ms() {
+  python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null || date +%s000
+}
+
+case "$1" in
+  auto)
+    if [ -n "${MOCK_DISPATCH_EVIDENCE_LOG:-}" ] && [ -n "$issue" ]; then
+      echo "START:${issue}:$(epoch_ms)" >> "$MOCK_DISPATCH_EVIDENCE_LOG"
+    fi
+    # Brief sleep to create an overlapping window for concurrency detection
+    sleep 0.3
+    if [ -n "${MOCK_DISPATCH_EVIDENCE_LOG:-}" ] && [ -n "$issue" ]; then
+      echo "END:${issue}:$(epoch_ms)" >> "$MOCK_DISPATCH_EVIDENCE_LOG"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `gh` script for dispatch failure conformance tests.
+///
+/// Extends `daemon_mock_gh_concurrency_script` to also log when
+/// dispatch-failure label swaps occur (transitions from
+/// `ralph:in-progress` to `ralph:failed`), writing an explicit
+/// `dispatch-failure:<issue_number>` marker to `MOCK_DISPATCH_FAILURE_LOG`.
+///
+/// Environment variables:
+/// - All variables from `daemon_mock_gh_concurrency_script`
+/// - `MOCK_DISPATCH_FAILURE_LOG` — file to log dispatch-failure markers
+pub fn daemon_mock_gh_dispatch_failure_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for dispatch-failure conformance tests.
+# Logs dispatch-failure markers when in-progress -> failed transitions occur.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd|ralph:prd-active) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ] && [ -n "${MOCK_PRD_TICK_LOG:-}" ]; then
+          echo "prd-tick" >> "$MOCK_PRD_TICK_LOG"
+        fi
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        # Detect failure-label addition: gh issue edit <num> --add-label ralph:failed
+        # swap_lifecycle_label calls remove_label then add_label in separate
+        # gh invocations, so we detect the add-label call alone.
+        has_add_failed=0
+        issue_num=""
+        prev=""
+        for arg in "$@"; do
+          if [ "$prev" = "--add-label" ] && [ "$arg" = "ralph:failed" ]; then
+            has_add_failed=1
+          fi
+          # Extract issue number from positional arg (number only)
+          case "$arg" in
+            [0-9]*) issue_num="$arg" ;;
+          esac
+          prev="$arg"
+        done
+        if [ "$has_add_failed" = "1" ] && [ -n "${MOCK_DISPATCH_FAILURE_LOG:-}" ]; then
+          echo "dispatch-failure:${issue_num}" >> "$MOCK_DISPATCH_FAILURE_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        # Comment body query
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        has_head=0
+        for arg in "$@"; do
+          if [ "$arg" = "--head" ]; then
+            has_head=1
+          fi
+        done
+        if [ "$has_head" = "1" ]; then
+          printf 'https://github.com/mock/repo/pull/1'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      create)
+        printf 'https://github.com/mock/repo/pull/1\n'
+        exit 0
+        ;;
+      view) printf '' ; exit 0 ;;
+      edit) exit 0 ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `ralph` script for completion-failure tests. Exits immediately
+/// with success or failure based on `MOCK_RALPH_EXIT_CODE` (default 0).
+///
+/// Environment variables:
+/// - `MOCK_RALPH_EXIT_CODE` — exit code to return on `auto` (default 0)
+pub fn daemon_mock_ralph_exit_code_script() -> String {
+    r###"#!/bin/sh
+case "$1" in
+  auto)
+    exit "${MOCK_RALPH_EXIT_CODE:-0}"
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}

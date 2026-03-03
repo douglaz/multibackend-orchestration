@@ -1036,6 +1036,44 @@ struct ClaimedIssue {
     raw_idea: String,
 }
 
+/// Per-issue outcome from a dispatch worker, preserving `issue_number` identity
+/// even when the worker panics, so rollback can always be applied.
+enum DispatchOutcome {
+    /// Dispatch succeeded — caller inserts the handle into `children`.
+    Success {
+        issue_number: u32,
+        handle: ChildHandle,
+    },
+    /// Dispatch returned an error — per-issue rollback needed.
+    Failure {
+        issue_number: u32,
+        detail: String,
+    },
+    /// Dispatch panicked — per-issue rollback needed (same path as Failure).
+    Panic {
+        issue_number: u32,
+        detail: String,
+    },
+}
+
+/// Per-issue outcome from a completion worker in `collect_children`.
+/// Preserves `issue_number` so panic recovery can transition the issue
+/// to a terminal failure state.
+#[allow(dead_code)]
+enum CompletionOutcome {
+    /// Completion finished (success or handled error).
+    Done {
+        issue_number: u32,
+        task_id: String,
+    },
+    /// Completion worker panicked — explicit terminalization needed.
+    Panic {
+        issue_number: u32,
+        task_id: String,
+        detail: String,
+    },
+}
+
 /// Poll for new issues, filter, claim, and dispatch.
 async fn poll_and_claim(
     config: &DaemonRuntimeConfig,
@@ -1186,30 +1224,63 @@ async fn poll_and_claim(
         return Ok(());
     }
 
-    // Stage 2: Dispatch claimed issues concurrently up to available slots
-    let mut dispatch_set: JoinSet<(u32, std::result::Result<ChildHandle, RalphError>)> = JoinSet::new();
+    // Stage 2: Dispatch claimed issues concurrently up to available slots.
+    //
+    // Each spawned task catches panics via a nested `tokio::spawn` so the
+    // per-issue `issue_number` is always available in the outcome — even
+    // when the dispatch worker panics.
+    let mut dispatch_set: JoinSet<DispatchOutcome> = JoinSet::new();
 
     for claimed in claimed_issues {
         let config = config.clone();
         let repo_root_lock = repo_root_lock.clone();
         dispatch_set.spawn(async move {
-            let result = dispatch_task(&config, claimed.issue_number, &claimed.raw_idea, &repo_root_lock).await;
-            (claimed.issue_number, result)
+            let issue_number = claimed.issue_number;
+            // Inner spawn isolates panics: if dispatch_task panics, the
+            // JoinHandle returns Err(JoinError) while issue_number survives
+            // in the outer task.
+            let inner = tokio::spawn(async move {
+                dispatch_task(&config, issue_number, &claimed.raw_idea, &repo_root_lock).await
+            });
+            match inner.await {
+                Ok(Ok(handle)) => DispatchOutcome::Success { issue_number, handle },
+                Ok(Err(err)) => DispatchOutcome::Failure {
+                    issue_number,
+                    detail: format!("{err}"),
+                },
+                Err(join_err) => {
+                    let detail = format!("{join_err}");
+                    DispatchOutcome::Panic {
+                        issue_number,
+                        detail,
+                    }
+                }
+            }
         });
     }
 
     // Stage 3: Collect dispatch results and apply to children
     while let Some(join_result) = dispatch_set.join_next().await {
-        match join_result {
-            Ok((issue_number, Ok(handle))) => {
+        let outcome = match join_result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // JoinError without issue identity — should not happen since
+                // we catch panics above, but log defensively.
+                eprintln!("warning: dispatch JoinSet task failed unexpectedly: {err}");
+                continue;
+            }
+        };
+
+        match outcome {
+            DispatchOutcome::Success { issue_number, handle } => {
                 children.insert(issue_number, handle);
             }
-            Ok((issue_number, Err(err))) => {
-                eprintln!("warning: failed to dispatch issue #{issue_number}: {err}");
+            DispatchOutcome::Failure { issue_number, detail } => {
+                eprintln!("warning: failed to dispatch issue #{issue_number}: {detail}");
                 // Per-issue rollback: swap ralph:in-progress -> ralph:failed
                 let owner = config.owner.clone();
                 let repo = config.repo.clone();
-                let _ = spawn_blocking_op(move || {
+                if let Err(rollback_err) = spawn_blocking_op(move || {
                     github::swap_lifecycle_label(
                         &owner,
                         &repo,
@@ -1218,10 +1289,35 @@ async fn poll_and_claim(
                         "ralph:failed",
                     )
                 })
-                .await;
+                .await
+                {
+                    eprintln!(
+                        "warning: dispatch rollback failed for issue #{issue_number}: {rollback_err}"
+                    );
+                }
             }
-            Err(err) => {
-                eprintln!("warning: dispatch task panicked: {err}");
+            DispatchOutcome::Panic { issue_number, detail } => {
+                eprintln!(
+                    "warning: dispatch worker panicked for issue #{issue_number}: {detail}"
+                );
+                // Per-issue rollback: same path as Err — swap ralph:in-progress -> ralph:failed
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                if let Err(rollback_err) = spawn_blocking_op(move || {
+                    github::swap_lifecycle_label(
+                        &owner,
+                        &repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                })
+                .await
+                {
+                    eprintln!(
+                        "warning: dispatch panic rollback failed for issue #{issue_number}: {rollback_err}"
+                    );
+                }
             }
         }
     }
@@ -1678,23 +1774,78 @@ async fn collect_children(
         completion_tasks.push((issue_number, task_id, terminal_label));
     }
 
-    // Stage 3: Run complete_task concurrently across finished children via JoinSet
+    // Stage 3: Run complete_task concurrently across finished children via JoinSet.
+    //
+    // Each completion worker returns a `CompletionOutcome` carrying the
+    // `issue_number` so panics/errors are tied to a specific issue.  If a
+    // worker panics, the issue is explicitly transitioned to `ralph:failed`.
     if completion_tasks.is_empty() {
         return;
     }
 
-    let mut complete_set: JoinSet<()> = JoinSet::new();
+    let mut complete_set: JoinSet<CompletionOutcome> = JoinSet::new();
     for (issue_number, task_id, terminal_label) in completion_tasks {
         let config = config.clone();
         let repo_root_lock = repo_root_lock.clone();
+        let tid = task_id.clone();
         complete_set.spawn(async move {
-            complete_task(&config, issue_number, &task_id, terminal_label, &repo_root_lock).await;
+            // Inner spawn isolates panics so issue_number is preserved.
+            let inner = tokio::spawn(async move {
+                complete_task(&config, issue_number, &tid, terminal_label, &repo_root_lock).await;
+            });
+            match inner.await {
+                Ok(()) => CompletionOutcome::Done {
+                    issue_number,
+                    task_id,
+                },
+                Err(join_err) => CompletionOutcome::Panic {
+                    issue_number,
+                    task_id,
+                    detail: format!("{join_err}"),
+                },
+            }
         });
     }
 
-    while let Some(result) = complete_set.join_next().await {
-        if let Err(err) = result {
-            eprintln!("warning: complete_task panicked: {err}");
+    while let Some(join_result) = complete_set.join_next().await {
+        let outcome = match join_result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                eprintln!("warning: completion JoinSet task failed unexpectedly: {err}");
+                continue;
+            }
+        };
+
+        match outcome {
+            CompletionOutcome::Done { .. } => {}
+            CompletionOutcome::Panic {
+                issue_number,
+                task_id,
+                detail,
+            } => {
+                eprintln!(
+                    "warning: complete_task panicked for {task_id} (issue #{issue_number}): {detail}"
+                );
+                // Explicitly transition to terminal failure state so the
+                // issue does not remain stuck as ralph:in-progress.
+                let owner = config.owner.clone();
+                let repo = config.repo.clone();
+                if let Err(rollback_err) = spawn_blocking_op(move || {
+                    github::swap_lifecycle_label(
+                        &owner,
+                        &repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                })
+                .await
+                {
+                    eprintln!(
+                        "warning: completion panic rollback failed for {task_id} (issue #{issue_number}): {rollback_err}"
+                    );
+                }
+            }
         }
     }
 }
