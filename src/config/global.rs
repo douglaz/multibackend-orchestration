@@ -6,6 +6,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use toml_edit::DocumentMut;
 
 use crate::Result;
 
@@ -1135,6 +1136,140 @@ impl GlobalConfig {
             _ => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sparse in-place TOML persistence
+// ---------------------------------------------------------------------------
+
+/// Persist a single config key change in-place using `toml_edit`, preserving
+/// comments, formatting, and unknown user keys. The `config` argument is the
+/// already-mutated in-memory `GlobalConfig` (after `set_global_config_value`).
+///
+/// `canonical_key` is the resolved dotted key (e.g. `"workflow.qa_backend"`).
+///
+/// The function reads the existing file, patches only the targeted key, and
+/// writes the result back. If the file does not exist yet it falls back to a
+/// full serialization.
+pub fn save_sparse(path: &Path, canonical_key: &str, config: &GlobalConfig) -> Result<()> {
+    let raw = match fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // No existing file — do a full write.
+            return config.save(path);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let mut doc: DocumentMut = raw.parse().map_err(|e| {
+        crate::error::RalphError::Orchestration(format!("failed to parse ralph.toml: {e}"))
+    })?;
+
+    // Serialize the full in-memory config so we can extract the target value.
+    let full_raw = toml::to_string_pretty(config)?;
+    let full_doc: DocumentMut = full_raw.parse().map_err(|e| {
+        crate::error::RalphError::Orchestration(format!("failed to parse serialized config: {e}"))
+    })?;
+
+    // Split the canonical key into TOML table path + leaf key.
+    let segments = sparse_key_segments(canonical_key);
+    let (table_path, leaf) = segments.split_at(segments.len() - 1);
+
+    // Look up the value in the full serialization.
+    let target_value = lookup_toml_value(full_doc.as_table(), table_path, leaf[0]);
+
+    match target_value {
+        Some(item) => {
+            // Ensure intermediate tables exist in the existing doc.
+            let table = ensure_tables(&mut doc, table_path);
+            table.insert(leaf[0], item.clone());
+        }
+        None => {
+            // Value is absent in full serialization → remove from disk (clear semantics).
+            if let Some(table) = navigate_tables_mut(&mut doc, table_path) {
+                table.remove(leaf[0]);
+            }
+        }
+    }
+
+    fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// Split a canonical config key into TOML path segments.
+///
+/// Special handling:
+/// - `backends.<backend>.env.<rest>`: `<rest>` is treated as a single literal
+///   key (even if it contains dots), matching the `BTreeMap<String, String>` env
+///   field.
+/// - All other keys split on dots normally.
+fn sparse_key_segments(canonical_key: &str) -> Vec<&str> {
+    // Check for the `backends.<name>.env.<rest>` pattern.
+    if let Some(rest) = canonical_key
+        .strip_prefix("backends.")
+        .and_then(|s| {
+            // Find the backend name (first segment after "backends.")
+            let dot = s.find('.')?;
+            let after_backend = &s[dot + 1..];
+            // Check if next segment is "env."
+            after_backend
+                .strip_prefix("env.")
+                .map(|env_rest| (s, dot, env_rest))
+        })
+    {
+        let (s, dot, env_rest) = rest;
+        let backend_name = &s[..dot];
+        return vec!["backends", backend_name, "env", env_rest];
+    }
+
+    canonical_key.split('.').collect()
+}
+
+/// Look up a value in a TOML table given a table path and leaf key.
+fn lookup_toml_value<'a>(
+    root: &'a toml_edit::Table,
+    table_path: &[&str],
+    leaf: &str,
+) -> Option<&'a toml_edit::Item> {
+    let mut current = root;
+    for &segment in table_path {
+        current = current.get(segment)?.as_table()?;
+    }
+    let item = current.get(leaf)?;
+    // Treat `Item::None` as absent.
+    if item.is_none() {
+        return None;
+    }
+    Some(item)
+}
+
+/// Navigate to a nested table in the document (mutable), returning `None` if
+/// any segment along the path is missing.
+fn navigate_tables_mut<'a>(
+    doc: &'a mut DocumentMut,
+    path: &[&str],
+) -> Option<&'a mut toml_edit::Table> {
+    let mut current = doc.as_table_mut();
+    for &segment in path {
+        current = current.get_mut(segment)?.as_table_mut()?;
+    }
+    Some(current)
+}
+
+/// Ensure the table hierarchy exists, creating missing intermediate tables.
+fn ensure_tables<'a>(doc: &'a mut DocumentMut, path: &[&str]) -> &'a mut toml_edit::Table {
+    let mut current = doc.as_table_mut();
+    for &segment in path {
+        if !current.contains_key(segment) {
+            current.insert(segment, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        current = current
+            .get_mut(segment)
+            .expect("just inserted")
+            .as_table_mut()
+            .expect("just inserted a table");
+    }
+    current
 }
 
 // ---------------------------------------------------------------------------
@@ -3058,5 +3193,206 @@ planner_state_in_prompt = "summary"
                 "key '{key}' should produce 'unsupported global config key' error"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // save_sparse unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_sparse_preserves_comments_and_unrelated_formatting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        let original = "# My workspace\n[workspace]\nversion = \"1.0\"\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workspace.default_backend = "codex".to_owned();
+        super::save_sparse(&path, "workspace.default_backend", &config).expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            result.contains("# My workspace"),
+            "comment should be preserved, got:\n{result}"
+        );
+        assert!(
+            result.contains("version = \"1.0\""),
+            "unrelated key should be preserved, got:\n{result}"
+        );
+        assert!(
+            result.contains("default_backend"),
+            "new key should be written, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_creates_intermediate_tables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        std::fs::write(&path, "[workspace]\nversion = \"1.0\"\n").expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workflow.auto_commit = false;
+        super::save_sparse(&path, "workflow.auto_commit", &config).expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            result.contains("[workflow]"),
+            "workflow table should be created, got:\n{result}"
+        );
+        assert!(
+            result.contains("auto_commit = false"),
+            "auto_commit should be set, got:\n{result}"
+        );
+        // Original content preserved.
+        assert!(
+            result.contains("version = \"1.0\""),
+            "existing key should remain, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_removes_optional_key_on_null() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        let original = "[workflow]\nqa_backend = \"codex\"\nauto_commit = true\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.workflow.qa_backend = None; // cleared
+        super::save_sparse(&path, "workflow.qa_backend", &config).expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !result.contains("qa_backend"),
+            "qa_backend should be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("auto_commit = true"),
+            "other keys should be preserved, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_handles_env_dotted_literal_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        std::fs::write(&path, "[workspace]\n").expect("write");
+
+        let mut config = GlobalConfig::default();
+        config
+            .backends
+            .claude
+            .env
+            .insert("MY.DOTTED.KEY".to_owned(), "value123".to_owned());
+        super::save_sparse(
+            &path,
+            "backends.claude.env.MY.DOTTED.KEY",
+            &config,
+        )
+        .expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            result.contains("\"MY.DOTTED.KEY\"") || result.contains("MY.DOTTED.KEY"),
+            "dotted env key should appear as literal key, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_handles_models_role_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        let original = "[backends.claude.models]\nplanner = \"opus\"\nreviewer = \"sonnet\"\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.backends.claude.models.planner = None;
+        super::save_sparse(&path, "backends.claude.models.planner", &config)
+            .expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        // planner should be removed since it's None in the full serialization
+        // (the full serialization doesn't include None optional fields).
+        assert!(
+            !result.contains("planner"),
+            "planner model should be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("reviewer = \"sonnet\""),
+            "other models should be preserved, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_handles_role_timeouts_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+        let original = "[backends.claude.role_timeouts]\nplanner = 42\nreviewer = 99\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut config = GlobalConfig::default();
+        config.backends.claude.role_timeouts.planner = None;
+        super::save_sparse(&path, "backends.claude.role_timeouts.planner", &config)
+            .expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !result.contains("planner"),
+            "planner timeout should be removed, got:\n{result}"
+        );
+        assert!(
+            result.contains("reviewer = 99"),
+            "other timeouts should be preserved, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn save_sparse_falls_back_to_full_save_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ralph.toml");
+
+        let config = GlobalConfig::default();
+        super::save_sparse(&path, "workspace.version", &config).expect("save_sparse");
+
+        let result = std::fs::read_to_string(&path).expect("read");
+        let parsed: GlobalConfig = toml::from_str(&result).expect("parse");
+        assert_eq!(parsed, GlobalConfig::default());
+    }
+
+    #[test]
+    fn sparse_key_segments_splits_normal_keys() {
+        assert_eq!(
+            super::sparse_key_segments("workspace.default_backend"),
+            vec!["workspace", "default_backend"]
+        );
+        assert_eq!(
+            super::sparse_key_segments("workflow.auto_commit"),
+            vec!["workflow", "auto_commit"]
+        );
+    }
+
+    #[test]
+    fn sparse_key_segments_treats_env_rest_as_literal() {
+        assert_eq!(
+            super::sparse_key_segments("backends.claude.env.MY.DOTTED.KEY"),
+            vec!["backends", "claude", "env", "MY.DOTTED.KEY"]
+        );
+        assert_eq!(
+            super::sparse_key_segments("backends.codex.env.SIMPLE"),
+            vec!["backends", "codex", "env", "SIMPLE"]
+        );
+    }
+
+    #[test]
+    fn sparse_key_segments_splits_models_and_timeouts_normally() {
+        assert_eq!(
+            super::sparse_key_segments("backends.claude.models.planner"),
+            vec!["backends", "claude", "models", "planner"]
+        );
+        assert_eq!(
+            super::sparse_key_segments("backends.codex.role_timeouts.qa"),
+            vec!["backends", "codex", "role_timeouts", "qa"]
+        );
     }
 }

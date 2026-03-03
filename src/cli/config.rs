@@ -312,7 +312,8 @@ fn execute_set(
     match scope {
         ConfigScope::Global => {
             set_global_value(&mut workspace.config, key, raw_value)?;
-            workspace.save_config()?;
+            let config_path = workspace.root.join("ralph.toml");
+            crate::config::save_sparse(&config_path, key, &workspace.config)?;
             println!("updated global config: {key}");
             Ok(())
         }
