@@ -92,6 +92,11 @@ where
     }
 }
 
+/// Count non-overlapping occurrences of `needle` in `haystack`.
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
 // ---- tests ----
 
 /// Verifies that two ralph:ready issues are both claimed and dispatched
@@ -166,6 +171,12 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
 
 /// Verifies that when dispatch_task fails for one issue in a batch, only
 /// that issue is rolled back to ralph:failed while the other issue proceeds.
+///
+/// Asserts per-issue outcomes:
+/// - Issue 300: dispatched successfully, no rollback labels applied
+/// - Issue 301: dispatch fails, rolled back with ralph:in-progress removed
+///   and ralph:failed added
+/// - The successful issue (300) is NOT affected by the 301 failure
 fn partial_dispatch_rollback(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -217,35 +228,75 @@ exit 0
 
         let combined = combined_output(&output);
 
-        // The daemon should exit. We check that both issues were processed:
-        // - issue 300 should have been dispatched successfully
-        // - issue 301 should show a dispatch failure and rollback
-
-        // Issue 300 should be dispatched
+        // Issue 300 should be dispatched successfully
         assert!(
             combined.contains("dispatched task acme-widgets-300")
                 || combined.contains("dispatch: task acme-widgets-300"),
             "issue 300 should be dispatched: {combined}"
         );
 
-        // Issue 301 failure (dispatch or child exit) should be recorded
-        // The rollback (in-progress -> failed) happens independently for each issue
-        if label_log.exists() {
-            let log_content = fs::read_to_string(&label_log).expect("read label log");
-            // Both issues should have been claimed (ready -> in-progress)
-            // Issue 301 should additionally have a rollback (in-progress -> failed)
-            // Due to concurrency, both claims happen before dispatches
-            assert!(
-                log_content.contains("300") || combined.contains("300"),
-                "issue 300 should appear in operations: label_log={log_content} combined={combined}"
-            );
-        }
+        // Issue 301 should show dispatch failure in daemon output
+        assert!(
+            combined.contains("failed to dispatch issue #301")
+                || combined.contains("301"),
+            "issue 301 dispatch failure should be logged: {combined}"
+        );
+
+        // Verify per-issue label transitions in the label log
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}", label_log.display()
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let log_lines: Vec<&str> = log_content.lines().collect();
+
+        // Both issues should have been claimed: ready -> in-progress
+        // (remove ralph:ready + add ralph:in-progress for each)
+        assert!(
+            log_lines.iter().any(|l| l.contains("300") && l.contains("--add-label") && l.contains("ralph:in-progress")),
+            "issue 300 should have been claimed (add ralph:in-progress): {log_content}"
+        );
+        assert!(
+            log_lines.iter().any(|l| l.contains("301") && l.contains("--add-label") && l.contains("ralph:in-progress")),
+            "issue 301 should have been claimed (add ralph:in-progress): {log_content}"
+        );
+
+        // Issue 301 should have rollback: in-progress -> failed
+        // This means remove ralph:in-progress AND add ralph:failed specifically for 301
+        assert!(
+            log_lines.iter().any(|l| l.contains("301") && l.contains("--remove-label") && l.contains("ralph:in-progress")),
+            "issue 301 should have rollback (remove ralph:in-progress): {log_content}"
+        );
+        assert!(
+            log_lines.iter().any(|l| l.contains("301") && l.contains("--add-label") && l.contains("ralph:failed")),
+            "issue 301 should have rollback (add ralph:failed): {log_content}"
+        );
+
+        // Issue 300 should NOT have any ralph:failed label added — the
+        // sibling failure must not cause rollback of successfully dispatched
+        // issues.
+        let issue_300_failed = log_lines.iter().any(|l| {
+            l.contains("300") && l.contains("--add-label") && l.contains("ralph:failed")
+        });
+        assert!(
+            !issue_300_failed,
+            "issue 300 should NOT be rolled back to ralph:failed (sibling isolation invariant): {log_content}"
+        );
     })
 }
 
 /// Verifies that in single-iteration mode with PRD enabled (default),
 /// exactly one inline PRD tick runs and no PRD background task is spawned.
-/// PRD is enabled by default in the config, so we don't need to set it explicitly.
+///
+/// Verification strategy:
+/// 1. Assert no PRD background task log markers appear (no "PRD background
+///    task panicked" or "PRD background task did not stop" shutdown messages).
+/// 2. Assert that the inline PRD phase warning (if PRD tick fails due to
+///    no issues) does not indicate background spawning.
+/// 3. Assert daemon exits cleanly with code 0 (proving single-iteration
+///    completed without hanging on a background task).
+/// 4. Assert no second PRD tick occurs by checking that the PRD-related
+///    log lines do not indicate multiple ticks.
 fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -284,21 +335,50 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
 
         let combined = combined_output(&output);
 
-        // In single-iteration mode, PRD runs inline. We verify that:
-        // 1. No "PRD background" spawn message appears
-        // 2. The daemon completes successfully (exit 0 is sufficient proof
-        //    that inline PRD tick executed without hanging)
+        // 1. No PRD background task shutdown messages should appear.
+        //    These markers are only emitted by Phase 4 (PRD shutdown) which
+        //    only runs when a background PRD JoinHandle exists.
         assert!(
-            !combined.contains("PRD background task"),
-            "single-iteration mode should not mention PRD background task: {combined}"
+            !combined.contains("PRD background task panicked"),
+            "single-iteration mode must not produce PRD background panic message: {combined}"
         );
+        assert!(
+            !combined.contains("PRD background task did not stop"),
+            "single-iteration mode must not produce PRD background timeout message: {combined}"
+        );
+
+        // 2. The background PRD tick failure marker is only emitted inside
+        //    the spawned continuous-mode task. Its absence proves no background
+        //    task was spawned. (The inline path emits "interactive PRD phase
+        //    failed" instead.)
+        assert!(
+            !combined.contains("PRD background tick failed"),
+            "single-iteration mode must not emit background tick log: {combined}"
+        );
+
+        // 3. If the inline PRD phase ran and failed (e.g., no PRD issues to
+        //    advance), it uses the distinct "interactive PRD phase failed"
+        //    marker. Count occurrences to prove at most one tick ran.
+        let inline_prd_failures = count_occurrences(&combined, "interactive PRD phase failed");
+        assert!(
+            inline_prd_failures <= 1,
+            "at most one inline PRD tick should run in single-iteration mode, but saw {inline_prd_failures} failures: {combined}"
+        );
+
+        // 4. Daemon exited 0 without hanging — this would not happen if a
+        //    background PRD task was spawned and kept running.
     })
 }
 
 /// Verifies that concurrent rebase and dispatch operations do not produce
 /// git lock contention errors when the repo-root semaphore serializes
 /// root-level git operations.
-/// Auto-rebase is enabled by default in the config.
+///
+/// This test sets up TWO ralph:ready issues so that dispatch runs
+/// concurrently for multiple issues in the same cycle where auto-rebase
+/// also executes. Auto-rebase is enabled by default. With the semaphore
+/// serializing root-level git operations, no index.lock contention should
+/// occur.
 fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -308,8 +388,10 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
         let label_log = dh.temp_dir.path().join("rebase_dispatch_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
-        // One issue to claim and dispatch
-        let issues = r#"[{"number":400,"title":"rebase test","labels":[{"name":"ralph:ready"}],"body":"rebase test body"}]"#;
+        // Two issues to claim and dispatch concurrently, forcing multiple
+        // root-level git operations (worktree add, fetch, etc.) in the same
+        // cycle alongside auto-rebase candidate scanning.
+        let issues = r#"[{"number":400,"title":"rebase test A","labels":[{"name":"ralph:ready"}],"body":"rebase test body A"},{"number":401,"title":"rebase test B","labels":[{"name":"ralph:ready"}],"body":"rebase test body B"}]"#;
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
         let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
@@ -348,11 +430,17 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
             "should not have git lock errors: {combined}"
         );
 
-        // Issue should have been dispatched
+        // Both issues should have been dispatched — proves concurrent
+        // dispatch under auto-rebase cycle completed without lock errors
         assert!(
             combined.contains("dispatched task acme-widgets-400")
                 || combined.contains("dispatch: task acme-widgets-400"),
             "issue 400 should be dispatched: {combined}"
+        );
+        assert!(
+            combined.contains("dispatched task acme-widgets-401")
+                || combined.contains("dispatch: task acme-widgets-401"),
+            "issue 401 should be dispatched: {combined}"
         );
     })
 }

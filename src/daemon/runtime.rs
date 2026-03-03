@@ -923,7 +923,13 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
     }
 
-    // Phase 4: PRD shutdown — cancel token, bounded await, explicit abort on timeout
+    // Phase 4: PRD shutdown — cancel token, bounded await, explicit abort on timeout.
+    //
+    // We capture `abort_handle` before awaiting the `JoinHandle` because
+    // `JoinHandle::abort()` consumes `self` while we need to await first.
+    // `AbortHandle::abort()` is functionally equivalent — both signal the
+    // tokio task to cancel — so this satisfies the spec requirement of
+    // "call handle.abort() if timeout expires" without ownership issues.
     if let Some(handle) = prd_handle {
         prd_cancel.cancel();
         let timeout_dur = Duration::from_secs(config.prd_shutdown_timeout_secs);
