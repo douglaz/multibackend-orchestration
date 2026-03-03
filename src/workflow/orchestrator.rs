@@ -3372,7 +3372,7 @@ async fn run_final_review_phase(
         "starting final review orchestration phase"
     );
     let log_dir = workspace_root.join("tmp").join("logs");
-    let project_id = &state.project_id;
+    let project_id = state.project_id.clone();
     let completion = state.current_completion_attempt().ok_or_else(|| {
         RalphError::Orchestration(
             "current phase is final_review but no completion attempt exists".to_owned(),
@@ -3424,6 +3424,12 @@ async fn run_final_review_phase(
         return Ok(Some((Phase::FinalReview, Phase::Completing)));
     }
 
+    // Load template content once for bootstrap hash computation (session reuse).
+    let fr_template_content = load_template_source(
+        &effective.templates.final_reviewer,
+        default_final_reviewer_template(),
+    );
+
     let mut reviewer_decisions: Vec<(String, FinalReviewerDecision)> = Vec::new();
     let mut review_quota_skipped: Vec<String> = Vec::new();
     for reviewer_backend in &reviewers {
@@ -3445,12 +3451,35 @@ async fn run_final_review_phase(
                 reviewer_backend_impl.name(),
                 &planner_backend_name,
             )?;
+            // Session reuse: compute bootstrap hash and resolve session
+            let fr_bootstrap = compute_bootstrap_hash(
+                "final_reviewer",
+                reviewer_backend,
+                &state.prompt_hash_at_loop_start,
+                "",
+                &fr_template_content,
+            );
+            let session_id = resolve_session_for_role(
+                effective,
+                state,
+                "final_reviewer",
+                reviewer_backend,
+                loop_number,
+                &fr_bootstrap,
+            );
+            let session_id = validate_session_rewrite(
+                registry,
+                reviewer_backend,
+                session_id,
+                &loop_dir,
+                "final_reviewer",
+            );
             registry
                 .set_tmux_context(TmuxExecutionContext {
                     loop_number: Some(loop_number),
                     role: Some("final_reviewer".to_owned()),
                     loop_dir: Some(loop_dir.clone()),
-                    session_id: None,
+                    session_id: session_id.clone(),
                 })
                 .await;
             info!(
@@ -3460,7 +3489,8 @@ async fn run_final_review_phase(
                 "invoking final reviewer..."
             );
             let mut reviewer_log =
-                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
+                LogWriter::open(&log_dir, &project_id, Some(loop_number), "final-reviewer");
+            let mut fr_out_session_id: Option<String> = None;
             let retry_result: ParseRetryResult<FinalReviewerDecision> =
                 match execute_with_parse_retries(
                     reviewer_backend_impl,
@@ -3469,14 +3499,14 @@ async fn run_final_review_phase(
                     "final_review",
                     loop_number,
                     &prompt,
-                    None,
+                    session_id.as_deref(),
                     parse_final_reviewer_output,
                     &expected_format_template_for("final_reviewer", None),
                     registry
                         .timeout_for_role(reviewer_backend, "final_reviewer")
                         .as_secs(),
                     &mut reviewer_log,
-                    None,
+                    Some(&mut fr_out_session_id),
                     repo_root_ref,
                 )
                 .await
@@ -3488,11 +3518,45 @@ async fn run_final_review_phase(
                             backend = reviewer_backend.as_str(),
                             "final reviewer backend hit quota limit; skipping"
                         );
+                        // Upsert session even on quota error (D6)
+                        let effective_sid = fr_out_session_id;
+                        upsert_session_after_execution(
+                            state,
+                            "final_reviewer",
+                            reviewer_backend,
+                            loop_number,
+                            &fr_bootstrap,
+                            effective_sid.as_deref(),
+                            session_id.is_some(),
+                        );
                         review_quota_skipped.push(reviewer_backend.clone());
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // Upsert session before propagating error (D6)
+                        upsert_session_after_execution(
+                            state,
+                            "final_reviewer",
+                            reviewer_backend,
+                            loop_number,
+                            &fr_bootstrap,
+                            fr_out_session_id.as_deref(),
+                            session_id.is_some(),
+                        );
+                        return Err(e);
+                    }
                 };
+            // Session lifecycle: upsert even if parse failed (D6)
+            let effective_sid = retry_result.session_id.clone().or(fr_out_session_id);
+            upsert_session_after_execution(
+                state,
+                "final_reviewer",
+                reviewer_backend,
+                loop_number,
+                &fr_bootstrap,
+                effective_sid.as_deref(),
+                session_id.is_some(),
+            );
             let decision = retry_result.parsed;
             let body = match &decision {
                 FinalReviewerDecision::NoAmendments { body }
@@ -3592,7 +3656,7 @@ async fn run_final_review_phase(
             "invoking planner for final-review positions..."
         );
         let mut planner_position_log =
-            LogWriter::open(&log_dir, project_id, Some(loop_number), "planner");
+            LogWriter::open(&log_dir, &project_id, Some(loop_number), "planner");
         let retry_result: ParseRetryResult<PlannerPositionsDecision> = execute_with_parse_retries(
             planner_backend,
             registry,
@@ -3662,7 +3726,7 @@ async fn run_final_review_phase(
                 "invoking final reviewer vote..."
             );
             let mut vote_log =
-                LogWriter::open(&log_dir, project_id, Some(loop_number), "final-reviewer");
+                LogWriter::open(&log_dir, &project_id, Some(loop_number), "final-reviewer");
             let retry_result: ParseRetryResult<VoteDecision> = match execute_with_parse_retries(
                 reviewer_backend_impl,
                 registry,
@@ -3770,7 +3834,7 @@ async fn run_final_review_phase(
                 "invoking final-review arbiter..."
             );
             let mut arbiter_log =
-                LogWriter::open(&log_dir, project_id, Some(loop_number), "arbiter");
+                LogWriter::open(&log_dir, &project_id, Some(loop_number), "arbiter");
             let retry_result: ParseRetryResult<ArbiterDecision> = execute_with_parse_retries(
                 arbiter_backend_impl,
                 registry,
@@ -4332,10 +4396,8 @@ fn build_final_reviewer_prompt(
     );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("prompt_content".to_owned(), prompt_content.to_owned());
-    vars.insert(
-        "state_json".to_owned(),
-        serde_json::to_string_pretty(state).unwrap_or_default(),
-    );
+    let state_summary = summarize_state_for_planner(state, None);
+    vars.insert("state_json".to_owned(), state_summary.clone());
     vars.insert(
         "system_guardrails".to_owned(),
         FINAL_REVIEWER_GUARDRAILS.to_owned(),
@@ -4361,13 +4423,12 @@ fn build_final_reviewer_prompt(
         "## Master Prompt",
         prompt_content,
     );
-    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
     append_section_if_missing(
         &mut prompt,
         &template_source,
         &["state_json"],
-        "## Project State",
-        &format!("```json\n{state_json}\n```"),
+        "## Project State Summary",
+        &state_summary,
     );
     Ok(prompt)
 }
@@ -5678,8 +5739,16 @@ fn compute_bootstrap_hash(
 
 /// V1 supported roles for session reuse. Planner and completer are known roles
 /// but not supported for session reuse in v1.
-const V1_SESSION_REUSE_SUPPORTED_ROLES: &[&str] = &["implementer", "reviewer", "qa"];
-const KNOWN_ROLES: &[&str] = &["planner", "implementer", "reviewer", "qa", "completer"];
+const V1_SESSION_REUSE_SUPPORTED_ROLES: &[&str] =
+    &["implementer", "reviewer", "qa", "final_reviewer"];
+const KNOWN_ROLES: &[&str] = &[
+    "planner",
+    "implementer",
+    "reviewer",
+    "qa",
+    "completer",
+    "final_reviewer",
+];
 
 /// Determine whether session reuse should be attempted for a given role.
 ///
