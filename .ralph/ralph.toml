@@ -52,7 +52,7 @@ reformatter = "sonnet"
 [backends.claude.role_timeouts]
 
 [backends.codex]
-command = "openrouter"
+command = "codex"
 args = [
     "exec",
     "--dangerously-bypass-approvals-and-sandbox",
