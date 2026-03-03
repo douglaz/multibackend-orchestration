@@ -2587,6 +2587,230 @@ fi
     )
 }
 
+/// Mock `ralph` script for daemon concurrency tests that simulates a
+/// long-running child task. Sleeps for `MOCK_RALPH_SLEEP_SECS` seconds
+/// (default: 10) before exiting, keeping the child alive across daemon
+/// iterations so that `auto_rebase_phase` can observe active children.
+pub fn daemon_mock_ralph_long_running_script() -> String {
+    r###"#!/bin/sh
+# Mock ralph that sleeps for a configurable duration.
+# Env: MOCK_RALPH_SLEEP_SECS - seconds to sleep (default 10)
+case "$1" in
+  auto)
+    sleep "${MOCK_RALPH_SLEEP_SECS:-10}"
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
+/// Mock `gh` script for daemon bounded continuous-mode concurrency tests.
+///
+/// Like `daemon_mock_gh_concurrency_script` but uses a counter file
+/// (`MOCK_GH_ISSUE_LIST_COUNTER`) to return issues only on the first
+/// `issue list` call (with `ralph:ready` label). Subsequent calls return `[]`.
+/// This allows a multi-iteration daemon run where iteration 1 dispatches
+/// children and iteration 2+ sees them for auto-rebase.
+///
+/// Also logs rebase-candidate discovery attempts to `MOCK_REBASE_ATTEMPT_LOG`
+/// when `pr list --head` is called, enabling tests to verify the auto-rebase
+/// code path was actually entered.
+///
+/// Environment variables:
+/// - `MOCK_GH_ISSUES` — JSON array of issues for first `issue list` call
+/// - `MOCK_GH_ISSUE_LIST_COUNTER` — file to track `issue list` call count
+/// - `MOCK_GH_LABEL_LOG` — file to log label add/remove operations
+/// - `MOCK_GH_ISSUE_LABELS` — JSON for `issue view --json labels`
+/// - `MOCK_PRD_TICK_LOG` — file to count PRD tick invocations
+/// - `MOCK_PR_VIEW_JSON` — JSON for `pr view --json` merge metadata
+/// - `MOCK_REBASE_ATTEMPT_LOG` — file to log rebase candidate PR lookups
+pub fn daemon_mock_gh_bounded_concurrency_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for daemon bounded continuous-mode concurrency tests.
+# Returns issues only on the first `issue list` call; empty thereafter.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        # Detect PRD tick: check if any arg is ralph:prd or ralph:prd-active
+        has_prd=0
+        has_ready=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd|ralph:prd-active) has_prd=1 ;;
+            ralph:ready) has_ready=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ] && [ -n "${MOCK_PRD_TICK_LOG:-}" ]; then
+          echo "prd-tick" >> "$MOCK_PRD_TICK_LOG"
+        fi
+
+        # For ralph:ready queries, use counter to return issues only once
+        if [ "$has_ready" = "1" ] && [ -n "${MOCK_GH_ISSUE_LIST_COUNTER:-}" ]; then
+          count="$(cat "$MOCK_GH_ISSUE_LIST_COUNTER" 2>/dev/null || echo 0)"
+          count=$((count + 1))
+          echo "$count" > "$MOCK_GH_ISSUE_LIST_COUNTER"
+          if [ "$count" -gt 1 ]; then
+            # Subsequent calls: no new issues
+            printf '[]'
+            exit 0
+          fi
+        fi
+
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list)
+        has_head=0
+        for arg in "$@"; do
+          if [ "$arg" = "--head" ]; then
+            has_head=1
+          fi
+        done
+        if [ "$has_head" = "1" ]; then
+          # Log rebase candidate discovery attempt
+          if [ -n "${MOCK_REBASE_ATTEMPT_LOG:-}" ]; then
+            echo "rebase-pr-lookup" >> "$MOCK_REBASE_ATTEMPT_LOG"
+          fi
+          printf 'https://github.com/mock/repo/pull/1'
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      create)
+        printf 'https://github.com/mock/repo/pull/1\n'
+        exit 0
+        ;;
+      view)
+        has_json=0
+        for arg in "$@"; do
+          if [ "$arg" = "mergeable,state,baseRefName,headRefOid" ]; then
+            has_json=1
+          fi
+        done
+        if [ "$has_json" = "1" ]; then
+          if [ -n "${MOCK_PR_VIEW_JSON:-}" ]; then
+            printf '%s' "$MOCK_PR_VIEW_JSON"
+          else
+            printf '{"mergeable":"MERGEABLE","state":"OPEN","baseRefName":"master","headRefOid":"abc123"}'
+          fi
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      edit) exit 0 ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view)
+        printf 'acme/widgets\n'
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
 /// Mock `gh` script for daemon concurrency conformance tests.
 ///
 /// Extends `daemon_mock_gh_script` with:

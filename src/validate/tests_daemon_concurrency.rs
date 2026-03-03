@@ -1,6 +1,7 @@
 use super::*;
 
 use std::fs;
+use std::process::{Command, Stdio};
 
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
@@ -295,12 +296,12 @@ exit 0
 /// Verification strategy:
 /// 1. Use the concurrency mock GH script which logs `prd-tick` to
 ///    `MOCK_PRD_TICK_LOG` every time `gh issue list` is called with a
-///    `ralph:prd` or `ralph:prd-active` label. This provides direct
-///    observability of how many PRD poll ticks executed.
-/// 2. Assert that exactly 1 PRD tick was recorded (the inline tick calls
-///    `poll_and_advance_prd` which issues 2 `gh issue list` calls — one for
-///    `ralph:prd` and one for `ralph:prd-active` — each producing a log line,
-///    so exactly 2 `prd-tick` lines = 1 tick).
+///    `ralph:prd` or `ralph:prd-active` label. This provides direct,
+///    causal observability of how many PRD poll ticks executed.
+/// 2. Assert that **exactly** 2 `prd-tick` log lines are recorded.
+///    `poll_and_advance_prd` issues 2 `gh issue list` calls per tick
+///    (one for `ralph:prd`, one for `ralph:prd-active`), so exactly 2
+///    lines proves exactly 1 tick ran. Anything else is a regression.
 /// 3. Assert no PRD background task shutdown messages appear.
 /// 4. Assert daemon exits cleanly with code 0.
 fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
@@ -368,19 +369,17 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
         // 3. Verify PRD tick count via the mock GH logging file.
         //    `poll_and_advance_prd` issues 2 `gh issue list` calls per tick
         //    (one for ralph:prd, one for ralph:prd-active), each producing a
-        //    `prd-tick` log line. So exactly 2 lines = 1 tick.
-        //    In single-iteration mode, exactly 1 inline tick should run.
-        let tick_count = if prd_tick_log.exists() {
-            let content = fs::read_to_string(&prd_tick_log).expect("read prd tick log");
-            content.lines().filter(|l| l.contains("prd-tick")).count()
-        } else {
-            0
-        };
-        // Each tick produces 2 log lines (ralph:prd + ralph:prd-active).
-        // Allow 0 (PRD disabled or no-op fast-path) or exactly 2 (one tick).
+        //    `prd-tick` log line. Exactly 2 lines = exactly 1 inline tick.
         assert!(
-            tick_count == 0 || tick_count == 2,
-            "expected exactly 0 or 2 prd-tick log lines (1 inline tick), got {tick_count}"
+            prd_tick_log.exists(),
+            "PRD tick log must exist — inline PRD tick should have fired: {combined}"
+        );
+        let tick_log_content = fs::read_to_string(&prd_tick_log).expect("read prd tick log");
+        let tick_count = tick_log_content.lines().filter(|l| l.contains("prd-tick")).count();
+        assert!(
+            tick_count == 2,
+            "expected exactly 2 prd-tick log lines (1 inline tick = 2 gh calls), got {tick_count}. \
+             PRD is enabled by default and single-iteration mode must run exactly one inline tick: {combined}"
         );
 
         // 4. If the inline PRD phase ran and failed, the distinct
@@ -401,16 +400,19 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
 /// git lock contention errors when the repo-root semaphore serializes
 /// root-level git operations.
 ///
-/// Uses the concurrency mock GH script that returns:
-/// - PR URLs for `find_existing_pr` calls (via `pr list --head`)
-/// - Merge metadata for `query_pr_merge_info` (via `pr view --json`)
+/// Strategy: Run the daemon in continuous mode (not single-iteration) with a
+/// bounded-run approach. The mock GH returns one claimable issue on the first
+/// `issue list` call and empty thereafter. A long-running mock ralph keeps the
+/// child alive across iteration boundaries. In iteration 2+, the `auto_rebase_phase`
+/// discovers the active child, looks up its PR URL and merge metadata, validating
+/// the rebase candidate discovery code path. The test asserts:
+/// - The issue was dispatched successfully (dispatch path worked)
+/// - The `auto_rebase_phase` entered and attempted rebase candidate discovery
+///   (via `MOCK_REBASE_ATTEMPT_LOG`)
+/// - No git lock contention errors occurred
+/// - No unhandled mock GH commands
 ///
-/// This ensures the auto_rebase_phase code path exercises candidate
-/// discovery and merge-info queries even though no rebase candidates
-/// exist on the first iteration (children are empty before poll_and_claim).
-/// The test validates that the rebase-capable mock handles all code paths
-/// without errors, and that concurrent dispatch of multiple issues under
-/// root-level git lock serialization completes without contention.
+/// The daemon is killed via SIGTERM after a bounded wait, and output is captured.
 fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -420,67 +422,114 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
         let label_log = dh.temp_dir.path().join("rebase_dispatch_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
-        // Two issues to claim and dispatch concurrently, forcing multiple
-        // root-level git operations (worktree add, fetch, etc.) in the same
-        // cycle alongside auto-rebase candidate scanning.
-        let issues = r#"[{"number":400,"title":"rebase test A","labels":[{"name":"ralph:ready"}],"body":"rebase test body A"},{"number":401,"title":"rebase test B","labels":[{"name":"ralph:ready"}],"body":"rebase test body B"}]"#;
+        let issue_counter = dh.temp_dir.path().join("issue_list_counter");
+        let issue_counter_str = issue_counter.to_string_lossy().into_owned();
 
-        // Use the concurrency mock which supports PR list/view for rebase
-        // candidate discovery, ensuring auto_rebase_phase code paths
-        // exercise without unhandled-command failures.
-        let gh_path = write_daemon_mock_gh_concurrency(&dh).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+        let rebase_log = dh.temp_dir.path().join("rebase_attempt.log");
+        let rebase_log_str = rebase_log.to_string_lossy().into_owned();
 
-        // Auto-rebase is enabled by default — no need to set it explicitly
+        // One issue to claim and dispatch. The bounded mock returns this only
+        // on the first `issue list` call; subsequent calls return `[]`.
+        let issues = r#"[{"number":400,"title":"rebase test A","labels":[{"name":"ralph:ready"}],"body":"rebase test body A"}]"#;
 
-        let output = dh
-            .daemon_env(
-                [
-                    "daemon",
-                    "start",
-                    "--repo",
-                    "acme/widgets",
-                    "--single-iteration",
-                    "--max-concurrent",
-                    "4",
-                ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
-                    ("MOCK_GH_ISSUES", issues),
-                    ("MOCK_GH_LABEL_LOG", &label_log_str),
-                ],
-            )
-            .expect("daemon start should execute");
+        // Use the bounded concurrency mock that returns issues once and
+        // supports rebase PR lookup + merge metadata queries.
+        let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_bounded_concurrency_script())
+            .expect("write mock gh");
+        // Use long-running mock ralph so child stays alive across iterations.
+        let ralph_script = dh.write_mock_script(
+            "mock_ralph",
+            &mock_scripts::daemon_mock_ralph_long_running_script(),
+        ).expect("write mock ralph");
+        let ralph_path = ralph_script.to_string_lossy().into_owned();
+
+        // Disable PRD to keep the test focused on rebase + dispatch.
+        // PRD config keys are rejected by `config set` CLI; write TOML directly.
+        {
+            let config_path = dh.repo_root.join(".ralph").join("ralph.toml");
+            let mut toml_content = fs::read_to_string(&config_path).unwrap_or_default();
+            if !toml_content.contains("[workspace]") {
+                toml_content.push_str("\n[workspace]\n");
+            }
+            toml_content.push_str("daemon_prd_enabled = false\n");
+            fs::write(&config_path, toml_content).expect("write config to disable PRD");
+        }
+
+        let data_dir_str = dh.data_dir().to_string_lossy().into_owned();
+
+        // Spawn daemon in continuous mode (non-blocking).
+        // We construct args manually since `prepare_cli_args` is private;
+        // inject `--data-dir` after `daemon start` as the harness would.
+        let child = Command::new(&dh.ralph_bin)
+            .args([
+                "daemon",
+                "start",
+                "--data-dir",
+                &data_dir_str,
+                "--repo",
+                "acme/widgets",
+                "--max-concurrent",
+                "4",
+                "--poll-seconds",
+                "1",
+            ])
+            .current_dir(dh.data_dir())
+            .env("PATH", &gh_path)
+            .env("RALPH_DAEMON_BIN", &ralph_path)
+            .env("MOCK_GH_ISSUES", issues)
+            .env("MOCK_GH_LABEL_LOG", &label_log_str)
+            .env("MOCK_GH_ISSUE_LIST_COUNTER", &issue_counter_str)
+            .env("MOCK_REBASE_ATTEMPT_LOG", &rebase_log_str)
+            .env("MOCK_RALPH_SLEEP_SECS", "30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn daemon in continuous mode");
+
+        // Wait long enough for at least 2 iterations (poll_seconds=1, so
+        // iteration 1 dispatches child at ~0s, iteration 2 at ~1s runs
+        // auto_rebase_phase with active child). 8s is generous.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+
+        // Send SIGTERM to stop the daemon gracefully
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+        // Wait for the process to exit and capture output
+        let output = child.wait_with_output().expect("wait for daemon output");
 
         let combined = combined_output(&output);
 
-        // Daemon should not produce git lock contention errors
-        assert!(
-            !combined.contains("index.lock"),
-            "should not have git lock contention: {combined}"
-        );
-        assert!(
-            !combined.contains("Unable to create") || !combined.contains(".git/index.lock"),
-            "should not have git lock errors: {combined}"
-        );
-
-        // Both issues should have been dispatched — proves concurrent
-        // dispatch under auto-rebase cycle completed without lock errors
+        // 1. Issue should have been dispatched in iteration 1
         assert!(
             combined.contains("dispatched task acme-widgets-400")
                 || combined.contains("dispatch: task acme-widgets-400"),
             "issue 400 should be dispatched: {combined}"
         );
+
+        // 2. auto_rebase_phase should have discovered the child as a rebase
+        //    candidate in iteration 2+. The bounded mock logs each `pr list --head`
+        //    call to MOCK_REBASE_ATTEMPT_LOG.
         assert!(
-            combined.contains("dispatched task acme-widgets-401")
-                || combined.contains("dispatch: task acme-widgets-401"),
-            "issue 401 should be dispatched: {combined}"
+            rebase_log.exists(),
+            "rebase attempt log must exist — auto_rebase_phase should have looked up PR for child: {combined}"
+        );
+        let rebase_log_content = fs::read_to_string(&rebase_log).expect("read rebase attempt log");
+        let rebase_attempts = rebase_log_content.lines()
+            .filter(|l| l.contains("rebase-pr-lookup"))
+            .count();
+        assert!(
+            rebase_attempts >= 1,
+            "expected at least 1 rebase PR lookup attempt (auto_rebase_phase exercised), got {rebase_attempts}: {combined}"
         );
 
-        // No unhandled mock gh command errors — validates that the
-        // rebase-capable mock properly handles all gh commands issued
-        // during auto_rebase_phase and dispatch.
+        // 3. No git lock contention errors
+        assert!(
+            !combined.contains("index.lock"),
+            "should not have git lock contention: {combined}"
+        );
+
+        // 4. No unhandled mock gh commands
         assert!(
             !combined.contains("mock gh: unhandled"),
             "mock gh should handle all commands without errors: {combined}"
