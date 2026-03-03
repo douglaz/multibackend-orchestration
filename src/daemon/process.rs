@@ -130,6 +130,8 @@ fn build_ralph_auto_command(
 
     let mut cmd = Command::new(ralph_bin);
     cmd.args(["auto", "--idea", idea]);
+    cmd.arg("--workspace-root");
+    cmd.arg(worktree_path);
     if let Some(project_id) = project_id {
         cmd.args(["--project-id", project_id]);
     }
@@ -162,6 +164,8 @@ fn build_ralph_run_command(
 
     let mut cmd = Command::new(ralph_bin);
     cmd.args(["run", "--project", project_id, "--until-complete"]);
+    cmd.arg("--workspace-root");
+    cmd.arg(worktree_path);
     if let Some(url) = pr_url {
         cmd.args(["--pr-url", url]);
     }
@@ -328,6 +332,8 @@ mod tests {
                 OsStr::new("auto"),
                 OsStr::new("--idea"),
                 OsStr::new("implement feature"),
+                OsStr::new("--workspace-root"),
+                OsStr::new("/tmp/worktree"),
             ]
         );
     }
@@ -351,6 +357,8 @@ mod tests {
                 OsStr::new("auto"),
                 OsStr::new("--idea"),
                 OsStr::new("implement feature"),
+                OsStr::new("--workspace-root"),
+                OsStr::new("/tmp/worktree"),
                 OsStr::new("--project-id"),
                 OsStr::new("issue-42"),
             ]
@@ -376,6 +384,8 @@ mod tests {
                 OsStr::new("auto"),
                 OsStr::new("--idea"),
                 OsStr::new("implement feature"),
+                OsStr::new("--workspace-root"),
+                OsStr::new("/tmp/worktree"),
                 OsStr::new("--project-id"),
                 OsStr::new("issue-42"),
                 OsStr::new("--pr-url"),
@@ -403,6 +413,8 @@ mod tests {
                 OsStr::new("--project"),
                 OsStr::new("retry-project"),
                 OsStr::new("--until-complete"),
+                OsStr::new("--workspace-root"),
+                OsStr::new("/tmp/worktree"),
             ]
         );
     }
@@ -426,6 +438,8 @@ mod tests {
                 OsStr::new("--project"),
                 OsStr::new("retry-project"),
                 OsStr::new("--until-complete"),
+                OsStr::new("--workspace-root"),
+                OsStr::new("/tmp/worktree"),
                 OsStr::new("--pr-url"),
                 OsStr::new("https://github.com/acme/widgets/pull/7"),
             ]

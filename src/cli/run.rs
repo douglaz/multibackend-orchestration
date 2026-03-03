@@ -1,10 +1,22 @@
+use crate::cli::init;
 use crate::cli::RunArgs;
 use crate::workflow::orchestrator::{Orchestrator, RunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
 pub async fn execute(args: RunArgs) -> Result<()> {
-    let workspace = Workspace::discover()?;
+    let workspace = if let Some(ref root) = args.workspace_root {
+        let ralph_dir = root.join(".ralph");
+        if ralph_dir.join("ralph.toml").is_file() {
+            Workspace::load(ralph_dir)?
+        } else {
+            let ws = init::create_workspace(&ralph_dir)?;
+            eprintln!("initialized workspace at {}", ralph_dir.display());
+            ws
+        }
+    } else {
+        Workspace::discover()?
+    };
     let mut orchestrator = Orchestrator::new(workspace);
 
     let result = orchestrator

@@ -153,6 +153,11 @@ pub struct RunArgs {
     /// PR URL to pass through to the orchestration context.
     #[arg(long = "pr-url")]
     pub pr_url: Option<String>,
+    /// Workspace root directory. When set, config is loaded from this
+    /// directory instead of walking up the directory tree. Used by the
+    /// daemon to isolate each worktree's configuration.
+    #[arg(long = "workspace-root")]
+    pub workspace_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
