@@ -669,8 +669,8 @@ mod tests {
         let task_id = "acme-widgets-123";
         let expected_path = task_worktree_path(&workspace_root, task_id);
 
-        let wt_path: PathBuf = create_worktree(&repo_root, &workspace_root, task_id, None)
-            .expect("create worktree");
+        let wt_path: PathBuf =
+            create_worktree(&repo_root, &workspace_root, task_id, None).expect("create worktree");
 
         assert_eq!(wt_path, expected_path);
         assert!(wt_path.is_dir(), "worktree directory should exist");
@@ -680,7 +680,8 @@ mod tests {
     fn verify_worktree_branch_returns_ok_for_matching_branch() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-124";
-        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
+        let wt_path =
+            create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
         let expected_branch = format!("ralph/daemon/{task_id}");
 
         let result: crate::Result<()> = verify_worktree_branch(&wt_path, &expected_branch);
@@ -694,7 +695,8 @@ mod tests {
     fn verify_worktree_branch_returns_error_for_missing_expected_branch() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-125";
-        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
+        let wt_path =
+            create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
 
         let err = verify_worktree_branch(&wt_path, "ralph/daemon/does-not-exist")
             .expect_err("missing expected branch should fail");

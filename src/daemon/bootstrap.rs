@@ -22,12 +22,9 @@ pub async fn ensure_repo_ready(
     repo_root_lock: Option<Arc<Semaphore>>,
 ) -> Result<()> {
     let _permit = if let Some(lock) = repo_root_lock {
-        Some(
-            lock
-                .acquire_owned()
-                .await
-                .map_err(|err| RalphError::Orchestration(format!("git root semaphore closed: {err}")))?,
-        )
+        Some(lock.acquire_owned().await.map_err(|err| {
+            RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+        })?)
     } else {
         None
     };
@@ -46,9 +43,7 @@ pub fn ensure_repo_ready_sync(repo_root: &Path) -> Result<()> {
     }
 
     if !is_git_repo(repo_root)? {
-        run_git_checked(repo_root, &[
-            "init",
-        ], "failed to initialize git repository")?;
+        run_git_checked(repo_root, &["init"], "failed to initialize git repository")?;
     }
 
     if is_bare_repo(repo_root)? {

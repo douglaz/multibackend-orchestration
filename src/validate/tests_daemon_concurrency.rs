@@ -254,15 +254,15 @@ exit 0
 
         // Issue 301 should show dispatch failure in daemon output
         assert!(
-            combined.contains("failed to dispatch issue #301")
-                || combined.contains("301"),
+            combined.contains("failed to dispatch issue #301") || combined.contains("301"),
             "issue 301 dispatch failure should be logged: {combined}"
         );
 
         // Verify per-issue label transitions in the label log
         assert!(
             label_log.exists(),
-            "label log should exist at {}", label_log.display()
+            "label log should exist at {}",
+            label_log.display()
         );
         let log_content = fs::read_to_string(&label_log).expect("read label log");
         let log_lines: Vec<&str> = log_content.lines().collect();
@@ -270,31 +270,39 @@ exit 0
         // Both issues should have been claimed: ready -> in-progress
         // (remove ralph:ready + add ralph:in-progress for each)
         assert!(
-            log_lines.iter().any(|l| l.contains("300") && l.contains("--add-label") && l.contains("ralph:in-progress")),
+            log_lines.iter().any(|l| l.contains("300")
+                && l.contains("--add-label")
+                && l.contains("ralph:in-progress")),
             "issue 300 should have been claimed (add ralph:in-progress): {log_content}"
         );
         assert!(
-            log_lines.iter().any(|l| l.contains("301") && l.contains("--add-label") && l.contains("ralph:in-progress")),
+            log_lines.iter().any(|l| l.contains("301")
+                && l.contains("--add-label")
+                && l.contains("ralph:in-progress")),
             "issue 301 should have been claimed (add ralph:in-progress): {log_content}"
         );
 
         // Issue 301 should have rollback: in-progress -> failed
         // This means remove ralph:in-progress AND add ralph:failed specifically for 301
         assert!(
-            log_lines.iter().any(|l| l.contains("301") && l.contains("--remove-label") && l.contains("ralph:in-progress")),
+            log_lines.iter().any(|l| l.contains("301")
+                && l.contains("--remove-label")
+                && l.contains("ralph:in-progress")),
             "issue 301 should have rollback (remove ralph:in-progress): {log_content}"
         );
         assert!(
-            log_lines.iter().any(|l| l.contains("301") && l.contains("--add-label") && l.contains("ralph:failed")),
+            log_lines.iter().any(|l| l.contains("301")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
             "issue 301 should have rollback (add ralph:failed): {log_content}"
         );
 
         // Issue 300 should NOT have any ralph:failed label added — the
         // sibling failure must not cause rollback of successfully dispatched
         // issues.
-        let issue_300_failed = log_lines.iter().any(|l| {
-            l.contains("300") && l.contains("--add-label") && l.contains("ralph:failed")
-        });
+        let issue_300_failed = log_lines
+            .iter()
+            .any(|l| l.contains("300") && l.contains("--add-label") && l.contains("ralph:failed"));
         assert!(
             !issue_300_failed,
             "issue 300 should NOT be rolled back to ralph:failed (sibling isolation invariant): {log_content}"
@@ -387,7 +395,10 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
             "PRD tick log must exist — inline PRD tick should have fired: {combined}"
         );
         let tick_log_content = fs::read_to_string(&prd_tick_log).expect("read prd tick log");
-        let tick_count = tick_log_content.lines().filter(|l| l.contains("prd-tick")).count();
+        let tick_count = tick_log_content
+            .lines()
+            .filter(|l| l.contains("prd-tick"))
+            .count();
         assert!(
             tick_count == 2,
             "expected exactly 2 prd-tick log lines (1 inline tick = 2 gh calls), got {tick_count}. \
@@ -446,13 +457,18 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
 
         // Use the bounded concurrency mock that returns issues once and
         // supports rebase PR lookup + merge metadata queries.
-        let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_bounded_concurrency_script())
-            .expect("write mock gh");
+        let gh_path = write_mock_gh(
+            &dh,
+            &mock_scripts::daemon_mock_gh_bounded_concurrency_script(),
+        )
+        .expect("write mock gh");
         // Use long-running mock ralph so child stays alive across iterations.
-        let ralph_script = dh.write_mock_script(
-            "mock_ralph",
-            &mock_scripts::daemon_mock_ralph_long_running_script(),
-        ).expect("write mock ralph");
+        let ralph_script = dh
+            .write_mock_script(
+                "mock_ralph",
+                &mock_scripts::daemon_mock_ralph_long_running_script(),
+            )
+            .expect("write mock ralph");
         let ralph_path = ralph_script.to_string_lossy().into_owned();
 
         // Disable PRD to keep the test focused on rebase + dispatch.
@@ -527,7 +543,8 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
             "rebase attempt log must exist — auto_rebase_phase should have looked up PR for child: {combined}"
         );
         let rebase_log_content = fs::read_to_string(&rebase_log).expect("read rebase attempt log");
-        let rebase_attempts = rebase_log_content.lines()
+        let rebase_attempts = rebase_log_content
+            .lines()
             .filter(|l| l.contains("rebase-pr-lookup"))
             .count();
         assert!(
@@ -659,10 +676,12 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
-        let ralph_script = dh.write_mock_script(
-            "mock_ralph",
-            &mock_scripts::daemon_mock_ralph_concurrency_evidence_script(),
-        ).expect("write mock ralph");
+        let ralph_script = dh
+            .write_mock_script(
+                "mock_ralph",
+                &mock_scripts::daemon_mock_ralph_concurrency_evidence_script(),
+            )
+            .expect("write mock ralph");
         let ralph_path = ralph_script.to_string_lossy().into_owned();
 
         let output = dh
@@ -789,10 +808,12 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
-        let ralph_script = dh.write_mock_script(
-            "mock_ralph",
-            &mock_scripts::daemon_mock_ralph_exit_code_script(),
-        ).expect("write mock ralph");
+        let ralph_script = dh
+            .write_mock_script(
+                "mock_ralph",
+                &mock_scripts::daemon_mock_ralph_exit_code_script(),
+            )
+            .expect("write mock ralph");
         let ralph_path = ralph_script.to_string_lossy().into_owned();
 
         let output = dh
@@ -843,7 +864,9 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
         // Terminal transition: remove ralph:in-progress + add ralph:failed
         // This comes from complete_task -> swap_lifecycle_label
         assert!(
-            log_lines.iter().any(|l| l.contains("700") && l.contains("--add-label") && l.contains("ralph:failed")),
+            log_lines.iter().any(|l| l.contains("700")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
             "issue 700 should have terminal ralph:failed label in log: {log_content}"
         );
 

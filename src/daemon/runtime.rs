@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
@@ -832,33 +832,33 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 
     // Phase 2: PRD background task lifecycle
     let prd_cancel = CancellationToken::new();
-    let prd_handle: Option<tokio::task::JoinHandle<()>> = if config.prd_enabled
-        && !config.single_iteration
-    {
-        // Continuous mode: spawn background PRD task with immediate first tick
-        let cancel = prd_cancel.clone();
-        let prd_config = config.clone();
-        Some(tokio::spawn(async move {
-            // Immediate first tick
-            if let Err(err) = run_prd_phase(&prd_config).await {
-                eprintln!("warning: PRD background tick failed: {err}");
-            }
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(prd_config.poll_seconds)) => {}
-                }
-                if cancel.is_cancelled() {
-                    break;
-                }
-                if let Err(err) = run_prd_phase(&prd_config).await {
+    let prd_handle: Option<tokio::task::JoinHandle<()>> =
+        if config.prd_enabled && !config.single_iteration {
+            // Continuous mode: spawn background PRD task with immediate first tick
+            let cancel = prd_cancel.clone();
+            let prd_config = config.clone();
+            let prd_lock = repo_root_lock.clone();
+            Some(tokio::spawn(async move {
+                // Immediate first tick
+                if let Err(err) = run_prd_phase(&prd_config, &prd_lock).await {
                     eprintln!("warning: PRD background tick failed: {err}");
                 }
-            }
-        }))
-    } else {
-        None
-    };
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(prd_config.poll_seconds)) => {}
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if let Err(err) = run_prd_phase(&prd_config, &prd_lock).await {
+                        eprintln!("warning: PRD background tick failed: {err}");
+                    }
+                }
+            }))
+        } else {
+            None
+        };
 
     // Phase 3: Main loop with in-memory child tracking
     let mut children: HashMap<u32, ChildHandle> = HashMap::new();
@@ -883,7 +883,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // inline tick (no background task). In continuous mode, PRD runs as
         // a background task spawned above.
         if config.prd_enabled && config.single_iteration {
-            if let Err(err) = run_prd_phase(config).await {
+            if let Err(err) = run_prd_phase(config, &repo_root_lock).await {
                 eprintln!("warning: interactive PRD phase failed: {err}");
             }
         }
@@ -903,9 +903,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         if slots > 0 {
-            if let Err(err) =
-                poll_and_claim(config, &mut children, slots, &repo_root_lock).await
-            {
+            if let Err(err) = poll_and_claim(config, &mut children, slots, &repo_root_lock).await {
                 eprintln!("warning: poll/claim cycle failed: {err}");
             }
         }
@@ -956,7 +954,10 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 ///
 /// Builds a `PrdPollConfig` from the runtime config and delegates to
 /// `interactive_prd::poll_and_advance_prd` in a blocking task.
-async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
+async fn run_prd_phase(
+    config: &DaemonRuntimeConfig,
+    repo_root_lock: &Arc<Semaphore>,
+) -> Result<()> {
     // data_dir must be the root above owner/repo so that state_path()
     // constructs {data_dir}/{owner}/{repo}/.ralph/interactive-prd/{issue}.json
     // without duplicating the owner/repo segment already present in repo_root.
@@ -985,6 +986,13 @@ async fn run_prd_phase(config: &DaemonRuntimeConfig) -> Result<()> {
         worker_cwd: None,
     };
 
+    // Acquire repo_root_lock so PRD git ops (fetch, reset) are serialized
+    // with dispatch/rebase/cleanup phases that also hold this semaphore.
+    let _permit = repo_root_lock.clone().acquire_owned().await.map_err(|e| {
+        crate::error::RalphError::Orchestration(format!(
+            "failed to acquire repo-root semaphore for PRD: {e}"
+        ))
+    })?;
     spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await
 }
 
@@ -1042,18 +1050,12 @@ enum DispatchOutcome {
     /// Dispatch succeeded — caller inserts the handle into `children`.
     Success {
         issue_number: u32,
-        handle: ChildHandle,
+        handle: Box<ChildHandle>,
     },
     /// Dispatch returned an error — per-issue rollback needed.
-    Failure {
-        issue_number: u32,
-        detail: String,
-    },
+    Failure { issue_number: u32, detail: String },
     /// Dispatch panicked — per-issue rollback needed (same path as Failure).
-    Panic {
-        issue_number: u32,
-        detail: String,
-    },
+    Panic { issue_number: u32, detail: String },
 }
 
 /// Per-issue outcome from a completion worker in `collect_children`.
@@ -1062,10 +1064,7 @@ enum DispatchOutcome {
 #[allow(dead_code)]
 enum CompletionOutcome {
     /// Completion finished (success or handled error).
-    Done {
-        issue_number: u32,
-        task_id: String,
-    },
+    Done { issue_number: u32, task_id: String },
     /// Completion worker panicked — explicit terminalization needed.
     Panic {
         issue_number: u32,
@@ -1243,7 +1242,10 @@ async fn poll_and_claim(
                 dispatch_task(&config, issue_number, &claimed.raw_idea, &repo_root_lock).await
             });
             match inner.await {
-                Ok(Ok(handle)) => DispatchOutcome::Success { issue_number, handle },
+                Ok(Ok(handle)) => DispatchOutcome::Success {
+                    issue_number,
+                    handle: Box::new(handle),
+                },
                 Ok(Err(err)) => DispatchOutcome::Failure {
                     issue_number,
                     detail: format!("{err}"),
@@ -1272,10 +1274,16 @@ async fn poll_and_claim(
         };
 
         match outcome {
-            DispatchOutcome::Success { issue_number, handle } => {
-                children.insert(issue_number, handle);
+            DispatchOutcome::Success {
+                issue_number,
+                handle,
+            } => {
+                children.insert(issue_number, *handle);
             }
-            DispatchOutcome::Failure { issue_number, detail } => {
+            DispatchOutcome::Failure {
+                issue_number,
+                detail,
+            } => {
                 eprintln!("warning: failed to dispatch issue #{issue_number}: {detail}");
                 // Per-issue rollback: swap ralph:in-progress -> ralph:failed
                 let owner = config.owner.clone();
@@ -1296,10 +1304,11 @@ async fn poll_and_claim(
                     );
                 }
             }
-            DispatchOutcome::Panic { issue_number, detail } => {
-                eprintln!(
-                    "warning: dispatch worker panicked for issue #{issue_number}: {detail}"
-                );
+            DispatchOutcome::Panic {
+                issue_number,
+                detail,
+            } => {
+                eprintln!("warning: dispatch worker panicked for issue #{issue_number}: {detail}");
                 // Per-issue rollback: same path as Err — swap ralph:in-progress -> ralph:failed
                 let owner = config.owner.clone();
                 let repo = config.repo.clone();
@@ -1412,15 +1421,15 @@ async fn dispatch_task(
             .clone()
             .acquire_owned()
             .await
-            .map_err(|err| RalphError::Orchestration(format!("git root semaphore closed: {err}")))?;
+            .map_err(|err| {
+                RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+            })?;
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
         let lock = Some(repo_root_lock.clone());
-        spawn_blocking_op(move || {
-            worktree::create_worktree(&repo_root, &ws_root, &tid, lock)
-        })
-        .await?
+        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid, lock))
+            .await?
     };
 
     // Clean worktree of any dirty files from previous runs
@@ -1437,7 +1446,9 @@ async fn dispatch_task(
             .clone()
             .acquire_owned()
             .await
-            .map_err(|err| RalphError::Orchestration(format!("git root semaphore closed: {err}")))?;
+            .map_err(|err| {
+                RalphError::Orchestration(format!("git root semaphore closed: {err}"))
+            })?;
         let wt = wt_path.clone();
         let base_branch = config.base_branch.clone();
         match spawn_blocking_op(move || {
@@ -1865,7 +1876,8 @@ async fn kill_aborted_children(
 
     // Query labels concurrently via JoinSet, capped at max(1, config.max_concurrent)
     let concurrency_cap = std::cmp::max(1, config.max_concurrent) as usize;
-    let mut join_set: JoinSet<(u32, String, std::result::Result<Vec<String>, RalphError>)> = JoinSet::new();
+    let mut join_set: JoinSet<(u32, String, std::result::Result<Vec<String>, RalphError>)> =
+        JoinSet::new();
 
     let mut pending = issue_numbers.into_iter();
     let mut in_flight = 0usize;
@@ -1878,9 +1890,10 @@ async fn kill_aborted_children(
                 let owner = config.owner.clone();
                 let repo = config.repo.clone();
                 join_set.spawn(async move {
-                    let result =
-                        spawn_blocking_op(move || github::fetch_issue_labels(&owner, &repo, issue_number))
-                            .await;
+                    let result = spawn_blocking_op(move || {
+                        github::fetch_issue_labels(&owner, &repo, issue_number)
+                    })
+                    .await;
                     (issue_number, task_id, result)
                 });
                 in_flight += 1;
@@ -1989,7 +2002,14 @@ async fn drain_all_children(
                     }
                 }
             }
-            complete_task(config, issue_number, &task_id, "ralph:failed", repo_root_lock).await;
+            complete_task(
+                config,
+                issue_number,
+                &task_id,
+                "ralph:failed",
+                repo_root_lock,
+            )
+            .await;
         }
     }
 }
@@ -2246,7 +2266,8 @@ async fn auto_rebase_phase(
         if candidates.len() as u32 >= config.max_rebases_per_cycle {
             eprintln!(
                 "auto-rebase: per-cycle cap reached ({}/{})",
-                candidates.len() as u32, config.max_rebases_per_cycle
+                candidates.len() as u32,
+                config.max_rebases_per_cycle
             );
             break;
         }
@@ -2495,9 +2516,13 @@ async fn execute_rebase_candidate(
         }
     };
 
+    // Single deadline for the entire rebase operation (fetch + rebase + push)
+    // to prevent the total wall-clock from exceeding the configured limit.
+    let deadline = Instant::now() + Duration::from_secs(config.rebase_timeout_seconds);
+
     // Fetch in the repo root with semaphore serialization.
-    let timeout = Duration::from_secs(config.rebase_timeout_seconds);
     let fetch_result = {
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let wt = wt_path.clone();
         let _permit = match repo_root_lock.clone().acquire_owned().await {
             Ok(permit) => permit,
@@ -2513,7 +2538,7 @@ async fn execute_rebase_candidate(
                 };
             }
         };
-        spawn_blocking_op(move || execute_rebase_fetch(&wt, timeout)).await
+        spawn_blocking_op(move || execute_rebase_fetch(&wt, remaining)).await
     };
     if let Err(err) = fetch_result {
         eprintln!("auto-rebase: fetch failed for {task_id}: {err}");
@@ -2531,13 +2556,24 @@ async fn execute_rebase_candidate(
 
     // Rebase + push in the worktree without holding the root semaphore.
     let rebase_result = {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            cleanup_rebase_worktree(config, task_id, repo_root_lock).await;
+            return RebaseOutcome::Failure {
+                issue_number: candidate.issue_number,
+                task_id: task_id.clone(),
+                head_sha: candidate.head_sha.clone(),
+                last_failure_sha: candidate.last_failure_sha.clone(),
+                pr_number: candidate.pr_number,
+                error: "rebase timeout budget exhausted after fetch".to_string(),
+                is_lease: false,
+            };
+        }
         let wt = wt_path.clone();
         let target = candidate.rebase_target.clone();
         let br = branch.clone();
-        let timeout_dur = Duration::from_secs(config.rebase_timeout_seconds);
         let backend_str = config.rebase_agent_backend.clone();
-        spawn_blocking_op(move || execute_rebase(&wt, &target, &br, timeout_dur, &backend_str))
-            .await
+        spawn_blocking_op(move || execute_rebase(&wt, &target, &br, remaining, &backend_str)).await
     };
 
     // Clean up rebase worktree (best-effort)
