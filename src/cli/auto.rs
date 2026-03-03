@@ -117,10 +117,7 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
             return Workspace::load(ralph_dir);
         }
         let workspace = init::create_workspace(&ralph_dir)?;
-        eprintln!(
-            "initialized workspace at {}",
-            ralph_dir.display()
-        );
+        eprintln!("initialized workspace at {}", ralph_dir.display());
         return Ok(workspace);
     }
 
@@ -477,8 +474,7 @@ mod tests {
         let root = temp.path().to_path_buf();
 
         // Create a workspace first
-        let _ = crate::cli::init::create_workspace(&root.join(".ralph"))
-            .expect("create workspace");
+        let _ = crate::cli::init::create_workspace(&root.join(".ralph")).expect("create workspace");
 
         // Loading it again should succeed without re-creating
         let workspace =
