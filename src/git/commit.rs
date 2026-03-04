@@ -308,14 +308,22 @@ pub fn remove_stray_impl_artifacts(workdir: &Path) -> Result<()> {
             continue;
         }
         info!("removing stray impl artifact: {name}");
-        // Try git rm first (handles tracked files — removes from index + working tree).
+        // Try git rm first (handles tracked/staged files — removes from index + working tree).
         // --force is needed because after `git add -A` the file is staged but has no
         // HEAD entry, so git considers it "to be added" and plain `git rm` refuses.
-        let git_rm_result = run_git(workdir, &["rm", "--force", "--ignore-unmatch", "--", name]);
-        if git_rm_result.is_err() {
-            // Fallback: delete from filesystem directly (untracked or index-only edge cases).
-            let _ = std::fs::remove_file(entry.path());
+        let _ = run_git(workdir, &["rm", "--force", "--ignore-unmatch", "--", name]);
+        // git rm --ignore-unmatch exits 0 for untracked files without removing them.
+        // Always fall back to filesystem deletion if the file still exists.
+        let path = entry.path();
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
         }
+        // If the file was staged in the index (e.g. via a prior `git add -A`),
+        // remove it from the index too so it won't be re-committed.
+        let _ = run_git(
+            workdir,
+            &["rm", "--cached", "--ignore-unmatch", "--", name],
+        );
     }
     Ok(())
 }
@@ -863,7 +871,7 @@ mod tests {
         let temp = init_repo();
         let repo = temp.path();
 
-        // Tracked stray files (already committed, then re-created)
+        // --- Truly tracked stray files: commit them first so they exist in HEAD ---
         fs::write(repo.join("20260304120000-impl-notes.md"), "stray notes\n")
             .expect("write stray notes");
         fs::write(
@@ -871,8 +879,21 @@ mod tests {
             "stray response\n",
         )
         .expect("write stray response");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "add tracked stray files"]);
 
-        // Untracked stray file
+        // Verify they are truly tracked from HEAD
+        let ls_files = git_output(repo, &["ls-files"]);
+        assert!(
+            ls_files.contains("20260304120000-impl-notes.md"),
+            "impl-notes should be tracked in HEAD"
+        );
+        assert!(
+            ls_files.contains("20260304120000-impl-response-001.md"),
+            "impl-response should be tracked in HEAD"
+        );
+
+        // --- Untracked stray file (never committed or staged) ---
         fs::write(
             repo.join("20260304130000-impl-response-002.md"),
             "untracked stray\n",
@@ -894,15 +915,15 @@ mod tests {
         // Stray files should be gone from working tree
         assert!(
             !repo.join("20260304120000-impl-notes.md").exists(),
-            "stray notes should be removed"
+            "tracked stray notes should be removed from disk"
         );
         assert!(
             !repo.join("20260304120000-impl-response-001.md").exists(),
-            "stray response should be removed"
+            "tracked stray response should be removed from disk"
         );
         assert!(
             !repo.join("20260304130000-impl-response-002.md").exists(),
-            "untracked stray should be removed"
+            "untracked stray should be removed from disk"
         );
 
         // Decoy files should remain
@@ -916,12 +937,18 @@ mod tests {
         );
 
         // Verify stray files are also gone from the index
-        let status = git_output(repo, &["status", "--porcelain"]);
+        let ls_after = git_output(repo, &["ls-files"]);
         assert!(
-            !status.contains("impl-notes.md")
-                || status.contains("impl-notes.md")
-                    && !status.contains("20260304120000-impl-notes.md"),
-            "stray files should not appear in git status as staged"
+            !ls_after.contains("20260304120000-impl-notes.md"),
+            "tracked stray notes should be removed from index"
+        );
+        assert!(
+            !ls_after.contains("20260304120000-impl-response-001.md"),
+            "tracked stray response should be removed from index"
+        );
+        assert!(
+            !ls_after.contains("20260304130000-impl-response-002.md"),
+            "untracked stray should not be in index"
         );
     }
 }
