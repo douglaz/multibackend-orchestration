@@ -1052,3 +1052,140 @@ async fn skip_commit_prevents_git_commits() {
         "skip_commit=true should prevent any new commits"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests - canonical backend equality
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn whitespace_equal_backend_rejection() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let err = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id),
+            implementer_backend: Some(" claude ".to_owned()),
+            reviewer_backend: Some("claude".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect_err("should fail when backends are semantically equal");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("distinct"),
+        "expected distinct-backend error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn whitespace_padded_model_equal_backend_rejection() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let err = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id),
+            implementer_backend: Some(" claude(opus) ".to_owned()),
+            reviewer_backend: Some("claude(opus)".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect_err("should fail when backends are semantically equal (whitespace-padded model)");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("distinct"),
+        "expected distinct-backend error, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests - crash-durable counter persistence
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn force_complete_persists_final_review_attempts() {
+    let (_temp, workspace_root, project_id) =
+        setup_quick_dev_workspace("satisfied", "issues_found");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: Some(2),
+        })
+        .await
+        .expect("orchestrator should force-complete");
+
+    assert!(
+        result.summary.contains("force-completed"),
+        "expected 'force-completed' in summary, got: {}",
+        result.summary
+    );
+
+    // Verify persisted counter matches the number of attempts made
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let state_json = fs::read_to_string(project_dir.join("state.json")).expect("read state.json");
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+
+    assert_eq!(
+        state["quick_dev_final_review_attempts"].as_u64().unwrap_or(0),
+        2,
+        "persisted final_review_attempts should equal max_final_review_retries after force-complete"
+    );
+}
+
+#[tokio::test]
+async fn review_iteration_persisted_after_changes_requested() {
+    // Use "loop_then_satisfied" so the reviewer rejects once then accepts
+    let (_temp, workspace_root, project_id) =
+        setup_quick_dev_workspace("loop_then_satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let _ = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("orchestrator should succeed");
+
+    // Verify persisted counter reflects the review iteration
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let state_json = fs::read_to_string(project_dir.join("state.json")).expect("read state.json");
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+
+    // After one rejection + one satisfaction, review_iteration should be at least 1
+    let review_iter = state["quick_dev_review_iteration"].as_u64().unwrap_or(0);
+    assert!(
+        review_iter >= 1,
+        "persisted quick_dev_review_iteration should be >= 1 after changes_requested, got: {}",
+        review_iter
+    );
+}

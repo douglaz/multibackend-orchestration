@@ -84,6 +84,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "quick_dev::auto_gemini_reviewer_fails_fast",
             func: auto_gemini_reviewer_fails_fast,
         },
+        ConformanceTest {
+            name: "quick_dev::auto_whitespace_equal_backends_fails_fast",
+            func: auto_whitespace_equal_backends_fails_fast,
+        },
+        ConformanceTest {
+            name: "quick_dev::force_complete_persists_counter",
+            func: force_complete_persists_counter,
+        },
     ]
 }
 
@@ -1107,6 +1115,122 @@ fn non_quick_completed_not_reclassified(h: &RalphHarness) -> TestResult {
             state["status"].as_str().unwrap_or(""),
             "completed",
             "non-quick project with fake state.json must not be reclassified as completed"
+        );
+    })
+}
+
+/// `quick-dev-auto` must fail with exit code 2 when implementer and reviewer
+/// are semantically equal but differently formatted (whitespace-padded), and
+/// must not create `.ralph/projects/<id>`.
+fn auto_whitespace_equal_backends_fails_fast(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let impl_script = h
+            .write_mock_script("qd-auto-ws-impl.sh", &quick_dev_implementer_mock_script())
+            .expect("write impl mock");
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{}\"\n", impl_script.display());
+        let wrapper = h
+            .write_mock_script("qd-auto-ws-wrapper.sh", &wrapper_content)
+            .expect("write wrapper");
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        for backend in &["claude", "codex"] {
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.command"),
+                wrapper_str.clone(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} command failed: {e}"));
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.args"),
+                "[]".to_owned(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
+        }
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("disable gemini");
+
+        // Pass semantically equal but differently formatted backends
+        let output = h
+            .ralph([
+                "quick-dev-auto",
+                "--idea",
+                "auto-ws-equal-test",
+                "--implementer-backend",
+                " claude ",
+                "--reviewer-backend",
+                "claude",
+            ])
+            .expect("quick-dev-auto should execute");
+
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "quick-dev requires distinct implementer and reviewer backends",
+        );
+
+        // No project should have been created
+        let project_dir = h.project_dir("auto-ws-equal-test");
+        assert!(
+            !project_dir.exists(),
+            "project directory must not exist after fail-fast: {}",
+            project_dir.display()
+        );
+    })
+}
+
+/// After force-complete, the persisted `quick_dev_final_review_attempts` in
+/// state.json must reflect the incremented attempt count.
+fn force_complete_persists_counter(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-force-counter-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_final_review_always_issues_script(),
+            &quick_dev_final_review_always_issues_script(),
+        );
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+                "--max-final-review-retries",
+                "2",
+            ])
+            .expect("quick-dev-run should execute");
+
+        assert_exit_code(&output, 0);
+
+        // Verify persisted counter
+        let state = load_state_json(h, project_id);
+        assert_eq!(
+            state["status"].as_str().unwrap_or(""),
+            "completed",
+            "project must be completed after force-complete"
+        );
+        assert_eq!(
+            state["quick_dev_final_review_attempts"].as_u64().unwrap_or(0),
+            2,
+            "persisted final_review_attempts must equal max_final_review_retries after force-complete"
         );
     })
 }

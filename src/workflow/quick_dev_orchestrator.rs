@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
+use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{
     resolve_effective_config, EffectiveConfig, RunWorkflowOverrides,
 };
@@ -426,6 +426,10 @@ impl QuickDevOrchestrator {
                             last_review_feedback = body;
                             review_iteration += 1;
 
+                            // Persist incremented counter immediately for crash-safety
+                            state.quick_dev_review_iteration = review_iteration;
+                            save_state_to_disk(state, project_dir)?;
+
                             // Guard: max review iterations
                             if review_iteration >= max_review_iterations {
                                 warn!(
@@ -694,6 +698,10 @@ impl QuickDevOrchestrator {
                     // Issues found: increment counter and check guard
                     final_review_attempts += 1;
 
+                    // Persist incremented counter immediately for crash-safety
+                    state.quick_dev_final_review_attempts = final_review_attempts;
+                    save_state_to_disk(state, project_dir)?;
+
                     if final_review_attempts >= max_final_review_retries {
                         warn!(
                             loop_number,
@@ -809,12 +817,24 @@ pub(crate) fn resolve_reviewer_backend(
 }
 
 pub(crate) fn validate_distinct_backends(implementer: &str, reviewer: &str) -> Result<()> {
-    if implementer == reviewer {
+    let canon_impl = canonicalize_backend_spec(implementer)?;
+    let canon_rev = canonicalize_backend_spec(reviewer)?;
+    if canon_impl == canon_rev {
         return Err(RalphError::Validation(format!(
-            "quick-dev requires distinct implementer and reviewer backends, but both resolved to '{implementer}'"
+            "quick-dev requires distinct implementer and reviewer backends, but both resolved to '{canon_impl}'"
         )));
     }
     Ok(())
+}
+
+/// Parse and reconstruct a backend spec in canonical form (strips `?` prefix,
+/// trims whitespace, normalizes to `name` or `name(model)` format).
+fn canonicalize_backend_spec(spec: &str) -> Result<String> {
+    let parsed = parse_backend_spec(spec)?;
+    Ok(match parsed.model {
+        Some(model) => format!("{}({model})", parsed.name),
+        None => parsed.name,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,6 +1182,29 @@ mod tests {
     #[test]
     fn validate_distinct_backends_accepts_different() {
         validate_distinct_backends("claude(opus)", "codex(gpt-5)").unwrap();
+    }
+
+    #[test]
+    fn validate_distinct_backends_rejects_whitespace_equal() {
+        let err = validate_distinct_backends(" claude ", "claude").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
+        assert!(msg.contains("claude"), "error should mention canonical spec, got: {msg}");
+    }
+
+    #[test]
+    fn validate_distinct_backends_rejects_optional_prefix_equal() {
+        let err = validate_distinct_backends("?claude", "claude").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
+    }
+
+    #[test]
+    fn validate_distinct_backends_rejects_optional_prefix_with_model() {
+        let err = validate_distinct_backends("?claude(opus)", "claude(opus)").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
+        assert!(msg.contains("claude(opus)"), "error should mention canonical spec, got: {msg}");
     }
 
     #[test]
