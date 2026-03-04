@@ -98,6 +98,7 @@ const GITHUB_COMMENT_LIMIT: usize = 65_536;
 const TRUNCATED_NOTE: &str = "\n\n[truncated]";
 const COMPLETE_TASK_MAX_ATTEMPTS: u32 = 3;
 const COMPLETE_TASK_RETRY_DELAY_SECS: u64 = 30;
+const WATCHER_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum consecutive ahead-check failures before the watcher gives up.
 const DRAFT_PR_WATCHER_MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
@@ -287,7 +288,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
             let push_ok = {
                 let wt = worktree_path.clone();
                 let br = branch.clone();
-                match spawn_blocking_op(move || github::push_branch(&wt, &br)).await {
+                match spawn_blocking_op(move || github::push_branch_with_retry(&wt, &br)).await {
                     Ok(()) => {
                         eprintln!("draft-pr-watcher: pushed branch {branch} for {task_id}");
                         true
@@ -1710,6 +1711,34 @@ pub fn extract_original_title(raw_idea: &str) -> Option<String> {
     }
 }
 
+async fn await_watcher_with_timeout(
+    join_handle: tokio::task::JoinHandle<()>,
+    watcher_name: &str,
+    task_id: &str,
+) {
+    await_watcher_with_timeout_impl(join_handle, watcher_name, task_id, WATCHER_TEARDOWN_TIMEOUT)
+        .await;
+}
+
+async fn await_watcher_with_timeout_impl(
+    join_handle: tokio::task::JoinHandle<()>,
+    watcher_name: &str,
+    task_id: &str,
+    timeout: Duration,
+) {
+    let mut join_handle = join_handle;
+    match tokio::time::timeout(timeout, &mut join_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(join_err)) => {
+            eprintln!("warning: {watcher_name} join failed for {task_id}: {join_err}");
+        }
+        Err(_) => {
+            join_handle.abort();
+            eprintln!("warning: {watcher_name} teardown timed out for {task_id}, aborted");
+        }
+    }
+}
+
 /// Collect finished children and transition them to terminal states via labels.
 async fn collect_children(
     config: &DaemonRuntimeConfig,
@@ -1769,15 +1798,11 @@ async fn collect_children(
         };
         handle.watcher_cancel.cancel();
         if let Some(join_handle) = handle.watcher_handle.take() {
-            if let Err(err) = join_handle.await {
-                eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
-            }
+            await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
         }
         handle.draft_pr_cancel.cancel();
         if let Some(join_handle) = handle.draft_pr_handle.take() {
-            if let Err(err) = join_handle.await {
-                eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
-            }
+            await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
         }
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
@@ -1939,15 +1964,11 @@ async fn kill_aborted_children(
             );
             handle.watcher_cancel.cancel();
             if let Some(join_handle) = handle.watcher_handle.take() {
-                if let Err(err) = join_handle.await {
-                    eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
-                }
+                await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
             }
             handle.draft_pr_cancel.cancel();
             if let Some(join_handle) = handle.draft_pr_handle.take() {
-                if let Err(err) = join_handle.await {
-                    eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
-                }
+                await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
             }
             eprintln!(
                 "abort-check: killed {task_id} (pid={} pgid={})",
@@ -1991,15 +2012,11 @@ async fn drain_all_children(
                 }
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
-                    if let Err(err) = join_handle.await {
-                        eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
-                    }
+                    await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
                 }
                 handle.draft_pr_cancel.cancel();
                 if let Some(join_handle) = handle.draft_pr_handle.take() {
-                    if let Err(err) = join_handle.await {
-                        eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
-                    }
+                    await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
                 }
             }
             complete_task(
@@ -3017,13 +3034,7 @@ pub(crate) async fn handle_pr_flow(
     {
         let wt = wt_path.to_path_buf();
         let br = branch.clone();
-        match spawn_blocking_op(move || github::push_branch(&wt, &br)).await {
-            Ok(()) => {}
-            Err(err) => {
-                eprintln!("warning: failed to push branch {branch} for {task_id}: {err}");
-                return Ok(());
-            }
-        }
+        spawn_blocking_op(move || github::push_branch_with_retry(&wt, &br)).await?;
     }
 
     // Step 3: Gather context
@@ -3195,8 +3206,9 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pr_body, build_pr_title, detect_final_prompt_artifact, detect_quick_prd_artifact,
-        extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
+        await_watcher_with_timeout_impl, build_pr_body, build_pr_title,
+        detect_final_prompt_artifact, detect_quick_prd_artifact, extract_issue_body,
+        extract_original_title, extract_project_ref, newest_by_mtime,
         post_artifact_comments_with_client, should_close_no_diff_draft_pr,
         should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
         sweep_artifact_comments, truncate_for_github, validate_daemon_branch_format,
@@ -3207,6 +3219,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
@@ -3674,6 +3687,42 @@ mod tests {
         let truncated = truncate_for_github("abcdefghijklmnopqrstuvwxyz", 16);
         assert_eq!(truncated.chars().count(), 16);
         assert!(truncated.ends_with(TRUNCATED_NOTE));
+    }
+
+    #[tokio::test]
+    async fn await_watcher_with_timeout_impl_aborts_stuck_task() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_for_task = counter.clone();
+        let join_handle = tokio::spawn(async move {
+            loop {
+                counter_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let before_timeout = counter.load(Ordering::SeqCst);
+        assert!(
+            before_timeout > 0,
+            "counter should be incrementing before timeout"
+        );
+
+        await_watcher_with_timeout_impl(
+            join_handle,
+            "artifact watcher",
+            "acme-widgets-77",
+            Duration::from_millis(25),
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let snapshot_after = counter.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let snapshot_later = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            snapshot_after, snapshot_later,
+            "counter should stop changing after task is aborted (after={snapshot_after}, later={snapshot_later})"
+        );
     }
 
     #[tokio::test]
