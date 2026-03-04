@@ -33,6 +33,14 @@ pub struct ProjectState {
     /// across phases (e.g. marking PRs ready, updating descriptions).
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Quick-dev review loop iteration counter (1-based, persisted for
+    /// crash-safe resume so guard accounting survives restarts).
+    #[serde(default)]
+    pub quick_dev_review_iteration: u32,
+    /// Quick-dev final-review attempt counter (persisted for crash-safe
+    /// resume so the force-complete guard is honored across restarts).
+    #[serde(default)]
+    pub quick_dev_final_review_attempts: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +304,8 @@ impl ProjectState {
             completion_attempts: Vec::new(),
             session_store: SessionStore::default(),
             pr_url: None,
+            quick_dev_review_iteration: 0,
+            quick_dev_final_review_attempts: 0,
         }
     }
 

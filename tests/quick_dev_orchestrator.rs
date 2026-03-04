@@ -70,6 +70,7 @@ fn add_local_bare_remote(repo_root: &Path) {
 /// Env vars control the behavior:
 ///   QUICK_DEV_REVIEW_MODE: "satisfied" (default) | "changes_requested" | "loop_then_satisfied"
 ///   QUICK_DEV_FINAL_REVIEW_MODE: "complete" (default) | "issues_found" | "loop_then_complete"
+///   QUICK_DEV_COUNTER_DIR: directory for stable cross-invocation counter files
 fn write_quick_dev_backend_script(path: &Path, role: &str) {
     let script = if role == "implementer" {
         r#"#!/usr/bin/env bash
@@ -79,7 +80,30 @@ prompt="$(cat)"
 # Check if this is a final review prompt
 if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] || [[ "$prompt" == *"final-review"* ]]; then
     mode="${QUICK_DEV_FINAL_REVIEW_MODE:-complete}"
-    if [[ "$mode" == "issues_found" ]]; then
+    counter_dir="${QUICK_DEV_COUNTER_DIR:-/tmp}"
+    counter_file="${counter_dir}/impl_final_review_counter"
+
+    if [[ "$mode" == "loop_then_complete" ]]; then
+        count=0
+        if [[ -f "$counter_file" ]]; then
+            count=$(cat "$counter_file")
+        fi
+        count=$((count + 1))
+        echo "$count" > "$counter_file"
+        if [[ $count -ge 2 ]]; then
+            cat <<'EOF'
+# Final Review: COMPLETE
+
+All requirements are met from implementer perspective.
+EOF
+        else
+            cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+Implementation has issues that need addressing.
+EOF
+        fi
+    elif [[ "$mode" == "issues_found" ]]; then
         cat <<'EOF'
 # Final Review: ISSUES FOUND
 
@@ -117,7 +141,8 @@ prompt="$(cat)"
 # Check if this is a final review prompt
 if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] || [[ "$prompt" == *"final-review"* ]]; then
     mode="${QUICK_DEV_FINAL_REVIEW_MODE:-complete}"
-    counter_file="/tmp/quick_dev_final_review_counter_$$"
+    counter_dir="${QUICK_DEV_COUNTER_DIR:-/tmp}"
+    counter_file="${counter_dir}/rev_final_review_counter"
 
     if [[ "$mode" == "loop_then_complete" ]]; then
         count=0
@@ -155,7 +180,8 @@ EOF
 else
     # Codex review
     mode="${QUICK_DEV_REVIEW_MODE:-satisfied}"
-    counter_file="/tmp/quick_dev_review_counter_$$"
+    counter_dir="${QUICK_DEV_COUNTER_DIR:-/tmp}"
+    counter_file="${counter_dir}/rev_review_counter"
 
     if [[ "$mode" == "loop_then_satisfied" ]]; then
         count=0
@@ -232,12 +258,18 @@ fn setup_quick_dev_workspace(
     let workspace_root = repo_root.join(".ralph");
     let mut workspace = Workspace::init(&workspace_root).expect("workspace init");
 
+    // Use a stable counter directory inside the temp dir
+    let counter_dir = repo_root.join(".test-counters");
+    fs::create_dir_all(&counter_dir).expect("create counter dir");
+    let counter_dir_str = counter_dir.to_string_lossy().to_string();
+
     let mut impl_env = BTreeMap::new();
     impl_env.insert("QUICK_DEV_REVIEW_MODE".to_owned(), review_mode.to_owned());
     impl_env.insert(
         "QUICK_DEV_FINAL_REVIEW_MODE".to_owned(),
         final_review_mode.to_owned(),
     );
+    impl_env.insert("QUICK_DEV_COUNTER_DIR".to_owned(), counter_dir_str.clone());
 
     let mut rev_env = BTreeMap::new();
     rev_env.insert("QUICK_DEV_REVIEW_MODE".to_owned(), review_mode.to_owned());
@@ -245,6 +277,7 @@ fn setup_quick_dev_workspace(
         "QUICK_DEV_FINAL_REVIEW_MODE".to_owned(),
         final_review_mode.to_owned(),
     );
+    rev_env.insert("QUICK_DEV_COUNTER_DIR".to_owned(), counter_dir_str);
 
     workspace.config.backends.claude.command = impl_script.to_string_lossy().to_string();
     workspace.config.backends.claude.args = Vec::new();
@@ -286,34 +319,68 @@ fn setup_quick_dev_workspace(
 // Unit tests (no workspace needed)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn missing_reviewer_backend_fails_fast() {
-    let options = QuickDevRunOptions {
-        project: None,
-        implementer_backend: None,
-        reviewer_backend: None,
-        pr_url: None,
-        skip_commit: false,
-        max_review_iterations: None,
-        max_final_review_retries: None,
-    };
-    // Use make_test_effective to test backend resolution
-    // The actual resolution happens inside run(), so we test the validation
-    // function directly via the message check.
-    let msg = "quick-dev requires a second backend for review";
-    // This test validates the error message is correct
-    assert!(msg.contains("quick-dev requires a second backend for review"));
+#[tokio::test]
+async fn missing_reviewer_backend_fails_fast() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    // Remove the reviewer backend from config so resolution fails
+    let workspace_root_clone = workspace_root.clone();
+    let mut workspace = Workspace::load(workspace_root_clone).expect("load workspace");
+    workspace.config.workflow.reviewer_backend = None;
+    workspace.save_config().expect("save config");
+
+    let workspace = Workspace::load(workspace_root).expect("reload workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let err = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: None,
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect_err("should fail when reviewer backend is missing");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("quick-dev requires a second backend for review"),
+        "expected exact missing-reviewer message, got: {msg}"
+    );
 }
 
-#[test]
-fn equal_backend_rejection() {
-    // When both backends resolve to the same spec, should fail fast
-    let msg = format!(
-        "quick-dev requires distinct implementer and reviewer backends, but both resolved to '{}'",
-        "claude(opus)"
+#[tokio::test]
+async fn equal_backend_rejection() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let err = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("claude".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect_err("should fail when both backends are equal");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("distinct"),
+        "expected distinct-backend error, got: {msg}"
     );
-    assert!(msg.contains("distinct"));
-    assert!(msg.contains("claude(opus)"));
+    assert!(
+        msg.contains("claude"),
+        "error should mention the backend spec, got: {msg}"
+    );
 }
 
 #[test]
@@ -338,7 +405,7 @@ fn quick_dev_phase_to_current_phase() {
 
 #[test]
 fn default_option_values() {
-    let _options = QuickDevRunOptions {
+    let options = QuickDevRunOptions {
         project: None,
         implementer_backend: None,
         reviewer_backend: None,
@@ -349,8 +416,37 @@ fn default_option_values() {
     };
 
     // When max values are None, defaults should be applied internally
-    assert!(_options.max_review_iterations.is_none());
-    assert!(_options.max_final_review_retries.is_none());
+    assert!(options.max_review_iterations.is_none());
+    assert!(options.max_final_review_retries.is_none());
+}
+
+#[test]
+fn quick_dev_counter_fields_serde_roundtrip() {
+    use ralph::project::state::ProjectState;
+
+    let mut state = ProjectState::new("test", "Test", "hash", None);
+    state.quick_dev_review_iteration = 3;
+    state.quick_dev_final_review_attempts = 1;
+
+    let json = serde_json::to_string(&state).unwrap();
+    let loaded: ProjectState = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded.quick_dev_review_iteration, 3);
+    assert_eq!(loaded.quick_dev_final_review_attempts, 1);
+}
+
+#[test]
+fn legacy_state_without_counter_fields_defaults_to_zero() {
+    use ralph::project::state::ProjectState;
+
+    let state = ProjectState::new("test", "Test", "hash", None);
+    let mut value = serde_json::to_value(&state).expect("serialize");
+    let obj = value.as_object_mut().unwrap();
+    obj.remove("quick_dev_review_iteration");
+    obj.remove("quick_dev_final_review_attempts");
+
+    let loaded: ProjectState = serde_json::from_value(value).unwrap();
+    assert_eq!(loaded.quick_dev_review_iteration, 0);
+    assert_eq!(loaded.quick_dev_final_review_attempts, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +610,53 @@ async fn max_final_review_retries_guard_force_completes() {
 }
 
 // ---------------------------------------------------------------------------
+// Integration tests - final review reloop (FinalReview -> PlanAndImplement -> ... -> Complete)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn final_review_reloop_then_complete() {
+    // First final review: both say ISSUES FOUND (implementer: issues, reviewer: issues)
+    // After reloop through PlanAndImplement -> CodexReview(satisfied) -> FinalReview:
+    // Second final review: both say COMPLETE
+    let (_temp, workspace_root, project_id) =
+        setup_quick_dev_workspace("satisfied", "loop_then_complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: Some(5), // allow enough retries
+        })
+        .await
+        .expect("orchestrator should complete after final-review reloop");
+
+    assert!(
+        result.summary.contains("completed"),
+        "expected 'completed' in summary, got: {}",
+        result.summary
+    );
+
+    // Verify state on disk
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let state_json = fs::read_to_string(project_dir.join("state.json")).expect("read state.json");
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+    assert_eq!(state["status"], "completed");
+
+    // Force-complete artifact should NOT exist (completed normally)
+    assert!(
+        !project_dir.join("quick-dev-force-complete.md").exists(),
+        "force-complete artifact should not exist for normal completion after reloop"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests - resume from persisted state
 // ---------------------------------------------------------------------------
 
@@ -652,6 +795,62 @@ async fn resume_from_none_starts_at_plan_and_implement() {
     assert!(
         result.summary.contains("completed"),
         "expected completion, got: {}",
+        result.summary
+    );
+}
+
+#[tokio::test]
+async fn resume_after_completion_does_not_restart() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    // Write persisted state marking project as completed with quick_dev_phase = None
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    // Set completion status AFTER register_feature_loop (which sets InProgress)
+    state.quick_dev_phase = None;
+    state.status = ProjectStatus::Completed;
+    state.current_phase = Phase::Completing;
+    state.phase_iteration = 1;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json).expect("write state.json");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("orchestrator should not restart a completed project");
+
+    assert!(
+        result.summary.contains("already completed"),
+        "expected 'already completed' in summary, got: {}",
         result.summary
     );
 }

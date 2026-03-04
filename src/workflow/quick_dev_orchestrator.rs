@@ -134,6 +134,15 @@ impl QuickDevOrchestrator {
             .max_final_review_retries
             .unwrap_or(DEFAULT_MAX_FINAL_REVIEW_RETRIES);
 
+        // If the project was already completed (normal or force-complete),
+        // do not restart from PlanAndImplement.
+        if state.status == ProjectStatus::Completed && state.quick_dev_phase.is_none() {
+            return Ok(OrchestrationResult {
+                summary: "quick-dev already completed".to_owned(),
+                loop_number: Some(state.current_loop.max(1)),
+            });
+        }
+
         // Determine the starting quick-dev phase from persisted state
         let starting_phase = state
             .quick_dev_phase
@@ -211,8 +220,8 @@ impl QuickDevOrchestrator {
         _repo_root: Option<&Path>,
     ) -> Result<OrchestrationResult> {
         let mut current_qd_phase = starting_phase;
-        let mut review_iteration: u32 = 0;
-        let mut final_review_attempts: u32 = 0;
+        let mut review_iteration: u32 = state.quick_dev_review_iteration;
+        let mut final_review_attempts: u32 = state.quick_dev_final_review_attempts;
 
         // Read prompt content
         let prompt_path = project_dir.join(&state.prompt_file);
@@ -249,6 +258,8 @@ impl QuickDevOrchestrator {
                 state,
                 &current_qd_phase,
                 compute_phase_iteration(&current_qd_phase, review_iteration),
+                review_iteration,
+                final_review_attempts,
             );
             save_state_to_disk(state, project_dir)?;
 
@@ -414,7 +425,13 @@ impl QuickDevOrchestrator {
                                 )?;
 
                                 // Persist target phase before transition
-                                persist_quick_dev_state(state, &QuickDevPhase::FinalReview, 1);
+                                persist_quick_dev_state(
+                                    state,
+                                    &QuickDevPhase::FinalReview,
+                                    1,
+                                    review_iteration,
+                                    final_review_attempts,
+                                );
                                 save_state_to_disk(state, project_dir)?;
 
                                 let from_phase = Phase::Reviewing;
@@ -777,11 +794,19 @@ fn validate_distinct_backends(implementer: &str, reviewer: &str) -> Result<()> {
 // State persistence helpers
 // ---------------------------------------------------------------------------
 
-fn persist_quick_dev_state(state: &mut ProjectState, phase: &QuickDevPhase, phase_iteration: u32) {
+fn persist_quick_dev_state(
+    state: &mut ProjectState,
+    phase: &QuickDevPhase,
+    phase_iteration: u32,
+    review_iteration: u32,
+    final_review_attempts: u32,
+) {
     state.quick_dev_phase = Some(phase.clone());
     state.current_phase = phase.to_current_phase();
     state.phase_iteration = phase_iteration;
     state.status = ProjectStatus::InProgress;
+    state.quick_dev_review_iteration = review_iteration;
+    state.quick_dev_final_review_attempts = final_review_attempts;
 }
 
 fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 {
@@ -834,8 +859,12 @@ fn checkpoint_if_enabled(
         return Ok(());
     }
 
-    // Check if there are actual changes to commit (no empty commits)
-    let changed = changed_paths_excluding_prefixes(repo_root, &[])?;
+    // Check if there are actual changes to commit beyond orchestration state
+    // (no empty transition commits when only .ralph/ changed)
+    let changed = changed_paths_excluding_prefixes(
+        repo_root,
+        &[crate::git::commit::ORCHESTRATION_STATE_PATH_PREFIX],
+    )?;
     if changed.is_empty() {
         return Ok(());
     }
@@ -1087,18 +1116,20 @@ mod tests {
     #[test]
     fn persist_quick_dev_state_sets_fields_correctly() {
         let mut state = ProjectState::new("test", "Test", "hash", None);
-        persist_quick_dev_state(&mut state, &QuickDevPhase::CodexReview, 1);
+        persist_quick_dev_state(&mut state, &QuickDevPhase::CodexReview, 1, 2, 1);
 
         assert_eq!(state.quick_dev_phase, Some(QuickDevPhase::CodexReview));
         assert_eq!(state.current_phase, Phase::Reviewing);
         assert_eq!(state.phase_iteration, 1);
         assert_eq!(state.status, ProjectStatus::InProgress);
+        assert_eq!(state.quick_dev_review_iteration, 2);
+        assert_eq!(state.quick_dev_final_review_attempts, 1);
     }
 
     #[test]
     fn persist_quick_dev_state_plan_and_implement() {
         let mut state = ProjectState::new("test", "Test", "hash", None);
-        persist_quick_dev_state(&mut state, &QuickDevPhase::PlanAndImplement, 1);
+        persist_quick_dev_state(&mut state, &QuickDevPhase::PlanAndImplement, 1, 0, 0);
 
         assert_eq!(
             state.quick_dev_phase,
@@ -1110,7 +1141,7 @@ mod tests {
     #[test]
     fn persist_quick_dev_state_apply_fixes() {
         let mut state = ProjectState::new("test", "Test", "hash", None);
-        persist_quick_dev_state(&mut state, &QuickDevPhase::ApplyFixes, 3);
+        persist_quick_dev_state(&mut state, &QuickDevPhase::ApplyFixes, 3, 3, 0);
 
         assert_eq!(state.quick_dev_phase, Some(QuickDevPhase::ApplyFixes));
         assert_eq!(state.current_phase, Phase::Implementing);
@@ -1120,7 +1151,7 @@ mod tests {
     #[test]
     fn persist_quick_dev_state_final_review() {
         let mut state = ProjectState::new("test", "Test", "hash", None);
-        persist_quick_dev_state(&mut state, &QuickDevPhase::FinalReview, 1);
+        persist_quick_dev_state(&mut state, &QuickDevPhase::FinalReview, 1, 0, 0);
 
         assert_eq!(state.quick_dev_phase, Some(QuickDevPhase::FinalReview));
         assert_eq!(state.current_phase, Phase::FinalReview);

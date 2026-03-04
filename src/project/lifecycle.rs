@@ -352,6 +352,10 @@ fn reconstruct_project_state_internal(
         .any(|attempt| attempt.verdict == Some(CompletionVerdict::Complete))
     {
         state.status = ProjectStatus::Completed;
+    } else if state.status == ProjectStatus::Completed {
+        // Quick-dev completion: load_quick_dev_phase_from_state_json already
+        // set status to Completed based on persisted state.json.  Preserve it
+        // so reruns do not restart from PlanAndImplement.
     } else if state.last_loop_number() == 0 {
         state.status = ProjectStatus::Pending;
     } else {
@@ -424,23 +428,49 @@ pub(crate) fn validate_project_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load the persisted `quick_dev_phase` from `state.json` written by the
+/// Load persisted quick-dev metadata from `state.json` written by the
 /// quick-dev orchestrator.  This allows crash-safe resume: if the process
 /// dies mid-phase, the next reconstruction picks up where it left off.
+///
+/// Also restores `status`, `review_iteration`, and `final_review_attempts`
+/// so that completed/force-completed projects are not restarted and guard
+/// counters survive across process restarts.
 fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectState) {
     let state_path = project_dir.join("state.json");
     let Ok(content) = fs::read_to_string(&state_path) else {
         return;
     };
-    // Parse only the quick_dev_phase field from the persisted state.
     #[derive(serde::Deserialize)]
     struct PartialState {
         #[serde(default)]
         quick_dev_phase: Option<crate::project::state::QuickDevPhase>,
+        #[serde(default)]
+        status: Option<crate::project::state::ProjectStatus>,
+        #[serde(default)]
+        quick_dev_review_iteration: Option<u32>,
+        #[serde(default)]
+        quick_dev_final_review_attempts: Option<u32>,
     }
     if let Ok(partial) = serde_json::from_str::<PartialState>(&content) {
         if partial.quick_dev_phase.is_some() {
             state.quick_dev_phase = partial.quick_dev_phase;
+        }
+        // If quick-dev wrote a Completed status (normal or force-complete)
+        // and quick_dev_phase is None, honor the persisted status so reruns
+        // do not restart from PlanAndImplement.
+        if let Some(ref persisted_status) = partial.status {
+            if state.quick_dev_phase.is_none()
+                && *persisted_status == crate::project::state::ProjectStatus::Completed
+            {
+                state.status = crate::project::state::ProjectStatus::Completed;
+            }
+        }
+        // Restore guard counters for crash-safe resume.
+        if let Some(ri) = partial.quick_dev_review_iteration {
+            state.quick_dev_review_iteration = ri;
+        }
+        if let Some(fra) = partial.quick_dev_final_review_attempts {
+            state.quick_dev_final_review_attempts = fra;
         }
     }
 }

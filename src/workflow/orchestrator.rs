@@ -7675,6 +7675,8 @@ mod tests {
             completion_attempts: vec![],
             session_store: Default::default(),
             pr_url: None,
+            quick_dev_review_iteration: 0,
+            quick_dev_final_review_attempts: 0,
         }
     }
 
