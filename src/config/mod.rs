@@ -97,6 +97,10 @@ pub struct EffectiveTemplateConfig {
     pub completer: PathBuf,
     pub qa: PathBuf,
     pub final_reviewer: PathBuf,
+    pub quick_dev_plan_implement: PathBuf,
+    pub quick_dev_codex_review: PathBuf,
+    pub quick_dev_apply_fixes: PathBuf,
+    pub quick_dev_final_review: PathBuf,
     pub planner_position: PathBuf,
     pub vote: PathBuf,
     pub arbiter: PathBuf,
@@ -400,6 +404,30 @@ pub fn resolve_effective_config(
             project_dir,
             project_ref.and_then(|p| p.templates.final_reviewer.as_deref()),
             &global.templates.final_reviewer,
+        ),
+        quick_dev_plan_implement: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.quick_dev_plan_implement.as_deref()),
+            &global.templates.quick_dev_plan_implement,
+        ),
+        quick_dev_codex_review: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.quick_dev_codex_review.as_deref()),
+            &global.templates.quick_dev_codex_review,
+        ),
+        quick_dev_apply_fixes: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.quick_dev_apply_fixes.as_deref()),
+            &global.templates.quick_dev_apply_fixes,
+        ),
+        quick_dev_final_review: resolve_template_path(
+            workspace_root,
+            project_dir,
+            project_ref.and_then(|p| p.templates.quick_dev_final_review.as_deref()),
+            &global.templates.quick_dev_final_review,
         ),
         planner_position: resolve_template_path(
             workspace_root,
@@ -1104,6 +1132,50 @@ mod tests {
         assert_eq!(
             effective.templates.prompt_review_validator,
             Path::new("/workspace/project-a/templates/prompt-review-validator-project.md")
+        );
+    }
+
+    #[test]
+    fn resolve_effective_config_resolves_quick_dev_template_paths() {
+        let mut global = GlobalConfig::default();
+        global.templates.quick_dev_plan_implement = "templates/quick-plan-global.md".to_owned();
+        global.templates.quick_dev_codex_review = "templates/quick-codex-global.md".to_owned();
+        global.templates.quick_dev_apply_fixes = "templates/quick-apply-global.md".to_owned();
+        global.templates.quick_dev_final_review = "templates/quick-final-global.md".to_owned();
+
+        let project = ProjectConfig {
+            templates: crate::config::project::ProjectTemplateOverrides {
+                quick_dev_codex_review: Some("templates/quick-codex-project.md".to_owned()),
+                quick_dev_final_review: Some("templates/quick-final-project.md".to_owned()),
+                ..crate::config::project::ProjectTemplateOverrides::default()
+            },
+            ..ProjectConfig::default()
+        };
+
+        let effective = resolve_effective_config(
+            Path::new("/workspace"),
+            Path::new("/workspace/project-a"),
+            global,
+            Some(project),
+            RunWorkflowOverrides::default(),
+        )
+        .expect("quick-dev template settings should resolve");
+
+        assert_eq!(
+            effective.templates.quick_dev_plan_implement,
+            Path::new("/workspace/templates/quick-plan-global.md")
+        );
+        assert_eq!(
+            effective.templates.quick_dev_codex_review,
+            Path::new("/workspace/project-a/templates/quick-codex-project.md")
+        );
+        assert_eq!(
+            effective.templates.quick_dev_apply_fixes,
+            Path::new("/workspace/templates/quick-apply-global.md")
+        );
+        assert_eq!(
+            effective.templates.quick_dev_final_review,
+            Path::new("/workspace/project-a/templates/quick-final-project.md")
         );
     }
 

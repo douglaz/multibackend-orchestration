@@ -7668,6 +7668,7 @@ mod tests {
             parent_project: None,
             current_loop: 1,
             current_phase: Phase::Planning,
+            quick_dev_phase: None,
             phase_iteration: 1,
             status: ProjectStatus::InProgress,
             loops: vec![],

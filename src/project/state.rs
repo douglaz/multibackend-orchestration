@@ -20,6 +20,8 @@ pub struct ProjectState {
     pub parent_project: Option<String>,
     pub current_loop: u32,
     pub current_phase: Phase,
+    #[serde(default)]
+    pub quick_dev_phase: Option<QuickDevPhase>,
     pub phase_iteration: u32,
     pub status: ProjectStatus,
     pub loops: Vec<FeatureLoopState>,
@@ -94,6 +96,15 @@ pub enum Phase {
     Reviewing,
     Committing,
     Completing,
+    FinalReview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickDevPhase {
+    PlanAndImplement,
+    CodexReview,
+    ApplyFixes,
     FinalReview,
 }
 
@@ -278,6 +289,7 @@ impl ProjectState {
             parent_project,
             current_loop: 0,
             current_phase: Phase::Planning,
+            quick_dev_phase: None,
             phase_iteration: 1,
             status: ProjectStatus::Pending,
             loops: Vec::new(),
@@ -521,13 +533,19 @@ impl CompletionLoopArtifacts {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_created_at, ProjectState};
+    use super::{default_created_at, ProjectState, QuickDevPhase};
     use chrono::{DateTime, Utc};
 
     #[test]
     fn new_state_defaults_prompt_review_completed_to_false() {
         let state = ProjectState::new("demo", "Demo", "abc123", None);
         assert!(!state.prompt_review_completed);
+    }
+
+    #[test]
+    fn new_state_defaults_quick_dev_phase_to_none() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        assert!(state.quick_dev_phase.is_none());
     }
 
     #[test]
@@ -541,6 +559,29 @@ mod tests {
 
         let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
         assert!(!parsed.prompt_review_completed);
+    }
+
+    #[test]
+    fn legacy_state_without_quick_dev_phase_deserializes_to_none() {
+        let state = ProjectState::new("demo", "Demo", "abc123", None);
+        let mut value = serde_json::to_value(&state).expect("serialize state");
+        value
+            .as_object_mut()
+            .expect("state should serialize as object")
+            .remove("quick_dev_phase");
+
+        let parsed: ProjectState = serde_json::from_value(value).expect("deserialize legacy state");
+        assert!(parsed.quick_dev_phase.is_none());
+    }
+
+    #[test]
+    fn state_roundtrip_preserves_quick_dev_phase() {
+        let mut state = ProjectState::new("demo", "Demo", "abc123", None);
+        state.quick_dev_phase = Some(QuickDevPhase::ApplyFixes);
+
+        let serialized = serde_json::to_string(&state).expect("serialize state");
+        let parsed: ProjectState = serde_json::from_str(&serialized).expect("deserialize state");
+        assert_eq!(parsed.quick_dev_phase, Some(QuickDevPhase::ApplyFixes));
     }
 
     #[test]
