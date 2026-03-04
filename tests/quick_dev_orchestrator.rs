@@ -63,6 +63,39 @@ fn add_local_bare_remote(repo_root: &Path) {
 }
 
 // ---------------------------------------------------------------------------
+// Artifact helpers
+// ---------------------------------------------------------------------------
+
+/// List artifact filenames in the first loop directory (001-*) of a project.
+fn list_loop_artifact_names(temp: &Path, project_id: &str) -> Vec<String> {
+    let loops_dir = temp.join(".ralph/projects").join(project_id).join("loops");
+    let Ok(entries) = fs::read_dir(&loops_dir) else {
+        return Vec::new();
+    };
+    let mut loop_dir = None;
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("001-") {
+                loop_dir = Some(entry.path());
+                break;
+            }
+        }
+    }
+    let Some(dir) = loop_dir else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+// ---------------------------------------------------------------------------
 // Quick-dev backend script
 // ---------------------------------------------------------------------------
 
@@ -720,6 +753,10 @@ async fn resume_from_codex_review_phase() {
     let workspace = Workspace::load(workspace_root).expect("load workspace");
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
 
+    // Snapshot artifact inventory before resume
+    let pre_artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    let pre_count = pre_artifacts.len();
+
     let result = orchestrator
         .run(QuickDevRunOptions {
             project: Some(project_id.clone()),
@@ -737,6 +774,25 @@ async fn resume_from_codex_review_phase() {
         result.summary.contains("completed"),
         "expected completion, got: {}",
         result.summary
+    );
+
+    // Phase-sensitive artifact-delta assertions
+    let post_artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    let new_artifacts: Vec<_> = post_artifacts[pre_count..].to_vec();
+
+    assert!(
+        !new_artifacts.iter().any(|n| n.contains("quick-dev-plan-implement")),
+        "resume from CodexReview must NOT create plan-implement artifact; new: {:?}",
+        new_artifacts
+    );
+    assert!(
+        !new_artifacts.is_empty(),
+        "resume from CodexReview must produce new artifacts"
+    );
+    assert!(
+        new_artifacts[0].contains("quick-dev-codex-review"),
+        "first new artifact after CodexReview resume must be codex-review, got: {}",
+        new_artifacts[0]
     );
 }
 
@@ -772,6 +828,10 @@ async fn resume_from_final_review_phase() {
     let state_json = serde_json::to_string_pretty(&state).unwrap();
     fs::write(project_dir.join("state.json"), &state_json).expect("write state.json");
 
+    // Snapshot artifact inventory before resume
+    let pre_artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    let pre_count = pre_artifacts.len();
+
     let workspace = Workspace::load(workspace_root).expect("load workspace");
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
 
@@ -793,6 +853,21 @@ async fn resume_from_final_review_phase() {
         "expected completion, got: {}",
         result.summary
     );
+
+    // Phase-sensitive artifact-delta assertions
+    let post_artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    let new_artifacts: Vec<_> = post_artifacts[pre_count..].to_vec();
+
+    for name in &new_artifacts {
+        assert!(
+            !name.contains("quick-dev-plan-implement"),
+            "resume from FinalReview must NOT create plan-implement artifact; found: {name}"
+        );
+        assert!(
+            !name.contains("quick-dev-apply-fixes"),
+            "resume from FinalReview must NOT create apply-fixes artifact; found: {name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -820,6 +895,19 @@ async fn resume_from_none_starts_at_plan_and_implement() {
         result.summary.contains("completed"),
         "expected completion, got: {}",
         result.summary
+    );
+
+    // Phase-sensitive artifact assertion: starting from None must produce
+    // a plan-implement artifact, proving default start phase is PlanAndImplement.
+    let artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    assert!(
+        !artifacts.is_empty(),
+        "starting from None must produce artifacts"
+    );
+    assert!(
+        artifacts.iter().any(|n| n.contains("quick-dev-plan-implement")),
+        "starting from None must produce a plan-implement artifact; got: {:?}",
+        artifacts
     );
 }
 

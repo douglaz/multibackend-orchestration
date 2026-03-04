@@ -427,6 +427,8 @@ fn max_final_review_retries_guard(h: &RalphHarness) -> TestResult {
 
 /// Resume from persisted CodexReview phase: run quick-dev-run twice.
 /// First run sets state to CodexReview, second resumes from there.
+/// Phase-sensitive: the resume must NOT create a new plan-implement artifact
+/// and MUST produce codex-review artifacts first.
 fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qd-resume-cr-001";
@@ -451,6 +453,12 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
             ])
             .expect("first quick-dev-run should execute");
         assert_exit_code(&output, 0);
+
+        // Snapshot artifact inventory before resume
+        let pre_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts before resume");
+        let pre_count = pre_artifacts.len();
 
         // Manually set state to CodexReview to simulate a crash/resume
         let project_dir = h.project_dir(project_id);
@@ -482,10 +490,35 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
 
         let state = load_state(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
+
+        // Phase-sensitive artifact-delta assertions:
+        // After resuming from CodexReview, no new plan-implement artifact
+        // should have been created (resume must not restart).
+        // We count plan-implement artifacts: only one should exist (from the
+        // first run), proving the resume did not create a second one.
+        let post_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts after resume");
+        let plan_implement_count = post_artifacts
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("quick-dev-plan-implement")
+            })
+            .count();
+        assert_eq!(
+            plan_implement_count, 1,
+            "resume from CodexReview must NOT create a second plan-implement artifact; \
+             found {plan_implement_count} plan-implement artifacts"
+        );
     })
 }
 
 /// Resume from persisted FinalReview phase.
+/// Phase-sensitive: resume must NOT create plan-implement or apply-fixes
+/// artifacts (no restart path).
 fn resume_from_final_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qd-resume-fr-001";
@@ -510,6 +543,12 @@ fn resume_from_final_review(h: &RalphHarness) -> TestResult {
             ])
             .expect("first quick-dev-run should execute");
         assert_exit_code(&output, 0);
+
+        // Snapshot artifact inventory before resume
+        let pre_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts before resume");
+        let pre_count = pre_artifacts.len();
 
         // Set state to FinalReview
         let project_dir = h.project_dir(project_id);
@@ -541,10 +580,32 @@ fn resume_from_final_review(h: &RalphHarness) -> TestResult {
 
         let state = load_state(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
+
+        // Phase-sensitive artifact-delta assertions:
+        // After resuming from FinalReview, no plan-implement or apply-fixes
+        // artifacts should appear (no restart path taken).
+        let post_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts after resume");
+        let new_artifacts: Vec<_> = post_artifacts[pre_count..].to_vec();
+
+        for artifact in &new_artifacts {
+            let name = artifact.file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                !name.contains("quick-dev-plan-implement"),
+                "resume from FinalReview must NOT create plan-implement artifact; found: {name}"
+            );
+            assert!(
+                !name.contains("quick-dev-apply-fixes"),
+                "resume from FinalReview must NOT create apply-fixes artifact; found: {name}"
+            );
+        }
     })
 }
 
 /// Resume from None quick_dev_phase starts at PlanAndImplement.
+/// Phase-sensitive: must create a plan-implement artifact as the first phase
+/// marker, proving default start phase is PlanAndImplement.
 fn resume_from_none_starts_plan_and_implement(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qd-resume-none-001";
@@ -580,6 +641,26 @@ fn resume_from_none_starts_plan_and_implement(h: &RalphHarness) -> TestResult {
 
         let state = load_state(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
+
+        // Phase-sensitive artifact assertion: starting from None must produce
+        // a plan-implement artifact, proving default start phase is PlanAndImplement.
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts should succeed");
+        assert!(
+            !artifacts.is_empty(),
+            "starting from None must produce artifacts"
+        );
+        assert!(
+            artifacts.iter().any(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("quick-dev-plan-implement")
+            }),
+            "starting from None must produce a plan-implement artifact; got: {:?}",
+            artifacts
+        );
     })
 }
 
