@@ -10,9 +10,7 @@ use crate::config::validate_required_backend_spec;
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-use crate::workflow::quick_dev_orchestrator::{
-    self, QuickDevOrchestrator, QuickDevRunOptions,
-};
+use crate::workflow::quick_dev_orchestrator::{self, QuickDevOrchestrator, QuickDevRunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -133,9 +131,10 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
         .as_deref()
         .or(workspace.config.workflow.implementer_backend.as_deref())
         .unwrap_or(&workspace.config.workspace.default_backend);
-    let preflight_reviewer = reviewer_backend
-        .as_deref()
-        .or(workspace.config.workflow.reviewer_backend.as_deref());
+    let preflight_reviewer =
+        reviewer_backend
+            .as_deref()
+            .or(workspace.config.workflow.reviewer_backend.as_deref());
 
     match preflight_reviewer {
         None => {
@@ -150,11 +149,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
                 preflight_implementer,
                 "quick-dev implementer backend",
             )?;
-            validate_required_backend_spec(
-                &workspace.config,
-                rev,
-                "quick-dev reviewer backend",
-            )?;
+            validate_required_backend_spec(&workspace.config, rev, "quick-dev reviewer backend")?;
         }
     }
 

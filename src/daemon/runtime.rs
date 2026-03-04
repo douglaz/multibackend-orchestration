@@ -1655,14 +1655,8 @@ async fn dispatch_task(
                     "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_run(
-                    &ralph_bin,
-                    &wt,
-                    &project_id,
-                    &log_path,
-                    pr_url.as_deref(),
-                )
-                .await?
+                process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
+                    .await?
             }
             (false, false) => {
                 eprintln!(

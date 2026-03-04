@@ -176,8 +176,12 @@ fn setup_quick_dev(h: &RalphHarness, project_id: &str, impl_script: &str, rev_sc
     ])
     .expect("disable gemini");
 
-    h.create_project(project_id, "Quick-Dev Test Project", "Quick-dev test prompt")
-        .expect("create_project failed");
+    h.create_project(
+        project_id,
+        "Quick-Dev Test Project",
+        "Quick-dev test prompt",
+    )
+    .expect("create_project failed");
 }
 
 /// Load project state from state.json on disk (written by the quick-dev
@@ -493,8 +497,11 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
             "prompt_file": "prompt.md",
             "created_at": "2026-01-01T00:00:00Z"
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
-            .expect("write seeded state");
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded_state).unwrap(),
+        )
+        .expect("write seeded state");
 
         // Create the loop directory so artifacts can be written
         let loops_dir = project_dir.join("loops").join("001-quick-dev");
@@ -540,7 +547,9 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
 
         // 1. No plan-implement artifact should exist (resume must not restart)
         assert!(
-            !artifact_names.iter().any(|n| n.contains("quick-dev-plan-implement")),
+            !artifact_names
+                .iter()
+                .any(|n| n.contains("quick-dev-plan-implement")),
             "resume from CodexReview must NOT create plan-implement artifact; found: {:?}",
             artifact_names
         );
@@ -614,8 +623,11 @@ fn resume_from_final_review(h: &RalphHarness) -> TestResult {
             "prompt_file": "prompt.md",
             "created_at": "2026-01-01T00:00:00Z"
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
-            .expect("write seeded state");
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded_state).unwrap(),
+        )
+        .expect("write seeded state");
 
         // Create the loop directory so artifacts can be written
         let loops_dir = project_dir.join("loops").join("001-quick-dev");
@@ -878,8 +890,7 @@ fn initial_checkpoint_planning_to_implementing(h: &RalphHarness) -> TestResult {
 
         // Create a file outside .ralph/ so the initial checkpoint has changes to commit.
         let seed_file = h.repo_root.join("seed-for-checkpoint.txt");
-        fs::write(&seed_file, "seed content for initial checkpoint test")
-            .expect("write seed file");
+        fs::write(&seed_file, "seed content for initial checkpoint test").expect("write seed file");
 
         // Run WITHOUT --skip-commit so checkpoints fire.
         let output = h
@@ -904,9 +915,7 @@ fn initial_checkpoint_planning_to_implementing(h: &RalphHarness) -> TestResult {
             .output()
             .expect("git log failed");
         let log_output = String::from_utf8_lossy(&git_log.stdout);
-        let expected_msg = format!(
-            "ralph({project_id}): loop 1 planning -> implementing"
-        );
+        let expected_msg = format!("ralph({project_id}): loop 1 planning -> implementing");
         assert!(
             log_output.contains(&expected_msg),
             "expected '{expected_msg}' in git log, got:\n{log_output}"
@@ -1441,8 +1450,11 @@ fn guard_at_entry_codex_review_skips_to_final_review(h: &RalphHarness) -> TestRe
             "prompt_file": "prompt.md",
             "created_at": "2026-01-01T00:00:00Z"
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
-            .expect("write seeded state");
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded_state).unwrap(),
+        )
+        .expect("write seeded state");
 
         let loops_dir = project_dir.join("loops").join("001-quick-dev");
         fs::create_dir_all(&loops_dir).expect("create loop dir");
@@ -1465,9 +1477,7 @@ fn guard_at_entry_codex_review_skips_to_final_review(h: &RalphHarness) -> TestRe
         assert_stdout_contains(&output, "completed");
 
         // Verify: no codex-review artifact (reviewer call was skipped)
-        let artifacts = h
-            .list_artifacts(project_id, 1)
-            .expect("list_artifacts");
+        let artifacts = h.list_artifacts(project_id, 1).expect("list_artifacts");
         let artifact_names: Vec<String> = artifacts
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
@@ -1538,8 +1548,11 @@ fn guard_at_entry_final_review_force_completes(h: &RalphHarness) -> TestResult {
             "prompt_file": "prompt.md",
             "created_at": "2026-01-01T00:00:00Z"
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
-            .expect("write seeded state");
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded_state).unwrap(),
+        )
+        .expect("write seeded state");
 
         let loops_dir = project_dir.join("loops").join("001-quick-dev");
         fs::create_dir_all(&loops_dir).expect("create loop dir");
@@ -1562,9 +1575,7 @@ fn guard_at_entry_final_review_force_completes(h: &RalphHarness) -> TestResult {
         assert_stdout_contains(&output, "force-completed");
 
         // Verify: no final-review artifacts (both backend calls were skipped)
-        let artifacts = h
-            .list_artifacts(project_id, 1)
-            .expect("list_artifacts");
+        let artifacts = h.list_artifacts(project_id, 1).expect("list_artifacts");
         let artifact_names: Vec<String> = artifacts
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
@@ -1644,8 +1655,11 @@ fn transition_boundary_resume_persists_destination(h: &RalphHarness) -> TestResu
             "prompt_file": "prompt.md",
             "created_at": "2026-01-01T00:00:00Z"
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
-            .expect("write seeded state");
+        fs::write(
+            &state_path,
+            serde_json::to_string_pretty(&seeded_state).unwrap(),
+        )
+        .expect("write seeded state");
 
         let loops_dir = project_dir.join("loops").join("001-quick-dev");
         fs::create_dir_all(&loops_dir).expect("create loop dir");
@@ -1666,9 +1680,7 @@ fn transition_boundary_resume_persists_destination(h: &RalphHarness) -> TestResu
         assert_stdout_contains(&output, "completed");
 
         // Verify: no plan-implement artifact (resume skipped PlanAndImplement)
-        let artifacts = h
-            .list_artifacts(project_id, 1)
-            .expect("list_artifacts");
+        let artifacts = h.list_artifacts(project_id, 1).expect("list_artifacts");
         let artifact_names: Vec<String> = artifacts
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
@@ -1680,10 +1692,7 @@ fn transition_boundary_resume_persists_destination(h: &RalphHarness) -> TestResu
         );
 
         // First artifact must be codex-review (proving correct resume phase)
-        assert!(
-            !artifact_names.is_empty(),
-            "resume must produce artifacts"
-        );
+        assert!(!artifact_names.is_empty(), "resume must produce artifacts");
         assert!(
             artifact_names[0].contains("codex-review"),
             "first artifact must be codex-review, got: {}",

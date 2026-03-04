@@ -1082,8 +1082,8 @@ mod tests {
     #[test]
     fn quick_final_review_parser_tolerates_leading_whitespace() {
         let text = "  # Final Review: ISSUES FOUND  \n\nbug";
-        let parsed = parse_quick_final_review_output(text)
-            .expect("leading whitespace on H1 should parse");
+        let parsed =
+            parse_quick_final_review_output(text).expect("leading whitespace on H1 should parse");
         assert!(matches!(
             parsed,
             QuickFinalReviewDecision::IssuesFound { .. }
@@ -1093,8 +1093,7 @@ mod tests {
     #[test]
     fn quick_final_review_parser_strips_frontmatter() {
         let text = "---\nartifact: final\n---\n# Final Review: ISSUES FOUND\n\nbug";
-        let parsed =
-            parse_quick_final_review_output(text).expect("frontmatter should be stripped");
+        let parsed = parse_quick_final_review_output(text).expect("frontmatter should be stripped");
         assert!(matches!(
             parsed,
             QuickFinalReviewDecision::IssuesFound { .. }

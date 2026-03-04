@@ -4302,10 +4302,7 @@ fn quick_label_is_non_lifecycle(h: &RalphHarness) -> TestResult {
         );
 
         // Verify classify_lifecycle_labels does not classify ralph:quick as lifecycle
-        let labels = vec![
-            "ralph:ready".to_owned(),
-            "ralph:quick".to_owned(),
-        ];
+        let labels = vec!["ralph:ready".to_owned(), "ralph:quick".to_owned()];
         let lifecycle = github::classify_lifecycle_labels(&labels);
         assert_eq!(
             lifecycle.len(),

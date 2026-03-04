@@ -300,13 +300,8 @@ pub async fn spawn_ralph_quick_dev_run(
     log_file: &Path,
     pr_url: Option<&str>,
 ) -> Result<SpawnedChild> {
-    let mut cmd = build_ralph_quick_dev_run_command(
-        ralph_bin,
-        worktree_path,
-        project_id,
-        log_file,
-        pr_url,
-    )?;
+    let mut cmd =
+        build_ralph_quick_dev_run_command(ralph_bin, worktree_path, project_id, log_file, pr_url)?;
 
     // SAFETY: setsid() is async-signal-safe and is the standard way to
     // create a new session/process group in the child before exec.

@@ -7,9 +7,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
-use crate::config::{
-    resolve_effective_config, EffectiveConfig, RunWorkflowOverrides,
-};
+use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverrides};
 use crate::error::RalphError;
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition,
@@ -275,8 +273,7 @@ impl QuickDevOrchestrator {
         // empty.  The artifact was written during the prior CodexReview phase
         // and persists on disk across process restarts.
         if matches!(current_qd_phase, QuickDevPhase::ApplyFixes) {
-            last_review_feedback =
-                load_latest_review_feedback(project_dir, loop_number, loop_slug);
+            last_review_feedback = load_latest_review_feedback(project_dir, loop_number, loop_slug);
         }
 
         // Compute a safe upper bound on phase transitions from the configured
@@ -287,9 +284,7 @@ impl QuickDevOrchestrator {
         // attempt plus retries).  We add a generous buffer of 10 for resume
         // edge cases and the initial checkpoint transition.
         let max_transitions: u32 = (max_final_review_retries.saturating_add(1))
-            .saturating_mul(
-                3u32.saturating_add(2u32.saturating_mul(max_review_iterations)),
-            )
+            .saturating_mul(3u32.saturating_add(2u32.saturating_mul(max_review_iterations)))
             .saturating_add(10);
 
         // Phase machine loop (bounded by configured limits)
@@ -327,7 +322,9 @@ impl QuickDevOrchestrator {
                         impl_backend.clone(),
                         &prompt,
                         &mut impl_log,
-                        registry.timeout_for_role(implementer_spec, "implementer").as_secs(),
+                        registry
+                            .timeout_for_role(implementer_spec, "implementer")
+                            .as_secs(),
                     )
                     .await?;
 
@@ -410,8 +407,7 @@ impl QuickDevOrchestrator {
                         &git_diff,
                     )?;
 
-                    let rev_backend =
-                        registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
+                    let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
 
                     let mut rev_log =
                         LogWriter::open(log_dir, project_id, Some(loop_number), "quick-dev-review");
@@ -419,7 +415,9 @@ impl QuickDevOrchestrator {
                         rev_backend.clone(),
                         &prompt,
                         &mut rev_log,
-                        registry.timeout_for_role(reviewer_spec, "reviewer").as_secs(),
+                        registry
+                            .timeout_for_role(reviewer_spec, "reviewer")
+                            .as_secs(),
                     )
                     .await?;
 
@@ -533,7 +531,10 @@ impl QuickDevOrchestrator {
                             persist_destination_and_checkpoint(
                                 state,
                                 &QuickDevPhase::ApplyFixes,
-                                compute_phase_iteration(&QuickDevPhase::ApplyFixes, review_iteration),
+                                compute_phase_iteration(
+                                    &QuickDevPhase::ApplyFixes,
+                                    review_iteration,
+                                ),
                                 review_iteration,
                                 final_review_attempts,
                                 project_dir,
@@ -553,10 +554,7 @@ impl QuickDevOrchestrator {
                 }
 
                 QuickDevPhase::ApplyFixes => {
-                    info!(
-                        loop_number,
-                        review_iteration, "quick-dev: ApplyFixes phase"
-                    );
+                    info!(loop_number, review_iteration, "quick-dev: ApplyFixes phase");
 
                     let git_diff = current_git_diff(&self.workspace.root)?;
                     let prompt = build_apply_fixes_prompt(
@@ -580,7 +578,9 @@ impl QuickDevOrchestrator {
                         impl_backend.clone(),
                         &prompt,
                         &mut impl_log,
-                        registry.timeout_for_role(implementer_spec, "implementer").as_secs(),
+                        registry
+                            .timeout_for_role(implementer_spec, "implementer")
+                            .as_secs(),
                     )
                     .await?;
 
@@ -702,7 +702,9 @@ impl QuickDevOrchestrator {
                         impl_backend.clone(),
                         &impl_final_prompt,
                         &mut impl_fr_log,
-                        registry.timeout_for_role(implementer_spec, "implementer").as_secs(),
+                        registry
+                            .timeout_for_role(implementer_spec, "implementer")
+                            .as_secs(),
                     )
                     .await?;
                     let impl_decision = parse_quick_final_review_output(&impl_raw)?;
@@ -736,8 +738,7 @@ impl QuickDevOrchestrator {
                         &spec_content,
                         &git_diff,
                     )?;
-                    let rev_backend =
-                        registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
+                    let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
                     let mut rev_fr_log = LogWriter::open(
                         log_dir,
                         project_id,
@@ -748,7 +749,9 @@ impl QuickDevOrchestrator {
                         rev_backend.clone(),
                         &rev_final_prompt,
                         &mut rev_fr_log,
-                        registry.timeout_for_role(reviewer_spec, "reviewer").as_secs(),
+                        registry
+                            .timeout_for_role(reviewer_spec, "reviewer")
+                            .as_secs(),
                     )
                     .await?;
                     let rev_decision = parse_quick_final_review_output(&rev_raw)?;
@@ -1031,15 +1034,11 @@ fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 
 /// resuming at the `ApplyFixes` phase after a process restart.
 fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: &str) -> String {
     let suffix = ArtifactKind::QuickDevCodexReview { satisfied: false }.file_name();
-    let artifact_rel = match resolve_artifact_path_by_suffix(
-        project_dir,
-        loop_number,
-        loop_slug,
-        &suffix,
-    ) {
-        Ok(Some(rel)) => rel,
-        _ => return String::new(),
-    };
+    let artifact_rel =
+        match resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix) {
+            Ok(Some(rel)) => rel,
+            _ => return String::new(),
+        };
     let artifact_path = project_dir.join(&artifact_rel);
     match fs::read_to_string(&artifact_path) {
         Ok(content) => {
@@ -1119,6 +1118,7 @@ fn current_git_diff(workspace_root: &Path) -> Result<String> {
     working_tree_diff_excluding_orchestration_state(repo_root)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn checkpoint_if_enabled(
     workspace: &Workspace,
     project_id: &str,
@@ -1173,7 +1173,10 @@ fn build_plan_implement_prompt(
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
-    vars.insert("system_guardrails".to_owned(), QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned(),
+    );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("current_diff".to_owned(), git_diff.to_owned());
@@ -1187,7 +1190,10 @@ fn build_codex_review_prompt(
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
-    vars.insert("system_guardrails".to_owned(), QUICK_DEV_REVIEWER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        QUICK_DEV_REVIEWER_GUARDRAILS.to_owned(),
+    );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("current_diff".to_owned(), git_diff.to_owned());
@@ -1202,7 +1208,10 @@ fn build_apply_fixes_prompt(
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
-    vars.insert("system_guardrails".to_owned(), QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned(),
+    );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("review_feedback".to_owned(), review_feedback.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
@@ -1217,7 +1226,10 @@ fn build_final_review_prompt(
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
-    vars.insert("system_guardrails".to_owned(), QUICK_DEV_REVIEWER_GUARDRAILS.to_owned());
+    vars.insert(
+        "system_guardrails".to_owned(),
+        QUICK_DEV_REVIEWER_GUARDRAILS.to_owned(),
+    );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("current_diff".to_owned(), git_diff.to_owned());
@@ -1322,7 +1334,8 @@ mod tests {
             max_review_iterations: None,
             max_final_review_retries: None,
         };
-        let effective = make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
+        let effective =
+            make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
         let result = resolve_implementer_backend(&options, &effective).unwrap();
         assert_eq!(result, "starting");
     }
@@ -1397,23 +1410,38 @@ mod tests {
     fn validate_distinct_backends_rejects_whitespace_equal() {
         let err = validate_distinct_backends(" claude ", "claude").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
-        assert!(msg.contains("claude"), "error should mention canonical spec, got: {msg}");
+        assert!(
+            msg.contains("distinct"),
+            "expected distinct-backend error, got: {msg}"
+        );
+        assert!(
+            msg.contains("claude"),
+            "error should mention canonical spec, got: {msg}"
+        );
     }
 
     #[test]
     fn validate_distinct_backends_rejects_optional_prefix_equal() {
         let err = validate_distinct_backends("?claude", "claude").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
+        assert!(
+            msg.contains("distinct"),
+            "expected distinct-backend error, got: {msg}"
+        );
     }
 
     #[test]
     fn validate_distinct_backends_rejects_optional_prefix_with_model() {
         let err = validate_distinct_backends("?claude(opus)", "claude(opus)").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("distinct"), "expected distinct-backend error, got: {msg}");
-        assert!(msg.contains("claude(opus)"), "error should mention canonical spec, got: {msg}");
+        assert!(
+            msg.contains("distinct"),
+            "expected distinct-backend error, got: {msg}"
+        );
+        assert!(
+            msg.contains("claude(opus)"),
+            "error should mention canonical spec, got: {msg}"
+        );
     }
 
     #[test]
@@ -1434,10 +1462,7 @@ mod tests {
         let mut state = ProjectState::new("test", "Test", "hash", None);
         persist_quick_dev_state(&mut state, &QuickDevPhase::PlanAndImplement, 1, 0, 0);
 
-        assert_eq!(
-            state.quick_dev_phase,
-            Some(QuickDevPhase::PlanAndImplement)
-        );
+        assert_eq!(state.quick_dev_phase, Some(QuickDevPhase::PlanAndImplement));
         assert_eq!(state.current_phase, Phase::Implementing);
     }
 
@@ -1462,7 +1487,10 @@ mod tests {
 
     #[test]
     fn compute_phase_iteration_returns_correct_values() {
-        assert_eq!(compute_phase_iteration(&QuickDevPhase::PlanAndImplement, 0), 1);
+        assert_eq!(
+            compute_phase_iteration(&QuickDevPhase::PlanAndImplement, 0),
+            1
+        );
         assert_eq!(compute_phase_iteration(&QuickDevPhase::CodexReview, 5), 1);
         assert_eq!(compute_phase_iteration(&QuickDevPhase::FinalReview, 3), 1);
         assert_eq!(compute_phase_iteration(&QuickDevPhase::ApplyFixes, 3), 3);
@@ -1523,7 +1551,10 @@ mod tests {
 
     #[test]
     fn quick_dev_phase_display() {
-        assert_eq!(QuickDevPhase::PlanAndImplement.to_string(), "plan_and_implement");
+        assert_eq!(
+            QuickDevPhase::PlanAndImplement.to_string(),
+            "plan_and_implement"
+        );
         assert_eq!(QuickDevPhase::CodexReview.to_string(), "codex_review");
         assert_eq!(QuickDevPhase::ApplyFixes.to_string(), "apply_fixes");
         assert_eq!(QuickDevPhase::FinalReview.to_string(), "final_review");
@@ -1531,10 +1562,22 @@ mod tests {
 
     #[test]
     fn quick_dev_phase_to_current_phase_mapping() {
-        assert_eq!(QuickDevPhase::PlanAndImplement.to_current_phase(), Phase::Implementing);
-        assert_eq!(QuickDevPhase::CodexReview.to_current_phase(), Phase::Reviewing);
-        assert_eq!(QuickDevPhase::ApplyFixes.to_current_phase(), Phase::Implementing);
-        assert_eq!(QuickDevPhase::FinalReview.to_current_phase(), Phase::FinalReview);
+        assert_eq!(
+            QuickDevPhase::PlanAndImplement.to_current_phase(),
+            Phase::Implementing
+        );
+        assert_eq!(
+            QuickDevPhase::CodexReview.to_current_phase(),
+            Phase::Reviewing
+        );
+        assert_eq!(
+            QuickDevPhase::ApplyFixes.to_current_phase(),
+            Phase::Implementing
+        );
+        assert_eq!(
+            QuickDevPhase::FinalReview.to_current_phase(),
+            Phase::FinalReview
+        );
     }
 
     /// Simulates the guard-at-entry logic for CodexReview: when
@@ -1576,13 +1619,7 @@ mod tests {
         state.current_phase = Phase::Implementing;
 
         // Simulate persist_destination_and_checkpoint step 1 (persist)
-        persist_quick_dev_state(
-            &mut state,
-            &QuickDevPhase::CodexReview,
-            1,
-            0,
-            0,
-        );
+        persist_quick_dev_state(&mut state, &QuickDevPhase::CodexReview, 1, 0, 0);
         save_state_to_disk(&state, temp.path()).unwrap();
 
         let content = fs::read_to_string(temp.path().join("state.json")).unwrap();
@@ -1600,13 +1637,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let mut state = ProjectState::new("test", "Test", "hash", None);
 
-        persist_quick_dev_state(
-            &mut state,
-            &QuickDevPhase::ApplyFixes,
-            3,
-            3,
-            1,
-        );
+        persist_quick_dev_state(&mut state, &QuickDevPhase::ApplyFixes, 3, 3, 1);
         save_state_to_disk(&state, temp.path()).unwrap();
 
         let content = fs::read_to_string(temp.path().join("state.json")).unwrap();
@@ -1658,8 +1689,7 @@ mod tests {
                 commit_tag_format: String::new(),
                 prompt_change_action: crate::config::PromptChangeAction::default(),
                 planner_state_in_prompt: crate::config::PlannerStateInPrompt::default(),
-                planner_previous_specs_in_prompt:
-                    crate::config::PreviousSpecsInPrompt::default(),
+                planner_previous_specs_in_prompt: crate::config::PreviousSpecsInPrompt::default(),
                 planner_max_prior_loops: None,
                 max_review_history_entries_in_prompt: 0,
                 max_qa_history_entries_in_prompt: 0,

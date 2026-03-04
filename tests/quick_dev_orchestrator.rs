@@ -454,10 +454,22 @@ fn quick_dev_phase_serde_roundtrip() {
 
 #[test]
 fn quick_dev_phase_to_current_phase() {
-    assert_eq!(QuickDevPhase::PlanAndImplement.to_current_phase(), Phase::Implementing);
-    assert_eq!(QuickDevPhase::CodexReview.to_current_phase(), Phase::Reviewing);
-    assert_eq!(QuickDevPhase::ApplyFixes.to_current_phase(), Phase::Implementing);
-    assert_eq!(QuickDevPhase::FinalReview.to_current_phase(), Phase::FinalReview);
+    assert_eq!(
+        QuickDevPhase::PlanAndImplement.to_current_phase(),
+        Phase::Implementing
+    );
+    assert_eq!(
+        QuickDevPhase::CodexReview.to_current_phase(),
+        Phase::Reviewing
+    );
+    assert_eq!(
+        QuickDevPhase::ApplyFixes.to_current_phase(),
+        Phase::Implementing
+    );
+    assert_eq!(
+        QuickDevPhase::FinalReview.to_current_phase(),
+        Phase::FinalReview
+    );
 }
 
 #[test]
@@ -723,12 +735,8 @@ async fn resume_from_codex_review_phase() {
 
     // Write persisted state with quick_dev_phase = CodexReview
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
     state.status = ProjectStatus::InProgress;
     state.current_phase = Phase::Reviewing;
@@ -781,7 +789,9 @@ async fn resume_from_codex_review_phase() {
     let new_artifacts: Vec<_> = post_artifacts[pre_count..].to_vec();
 
     assert!(
-        !new_artifacts.iter().any(|n| n.contains("quick-dev-plan-implement")),
+        !new_artifacts
+            .iter()
+            .any(|n| n.contains("quick-dev-plan-implement")),
         "resume from CodexReview must NOT create plan-implement artifact; new: {:?}",
         new_artifacts
     );
@@ -802,12 +812,8 @@ async fn resume_from_final_review_phase() {
 
     // Write persisted state with quick_dev_phase = FinalReview
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
     state.status = ProjectStatus::InProgress;
     state.current_phase = Phase::FinalReview;
@@ -905,7 +911,9 @@ async fn resume_from_none_starts_at_plan_and_implement() {
         "starting from None must produce artifacts"
     );
     assert!(
-        artifacts.iter().any(|n| n.contains("quick-dev-plan-implement")),
+        artifacts
+            .iter()
+            .any(|n| n.contains("quick-dev-plan-implement")),
         "starting from None must produce a plan-implement artifact; got: {:?}",
         artifacts
     );
@@ -917,12 +925,8 @@ async fn resume_after_completion_does_not_restart() {
 
     // Write persisted state marking project as completed with quick_dev_phase = None
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.register_feature_loop(
         1,
         "quick-dev".to_owned(),
@@ -977,12 +981,8 @@ async fn resume_from_apply_fixes_includes_review_feedback() {
 
     // Write persisted state with quick_dev_phase = ApplyFixes and review_iteration = 1
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.quick_dev_phase = Some(QuickDevPhase::ApplyFixes);
     state.status = ProjectStatus::InProgress;
     state.current_phase = Phase::Implementing;
@@ -1099,8 +1099,7 @@ fi
 
     // Verify the captured prompt (the first backend call, which is apply-fixes)
     // contains the review feedback from the persisted artifact.
-    let captured = fs::read_to_string(&capture_prompt_file)
-        .expect("read captured prompt");
+    let captured = fs::read_to_string(&capture_prompt_file).expect("read captured prompt");
     assert!(
         captured.contains("error handling"),
         "apply-fixes prompt should contain review feedback from artifact, got: {}",
@@ -1300,12 +1299,8 @@ async fn transition_failure_preserves_review_counter_on_resume() {
     // the transition to ApplyFixes never completed (quick_dev_phase is still
     // CodexReview).
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
     state.status = ProjectStatus::InProgress;
     state.current_phase = Phase::Reviewing;
@@ -1363,7 +1358,9 @@ async fn transition_failure_preserves_review_counter_on_resume() {
         serde_json::from_str(&final_state_json).expect("parse final state.json");
 
     // review_iteration must never decrease from persisted pre-crash value
-    let review_iter = final_state["quick_dev_review_iteration"].as_u64().unwrap_or(0);
+    let review_iter = final_state["quick_dev_review_iteration"]
+        .as_u64()
+        .unwrap_or(0);
     assert!(
         review_iter >= 2,
         "review_iteration must not decrease from persisted value 2 after resume, got: {}",
@@ -1396,12 +1393,8 @@ async fn transition_failure_preserves_final_review_counter_on_resume() {
     // persisted, but the transition to PlanAndImplement never completed
     // (quick_dev_phase is still FinalReview, status is still in_progress).
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
     state.status = ProjectStatus::InProgress;
     state.current_phase = Phase::FinalReview;
@@ -1459,7 +1452,9 @@ async fn transition_failure_preserves_final_review_counter_on_resume() {
         serde_json::from_str(&final_state_json).expect("parse final state.json");
 
     // final_review_attempts must never decrease from persisted pre-crash value
-    let fr_attempts = final_state["quick_dev_final_review_attempts"].as_u64().unwrap_or(0);
+    let fr_attempts = final_state["quick_dev_final_review_attempts"]
+        .as_u64()
+        .unwrap_or(0);
     assert!(
         fr_attempts >= 1,
         "final_review_attempts must not decrease from persisted value 1 after resume, got: {}",
@@ -1541,12 +1536,8 @@ async fn guard_at_entry_codex_review_skips_reviewer_when_at_limit() {
     let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
 
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     // Seed: CodexReview phase with review_iteration already at the limit (5).
     state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
     state.status = ProjectStatus::InProgress;
@@ -1572,8 +1563,7 @@ async fn guard_at_entry_codex_review_skips_reviewer_when_at_limit() {
     state.current_phase = Phase::Reviewing;
     state.quick_dev_review_iteration = 5;
     let state_json = serde_json::to_string_pretty(&state).unwrap();
-    fs::write(project_dir.join("state.json"), &state_json)
-        .expect("write guard-at-entry state");
+    fs::write(project_dir.join("state.json"), &state_json).expect("write guard-at-entry state");
 
     let workspace = Workspace::load(workspace_root).expect("load workspace");
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
@@ -1623,12 +1613,8 @@ async fn guard_at_entry_final_review_force_completes_when_at_limit() {
         setup_quick_dev_workspace("satisfied", "issues_found");
 
     let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
-    let mut state = ralph::project::state::ProjectState::new(
-        &project_id,
-        "Quick Dev Test",
-        "hash123",
-        None,
-    );
+    let mut state =
+        ralph::project::state::ProjectState::new(&project_id, "Quick Dev Test", "hash123", None);
     // Seed: FinalReview phase with final_review_attempts already at limit (2).
     state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
     state.status = ProjectStatus::InProgress;
@@ -1654,8 +1640,7 @@ async fn guard_at_entry_final_review_force_completes_when_at_limit() {
     state.current_phase = Phase::FinalReview;
     state.quick_dev_final_review_attempts = 2;
     let state_json = serde_json::to_string_pretty(&state).unwrap();
-    fs::write(project_dir.join("state.json"), &state_json)
-        .expect("write guard-at-entry state");
+    fs::write(project_dir.join("state.json"), &state_json).expect("write guard-at-entry state");
 
     let workspace = Workspace::load(workspace_root).expect("load workspace");
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
@@ -1751,8 +1736,5 @@ async fn destination_state_persisted_before_checkpoint_plan_to_codex() {
 
     assert_eq!(final_state["status"].as_str().unwrap(), "completed");
     assert!(final_state["quick_dev_phase"].is_null());
-    assert_eq!(
-        final_state["current_phase"].as_str().unwrap(),
-        "completing"
-    );
+    assert_eq!(final_state["current_phase"].as_str().unwrap(), "completing");
 }

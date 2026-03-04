@@ -8,28 +8,44 @@ pub fn build_quick_dev_plan_implement_prompt(
     template_path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<String> {
-    render_template_with_fallback(template_path, vars, default_quick_dev_plan_implement_template())
+    render_template_with_fallback(
+        template_path,
+        vars,
+        default_quick_dev_plan_implement_template(),
+    )
 }
 
 pub fn build_quick_dev_codex_review_prompt(
     template_path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<String> {
-    render_template_with_fallback(template_path, vars, default_quick_dev_codex_review_template())
+    render_template_with_fallback(
+        template_path,
+        vars,
+        default_quick_dev_codex_review_template(),
+    )
 }
 
 pub fn build_quick_dev_apply_fixes_prompt(
     template_path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<String> {
-    render_template_with_fallback(template_path, vars, default_quick_dev_apply_fixes_template())
+    render_template_with_fallback(
+        template_path,
+        vars,
+        default_quick_dev_apply_fixes_template(),
+    )
 }
 
 pub fn build_quick_dev_final_review_prompt(
     template_path: &Path,
     vars: &BTreeMap<String, String>,
 ) -> Result<String> {
-    render_template_with_fallback(template_path, vars, default_quick_dev_final_review_template())
+    render_template_with_fallback(
+        template_path,
+        vars,
+        default_quick_dev_final_review_template(),
+    )
 }
 
 fn default_quick_dev_plan_implement_template() -> &'static str {

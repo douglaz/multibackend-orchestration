@@ -42,11 +42,7 @@ pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
         "Ralph daemon completed this issue",
     ),
     ("ralph:failed", "#d93f0b", "Ralph daemon task failed"),
-    (
-        "ralph:quick",
-        "#5319e7",
-        "Use quick-dev orchestration flow",
-    ),
+    ("ralph:quick", "#5319e7", "Use quick-dev orchestration flow"),
 ];
 
 /// Represents a single issue returned from `gh issue list`.
@@ -2334,7 +2330,9 @@ mod tests {
     #[test]
     fn unknown_errors_are_not_retried() {
         assert!(!super::is_retryable_push_stderr("repository not found"));
-        assert!(!super::is_retryable_push_stderr("unexpected internal error xyz"));
+        assert!(!super::is_retryable_push_stderr(
+            "unexpected internal error xyz"
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -2397,16 +2395,18 @@ mod tests {
         let codes = super::extract_http_status_codes(
             "fatal: unable to access 'https://github.com/org/repo-403/': http 503 service unavailable"
         );
-        assert_eq!(codes, vec![503], "should only extract 503 from 'http 503', not 403 from URL");
-
-        let codes = super::extract_http_status_codes(
-            "the requested url returned error: 401"
+        assert_eq!(
+            codes,
+            vec![503],
+            "should only extract 503 from 'http 503', not 403 from URL"
         );
+
+        let codes = super::extract_http_status_codes("the requested url returned error: 401");
         assert_eq!(codes, vec![401]);
 
         // No codes from plain URLs.
         let codes = super::extract_http_status_codes(
-            "fatal: unable to access 'https://github.com/org/error-500/': could not resolve host"
+            "fatal: unable to access 'https://github.com/org/error-500/': could not resolve host",
         );
         assert!(codes.is_empty(), "should not extract codes from URL paths");
     }
@@ -2443,9 +2443,8 @@ mod tests {
         );
         assert!(!is_retryable_push_error(&gh013));
 
-        let forbidden = RalphError::Orchestration(
-            "git push failed for branch main: HTTP 403".to_owned(),
-        );
+        let forbidden =
+            RalphError::Orchestration("git push failed for branch main: HTTP 403".to_owned());
         assert!(!is_retryable_push_error(&forbidden));
     }
 
@@ -2474,9 +2473,7 @@ mod tests {
         assert!(!is_retryable_push_error(&validation));
 
         // Malformed push error (missing ": " separator) should be non-retryable.
-        let malformed = RalphError::Orchestration(
-            "git push failed for branch main".to_owned(),
-        );
+        let malformed = RalphError::Orchestration("git push failed for branch main".to_owned());
         assert!(!is_retryable_push_error(&malformed));
     }
 
@@ -2535,8 +2532,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_then_success");
 
-        let result =
-            push_branch_with_retry_impl(&git_bin, tmp.path(), "fix/issue-403", &[0, 0, 0]);
+        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "fix/issue-403", &[0, 0, 0]);
         assert!(
             result.is_ok(),
             "transient stderr should retry regardless of branch name collision: {result:?}"
