@@ -11,6 +11,18 @@ use tokio::process::Command;
 use crate::error::RalphError;
 use crate::Result;
 
+/// Environment variables that must be stripped from daemon child processes.
+/// `CLAUDECODE` — prevents Claude Code backends from detecting a nested session
+/// and refusing to launch.
+const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
+
+/// Remove environment variables that interfere with child process execution.
+fn sanitize_command_env(cmd: &mut Command) {
+    for var in SANITIZED_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 /// Result of spawning a child process.
 pub struct SpawnedChild {
     pub pid: u32,
@@ -126,6 +138,7 @@ fn build_ralph_auto_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
+    sanitize_command_env(&mut cmd);
     cmd.args(["auto", "--idea", idea]);
     cmd.arg("--workspace-root");
     cmd.arg(worktree_path);
@@ -155,6 +168,7 @@ fn build_ralph_run_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
+    sanitize_command_env(&mut cmd);
     cmd.args(["run", "--project", project_id, "--until-complete"]);
     cmd.arg("--workspace-root");
     cmd.arg(worktree_path);
@@ -348,6 +362,7 @@ fn build_ralph_quick_dev_auto_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
+    sanitize_command_env(&mut cmd);
     cmd.args(["quick-dev-auto", "--idea", idea]);
     cmd.arg("--workspace-root");
     cmd.arg(worktree_path);
@@ -377,6 +392,7 @@ fn build_ralph_quick_dev_run_command(
     })?;
 
     let mut cmd = Command::new(ralph_bin);
+    sanitize_command_env(&mut cmd);
     cmd.args(["quick-dev-run", "--project", project_id]);
     cmd.arg("--workspace-root");
     cmd.arg(worktree_path);
