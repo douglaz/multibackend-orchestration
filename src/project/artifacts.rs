@@ -43,6 +43,11 @@ pub enum ArtifactKind {
     FinalReviewVotes { backend: String },
     FinalReviewArbiterRuling,
     FinalReviewExit { outcome: String },
+    QuickDevPlanImplement,
+    QuickDevCodexReview { satisfied: bool },
+    QuickDevApplyFixes { iteration: u32 },
+    QuickDevFinalReview { role: String, complete: bool },
+    QuickDevForceComplete,
 }
 
 impl ArtifactKind {
@@ -66,6 +71,11 @@ impl ArtifactKind {
             Self::FinalReviewVotes { .. } => "final-review-votes",
             Self::FinalReviewArbiterRuling => "final-review-arbiter-ruling",
             Self::FinalReviewExit { .. } => "final-review-exit",
+            Self::QuickDevPlanImplement => "quick-dev-plan-implement",
+            Self::QuickDevCodexReview { .. } => "quick-dev-codex-review",
+            Self::QuickDevApplyFixes { .. } => "quick-dev-apply-fixes",
+            Self::QuickDevFinalReview { .. } => "quick-dev-final-review",
+            Self::QuickDevForceComplete => "quick-dev-force-complete",
         }
     }
 
@@ -101,6 +111,22 @@ impl ArtifactKind {
             }
             Self::FinalReviewArbiterRuling => "final-review-arbiter-ruling.md".to_owned(),
             Self::FinalReviewExit { outcome } => format!("final-review-exit-{outcome}.md"),
+            Self::QuickDevPlanImplement => "quick-dev-plan-implement.md".to_owned(),
+            Self::QuickDevCodexReview { satisfied } => {
+                if *satisfied {
+                    "quick-dev-codex-review-satisfied.md".to_owned()
+                } else {
+                    "quick-dev-codex-review-changes-requested.md".to_owned()
+                }
+            }
+            Self::QuickDevApplyFixes { iteration } => {
+                format!("quick-dev-apply-fixes-{iteration:03}.md")
+            }
+            Self::QuickDevFinalReview { role, complete } => {
+                let outcome = if *complete { "complete" } else { "issues" };
+                format!("quick-dev-final-review-{role}-{outcome}.md")
+            }
+            Self::QuickDevForceComplete => "quick-dev-force-complete.md".to_owned(),
         }
     }
 
@@ -114,7 +140,8 @@ impl ArtifactKind {
             | Self::ImplResponse { iteration }
             | Self::QaPass { iteration }
             | Self::QaFail { iteration }
-            | Self::ImplQaResponse { iteration } => Some(*iteration),
+            | Self::ImplQaResponse { iteration }
+            | Self::QuickDevApplyFixes { iteration } => Some(*iteration),
             _ => None,
         }
     }
@@ -288,7 +315,7 @@ fn is_candidate_better(
     }
 }
 
-fn strip_backend_frontmatter(raw: &str) -> String {
+pub(crate) fn strip_backend_frontmatter(raw: &str) -> String {
     let trimmed = raw.trim();
     if !trimmed.starts_with("---") {
         return trimmed.to_owned();

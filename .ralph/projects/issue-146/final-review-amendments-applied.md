@@ -1,0 +1,547 @@
+# Final Review Amendments Applied
+
+## Round 1
+
+### Amendment: QD-REVIEW-001
+
+### Problem
+`quick-dev-auto` performs expensive side effects before validating quick-dev backend requirements. It runs quick-PRD and creates the project first, then only fails when `QuickDevOrchestrator::run()` validates reviewer presence/distinctness.
+
+Evidence:
+- Quick-PRD + project creation happen before orchestrator call in [quick_dev_auto.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:133) and [quick_dev_auto.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:193).
+- Backend requirement errors are thrown inside orchestrator in [quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:796) and [quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:811).
+
+This violates fail-fast behavior and can leave partially-created projects for invalid quick-dev backend configuration.
+
+### Proposed Change
+Add a preflight quick-dev backend resolution/validation step at the start of `quick-dev-auto` (before quick-PRD and before `create_project`), using the same precedence/error semantics as `quick-dev-run`:
+- reviewer required (`"quick-dev requires a second backend for review"`)
+- implementer/reviewer must be distinct specs
+
+Add conformance coverage that `quick-dev-auto` with missing/equal reviewer backend fails with exit code 2 and does not create `.ralph/projects/<id>`.
+
+### Affected Files
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs` - add preflight validation before side effects.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs` - add failure-without-project-creation tests.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs` - optionally expose/shared helper for consistent resolution logic.
+
+### Reviewer
+codex
+
+### Amendment: QD-REVIEW-002
+
+### Problem
+Quick-dev reconstruction from `state.json` is incomplete and not safely scoped:
+
+1. It restores `quick_dev_phase` and counters, but not `current_phase`/`phase_iteration`, so reconstructed state can show stale phase data.
+- See loader in [lifecycle.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/project/lifecycle.rs:438).
+- Tests explicitly work around this by reading raw `state.json` because `reconstruct_project_state` does not propagate quick-dev phase fields for status display: [tests_quick_dev.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:139).
+
+2. Completed-status override is broad (`quick_dev_phase.is_none()`), which can also match non-quick projects:
+- [lifecycle.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/project/lifecycle.rs:461).
+
+This can produce incorrect reconstructed state/reporting and risks non-quick behavior contamination.
+
+### Proposed Change
+Tighten and complete quick-dev state hydration in `load_quick_dev_phase_from_state_json`:
+- Restore `current_phase` and `phase_iteration` from persisted quick-dev state.
+- Scope completed-status override to explicit quick-dev state markers (not any `status=completed` + `quick_dev_phase=null` case).
+- Add reconstruction tests using `reconstruct_project_state`/`h.load_state()` to verify quick-dev phase display is correct and non-quick projects are unaffected.
+
+### Affected Files
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/project/lifecycle.rs` - complete/scoped quick-dev hydration.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs` - replace workaround assertions with reconstructed-state assertions.
+- `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/project/lifecycle.rs` (tests module, if present) - add unit tests for quick-dev/non-quick reconstruction boundaries.
+
+### Reviewer
+codex
+
+### Amendment: QD-STRAY-002
+
+### Problem
+Four implementation-note markdown files were committed to the repository root during the development process. These are not source code, tests, or documentation — they are development artifacts that should not be shipped:
+
+- `1741059547-impl-response-001.md`
+- `1741065332-impl-notes.md`
+- `20260304023236-impl-notes.md`
+- `20260304T040000-impl-notes.md`
+
+### Proposed Change
+Delete all four files.
+
+### Affected Files
+- `1741059547-impl-response-001.md` - Delete
+- `1741065332-impl-notes.md` - Delete
+- `20260304023236-impl-notes.md` - Delete
+- `20260304T040000-impl-notes.md` - Delete
+
+---
+
+### Reviewer
+claude
+
+### Amendment: QD-TRIM-001
+
+### Problem
+In `src/workflow/parser.rs`, both `parse_codex_review_output` (line 194) and `parse_quick_final_review_output` (line 211) use `first_h1.trim_end()` for the match expression. Every other parser in the file (15 instances across `parse_planner_output`, `parse_implementer_output`, `parse_reviewer_output`, `parse_completer_output`, `parse_qa_output`, `parse_prompt_reviewer_output`, `parse_final_reviewer_output`, `parse_planner_positions`, `parse_vote_results`, `parse_arbiter_ruling`) uses `first_h1.trim()`.
+
+The `first_h1_line()` helper finds lines where `line.trim_start().starts_with("# ")` but returns the original line including any leading whitespace. If a backend produces `"  # Review: SATISFIED"`, `trim_end()` yields `"  # Review: SATISFIED"` which fails the match, while `trim()` would correctly yield `"# Review: SATISFIED"`.
+
+This is an inconsistency that makes the two quick-dev parsers less robust than every other parser in the same file.
+
+### Proposed Change
+Change `first_h1.trim_end()` to `first_h1.trim()` on lines 194 and 211, matching the convention used by all other parsers.
+
+### Affected Files
+- `src/workflow/parser.rs` - Change `trim_end()` to `trim()` on lines 194 and 211
+
+---
+
+### Reviewer
+claude
+
+
+## Round 2
+
+### Amendment: QD-BACKEND-EQUALITY-002
+
+### Problem
+Distinct-backend validation is a raw string equality check, which is bypassable by formatting differences.
+
+- [`quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs):811-815 compares `implementer == reviewer` directly.
+
+Semantically identical specs like `"claude"` vs `" claude "` can pass this check and still resolve to the same backend, violating the quick-dev “distinct backend specs” requirement.
+
+### Proposed Change
+Canonicalize both specs before comparison.
+
+- Parse with `parse_backend_spec`, compare normalized `name` + `model` (+ optional flag if desired), and reject if semantically equal.
+- Keep the existing clear error message.
+- Add tests for whitespace-normalized equality rejection.
+
+### Affected Files
+- [`src/workflow/quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - normalize backend specs in `validate_distinct_backends`.
+- [`src/validate/tests_quick_dev.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs) - add conformance coverage for normalization edge cases.
+
+### Reviewer
+codex
+
+### Amendment: QD-CRASH-COUNTERS-001
+
+### Problem
+`quick-dev` counter state is not durably updated at the moment counters change.
+
+- [`quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs):427 increments `review_iteration` only in a local variable.
+- [`quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs):695 increments `final_review_attempts` only in a local variable.
+- [`quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs):721-724 force-completes and saves state without copying the incremented `final_review_attempts` into `state.quick_dev_final_review_attempts`.
+
+If a crash/error occurs after increment but before the next loop-head persistence, guard accounting can be stale on resume. In force-complete, persisted attempt count is wrong.
+
+### Proposed Change
+Persist counters immediately when they change, not only at phase-loop entry.
+
+- After `review_iteration += 1`, assign `state.quick_dev_review_iteration = review_iteration` and save state before transition/checkpoint work.
+- After `final_review_attempts += 1`, assign `state.quick_dev_final_review_attempts = final_review_attempts` and save state before transition/checkpoint work.
+- In force-complete path, ensure incremented attempt count is persisted in `state.json` before return.
+- Add regression tests asserting persisted counter values in force-complete and transition-error paths.
+
+### Affected Files
+- [`src/workflow/quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - persist counter mutations at mutation points.
+- [`tests/quick_dev_orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - add assertions/tests for persisted counter accuracy.
+
+### Reviewer
+codex
+
+### Amendment: QD-STRAY-FILE-003
+
+### Problem
+A non-source, loop-specific notes artifact was committed in repo root:
+
+- [`20260304T070323-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T070323-impl-notes.md)
+
+This is unintended scope creep and repository noise outside `.ralph` runtime state.
+
+### Proposed Change
+Remove this file from the tracked source tree (or relocate to `.ralph` artifacts if it must be kept as runtime output).
+
+### Affected Files
+- [`20260304T070323-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T070323-impl-notes.md) - delete from version control.
+
+---
+
+### Reviewer
+codex
+
+
+## Round 3
+
+### Amendment: QD-FR-001
+
+### Problem
+A stray non-source artifact was committed at repo root: `20260304T082736-impl-response-001.md` (starts at line 1).  
+This is implementation-process output, not runtime/source/test code, and it is outside the project’s intended deliverables.
+
+### Proposed Change
+Remove the file from the repository history for this branch/PR.
+
+### Affected Files
+- `20260304T082736-impl-response-001.md` - delete stray artifact file.
+
+### Reviewer
+codex
+
+### Amendment: QD-FR-002
+
+### Problem
+`QuickDevOrchestrator` hard-caps phase transitions at 100 (`src/workflow/quick_dev_orchestrator.rs:281`, `:781-783`).  
+This can cause false failures (`"quick-dev: exceeded maximum phase transitions (100)"`) before user-configured guards (`--max-review-iterations`, `--max-final-review-retries`) are reached, so configured limits are not reliably honored for larger values.
+
+### Proposed Change
+Replace the fixed `0..100` cap with a bound derived from configured limits (or remove the fixed cap and rely on guard-based termination). Add a regression test with elevated limits to prove no premature cap-triggered failure.
+
+### Affected Files
+- `src/workflow/quick_dev_orchestrator.rs` - remove/replace fixed 100-step bound with config-aware termination logic.
+- `tests/quick_dev_orchestrator.rs` - add regression coverage for high iteration/retry settings.
+
+### Reviewer
+codex
+
+### Amendment: QD-FR-003
+
+### Problem
+Quick-dev state persistence is non-atomic: `save_state_to_disk` writes directly via `fs::write` (`src/workflow/quick_dev_orchestrator.rs:892-896`).  
+During crash/power-loss windows, `state.json` can be partially written/corrupted, undermining the “crash-safe resumable” guarantee. Recovery currently silently ignores parse failure (`src/project/lifecycle.rs:458-503`), which can drop persisted phase/counter state.
+
+### Proposed Change
+Write `state.json` atomically (temp file in same dir, flush/fsync, then rename; optionally fsync parent dir). Also emit a warning/error log when `state.json` parsing fails during reconstruction so state-loss is observable.
+
+### Affected Files
+- `src/workflow/quick_dev_orchestrator.rs` - implement atomic state write path.
+- `src/project/lifecycle.rs` - log parse failures for `state.json` quick-dev metadata loading.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+`20260304T082736-impl-response-001.md` is a committed build-artifact/implementation-response file in the repository root (added in commit `f1a8dde`). It is not source code and should not be shipped. Prior stray files (`20260304T082736-impl-notes.md`) were already cleaned up per the file's own contents, but this response file was committed in the same loop.
+
+### Proposed Change
+Delete `20260304T082736-impl-response-001.md` from the repository root.
+
+### Affected Files
+- `20260304T082736-impl-response-001.md` — delete
+
+---
+
+### Reviewer
+claude
+
+
+## Round 4
+
+### Amendment: FR-QD-002
+
+### Problem
+Several tests named as resume-phase validations do not actually prove phase-correct resume behavior; they only assert eventual completion.  
+Examples:
+- [src/validate/tests_quick_dev.rs:430](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:430), [src/validate/tests_quick_dev.rs:489](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:489), [src/validate/tests_quick_dev.rs:548](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:548)
+- [tests/quick_dev_orchestrator.rs:688](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:688), [tests/quick_dev_orchestrator.rs:744](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:744), [tests/quick_dev_orchestrator.rs:799](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:799)
+
+A regression where resume always restarts from `PlanAndImplement` could still pass these tests.
+
+### Proposed Change
+Strengthen these tests with phase-sensitive assertions, e.g.:
+- `resume_from_codex_review`: assert no new plan-implement artifact is created on resume, and a codex-review artifact is produced first.
+- `resume_from_final_review`: assert no new plan/apply-fixes artifacts are created on resume.
+- `resume_from_none`: assert plan-implement artifact creation (or first prompt marker) to prove start phase is `PlanAndImplement`.
+
+### Affected Files
+- [src/validate/tests_quick_dev.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs) - strengthen conformance assertions for resume semantics.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - strengthen integration assertions for phase-accurate resume behavior.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+`20260304T094223-impl-notes.md` is committed to the repo root. This is an implementation scratchpad from loop 14 that does not belong in the source tree — it's not referenced by any code, test, or documentation, and pollutes the project root.
+
+### Proposed Change
+Delete `20260304T094223-impl-notes.md` from the repository.
+
+### Affected Files
+- `20260304T094223-impl-notes.md` - delete (stray implementation notes file)
+
+### Reviewer
+claude
+
+
+## Round 5
+
+### Amendment: AMEND-QD-CRASH-GUARD-001
+
+### Problem
+`quick-dev` guard enforcement is not crash-durable in two counter-persist windows.
+
+In [src/workflow/quick_dev_orchestrator.rs:443](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:443), `review_iteration` is persisted before the max-review guard check at [line 447](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:447).  
+In [src/workflow/quick_dev_orchestrator.rs:715](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:715), `final_review_attempts` is persisted before the max-final-review-retries guard check at [line 719](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:719).
+
+If the process crashes between persistence and guard evaluation, resume re-enters `CodexReview` / `FinalReview` and executes backend calls again (see [FinalReview entry at line 582](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:582)) instead of immediately honoring already-reached limits. That can bypass intended guard outcomes after restart.
+
+### Proposed Change
+Add guard checks at phase entry, before any backend invocation:
+
+1. In `CodexReview`: if `review_iteration >= max_review_iterations`, perform the warning/transition-to-`FinalReview` path immediately.
+2. In `FinalReview`: if `final_review_attempts >= max_final_review_retries`, perform force-complete immediately (artifact + completed state + checkpoint), without running final-review backends.
+
+Add regression tests that seed persisted maxed counters and assert resume enforces guard behavior without extra review calls.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - enforce guard-at-entry logic for crash-durable resume.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - add resume tests for pre-guard crash windows.
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+The file `20260304T103437-impl-notes.md` exists in the repository root. This is a development artifact from loop 16 that was committed to the branch but should not be part of the final deliverable. It is tracked by git (appears in `git diff master...HEAD`).
+
+### Proposed Change
+Delete `20260304T103437-impl-notes.md` from the repository root and commit the removal.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this stray implementation-notes artifact from the repo root
+
+---
+
+### Reviewer
+claude
+
+
+## Round 6
+
+### Amendment: QD-CRASH-TRANSITION-STATE-001
+
+### Problem
+Crash-resume can re-run the wrong phase after `ChangesRequested` / `IssuesFound`, which can consume guard counters without executing required fix phases.
+
+- In `CodexReview -> ApplyFixes`, review iteration is incremented and persisted ([src/workflow/quick_dev_orchestrator.rs:441](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:441), [src/workflow/quick_dev_orchestrator.rs:445](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:445)), but the phase is not durably switched to `ApplyFixes` before the transition checkpoint ([src/workflow/quick_dev_orchestrator.rs:499](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:499)-[513](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:513)).
+- In `FinalReview -> PlanAndImplement` (issues path), final-review attempts are incremented and persisted ([src/workflow/quick_dev_orchestrator.rs:713](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:713)-[717](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:717)), but phase is not durably switched to `PlanAndImplement` before checkpoint ([src/workflow/quick_dev_orchestrator.rs:770](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:770)-[790](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:790)).
+
+If the process crashes between checkpoint and next loop persist, resume restarts in the previous phase, which can prematurely hit `max_review_iterations` / `max_final_review_retries` without actually running `ApplyFixes` / `PlanAndImplement`.
+
+### Proposed Change
+Persist the target quick-dev phase before transition checkpoints on non-terminal transitions (at minimum: `CodexReview -> ApplyFixes` and `FinalReview -> PlanAndImplement`; ideally all transitions for consistency). Add regression tests that simulate crash at these boundaries and assert resume executes the intended next phase, not the previous one.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - persist transition target phase before checkpoint for crash-durable resume semantics.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - add boundary-crash regression assertions for phase progression.
+
+### Reviewer
+codex
+
+### Amendment: QD-STRAY-ROOT-ARTIFACT-002
+
+### Problem
+A non-source artifact file is committed at repo root: [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md). This is implementation-loop metadata and appears out of scope for production code.
+
+### Proposed Change
+Remove the file from the commit history for this feature branch (or move it to an explicitly ignored artifact location if it must be retained locally).
+
+### Affected Files
+- [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - delete from tracked source changes.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES-001
+
+### Problem
+The file `20260304T103437-impl-notes.md` exists in the repository root and is committed to the branch. This is an implementation notes artifact from loop 16 that should not be shipped — it contains internal development decisions and test debugging notes that are not part of the deliverable.
+
+### Proposed Change
+Delete `20260304T103437-impl-notes.md` from the repository.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this file
+
+---
+
+### Reviewer
+claude
+
+
+## Round 7
+
+### Amendment: FR-CLEANUP-003
+
+### Problem
+A stray implementation artifact was committed at repo root and is outside product/runtime/test scope.
+
+- [`20260304T103437-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md)
+
+### Proposed Change
+Remove the stray root file from the branch.
+
+### Affected Files
+- [`20260304T103437-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - delete file.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: FR-QD-PREFLIGHT-002
+
+### Problem
+`quick-dev-auto` preflight claims fail-fast behavior but does not validate backend availability (enabled/usable), so side effects can occur before failure.
+
+- Preflight currently validates distinctness and spec validity only ([`src/cli/quick_dev_auto.rs:129`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:129)-[`158`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:158)).
+- `validate_required_backend_spec` does not check disabled backends ([`src/config/mod.rs:534`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:534)-[`559`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:559), [`566`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:566)-[`572`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:572)).
+- The actual disabled-backend rejection happens later in orchestrator backend creation ([`src/workflow/quick_dev_orchestrator.rs:117`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:117)-[`118`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:118), [`src/backend/mod.rs:983`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/backend/mod.rs:983)-[`990`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/backend/mod.rs:990)).
+- By then `quick-prd` and project creation may already have run ([`src/cli/quick_dev_auto.rs:168`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:168)-[`229`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:229)).
+
+### Proposed Change
+Make preflight truly fail-fast for quick-dev backends before any quick-prd/project side effects.
+
+- During preflight, verify selected implementer/reviewer are enabled/available (not just syntactically valid).
+- Perform backend `health_check` for those two selected quick-dev roles before launching quick-prd.
+- Add conformance coverage for disabled reviewer backend to assert failure happens before project creation.
+
+### Affected Files
+- [`src/cli/quick_dev_auto.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs) - strengthen preflight validation.
+- [`src/config/mod.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs) - add/adjust helper to validate availability (or use registry-based check).
+- [`src/validate/tests_quick_dev.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs) - add disabled-backend fail-fast test.
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES
+
+### Problem
+A stray implementation notes file `20260304T103437-impl-notes.md` exists in the repository root. This is a development artifact from a prior implementation loop and should not be committed to the final branch. It appears in `git diff master...HEAD` as a new file and is present on disk.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository (delete the file and ensure it is not tracked).
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete entirely
+
+---
+
+## Summary
+
+The quick-dev orchestration implementation is **correct and complete** across all acceptance criteria:
+
+- **State management** (`src/project/state.rs`): `QuickDevPhase` enum, `quick_dev_phase`, `quick_dev_review_iteration`, and `quick_dev_final_review_attempts` fields are properly persisted with `#[serde(default)]` for backward compatibility. Atomic state writes with fsync ensure crash-safety.
+- **Phase machine** (`src/workflow/quick_dev_orchestrator.rs`): Full 4-phase machine with correct transitions, review loop with max-iterations guard, final-review reloop with max-retries force-complete guard, and bounded phase transitions to prevent infinite loops.
+- **Parser contracts** (`src/workflow/parser.rs`): Strict H1 matching with frontmatter stripping, trailing/leading whitespace tolerance, exact case-sensitive headers as specified.
+- **CLI commands** (`src/cli/quick_dev_run.rs`, `src/cli/quick_dev_auto.rs`): Both commands wired with all required arguments including `--workspace-root` for daemon isolation.
+- **Daemon dispatch** (`src/daemon/runtime.rs`, `src/daemon/process.rs`): Correct branching by `ralph:quick` label, `ralph:quick` in `REQUIRED_LABELS` but excluded from `LIFECYCLE_LABELS`.
+- **Backend validation**: Implementer/reviewer resolution chain follows spec (CLI -> effective config -> starting_backend). Distinct-backend check uses canonical form comparison. Missing reviewer returns exact error message.
+- **No `mark_pr_ready`** calls in the orchestrator (verified by grep).
+- **Config/templates**: All 4 template fields present in global, project override, and effective config with correct merge resolution.
+- **Tests**: All 346 tests pass in both `cargo test` and `nix build -L`. `ralph validate` passes all conformance tests.
+
+### Reviewer
+claude
+
+
+## Round 8
+
+### Amendment: AMEND-QD-STRAY-001
+
+### Problem
+A stray implementation artifact was committed at repository root: `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md:1`.  
+This file contains transient process notes and local test claims (`:1-16`) rather than product source or test assets, and is an unintended out-of-scope change.
+
+### Proposed Change
+Remove the stray root file from version control. Keep implementation notes under runtime/project artifact paths (for example under `.ralph/...`) rather than repository root.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete file.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+A stray implementation notes file `20260304T103437-impl-notes.md` exists in the repository root. This is a working artifact that should not be committed to the project. The file itself even documents removing a prior stray file (`20260304T094223-impl-notes.md`), indicating this pattern has already been identified as undesirable.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository root.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this file
+
+---
+
+### Reviewer
+claude
+
+
+## Round 9
+
+### Amendment: QD-AMEND-001
+
+### Problem
+Quick-dev transition state is only persisted at loop entry, not at transition points. The phase is saved at the top of each iteration ([quick_dev_orchestrator.rs:297](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:297)), but several transitions only call `checkpoint_if_enabled(...)` and then mutate `current_qd_phase` in memory ([quick_dev_orchestrator.rs:409](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:409), [quick_dev_orchestrator.rs:499](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:499), [quick_dev_orchestrator.rs:565](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:565), [quick_dev_orchestrator.rs:770](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:770)).  
+If the process crashes between checkpoint and next loop-entry persistence, resume re-enters the prior phase and can re-run non-idempotent LLM decisions (for example, re-running `CodexReview` instead of entering `ApplyFixes`), which can change outcomes and skip intended fix application.
+
+### Proposed Change
+Persist destination phase/counters immediately before each transition checkpoint (or immediately after decision, before return/continue), not only at next loop entry.  
+Implement a shared helper for transition persistence to avoid missing branches, and update crash-resume tests to assert resume continues from persisted destination phase after an injected mid-transition failure.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - persist destination phase on all transitions
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - tighten crash-transition resume assertions to verify destination-phase durability
+
+### Reviewer
+codex
+
+### Amendment: QD-AMEND-002
+
+### Problem
+A root-level implementation-notes artifact was committed into source changes ([20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md)). This is a stray non-product file and outside intended runtime/test source scope.
+
+### Proposed Change
+Delete the file from the repository. If this note must be retained, move it to ephemeral orchestration output under `.ralph/` (which is excluded from source diffs).
+
+### Affected Files
+- [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - remove stray artifact
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES-001
+
+### Problem
+A development notes file `20260304T103437-impl-notes.md` was committed to the repository root during loop 16 (commit `72956ab`). This file contains implementation decisions and testing notes that are development artifacts, not source code. It should not be shipped in the repository.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository via `git rm`.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete from repository
+
+---
+
+### Reviewer
+claude
+

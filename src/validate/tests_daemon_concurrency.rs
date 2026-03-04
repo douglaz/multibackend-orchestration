@@ -473,13 +473,20 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
 
         // Disable PRD to keep the test focused on rebase + dispatch.
         // PRD config keys are rejected by `config set` CLI; write TOML directly.
+        // Insert immediately after the [workspace] header so the key stays in
+        // the correct TOML section even when other sections follow.
         {
             let config_path = dh.repo_root.join(".ralph").join("ralph.toml");
             let mut toml_content = fs::read_to_string(&config_path).unwrap_or_default();
-            if !toml_content.contains("[workspace]") {
-                toml_content.push_str("\n[workspace]\n");
+            if let Some(pos) = toml_content.find("[workspace]") {
+                let insert_pos = toml_content[pos..]
+                    .find('\n')
+                    .map(|p| pos + p + 1)
+                    .unwrap_or(toml_content.len());
+                toml_content.insert_str(insert_pos, "daemon_prd_enabled = false\n");
+            } else {
+                toml_content.push_str("\n[workspace]\ndaemon_prd_enabled = false\n");
             }
-            toml_content.push_str("daemon_prd_enabled = false\n");
             fs::write(&config_path, toml_content).expect("write config to disable PRD");
         }
 

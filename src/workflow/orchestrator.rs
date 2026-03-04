@@ -7668,12 +7668,15 @@ mod tests {
             parent_project: None,
             current_loop: 1,
             current_phase: Phase::Planning,
+            quick_dev_phase: None,
             phase_iteration: 1,
             status: ProjectStatus::InProgress,
             loops: vec![],
             completion_attempts: vec![],
             session_store: Default::default(),
             pr_url: None,
+            quick_dev_review_iteration: 0,
+            quick_dev_final_review_attempts: 0,
         }
     }
 

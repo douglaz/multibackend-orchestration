@@ -3229,6 +3229,335 @@ esac
     .to_owned()
 }
 
+// ---------------------------------------------------------------------------
+// Quick-Dev mock scripts
+// ---------------------------------------------------------------------------
+
+/// Quick-dev implementer mock script (happy path).
+///
+/// Responds to quick-dev prompts that the implementer handles:
+/// - `plan-and-implement phase` → implementation notes output + creates `mock_file.txt`
+/// - `apply-fixes phase` → implementation response
+/// - `final review pass` → `# Final Review: COMPLETE`
+///
+/// Environment variable `QUICK_DEV_FINAL_REVIEW_RESULT` controls the final-review
+/// response: "COMPLETE" (default) or "ISSUES FOUND".
+pub fn quick_dev_implementer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created quick-dev mock implementation.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script only
+EOF
+  echo "quick-dev-implemented" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied reviewer-requested fixes.
+
+## Could Not Address
+- None
+EOF
+  echo "quick-dev-fixed" >> mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
+  if [ "$result" = "ISSUES FOUND" ]; then
+    cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+## Issues
+- Mock issue found by implementer final review.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+All requirements met per implementer review.
+EOF
+  fi
+else
+  echo "quick-dev-implementer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Quick-dev reviewer mock script (happy path — review satisfied on first call).
+///
+/// Responds to quick-dev prompts that the reviewer handles:
+/// - `quick-dev reviewer` → `# Review: SATISFIED`
+/// - `final review pass` → `# Final Review: COMPLETE`
+///
+/// Environment variables:
+/// - `QUICK_DEV_REVIEW_RESULT`: "SATISFIED" (default) or "CHANGES REQUESTED"
+/// - `QUICK_DEV_FINAL_REVIEW_RESULT`: "COMPLETE" (default) or "ISSUES FOUND"
+pub fn quick_dev_reviewer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  review="${QUICK_DEV_REVIEW_RESULT:-SATISFIED}"
+  if [ "$review" = "CHANGES REQUESTED" ]; then
+    cat <<'EOF'
+# Review: CHANGES REQUESTED
+
+## Required Changes
+- Fix mock issue in implementation.
+EOF
+  else
+    cat <<'EOF'
+# Review: SATISFIED
+
+## Summary
+Implementation looks good, no changes needed.
+EOF
+  fi
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
+  if [ "$result" = "ISSUES FOUND" ]; then
+    cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+## Issues
+- Mock issue found by reviewer final review.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+All requirements met per reviewer review.
+EOF
+  fi
+else
+  echo "quick-dev-reviewer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Quick-dev reviewer mock that always returns CHANGES REQUESTED.
+/// Used to test the max-review-iterations guard.
+pub fn quick_dev_reviewer_always_reject_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: CHANGES REQUESTED
+
+## Required Changes
+- Always-reject mock: changes requested every time.
+EOF
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+Force-approved after iteration guard.
+EOF
+else
+  echo "quick-dev-always-reject-reviewer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Quick-dev reviewer that returns CHANGES REQUESTED on the first call,
+/// then SATISFIED on subsequent calls. Uses a state file to track invocations.
+///
+/// Set `QUICK_DEV_REVIEW_STATE_FILE` to a path for the state file.
+pub fn quick_dev_reviewer_reject_once_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+STATE="${QUICK_DEV_REVIEW_STATE_FILE:-/tmp/quick-dev-review-state}"
+
+if grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  if [ -f "$STATE" ]; then
+    cat <<'EOF'
+# Review: SATISFIED
+
+## Summary
+Second review pass: implementation looks good.
+EOF
+  else
+    echo "rejected" > "$STATE"
+    cat <<'EOF'
+# Review: CHANGES REQUESTED
+
+## Required Changes
+- Fix the initial implementation issue.
+EOF
+  fi
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+All requirements met.
+EOF
+else
+  echo "quick-dev-reject-once-reviewer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Quick-dev final-review mock that returns ISSUES FOUND on the first call,
+/// then COMPLETE on subsequent calls. Used to test the final-review reloop.
+///
+/// Set `QUICK_DEV_FR_STATE_FILE` to a path for the state file.
+pub fn quick_dev_final_review_issues_once_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+STATE="${QUICK_DEV_FR_STATE_FILE:-/tmp/quick-dev-fr-state}"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Reloop implementation after final review issues.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock only
+EOF
+  echo "quick-dev-reloop" >> mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied fixes.
+
+## Could Not Address
+- None
+EOF
+elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: SATISFIED
+
+## Summary
+Implementation satisfactory.
+EOF
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  count=0
+  if [ -f "$STATE" ]; then
+    count="$(cat "$STATE")"
+  fi
+  count=$((count + 1))
+  echo "$count" > "$STATE"
+  if [ "$count" -le 2 ]; then
+    cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+## Issues
+- Mock issue requiring re-implementation.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+All requirements met after reloop.
+EOF
+  fi
+else
+  echo "quick-dev-fr-issues-once: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Quick-dev mock where final review always finds issues.
+/// Used to test max-final-review-retries force-complete guard.
+pub fn quick_dev_final_review_always_issues_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Implementation attempt.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock only
+EOF
+  echo "quick-dev-force" >> mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied fixes.
+
+## Could Not Address
+- None
+EOF
+elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: SATISFIED
+
+## Summary
+OK.
+EOF
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+## Issues
+- Always-issues mock: perpetual issues found.
+EOF
+else
+  echo "quick-dev-always-issues: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 /// Mock `ralph` script for completion-failure tests. Exits immediately
 /// with success or failure based on `MOCK_RALPH_EXIT_CODE` (default 0).
 ///

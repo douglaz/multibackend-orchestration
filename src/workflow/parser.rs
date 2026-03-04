@@ -27,6 +27,18 @@ pub enum ReviewerDecision {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexReviewDecision {
+    ReviewSatisfied { body: String },
+    ChangesRequested { body: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickFinalReviewDecision {
+    Complete { body: String },
+    IssuesFound { body: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct CompleterDecision {
     pub verdict: CompletionVerdict,
@@ -167,6 +179,40 @@ pub fn parse_reviewer_output(raw: &str) -> Result<ReviewerDecision> {
         }
         other => Err(RalphError::ParseError(format!(
             "unsupported reviewer H1: {other}"
+        ))),
+    }
+}
+
+pub fn parse_codex_review_output(raw: &str) -> Result<CodexReviewDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "codex review output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    match first_h1.trim() {
+        "# Review: SATISFIED" => Ok(CodexReviewDecision::ReviewSatisfied { body }),
+        "# Review: CHANGES REQUESTED" => Ok(CodexReviewDecision::ChangesRequested { body }),
+        other => Err(RalphError::ParseError(format!(
+            "unsupported codex review H1: {other}; expected '# Review: SATISFIED' or '# Review: CHANGES REQUESTED'"
+        ))),
+    }
+}
+
+pub fn parse_quick_final_review_output(raw: &str) -> Result<QuickFinalReviewDecision> {
+    let body = strip_frontmatter(raw);
+    let Some(first_h1) = first_h1_line(&body) else {
+        return Err(RalphError::ParseError(
+            "quick final review output is missing a top-level H1".to_owned(),
+        ));
+    };
+
+    match first_h1.trim() {
+        "# Final Review: COMPLETE" => Ok(QuickFinalReviewDecision::Complete { body }),
+        "# Final Review: ISSUES FOUND" => Ok(QuickFinalReviewDecision::IssuesFound { body }),
+        other => Err(RalphError::ParseError(format!(
+            "unsupported quick final review H1: {other}; expected '# Final Review: COMPLETE' or '# Final Review: ISSUES FOUND'"
         ))),
     }
 }
@@ -847,10 +893,11 @@ fn validate_required_line(body: &str, line: &str, scope: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_commit_message, parse_completer_output, parse_implementer_output,
-        parse_planner_output, parse_prompt_review_validator_output, parse_prompt_reviewer_output,
-        parse_qa_output, parse_reviewer_output, ImplementerDecision, PlannerDecision,
-        PromptReviewValidatorVerdict, QaDecision, ReviewerDecision,
+        extract_commit_message, parse_codex_review_output, parse_completer_output,
+        parse_implementer_output, parse_planner_output, parse_prompt_review_validator_output,
+        parse_prompt_reviewer_output, parse_qa_output, parse_quick_final_review_output,
+        parse_reviewer_output, CodexReviewDecision, ImplementerDecision, PlannerDecision,
+        PromptReviewValidatorVerdict, QaDecision, QuickFinalReviewDecision, ReviewerDecision,
     };
     use crate::project::state::CompletionVerdict;
 
@@ -914,6 +961,143 @@ mod tests {
             ReviewerDecision::Suggestions { .. } => {}
             _ => panic!("expected suggestions"),
         }
+    }
+
+    #[test]
+    fn parses_codex_review_satisfied() {
+        let text = "# Review: SATISFIED\n\nEverything checks out.";
+        let parsed = parse_codex_review_output(text).expect("parse should succeed");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ReviewSatisfied { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_codex_review_changes_requested() {
+        let text = "# Review: CHANGES REQUESTED\n\nPlease address issue 1.";
+        let parsed = parse_codex_review_output(text).expect("parse should succeed");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ChangesRequested { .. }
+        ));
+    }
+
+    #[test]
+    fn codex_review_parser_rejects_missing_h1() {
+        let result = parse_codex_review_output("No markdown heading here.");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn codex_review_parser_rejects_wrong_h1() {
+        let result = parse_codex_review_output("# Review: APPROVED\n\nWrong contract.");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported codex review H1"));
+    }
+
+    #[test]
+    fn codex_review_parser_tolerates_trailing_whitespace() {
+        let text = "# Review: SATISFIED   \n\nok";
+        let parsed = parse_codex_review_output(text).expect("trailing whitespace should parse");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ReviewSatisfied { .. }
+        ));
+    }
+
+    #[test]
+    fn codex_review_parser_tolerates_leading_whitespace() {
+        let text = "  # Review: CHANGES REQUESTED  \n\nfixes needed";
+        let parsed =
+            parse_codex_review_output(text).expect("leading whitespace on H1 should parse");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ChangesRequested { .. }
+        ));
+    }
+
+    #[test]
+    fn codex_review_parser_strips_frontmatter() {
+        let text = "---\nartifact: review\n---\n# Review: CHANGES REQUESTED\n\nneeds fixes";
+        let parsed = parse_codex_review_output(text).expect("frontmatter should be stripped");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ChangesRequested { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_quick_final_review_complete() {
+        let text = "# Final Review: COMPLETE\n\nAll done.";
+        let parsed = parse_quick_final_review_output(text).expect("parse should succeed");
+        assert!(matches!(parsed, QuickFinalReviewDecision::Complete { .. }));
+    }
+
+    #[test]
+    fn parses_quick_final_review_issues_found() {
+        let text = "# Final Review: ISSUES FOUND\n\nNeed additional fixes.";
+        let parsed = parse_quick_final_review_output(text).expect("parse should succeed");
+        assert!(matches!(
+            parsed,
+            QuickFinalReviewDecision::IssuesFound { .. }
+        ));
+    }
+
+    #[test]
+    fn quick_final_review_parser_rejects_missing_h1() {
+        let result = parse_quick_final_review_output("No heading");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing a top-level H1"));
+    }
+
+    #[test]
+    fn quick_final_review_parser_rejects_wrong_h1() {
+        let result = parse_quick_final_review_output("# Final Review: NO AMENDMENTS");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported quick final review H1"));
+    }
+
+    #[test]
+    fn quick_final_review_parser_tolerates_trailing_whitespace() {
+        let text = "# Final Review: COMPLETE   \n\ndone";
+        let parsed =
+            parse_quick_final_review_output(text).expect("trailing whitespace should parse");
+        assert!(matches!(parsed, QuickFinalReviewDecision::Complete { .. }));
+    }
+
+    #[test]
+    fn quick_final_review_parser_tolerates_leading_whitespace() {
+        let text = "  # Final Review: ISSUES FOUND  \n\nbug";
+        let parsed =
+            parse_quick_final_review_output(text).expect("leading whitespace on H1 should parse");
+        assert!(matches!(
+            parsed,
+            QuickFinalReviewDecision::IssuesFound { .. }
+        ));
+    }
+
+    #[test]
+    fn quick_final_review_parser_strips_frontmatter() {
+        let text = "---\nartifact: final\n---\n# Final Review: ISSUES FOUND\n\nbug";
+        let parsed = parse_quick_final_review_output(text).expect("frontmatter should be stripped");
+        assert!(matches!(
+            parsed,
+            QuickFinalReviewDecision::IssuesFound { .. }
+        ));
     }
 
     #[test]
