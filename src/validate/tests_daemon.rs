@@ -248,6 +248,27 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::reconstruct_position_from_real_remote_checkpoint",
             func: reconstruct_position_from_real_remote_checkpoint,
         },
+        // --- Quick-Dev Dispatch Tests ---
+        ConformanceTest {
+            name: "daemon::quick_label_fresh_dispatches_quick_dev_auto",
+            func: quick_label_fresh_dispatches_quick_dev_auto,
+        },
+        ConformanceTest {
+            name: "daemon::quick_label_resume_dispatches_quick_dev_run",
+            func: quick_label_resume_dispatches_quick_dev_run,
+        },
+        ConformanceTest {
+            name: "daemon::no_quick_label_fresh_dispatches_auto",
+            func: no_quick_label_fresh_dispatches_auto,
+        },
+        ConformanceTest {
+            name: "daemon::no_quick_label_resume_dispatches_run",
+            func: no_quick_label_resume_dispatches_run,
+        },
+        ConformanceTest {
+            name: "daemon::quick_label_is_non_lifecycle",
+            func: quick_label_is_non_lifecycle,
+        },
     ]
 }
 
@@ -3971,6 +3992,333 @@ fn reconstruct_position_from_real_remote_checkpoint(_h: &RalphHarness) -> TestRe
             Phase::Reviewing,
             "expected reviewing phase after second checkpoint"
         );
+    })
+}
+
+// =============================================================================
+// Quick-Dev Dispatch Tests
+// =============================================================================
+
+fn quick_label_fresh_dispatches_quick_dev_auto(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Issue with ralph:quick + ralph:ready labels, no existing project
+        let issues = r#"[{"number":600,"title":"Quick task","labels":[{"name":"ralph:ready"},{"name":"ralph:quick"}],"body":"quick feature"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("quick_fresh_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let label_log = dh.temp_dir.path().join("quick_fresh_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("quick-dev-auto\n"),
+            "expected quick-dev-auto for fresh quick dispatch, got:\n{args}"
+        );
+        assert!(
+            args.contains("--project-id\nissue-600\n"),
+            "expected --project-id issue-600, got:\n{args}"
+        );
+    })
+}
+
+fn quick_label_resume_dispatches_quick_dev_run(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Set up a remote so branch sync works
+        let bare_remote = dh.temp_dir.path().join("quick-resume-origin.git");
+        git(
+            dh.temp_dir.path(),
+            &["init", "--bare", &bare_remote.to_string_lossy()],
+        );
+        git(
+            &dh.repo_root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &bare_remote.to_string_lossy(),
+            ],
+        );
+        let base_branch = git_stdout(&dh.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git(&dh.repo_root, &["push", "-u", "origin", &base_branch]);
+
+        // Create existing project on branch so dispatch resumes
+        git(&dh.repo_root, &["checkout", "-b", "ralph/issue-601"]);
+        let prompt_path = dh
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join("issue-601")
+            .join("prompt.md");
+        fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create issue project dir");
+        fs::write(&prompt_path, "# existing quick prompt").expect("write prompt");
+        git(
+            &dh.repo_root,
+            &["add", ".ralph/projects/issue-601/prompt.md"],
+        );
+        git(&dh.repo_root, &["commit", "-m", "add project"]);
+        git(&dh.repo_root, &["push", "-u", "origin", "ralph/issue-601"]);
+        git(&dh.repo_root, &["checkout", &base_branch]);
+
+        let issues = r#"[{"number":601,"title":"Quick resume","labels":[{"name":"ralph:ready"},{"name":"ralph:quick"}],"body":"resume quick"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("quick_resume_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let label_log = dh.temp_dir.path().join("quick_resume_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("quick-dev-run\n"),
+            "expected quick-dev-run for resumed quick dispatch, got:\n{args}"
+        );
+        assert!(
+            args.contains("--project\nissue-601\n"),
+            "expected --project issue-601, got:\n{args}"
+        );
+    })
+}
+
+fn no_quick_label_fresh_dispatches_auto(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Issue WITHOUT ralph:quick label
+        let issues = r#"[{"number":602,"title":"Normal task","labels":[{"name":"ralph:ready"}],"body":"normal feature"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("normal_fresh_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let label_log = dh.temp_dir.path().join("normal_fresh_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("auto\n"),
+            "expected auto for fresh non-quick dispatch, got:\n{args}"
+        );
+        assert!(
+            !args.starts_with("quick-dev-auto\n"),
+            "non-quick fresh dispatch must NOT use quick-dev-auto, got:\n{args}"
+        );
+    })
+}
+
+fn no_quick_label_resume_dispatches_run(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Set up a remote
+        let bare_remote = dh.temp_dir.path().join("normal-resume-origin.git");
+        git(
+            dh.temp_dir.path(),
+            &["init", "--bare", &bare_remote.to_string_lossy()],
+        );
+        git(
+            &dh.repo_root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &bare_remote.to_string_lossy(),
+            ],
+        );
+        let base_branch = git_stdout(&dh.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git(&dh.repo_root, &["push", "-u", "origin", &base_branch]);
+
+        // Create existing project on branch
+        git(&dh.repo_root, &["checkout", "-b", "ralph/issue-603"]);
+        let prompt_path = dh
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join("issue-603")
+            .join("prompt.md");
+        fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("create issue project dir");
+        fs::write(&prompt_path, "# existing normal prompt").expect("write prompt");
+        git(
+            &dh.repo_root,
+            &["add", ".ralph/projects/issue-603/prompt.md"],
+        );
+        git(&dh.repo_root, &["commit", "-m", "add project"]);
+        git(&dh.repo_root, &["push", "-u", "origin", "ralph/issue-603"]);
+        git(&dh.repo_root, &["checkout", &base_branch]);
+
+        // Issue WITHOUT ralph:quick label
+        let issues = r#"[{"number":603,"title":"Normal resume","labels":[{"name":"ralph:ready"}],"body":"resume normal"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("normal_resume_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let label_log = dh.temp_dir.path().join("normal_resume_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let args = fs::read_to_string(&args_log).expect("read args log");
+        assert!(
+            args.starts_with("run\n"),
+            "expected run for resumed non-quick dispatch, got:\n{args}"
+        );
+        assert!(
+            !args.starts_with("quick-dev-run\n"),
+            "non-quick resume dispatch must NOT use quick-dev-run, got:\n{args}"
+        );
+    })
+}
+
+fn quick_label_is_non_lifecycle(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        // Verify at the API level that ralph:quick is in REQUIRED_LABELS
+        // but not in LIFECYCLE_LABELS
+        let required_names: Vec<&str> = github::REQUIRED_LABELS
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert!(
+            required_names.contains(&"ralph:quick"),
+            "ralph:quick must be in REQUIRED_LABELS"
+        );
+        assert!(
+            !github::LIFECYCLE_LABELS.contains(&"ralph:quick"),
+            "ralph:quick must NOT be in LIFECYCLE_LABELS"
+        );
+
+        // Verify classify_lifecycle_labels does not classify ralph:quick as lifecycle
+        let labels = vec![
+            "ralph:ready".to_owned(),
+            "ralph:quick".to_owned(),
+        ];
+        let lifecycle = github::classify_lifecycle_labels(&labels);
+        assert_eq!(
+            lifecycle.len(),
+            1,
+            "only ralph:ready should be classified as lifecycle"
+        );
+        assert!(
+            lifecycle.contains(&"ralph:ready".to_owned()),
+            "ralph:ready should be classified as lifecycle"
+        );
+
+        // Unused harness reference to silence warning
+        let _ = h;
     })
 }
 

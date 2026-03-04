@@ -42,6 +42,11 @@ pub const REQUIRED_LABELS: &[(&str, &str, &str)] = &[
         "Ralph daemon completed this issue",
     ),
     ("ralph:failed", "#d93f0b", "Ralph daemon task failed"),
+    (
+        "ralph:quick",
+        "#5319e7",
+        "Use quick-dev orchestration flow",
+    ),
 ];
 
 /// Represents a single issue returned from `gh issue list`.
@@ -2618,6 +2623,39 @@ mod tests {
                 "REQUIRED_LABELS is missing required lifecycle label: {required}"
             );
         }
+    }
+
+    #[test]
+    fn ralph_quick_is_in_required_labels() {
+        let names: Vec<&str> = REQUIRED_LABELS.iter().map(|(name, _, _)| *name).collect();
+        assert!(
+            names.contains(&"ralph:quick"),
+            "REQUIRED_LABELS must include ralph:quick"
+        );
+    }
+
+    #[test]
+    fn ralph_quick_is_not_a_lifecycle_label() {
+        assert!(
+            !super::LIFECYCLE_LABELS.contains(&"ralph:quick"),
+            "ralph:quick must NOT be in LIFECYCLE_LABELS"
+        );
+    }
+
+    #[test]
+    fn classify_lifecycle_labels_excludes_ralph_quick() {
+        let labels = vec![
+            "ralph:ready".to_owned(),
+            "ralph:quick".to_owned(),
+            "bug".to_owned(),
+        ];
+        let lifecycle = super::classify_lifecycle_labels(&labels);
+        assert_eq!(lifecycle.len(), 1);
+        assert!(lifecycle.contains(&"ralph:ready".to_owned()));
+        assert!(
+            !lifecycle.contains(&"ralph:quick".to_owned()),
+            "ralph:quick should not be classified as lifecycle"
+        );
     }
 
     #[test]

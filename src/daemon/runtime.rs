@@ -1043,6 +1043,7 @@ fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Resul
 struct ClaimedIssue {
     issue_number: u32,
     raw_idea: String,
+    issue_labels: Vec<String>,
 }
 
 /// Per-issue outcome from a dispatch worker, preserving `issue_number` identity
@@ -1217,6 +1218,7 @@ async fn poll_and_claim(
         claimed_issues.push(ClaimedIssue {
             issue_number: issue.number,
             raw_idea,
+            issue_labels: issue.labels.clone(),
         });
     }
 
@@ -1240,7 +1242,14 @@ async fn poll_and_claim(
             // JoinHandle returns Err(JoinError) while issue_number survives
             // in the outer task.
             let inner = tokio::spawn(async move {
-                dispatch_task(&config, issue_number, &claimed.raw_idea, &repo_root_lock).await
+                dispatch_task(
+                    &config,
+                    issue_number,
+                    &claimed.raw_idea,
+                    &claimed.issue_labels,
+                    &repo_root_lock,
+                )
+                .await
             });
             match inner.await {
                 Ok(Ok(handle)) => DispatchOutcome::Success {
@@ -1407,6 +1416,7 @@ async fn dispatch_task(
     config: &DaemonRuntimeConfig,
     issue_number: u32,
     raw_idea: &str,
+    issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<ChildHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
@@ -1601,31 +1611,71 @@ async fn dispatch_task(
         pr_url.as_deref().unwrap_or("none")
     );
 
-    // Spawn child process
+    // Spawn child process — branch by `ralph:quick` label for quick-dev flow
+    let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
     let spawned = {
         let ralph_bin = config.ralph_bin.clone();
         let wt = wt_path.clone();
         let idea_clone = idea.clone();
-        if resume_existing_project {
-            eprintln!(
-                "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
-                pr_url.as_deref().unwrap_or("none")
-            );
-            process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
+        match (is_quick, resume_existing_project) {
+            (true, true) => {
+                eprintln!(
+                    "dispatch: task {task_id} resuming with ralph quick-dev-run --project {project_id} pr_url={}",
+                    pr_url.as_deref().unwrap_or("none")
+                );
+                process::spawn_ralph_quick_dev_run(
+                    &ralph_bin,
+                    &wt,
+                    &project_id,
+                    &log_path,
+                    pr_url.as_deref(),
+                )
                 .await?
-        } else {
-            eprintln!(
-                "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}", pr_url.as_deref().unwrap_or("none")
-            );
-            process::spawn_ralph_auto(
-                &ralph_bin,
-                &wt,
-                &idea_clone,
-                &log_path,
-                Some(&project_id),
-                pr_url.as_deref(),
-            )
-            .await?
+            }
+            (true, false) => {
+                eprintln!(
+                    "dispatch: task {task_id} starting fresh with ralph quick-dev-auto --project-id {project_id} pr_url={}",
+                    pr_url.as_deref().unwrap_or("none")
+                );
+                process::spawn_ralph_quick_dev_auto(
+                    &ralph_bin,
+                    &wt,
+                    &idea_clone,
+                    &log_path,
+                    Some(&project_id),
+                    pr_url.as_deref(),
+                )
+                .await?
+            }
+            (false, true) => {
+                eprintln!(
+                    "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
+                    pr_url.as_deref().unwrap_or("none")
+                );
+                process::spawn_ralph_run(
+                    &ralph_bin,
+                    &wt,
+                    &project_id,
+                    &log_path,
+                    pr_url.as_deref(),
+                )
+                .await?
+            }
+            (false, false) => {
+                eprintln!(
+                    "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}",
+                    pr_url.as_deref().unwrap_or("none")
+                );
+                process::spawn_ralph_auto(
+                    &ralph_bin,
+                    &wt,
+                    &idea_clone,
+                    &log_path,
+                    Some(&project_id),
+                    pr_url.as_deref(),
+                )
+                .await?
+            }
         }
     };
 
