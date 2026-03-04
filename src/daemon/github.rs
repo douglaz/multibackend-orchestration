@@ -918,6 +918,9 @@ pub fn is_retryable_push_error(err: &RalphError) -> bool {
         "protected branch",
         "denied",
         "forbidden",
+        "403",
+        "gh013",
+        "repository rule violation",
     ];
     if non_retryable_patterns
         .iter()
@@ -2218,6 +2221,19 @@ mod tests {
 
         let non_fast_forward = RalphError::Orchestration("non-fast-forward".to_owned());
         assert!(!super::is_retryable_push_error(&non_fast_forward));
+
+        let gh013 = RalphError::Orchestration("GH013: Repository rule violations found".to_owned());
+        assert!(!super::is_retryable_push_error(&gh013));
+
+        let http_403 = RalphError::Orchestration("HTTP 403".to_owned());
+        assert!(!super::is_retryable_push_error(&http_403));
+
+        let protected_branch =
+            RalphError::Orchestration("protected branch hook declined".to_owned());
+        assert!(!super::is_retryable_push_error(&protected_branch));
+
+        let connection_reset = RalphError::Orchestration("connection reset by peer".to_owned());
+        assert!(super::is_retryable_push_error(&connection_reset));
     }
 
     #[test]

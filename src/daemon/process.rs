@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -171,6 +171,7 @@ fn build_ralph_run_command(
 fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(log_file)
         .map_err(|err| {
@@ -188,8 +189,25 @@ fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
     })?;
 
     if has_content {
+        let ends_with_newline = file
+            .seek(SeekFrom::End(-1))
+            .and_then(|_| {
+                let mut last = [0_u8; 1];
+                file.read_exact(&mut last).map(|_| last[0] == b'\n')
+            })
+            .map_err(|err| {
+                RalphError::Orchestration(format!(
+                    "failed to inspect trailing newline for log file {}: {err}",
+                    log_file.display()
+                ))
+            })?;
+
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let separator = format!("\n--- retrigger at {timestamp} ---\n\n");
+        let separator = if ends_with_newline {
+            format!("\n--- retrigger at {timestamp} ---\n\n")
+        } else {
+            format!("\n\n--- retrigger at {timestamp} ---\n\n")
+        };
         if let Err(err) = file.write_all(separator.as_bytes()) {
             eprintln!(
                 "warning: failed to write retrigger separator to {}: {err}",
@@ -509,6 +527,34 @@ mod tests {
         assert!(
             DateTime::parse_from_rfc3339(timestamp).is_ok(),
             "separator timestamp should be RFC3339 UTC, got: {timestamp}"
+        );
+    }
+
+    #[test]
+    fn append_mode_separator_has_blank_lines_when_no_trailing_newline() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let log_file = tmp.path().join("issue.log");
+        std::fs::write(&log_file, "output without newline").expect("seed existing log");
+
+        let cmd = build_ralph_auto_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "implement feature",
+            &log_file,
+            None,
+            None,
+        )
+        .expect("build command");
+        drop(cmd);
+
+        let content = std::fs::read_to_string(&log_file).expect("read updated log");
+        assert!(
+            content.starts_with("output without newline\n\n--- retrigger at "),
+            "expected separator to be preceded by blank line, got: {content:?}"
+        );
+        assert!(
+            content.ends_with(" ---\n\n"),
+            "separator should end with blank line, got: {content:?}"
         );
     }
 
