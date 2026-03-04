@@ -240,3 +240,45 @@ Delete `20260304T082736-impl-response-001.md` from the repository root.
 ### Reviewer
 claude
 
+
+## Round 4
+
+### Amendment: FR-QD-002
+
+### Problem
+Several tests named as resume-phase validations do not actually prove phase-correct resume behavior; they only assert eventual completion.  
+Examples:
+- [src/validate/tests_quick_dev.rs:430](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:430), [src/validate/tests_quick_dev.rs:489](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:489), [src/validate/tests_quick_dev.rs:548](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs:548)
+- [tests/quick_dev_orchestrator.rs:688](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:688), [tests/quick_dev_orchestrator.rs:744](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:744), [tests/quick_dev_orchestrator.rs:799](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs:799)
+
+A regression where resume always restarts from `PlanAndImplement` could still pass these tests.
+
+### Proposed Change
+Strengthen these tests with phase-sensitive assertions, e.g.:
+- `resume_from_codex_review`: assert no new plan-implement artifact is created on resume, and a codex-review artifact is produced first.
+- `resume_from_final_review`: assert no new plan/apply-fixes artifacts are created on resume.
+- `resume_from_none`: assert plan-implement artifact creation (or first prompt marker) to prove start phase is `PlanAndImplement`.
+
+### Affected Files
+- [src/validate/tests_quick_dev.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs) - strengthen conformance assertions for resume semantics.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - strengthen integration assertions for phase-accurate resume behavior.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+`20260304T094223-impl-notes.md` is committed to the repo root. This is an implementation scratchpad from loop 14 that does not belong in the source tree — it's not referenced by any code, test, or documentation, and pollutes the project root.
+
+### Proposed Change
+Delete `20260304T094223-impl-notes.md` from the repository.
+
+### Affected Files
+- `20260304T094223-impl-notes.md` - delete (stray implementation notes file)
+
+### Reviewer
+claude
+
