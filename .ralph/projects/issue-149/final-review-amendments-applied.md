@@ -105,3 +105,37 @@ Make status-code matching context-aware instead of raw numeric substring checks:
 ### Reviewer
 codex
 
+
+## Round 4
+
+### Amendment: FR-149-001
+
+### Problem
+A stray file was added outside the implementation scope: [1741063993-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/1741063993-impl-notes.md) (starts at line 1).  
+It is not source/test code, is not consumed by the build/runtime, and is outside the requested edit set (`src/daemon/process.rs`, `src/daemon/github.rs`, `src/daemon/runtime.rs`).
+
+### Proposed Change
+Remove this file from the branch so the change set contains only the daemon resilience implementation and tests.
+
+### Affected Files
+- [1741063993-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/1741063993-impl-notes.md) - delete file
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+A stray scratch file `1741063993-impl-notes.md` exists at the repository root and is not part of the implementation.
+
+### Proposed Change
+Remove `1741063993-impl-notes.md` from the repo root (or move it to an appropriate non-tracked scratch location) so only intended source and test changes remain.
+
+### Affected Files
+- `1741063993-impl-notes.md`
+
+### Reviewer
+claude
+
