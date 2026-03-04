@@ -32,6 +32,7 @@ mod tests_prompt_review_panel;
 mod tests_qa;
 mod tests_quick_dev;
 mod tests_role_timeouts;
+mod tests_stray_cleanup;
 mod tests_run;
 mod tests_sessions;
 mod tests_streaming;
@@ -128,6 +129,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_pr_runtime::tests());
     tests.extend(tests_pr_lifecycle::tests());
     tests.extend(tests_quick_dev::tests());
+    tests.extend(tests_stray_cleanup::tests());
     tests
 }
 

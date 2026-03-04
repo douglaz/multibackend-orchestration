@@ -3577,3 +3577,70 @@ esac
 "###
     .to_owned()
 }
+
+/// Quick-dev implementer mock that also creates stray impl-notes and
+/// impl-response files in the worktree root (simulating the behaviour that
+/// caused the infinite loop in issue #146).
+pub fn quick_dev_implementer_with_stray_files_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created quick-dev mock implementation.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script only
+EOF
+  echo "quick-dev-implemented" > mock_file.txt
+  git add mock_file.txt
+  # Create stray impl artifacts at worktree root (the bug this tests)
+  echo "stray notes" > 20260304120000-impl-notes.md
+  echo "stray response" > 20260304120000-impl-response-001.md
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied reviewer-requested fixes.
+
+## Could Not Address
+- None
+EOF
+  echo "quick-dev-fixed" >> mock_file.txt
+  git add mock_file.txt
+  # Create more stray files on second iteration
+  echo "stray notes 2" > 20260304130000-impl-notes.md
+  echo "stray response 2" > 20260304130000-impl-response-002.md
+elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
+  if [ "$result" = "ISSUES FOUND" ]; then
+    cat <<'EOF'
+# Final Review: ISSUES FOUND
+
+## Issues
+- Mock issue found by implementer final review.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: COMPLETE
+
+## Summary
+All requirements met per implementer review.
+EOF
+  fi
+else
+  echo "quick-dev-implementer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}

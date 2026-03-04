@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use tracing::info;
+
 use crate::error::RalphError;
 use crate::git::branch::current_branch;
 use crate::git::ralph_commit::build_ralph_commit_message;
@@ -7,6 +9,7 @@ use crate::git::{
     conflicting_files, ensure_git_repo, has_conflicts, read_porcelain_status, run_git,
     run_git_status,
 };
+use crate::project::artifacts::{parse_artifact_filename_timestamp, ARTIFACT_TIMESTAMP_LEN};
 use crate::project::state::Phase;
 use crate::Result;
 
@@ -214,6 +217,7 @@ pub fn commit_and_push_phase_transition(
     }
 
     run_git(repo_root, &["add", "-A"])?;
+    remove_stray_impl_artifacts(repo_root)?;
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
@@ -256,10 +260,63 @@ pub fn count_phase_transition_checkpoints(
 pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     ensure_git_repo(workdir)?;
     run_git(workdir, &["add", "-A"])?;
+    remove_stray_impl_artifacts(workdir)?;
     // Unstage runtime and generated artifacts to avoid git pollution.
     // --ignore-unmatch avoids errors when nothing was staged.
     // Best-effort: errors are harmless.
     unstage_non_commit_artifacts(workdir);
+    Ok(())
+}
+
+/// Returns `true` if `file_name` matches the canonical stray impl artifact
+/// patterns: `YYYYMMDDHHMMSS-impl-notes.md` or `YYYYMMDDHHMMSS-impl-response-NNN.md`.
+fn is_stray_impl_artifact(file_name: &str) -> bool {
+    if parse_artifact_filename_timestamp(file_name).is_none() {
+        return false;
+    }
+    // Skip past "YYYYMMDDHHMMSS-"
+    let suffix = &file_name[ARTIFACT_TIMESTAMP_LEN + 1..];
+    if suffix == "impl-notes.md" {
+        return true;
+    }
+    // Exact match: "impl-response-NNN.md" where NNN is exactly 3 ASCII digits
+    if let Some(rest) = suffix.strip_prefix("impl-response-") {
+        if let Some(seq) = rest.strip_suffix(".md") {
+            return seq.len() == 3 && seq.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// Remove stray `*-impl-notes*.md` and `*-impl-response*.md` files from the
+/// worktree root.  These are duplicates left behind by implementer backends
+/// (canonical copies live in `.ralph/projects/<id>/loops/<NNN>/`).
+///
+/// Must be called **after** `git add -A` so that previously-untracked files are
+/// in the index and `git rm --force` can remove them from both index and disk.
+pub fn remove_stray_impl_artifacts(workdir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(workdir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !is_stray_impl_artifact(name) {
+            continue;
+        }
+        info!("removing stray impl artifact: {name}");
+        // Try git rm first (handles tracked files — removes from index + working tree).
+        // --force is needed because after `git add -A` the file is staged but has no
+        // HEAD entry, so git considers it "to be added" and plain `git rm` refuses.
+        let git_rm_result = run_git(workdir, &["rm", "--force", "--ignore-unmatch", "--", name]);
+        if git_rm_result.is_err() {
+            // Fallback: delete from filesystem directly (untracked or index-only edge cases).
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     Ok(())
 }
 
@@ -730,5 +787,141 @@ mod tests {
         let count = count_phase_transition_checkpoints(repo, "proj-a", "final_review", "planning")
             .expect("count checkpoints");
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_canonical_notes() {
+        assert!(super::is_stray_impl_artifact("20260304123456-impl-notes.md"));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_canonical_response() {
+        assert!(super::is_stray_impl_artifact(
+            "20260304123456-impl-response-001.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_response_999() {
+        assert!(super::is_stray_impl_artifact(
+            "20260304123456-impl-response-999.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_no_timestamp() {
+        assert!(!super::is_stray_impl_artifact("impl-notes.md"));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_non_canonical_draft() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260304123456-impl-response-draft.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_four_digit_seq() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260304123456-impl-response-0001.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_extra_suffix() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260304123456-impl-notes-custom.txt"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_review_file() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260304123456-review-001-feedback.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_readme() {
+        assert!(!super::is_stray_impl_artifact("README.md"));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_spec() {
+        assert!(!super::is_stray_impl_artifact("SPEC.md"));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_short_timestamp() {
+        assert!(!super::is_stray_impl_artifact(
+            "2026030412345-impl-notes.md"
+        ));
+    }
+
+    #[test]
+    fn remove_stray_impl_artifacts_cleans_tracked_and_untracked() {
+        let temp = init_repo();
+        let repo = temp.path();
+
+        // Tracked stray files (already committed, then re-created)
+        fs::write(repo.join("20260304120000-impl-notes.md"), "stray notes\n")
+            .expect("write stray notes");
+        fs::write(
+            repo.join("20260304120000-impl-response-001.md"),
+            "stray response\n",
+        )
+        .expect("write stray response");
+
+        // Untracked stray file
+        fs::write(
+            repo.join("20260304130000-impl-response-002.md"),
+            "untracked stray\n",
+        )
+        .expect("write untracked stray");
+
+        // Decoy files that should NOT be removed
+        fs::write(repo.join("impl-notes.md"), "user notes\n").expect("write decoy notes");
+        fs::write(
+            repo.join("20260304120000-review-001-feedback.md"),
+            "review\n",
+        )
+        .expect("write review artifact");
+
+        // Simulate the flow: git add -A then cleanup
+        git_ok(repo, &["add", "-A"]);
+        super::remove_stray_impl_artifacts(repo).expect("cleanup should succeed");
+
+        // Stray files should be gone from working tree
+        assert!(
+            !repo.join("20260304120000-impl-notes.md").exists(),
+            "stray notes should be removed"
+        );
+        assert!(
+            !repo.join("20260304120000-impl-response-001.md").exists(),
+            "stray response should be removed"
+        );
+        assert!(
+            !repo.join("20260304130000-impl-response-002.md").exists(),
+            "untracked stray should be removed"
+        );
+
+        // Decoy files should remain
+        assert!(
+            repo.join("impl-notes.md").exists(),
+            "decoy notes should survive"
+        );
+        assert!(
+            repo.join("20260304120000-review-001-feedback.md").exists(),
+            "review artifact should survive"
+        );
+
+        // Verify stray files are also gone from the index
+        let status = git_output(repo, &["status", "--porcelain"]);
+        assert!(
+            !status.contains("impl-notes.md")
+                || status.contains("impl-notes.md")
+                    && !status.contains("20260304120000-impl-notes.md"),
+            "stray files should not appear in git status as staged"
+        );
     }
 }

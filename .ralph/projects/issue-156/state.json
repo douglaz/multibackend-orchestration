@@ -1,0 +1,23 @@
+{
+  "project_id": "issue-156",
+  "project_name": "## Summary\n\nAfter the implementation phase completes, the or",
+  "created_at": "2026-03-04T16:23:23.285703044Z",
+  "prompt_file": "prompt.md",
+  "prompt_hash": "5a5f6ae59259078d90ae46c7ccd661387e79638414ff6c5d6153b09e89670203",
+  "prompt_hash_at_loop_start": "5a5f6ae59259078d90ae46c7ccd661387e79638414ff6c5d6153b09e89670203",
+  "prompt_review_completed": false,
+  "parent_project": null,
+  "current_loop": 15,
+  "current_phase": "reviewing",
+  "quick_dev_phase": "codex_review",
+  "phase_iteration": 1,
+  "status": "in_progress",
+  "loops": [],
+  "completion_attempts": [],
+  "session_store": {
+    "records": []
+  },
+  "pr_url": null,
+  "quick_dev_review_iteration": 0,
+  "quick_dev_final_review_attempts": 0
+}
