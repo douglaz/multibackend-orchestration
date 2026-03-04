@@ -7,6 +7,8 @@ pub mod history;
 pub mod init;
 mod prd;
 mod project;
+mod quick_dev_auto;
+mod quick_dev_run;
 mod quick_prd;
 mod rollback;
 mod run;
@@ -39,6 +41,8 @@ pub enum Commands {
     Prd(prd::PrdArgs),
     QuickPrd(quick_prd::QuickPrdArgs),
     Auto(auto::AutoArgs),
+    QuickDevRun(quick_dev_run::QuickDevRunArgs),
+    QuickDevAuto(quick_dev_auto::QuickDevAutoArgs),
     Validate(validate::ValidateArgs),
     Status(StatusArgs),
     History(HistoryArgs),
@@ -292,6 +296,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Prd(args) => prd::execute(args).await,
         Commands::QuickPrd(args) => quick_prd::execute(args).await,
         Commands::Auto(args) => auto::execute(args).await,
+        Commands::QuickDevRun(args) => quick_dev_run::execute(args).await,
+        Commands::QuickDevAuto(args) => quick_dev_auto::execute(args).await,
         Commands::Validate(args) => validate::execute(args),
         Commands::Status(args) => status::execute(args),
         Commands::History(args) => history::execute(args),
@@ -557,6 +563,178 @@ mod tests {
         };
 
         assert!(args.skip_prompt_review);
+    }
+
+    #[test]
+    fn parses_quick_dev_run_with_defaults() {
+        let cli = Cli::parse_from(["ralph", "quick-dev-run"]);
+        let Commands::QuickDevRun(args) = cli.command else {
+            panic!("expected quick-dev-run command");
+        };
+
+        assert!(args.project.is_none());
+        assert!(args.implementer_backend.is_none());
+        assert!(args.reviewer_backend.is_none());
+        assert!(args.pr_url.is_none());
+        assert!(args.workspace_root.is_none());
+        assert!(!args.skip_commit);
+        assert!(args.max_review_iterations.is_none());
+        assert!(args.max_final_review_retries.is_none());
+    }
+
+    #[test]
+    fn parses_quick_dev_run_with_all_args() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "quick-dev-run",
+            "--project",
+            "issue-146",
+            "--implementer-backend",
+            "claude(opus)",
+            "--reviewer-backend",
+            "codex(gpt-5)",
+            "--pr-url",
+            "https://github.com/acme/repo/pull/123",
+            "--workspace-root",
+            "/tmp/worktree",
+            "--skip-commit",
+            "--max-review-iterations",
+            "4",
+            "--max-final-review-retries",
+            "3",
+        ]);
+        let Commands::QuickDevRun(args) = cli.command else {
+            panic!("expected quick-dev-run command");
+        };
+
+        assert_eq!(args.project.as_deref(), Some("issue-146"));
+        assert_eq!(args.implementer_backend.as_deref(), Some("claude(opus)"));
+        assert_eq!(args.reviewer_backend.as_deref(), Some("codex(gpt-5)"));
+        assert_eq!(
+            args.pr_url.as_deref(),
+            Some("https://github.com/acme/repo/pull/123")
+        );
+        assert_eq!(
+            args.workspace_root.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert!(args.skip_commit);
+        assert_eq!(args.max_review_iterations, Some(4));
+        assert_eq!(args.max_final_review_retries, Some(3));
+    }
+
+    #[test]
+    fn parses_quick_dev_auto_with_defaults() {
+        let cli = Cli::parse_from(["ralph", "quick-dev-auto", "--idea", "add retry logic"]);
+        let Commands::QuickDevAuto(args) = cli.command else {
+            panic!("expected quick-dev-auto command");
+        };
+
+        assert_eq!(args.idea, "add retry logic");
+        assert!(args.implementer_backend.is_none());
+        assert!(args.reviewer_backend.is_none());
+        assert!(args.project_id.is_none());
+        assert!(args.pr_url.is_none());
+        assert!(args.workspace_root.is_none());
+        assert!(!args.skip_commit);
+        assert!(args.max_review_iterations.is_none());
+        assert!(args.max_final_review_retries.is_none());
+    }
+
+    #[test]
+    fn parses_quick_dev_auto_with_all_args() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "quick-dev-auto",
+            "--idea",
+            "add retry logic",
+            "--implementer-backend",
+            "claude(opus)",
+            "--reviewer-backend",
+            "codex(gpt-5)",
+            "--project-id",
+            "retry-logic",
+            "--pr-url",
+            "https://github.com/acme/repo/pull/123",
+            "--workspace-root",
+            "/tmp/worktree",
+            "--skip-commit",
+            "--max-review-iterations",
+            "4",
+            "--max-final-review-retries",
+            "3",
+        ]);
+        let Commands::QuickDevAuto(args) = cli.command else {
+            panic!("expected quick-dev-auto command");
+        };
+
+        assert_eq!(args.idea, "add retry logic");
+        assert_eq!(args.implementer_backend.as_deref(), Some("claude(opus)"));
+        assert_eq!(args.reviewer_backend.as_deref(), Some("codex(gpt-5)"));
+        assert_eq!(args.project_id.as_deref(), Some("retry-logic"));
+        assert_eq!(
+            args.pr_url.as_deref(),
+            Some("https://github.com/acme/repo/pull/123")
+        );
+        assert_eq!(
+            args.workspace_root.as_deref(),
+            Some(std::path::Path::new("/tmp/worktree"))
+        );
+        assert!(args.skip_commit);
+        assert_eq!(args.max_review_iterations, Some(4));
+        assert_eq!(args.max_final_review_retries, Some(3));
+    }
+
+    #[test]
+    fn rejects_quick_dev_auto_with_empty_idea() {
+        let result = Cli::try_parse_from(["ralph", "quick-dev-auto", "--idea", ""]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_quick_dev_auto_with_whitespace_idea() {
+        let result = Cli::try_parse_from(["ralph", "quick-dev-auto", "--idea", "   "]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_quick_dev_run_with_zero_max_review_iterations() {
+        let result =
+            Cli::try_parse_from(["ralph", "quick-dev-run", "--max-review-iterations", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_quick_dev_run_with_zero_max_final_review_retries() {
+        let result =
+            Cli::try_parse_from(["ralph", "quick-dev-run", "--max-final-review-retries", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_quick_dev_auto_with_zero_max_review_iterations() {
+        let result = Cli::try_parse_from([
+            "ralph",
+            "quick-dev-auto",
+            "--idea",
+            "test",
+            "--max-review-iterations",
+            "0",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_quick_dev_auto_with_zero_max_final_review_retries() {
+        let result = Cli::try_parse_from([
+            "ralph",
+            "quick-dev-auto",
+            "--idea",
+            "test",
+            "--max-final-review-retries",
+            "0",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -73,7 +73,7 @@ fn add_local_bare_remote(repo_root: &Path) {
 ///   QUICK_DEV_COUNTER_DIR: directory for stable cross-invocation counter files
 fn write_quick_dev_backend_script(path: &Path, role: &str) {
     let script = if role == "implementer" {
-        r#"#!/usr/bin/env bash
+        r#"#!/bin/bash
 set -euo pipefail
 prompt="$(cat)"
 
@@ -134,7 +134,7 @@ fi
 "#
     } else {
         // reviewer
-        r#"#!/usr/bin/env bash
+        r#"#!/bin/bash
 set -euo pipefail
 prompt="$(cat)"
 
@@ -227,6 +227,17 @@ fi
     }
 }
 
+fn write_bash_wrapper(path: &Path, target_script: &Path) {
+    let target = target_script.to_string_lossy();
+    let wrapper = format!("#!/bin/sh\nexec bash \"{target}\" \"$@\"\n");
+    fs::write(path, wrapper).expect("write bash wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
@@ -248,9 +259,22 @@ fn setup_quick_dev_workspace(
 
     let impl_script = repo_root.join("mock_impl.sh");
     let rev_script = repo_root.join("mock_rev.sh");
+    let impl_wrapper = repo_root.join("mock_impl_wrapper.sh");
+    let rev_wrapper = repo_root.join("mock_rev_wrapper.sh");
     write_quick_dev_backend_script(&impl_script, "implementer");
     write_quick_dev_backend_script(&rev_script, "reviewer");
-    git_ok(repo_root, &["add", "mock_impl.sh", "mock_rev.sh"]);
+    write_bash_wrapper(&impl_wrapper, &impl_script);
+    write_bash_wrapper(&rev_wrapper, &rev_script);
+    git_ok(
+        repo_root,
+        &[
+            "add",
+            "mock_impl.sh",
+            "mock_rev.sh",
+            "mock_impl_wrapper.sh",
+            "mock_rev_wrapper.sh",
+        ],
+    );
     git_ok(repo_root, &["commit", "-m", "test: add backend mocks"]);
 
     add_local_bare_remote(repo_root);
@@ -279,12 +303,12 @@ fn setup_quick_dev_workspace(
     );
     rev_env.insert("QUICK_DEV_COUNTER_DIR".to_owned(), counter_dir_str);
 
-    workspace.config.backends.claude.command = impl_script.to_string_lossy().to_string();
+    workspace.config.backends.claude.command = impl_wrapper.to_string_lossy().to_string();
     workspace.config.backends.claude.args = Vec::new();
     workspace.config.backends.claude.timeout_seconds = 30;
     workspace.config.backends.claude.env = impl_env;
 
-    workspace.config.backends.codex.command = rev_script.to_string_lossy().to_string();
+    workspace.config.backends.codex.command = rev_wrapper.to_string_lossy().to_string();
     workspace.config.backends.codex.args = Vec::new();
     workspace.config.backends.codex.timeout_seconds = 30;
     workspace.config.backends.codex.env = rev_env;
@@ -912,9 +936,10 @@ async fn resume_from_apply_fixes_includes_review_feedback() {
     // Replace the implementer mock with one that captures the prompt and
     // verifies it contains the review feedback.
     let capture_script = _temp.path().join("mock_impl_capture.sh");
+    let capture_wrapper = _temp.path().join("mock_impl_capture_wrapper.sh");
     let capture_prompt_file = _temp.path().join(".captured-prompt.txt");
     let capture_script_content = format!(
-        r#"#!/usr/bin/env bash
+        r#"#!/bin/bash
 set -euo pipefail
 prompt="$(cat)"
 
@@ -955,10 +980,11 @@ fi
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&capture_script, fs::Permissions::from_mode(0o755)).expect("chmod +x");
     }
+    write_bash_wrapper(&capture_wrapper, &capture_script);
 
     // Update workspace config to use the capture script as the implementer
     let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
-    workspace.config.backends.claude.command = capture_script.to_string_lossy().to_string();
+    workspace.config.backends.claude.command = capture_wrapper.to_string_lossy().to_string();
     workspace.save_config().expect("save config");
 
     let workspace = Workspace::load(workspace_root).expect("reload workspace");
