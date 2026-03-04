@@ -326,3 +326,58 @@ Delete `20260304T103437-impl-notes.md` from the repository root and commit the r
 ### Reviewer
 claude
 
+
+## Round 6
+
+### Amendment: QD-CRASH-TRANSITION-STATE-001
+
+### Problem
+Crash-resume can re-run the wrong phase after `ChangesRequested` / `IssuesFound`, which can consume guard counters without executing required fix phases.
+
+- In `CodexReview -> ApplyFixes`, review iteration is incremented and persisted ([src/workflow/quick_dev_orchestrator.rs:441](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:441), [src/workflow/quick_dev_orchestrator.rs:445](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:445)), but the phase is not durably switched to `ApplyFixes` before the transition checkpoint ([src/workflow/quick_dev_orchestrator.rs:499](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:499)-[513](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:513)).
+- In `FinalReview -> PlanAndImplement` (issues path), final-review attempts are incremented and persisted ([src/workflow/quick_dev_orchestrator.rs:713](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:713)-[717](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:717)), but phase is not durably switched to `PlanAndImplement` before checkpoint ([src/workflow/quick_dev_orchestrator.rs:770](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:770)-[790](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:790)).
+
+If the process crashes between checkpoint and next loop persist, resume restarts in the previous phase, which can prematurely hit `max_review_iterations` / `max_final_review_retries` without actually running `ApplyFixes` / `PlanAndImplement`.
+
+### Proposed Change
+Persist the target quick-dev phase before transition checkpoints on non-terminal transitions (at minimum: `CodexReview -> ApplyFixes` and `FinalReview -> PlanAndImplement`; ideally all transitions for consistency). Add regression tests that simulate crash at these boundaries and assert resume executes the intended next phase, not the previous one.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - persist transition target phase before checkpoint for crash-durable resume semantics.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - add boundary-crash regression assertions for phase progression.
+
+### Reviewer
+codex
+
+### Amendment: QD-STRAY-ROOT-ARTIFACT-002
+
+### Problem
+A non-source artifact file is committed at repo root: [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md). This is implementation-loop metadata and appears out of scope for production code.
+
+### Proposed Change
+Remove the file from the commit history for this feature branch (or move it to an explicitly ignored artifact location if it must be retained locally).
+
+### Affected Files
+- [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - delete from tracked source changes.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES-001
+
+### Problem
+The file `20260304T103437-impl-notes.md` exists in the repository root and is committed to the branch. This is an implementation notes artifact from loop 16 that should not be shipped — it contains internal development decisions and test debugging notes that are not part of the deliverable.
+
+### Proposed Change
+Delete `20260304T103437-impl-notes.md` from the repository.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this file
+
+---
+
+### Reviewer
+claude
+
