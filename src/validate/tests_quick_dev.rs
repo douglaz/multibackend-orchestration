@@ -76,6 +76,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "quick_dev::non_quick_completed_not_reclassified",
             func: non_quick_completed_not_reclassified,
         },
+        ConformanceTest {
+            name: "quick_dev::auto_optional_reviewer_fails_fast",
+            func: auto_optional_reviewer_fails_fast,
+        },
+        ConformanceTest {
+            name: "quick_dev::auto_gemini_reviewer_fails_fast",
+            func: auto_gemini_reviewer_fails_fast,
+        },
     ]
 }
 
@@ -927,6 +935,135 @@ fn reconstruction_restores_quick_dev_fields(h: &RalphHarness) -> TestResult {
             state_json["current_phase"].as_str().unwrap(),
             "completing",
             "state.json current_phase must match reconstruction"
+        );
+    })
+}
+
+/// `quick-dev-auto` with optional reviewer backend (`?codex`) must fail-fast
+/// (exit 2). Optional (`?`) prefixes are only allowed on panel surfaces.
+fn auto_optional_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let impl_script = h
+            .write_mock_script("qd-auto-opt-impl.sh", &quick_dev_implementer_mock_script())
+            .expect("write impl mock");
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{}\"\n", impl_script.display());
+        let wrapper = h
+            .write_mock_script("qd-auto-opt-wrapper.sh", &wrapper_content)
+            .expect("write wrapper");
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        for backend in &["claude", "codex"] {
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.command"),
+                wrapper_str.clone(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} command failed: {e}"));
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.args"),
+                "[]".to_owned(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
+        }
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("disable gemini");
+
+        let output = h
+            .ralph([
+                "quick-dev-auto",
+                "--idea",
+                "auto-optional-reviewer-test",
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "?codex",
+            ])
+            .expect("quick-dev-auto should execute");
+
+        // Must fail with exit code 2
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(&output, "optional backend specs");
+
+        // No project should have been created
+        let project_dir = h.project_dir("auto-optional-reviewer-test");
+        assert!(
+            !project_dir.exists(),
+            "project directory must not exist after fail-fast: {}",
+            project_dir.display()
+        );
+    })
+}
+
+/// `quick-dev-auto` with gemini as reviewer backend must fail-fast (exit 2).
+/// Gemini is only allowed on panel surfaces (final review, completion, prompt
+/// review), not as implementer or reviewer in quick-dev.
+fn auto_gemini_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let impl_script = h
+            .write_mock_script("qd-auto-gem-impl.sh", &quick_dev_implementer_mock_script())
+            .expect("write impl mock");
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{}\"\n", impl_script.display());
+        let wrapper = h
+            .write_mock_script("qd-auto-gem-wrapper.sh", &wrapper_content)
+            .expect("write wrapper");
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        for backend in &["claude", "codex"] {
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.command"),
+                wrapper_str.clone(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} command failed: {e}"));
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.args"),
+                "[]".to_owned(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
+        }
+
+        let output = h
+            .ralph([
+                "quick-dev-auto",
+                "--idea",
+                "auto-gemini-reviewer-test",
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "gemini",
+            ])
+            .expect("quick-dev-auto should execute");
+
+        // Must fail with exit code 2
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(&output, "gemini backend is not supported");
+
+        // No project should have been created
+        let project_dir = h.project_dir("auto-gemini-reviewer-test");
+        assert!(
+            !project_dir.exists(),
+            "project directory must not exist after fail-fast: {}",
+            project_dir.display()
         );
     })
 }

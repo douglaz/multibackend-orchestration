@@ -559,6 +559,19 @@ fn validate_backend_spec(
     Ok(parsed)
 }
 
+/// Public wrapper for validating a backend spec with `Required` surface
+/// semantics (rejects optional `?backend` prefixes and gemini backends).
+/// Use this when pre-validating backends outside `resolve_effective_config`,
+/// e.g. in `quick-dev-auto` preflight.
+pub fn validate_required_backend_spec(
+    global: &GlobalConfig,
+    spec: &str,
+    label: &str,
+) -> Result<()> {
+    validate_backend_spec(global, spec, label, ValidationSurface::Required)?;
+    Ok(())
+}
+
 pub fn validate_interactive_prd_workspace_config(global: &GlobalConfig) -> Result<()> {
     let workspace = &global.workspace;
     if workspace.daemon_prd_question_backends.len() != 2 {

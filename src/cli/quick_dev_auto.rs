@@ -6,6 +6,7 @@ use super::init;
 use super::parse_positive_u32;
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
+use crate::config::validate_required_backend_spec;
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
@@ -144,8 +145,16 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
         }
         Some(rev) => {
             quick_dev_orchestrator::validate_distinct_backends(preflight_implementer, rev)?;
-            backend_spec::validate_backend_spec(preflight_implementer, &workspace.config)?;
-            backend_spec::validate_backend_spec(rev, &workspace.config)?;
+            validate_required_backend_spec(
+                &workspace.config,
+                preflight_implementer,
+                "quick-dev implementer backend",
+            )?;
+            validate_required_backend_spec(
+                &workspace.config,
+                rev,
+                "quick-dev reviewer backend",
+            )?;
         }
     }
 
