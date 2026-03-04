@@ -494,6 +494,30 @@ impl ProjectState {
     }
 }
 
+impl QuickDevPhase {
+    /// Map a quick-dev phase to the corresponding compatibility `Phase` used
+    /// for git checkpoint messaging and state persistence.
+    pub fn to_current_phase(&self) -> Phase {
+        match self {
+            QuickDevPhase::PlanAndImplement => Phase::Implementing,
+            QuickDevPhase::CodexReview => Phase::Reviewing,
+            QuickDevPhase::ApplyFixes => Phase::Implementing,
+            QuickDevPhase::FinalReview => Phase::FinalReview,
+        }
+    }
+}
+
+impl std::fmt::Display for QuickDevPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuickDevPhase::PlanAndImplement => write!(f, "plan_and_implement"),
+            QuickDevPhase::CodexReview => write!(f, "codex_review"),
+            QuickDevPhase::ApplyFixes => write!(f, "apply_fixes"),
+            QuickDevPhase::FinalReview => write!(f, "final_review"),
+        }
+    }
+}
+
 impl CompletionLoopArtifacts {
     pub fn has_acceptance_result_for(&self, backend: &str) -> bool {
         self.acceptance_results

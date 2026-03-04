@@ -341,6 +341,11 @@ fn reconstruct_project_state_internal(
 
     state.phase_iteration = infer_phase_iteration(&state);
 
+    // Load persisted quick-dev phase from state.json if present.
+    // The quick-dev orchestrator writes state.json to persist its phase
+    // machine position for crash-safe resume.
+    load_quick_dev_phase_from_state_json(project_dir, &mut state);
+
     if state
         .completion_attempts
         .iter()
@@ -417,6 +422,27 @@ pub(crate) fn validate_project_id(id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Load the persisted `quick_dev_phase` from `state.json` written by the
+/// quick-dev orchestrator.  This allows crash-safe resume: if the process
+/// dies mid-phase, the next reconstruction picks up where it left off.
+fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectState) {
+    let state_path = project_dir.join("state.json");
+    let Ok(content) = fs::read_to_string(&state_path) else {
+        return;
+    };
+    // Parse only the quick_dev_phase field from the persisted state.
+    #[derive(serde::Deserialize)]
+    struct PartialState {
+        #[serde(default)]
+        quick_dev_phase: Option<crate::project::state::QuickDevPhase>,
+    }
+    if let Ok(partial) = serde_json::from_str::<PartialState>(&content) {
+        if partial.quick_dev_phase.is_some() {
+            state.quick_dev_phase = partial.quick_dev_phase;
+        }
+    }
 }
 
 fn collect_loop_directories(project_dir: &Path) -> Result<Vec<(u32, String, PathBuf)>> {
