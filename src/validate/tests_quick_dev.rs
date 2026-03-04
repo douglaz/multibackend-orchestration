@@ -1,4 +1,5 @@
 use std::fs;
+use std::process::Command;
 
 use super::panic_message;
 use crate::validate::assertions::{
@@ -54,6 +55,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "quick_dev::equal_backends_fails",
             func: equal_backends_fails,
+        },
+        ConformanceTest {
+            name: "quick_dev::initial_checkpoint_planning_to_implementing",
+            func: initial_checkpoint_planning_to_implementing,
         },
     ]
 }
@@ -671,6 +676,57 @@ fn equal_backends_fails(h: &RalphHarness) -> TestResult {
             state["status"].as_str().unwrap_or(""),
             "completed",
             "status must not be completed after equal-backends error"
+        );
+    })
+}
+
+/// Regression: the initial `start -> PlanAndImplement` transition must emit a
+/// `planning -> implementing` checkpoint when auto-commit is enabled and there
+/// are changes outside `.ralph/` to commit.
+fn initial_checkpoint_planning_to_implementing(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-checkpoint-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_implementer_mock_script(),
+            &quick_dev_reviewer_mock_script(),
+        );
+
+        // Create a file outside .ralph/ so the initial checkpoint has changes to commit.
+        let seed_file = h.repo_root.join("seed-for-checkpoint.txt");
+        fs::write(&seed_file, "seed content for initial checkpoint test")
+            .expect("write seed file");
+
+        // Run WITHOUT --skip-commit so checkpoints fire.
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+            ])
+            .expect("quick-dev-run should execute");
+
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "completed");
+
+        // Verify the initial planning -> implementing checkpoint exists in git log.
+        let git_log = Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git log failed");
+        let log_output = String::from_utf8_lossy(&git_log.stdout);
+        let expected_msg = format!(
+            "ralph({project_id}): loop 1 planning -> implementing"
+        );
+        assert!(
+            log_output.contains(&expected_msg),
+            "expected '{expected_msg}' in git log, got:\n{log_output}"
         );
     })
 }

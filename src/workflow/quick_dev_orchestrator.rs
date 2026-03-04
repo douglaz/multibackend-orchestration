@@ -178,6 +178,23 @@ impl QuickDevOrchestrator {
             .map(|l| l.slug.clone())
             .unwrap_or_else(|| "quick-dev".to_owned());
 
+        // Initial checkpoint: start -> PlanAndImplement (Planning -> Implementing).
+        // Only emitted on fresh start when no persisted quick_dev_phase exists.
+        if state.quick_dev_phase.is_none()
+            && matches!(starting_phase, QuickDevPhase::PlanAndImplement)
+        {
+            checkpoint_if_enabled(
+                &self.workspace,
+                &project_id,
+                loop_number,
+                Phase::Planning,
+                Phase::Implementing,
+                effective.workflow.auto_commit,
+                options.skip_commit,
+                effective.global.git.sign_commits,
+            )?;
+        }
+
         let result = self
             .run_phase_machine(
                 &mut state,
