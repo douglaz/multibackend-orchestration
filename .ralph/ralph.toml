@@ -122,6 +122,7 @@ completer = "gemini-3-pro-preview"
 [backends.gemini.role_timeouts]
 
 [workflow]
+reviewer_backend = "codex"
 max_review_iterations = 30
 auto_commit = true
 commit_message_style = "conventional"
