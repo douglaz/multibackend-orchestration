@@ -286,8 +286,10 @@ impl QuickDevOrchestrator {
         // There can be (max_final_review_retries + 1) such cycles (the initial
         // attempt plus retries).  We add a generous buffer of 10 for resume
         // edge cases and the initial checkpoint transition.
-        let max_transitions: u32 = (max_final_review_retries + 1)
-            .saturating_mul(3 + 2 * max_review_iterations)
+        let max_transitions: u32 = (max_final_review_retries.saturating_add(1))
+            .saturating_mul(
+                3u32.saturating_add(2u32.saturating_mul(max_review_iterations)),
+            )
             .saturating_add(10);
 
         // Phase machine loop (bounded by configured limits)
@@ -935,6 +937,9 @@ fn save_state_to_disk(state: &ProjectState, project_dir: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp_path);
         RalphError::Orchestration(format!("failed to fsync temp state file: {e}"))
     })?;
+
+    // Explicitly close the file handle before rename for cross-platform safety.
+    drop(file);
 
     // Atomic rename
     fs::rename(&tmp_path, &state_path).map_err(|e| {

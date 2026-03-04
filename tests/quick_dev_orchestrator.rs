@@ -1396,15 +1396,20 @@ async fn transition_failure_preserves_final_review_counter_on_resume() {
 // Regression test - high configured limits do not hit a fixed transition cap
 // ---------------------------------------------------------------------------
 
-/// Verifies that when `max_review_iterations` and `max_final_review_retries`
-/// are set above the old hardcoded ceiling of 100, the orchestrator does NOT
-/// terminate with "exceeded maximum phase transitions (100)".  The transition
-/// bound must be derived from configured limits, not a fixed constant.
+/// Verifies that when `max_review_iterations` exceeds 50 (the old hardcoded
+/// ceiling was 100 transitions total), the orchestrator does NOT terminate with
+/// "exceeded maximum phase transitions".  With `changes_requested` mode and
+/// `max_review_iterations = 60`, the phase machine must execute at least 123
+/// transitions (3 + 2*60) before reaching FinalReview, which would have been
+/// impossible under the old fixed `0..100` loop.
 #[tokio::test]
 async fn high_configured_limits_do_not_hit_fixed_transition_cap() {
-    // Use "satisfied" + "complete" so it finishes quickly — the point is that
-    // setting high limits doesn't trigger an artificial ceiling.
-    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+    // "changes_requested" forces the reviewer to always request changes, so the
+    // orchestrator loops through ApplyFixes→CodexReview exactly
+    // `max_review_iterations` times before the guard kicks in and skips to
+    // FinalReview.  With max_review_iterations=60 this requires >100 transitions.
+    let (_temp, workspace_root, project_id) =
+        setup_quick_dev_workspace("changes_requested", "complete");
 
     let workspace = Workspace::load(workspace_root).expect("load workspace");
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
@@ -1416,16 +1421,16 @@ async fn high_configured_limits_do_not_hit_fixed_transition_cap() {
             reviewer_backend: Some("codex".to_owned()),
             pr_url: None,
             skip_commit: true,
-            // Set limits well above the old hardcoded 100-transition cap
-            max_review_iterations: Some(200),
-            max_final_review_retries: Some(50),
+            // 60 review iterations → 3 + 2*60 = 123 transitions (exceeds old cap of 100)
+            max_review_iterations: Some(60),
+            max_final_review_retries: Some(0),
         })
         .await;
 
     // The orchestrator must complete successfully, NOT fail with a
     // "exceeded maximum phase transitions" error.
     let result = result.expect(
-        "orchestrator should succeed with high limits; must not hit a fixed transition cap",
+        "orchestrator should succeed with >100 transitions; must not hit a fixed transition cap",
     );
     assert!(
         result.summary.contains("completed"),
