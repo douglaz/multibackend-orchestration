@@ -191,7 +191,7 @@ pub fn parse_codex_review_output(raw: &str) -> Result<CodexReviewDecision> {
         ));
     };
 
-    match first_h1.trim_end() {
+    match first_h1.trim() {
         "# Review: SATISFIED" => Ok(CodexReviewDecision::ReviewSatisfied { body }),
         "# Review: CHANGES REQUESTED" => Ok(CodexReviewDecision::ChangesRequested { body }),
         other => Err(RalphError::ParseError(format!(
@@ -208,7 +208,7 @@ pub fn parse_quick_final_review_output(raw: &str) -> Result<QuickFinalReviewDeci
         ));
     };
 
-    match first_h1.trim_end() {
+    match first_h1.trim() {
         "# Final Review: COMPLETE" => Ok(QuickFinalReviewDecision::Complete { body }),
         "# Final Review: ISSUES FOUND" => Ok(QuickFinalReviewDecision::IssuesFound { body }),
         other => Err(RalphError::ParseError(format!(
@@ -1014,6 +1014,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_review_parser_tolerates_leading_whitespace() {
+        let text = "  # Review: CHANGES REQUESTED  \n\nfixes needed";
+        let parsed =
+            parse_codex_review_output(text).expect("leading whitespace on H1 should parse");
+        assert!(matches!(
+            parsed,
+            CodexReviewDecision::ChangesRequested { .. }
+        ));
+    }
+
+    #[test]
     fn codex_review_parser_strips_frontmatter() {
         let text = "---\nartifact: review\n---\n# Review: CHANGES REQUESTED\n\nneeds fixes";
         let parsed = parse_codex_review_output(text).expect("frontmatter should be stripped");
@@ -1066,6 +1077,17 @@ mod tests {
         let parsed =
             parse_quick_final_review_output(text).expect("trailing whitespace should parse");
         assert!(matches!(parsed, QuickFinalReviewDecision::Complete { .. }));
+    }
+
+    #[test]
+    fn quick_final_review_parser_tolerates_leading_whitespace() {
+        let text = "  # Final Review: ISSUES FOUND  \n\nbug";
+        let parsed = parse_quick_final_review_output(text)
+            .expect("leading whitespace on H1 should parse");
+        assert!(matches!(
+            parsed,
+            QuickFinalReviewDecision::IssuesFound { .. }
+        ));
     }
 
     #[test]

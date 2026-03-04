@@ -9,7 +9,9 @@ use crate::cli::backend_spec;
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-use crate::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunOptions};
+use crate::workflow::quick_dev_orchestrator::{
+    self, QuickDevOrchestrator, QuickDevRunOptions,
+};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -123,6 +125,30 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
 
     let workspace = ensure_workspace(workspace_root.as_ref())?;
 
+    // --- Quick-dev backend preflight validation (fail-fast before side effects) ---
+    // Mirror the orchestrator's resolution chain: CLI -> global config -> starting_backend.
+    // Since the project doesn't exist yet, project-level overrides don't apply.
+    let preflight_implementer = implementer_backend
+        .as_deref()
+        .or(workspace.config.workflow.implementer_backend.as_deref())
+        .unwrap_or(&workspace.config.workspace.default_backend);
+    let preflight_reviewer = reviewer_backend
+        .as_deref()
+        .or(workspace.config.workflow.reviewer_backend.as_deref());
+
+    match preflight_reviewer {
+        None => {
+            return Err(RalphError::Validation(
+                "quick-dev requires a second backend for review".to_owned(),
+            ));
+        }
+        Some(rev) => {
+            quick_dev_orchestrator::validate_distinct_backends(preflight_implementer, rev)?;
+            backend_spec::validate_backend_spec(preflight_implementer, &workspace.config)?;
+            backend_spec::validate_backend_spec(rev, &workspace.config)?;
+        }
+    }
+
     let writer_spec = workspace.config.workspace.daemon_prd_writer_backend.clone();
     let reviewer_spec = workspace
         .config
@@ -172,13 +198,6 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
     println!("  cache: {}", quick_prd_result.cache_dir.display());
     println!("  revisions: {}", quick_prd_result.revision_count);
     println!("  {}", quick_prd_result.summary);
-
-    if let Some(spec) = implementer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = reviewer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
 
     let project_id = project_id.unwrap_or_else(|| slugify_idea(&idea));
     if project_id.is_empty() {

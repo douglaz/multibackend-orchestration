@@ -780,7 +780,7 @@ impl QuickDevOrchestrator {
 // Backend resolution helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_implementer_backend(
+pub(crate) fn resolve_implementer_backend(
     options: &QuickDevRunOptions,
     effective: &EffectiveConfig,
 ) -> Result<String> {
@@ -793,7 +793,7 @@ fn resolve_implementer_backend(
     Ok(effective.workflow.starting_backend.clone())
 }
 
-fn resolve_reviewer_backend(
+pub(crate) fn resolve_reviewer_backend(
     options: &QuickDevRunOptions,
     effective: &EffectiveConfig,
 ) -> Result<String> {
@@ -808,7 +808,7 @@ fn resolve_reviewer_backend(
     ))
 }
 
-fn validate_distinct_backends(implementer: &str, reviewer: &str) -> Result<()> {
+pub(crate) fn validate_distinct_backends(implementer: &str, reviewer: &str) -> Result<()> {
     if implementer == reviewer {
         return Err(RalphError::Validation(format!(
             "quick-dev requires distinct implementer and reviewer backends, but both resolved to '{implementer}'"

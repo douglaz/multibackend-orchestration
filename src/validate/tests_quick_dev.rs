@@ -60,6 +60,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "quick_dev::initial_checkpoint_planning_to_implementing",
             func: initial_checkpoint_planning_to_implementing,
         },
+        ConformanceTest {
+            name: "quick_dev::auto_missing_reviewer_fails_fast",
+            func: auto_missing_reviewer_fails_fast,
+        },
+        ConformanceTest {
+            name: "quick_dev::auto_equal_backends_fails_fast",
+            func: auto_equal_backends_fails_fast,
+        },
+        ConformanceTest {
+            name: "quick_dev::reconstruction_restores_quick_dev_fields",
+            func: reconstruction_restores_quick_dev_fields,
+        },
+        ConformanceTest {
+            name: "quick_dev::non_quick_completed_not_reclassified",
+            func: non_quick_completed_not_reclassified,
+        },
     ]
 }
 
@@ -727,6 +743,233 @@ fn initial_checkpoint_planning_to_implementing(h: &RalphHarness) -> TestResult {
         assert!(
             log_output.contains(&expected_msg),
             "expected '{expected_msg}' in git log, got:\n{log_output}"
+        );
+    })
+}
+
+/// `quick-dev-auto` with missing reviewer backend must fail-fast (exit 2)
+/// before creating a project directory or running quick-prd.
+fn auto_missing_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let impl_script = h
+            .write_mock_script("qd-auto-impl.sh", &quick_dev_implementer_mock_script())
+            .expect("write impl mock");
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{}\"\n", impl_script.display());
+        let wrapper = h
+            .write_mock_script("qd-auto-impl-wrapper.sh", &wrapper_content)
+            .expect("write wrapper");
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.claude.command".to_owned(),
+            wrapper_str,
+            "--global".to_owned(),
+        ])
+        .expect("set claude command");
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.claude.args".to_owned(),
+            "[]".to_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("set claude args");
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("disable gemini");
+
+        let output = h
+            .ralph([
+                "quick-dev-auto",
+                "--idea",
+                "auto-missing-reviewer-test",
+                "--implementer-backend",
+                "claude",
+            ])
+            .expect("quick-dev-auto should execute");
+
+        // Must fail with exit code 2
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(&output, "quick-dev requires a second backend for review");
+
+        // No project should have been created
+        let project_dir = h.project_dir("auto-missing-reviewer-test");
+        assert!(
+            !project_dir.exists(),
+            "project directory must not exist after fail-fast: {}",
+            project_dir.display()
+        );
+    })
+}
+
+/// `quick-dev-auto` with equal implementer/reviewer backends must fail-fast
+/// (exit 2) before creating a project directory or running quick-prd.
+fn auto_equal_backends_fails_fast(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let impl_script = h
+            .write_mock_script("qd-auto-eq-impl.sh", &quick_dev_implementer_mock_script())
+            .expect("write impl mock");
+        let wrapper_content = format!("#!/bin/sh\nexec bash \"{}\"\n", impl_script.display());
+        let wrapper = h
+            .write_mock_script("qd-auto-eq-wrapper.sh", &wrapper_content)
+            .expect("write wrapper");
+        let wrapper_str = wrapper.to_string_lossy().into_owned();
+
+        for backend in &["claude", "codex"] {
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.command"),
+                wrapper_str.clone(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} command failed: {e}"));
+            h.ralph_ok(vec![
+                "config".to_owned(),
+                "set".to_owned(),
+                format!("backends.{backend}.args"),
+                "[]".to_owned(),
+                "--global".to_owned(),
+            ])
+            .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
+        }
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "backends.gemini.enabled".to_owned(),
+            "false".to_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("disable gemini");
+
+        let output = h
+            .ralph([
+                "quick-dev-auto",
+                "--idea",
+                "auto-equal-backends-test",
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "claude",
+            ])
+            .expect("quick-dev-auto should execute");
+
+        assert_exit_code(&output, 2);
+        assert_stderr_contains(
+            &output,
+            "quick-dev requires distinct implementer and reviewer backends",
+        );
+
+        // No project should have been created
+        let project_dir = h.project_dir("auto-equal-backends-test");
+        assert!(
+            !project_dir.exists(),
+            "project directory must not exist after fail-fast: {}",
+            project_dir.display()
+        );
+    })
+}
+
+/// After a successful quick-dev-run, `h.load_state()` (which uses
+/// `reconstruct_project_state`) must reflect the persisted quick-dev fields
+/// including `current_phase` and `phase_iteration`.
+fn reconstruction_restores_quick_dev_fields(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-recon-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_implementer_mock_script(),
+            &quick_dev_reviewer_mock_script(),
+        );
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify via reconstruction (h.load_state) — not just state.json
+        let state = load_state(h, project_id);
+        assert_eq!(
+            state["status"].as_str().unwrap(),
+            "completed",
+            "reconstructed status must be completed"
+        );
+        assert_eq!(
+            state["current_phase"].as_str().unwrap(),
+            "completing",
+            "reconstructed current_phase must be completing"
+        );
+
+        // Also verify that state.json matches reconstruction
+        let state_json = load_state_json(h, project_id);
+        assert_eq!(
+            state_json["current_phase"].as_str().unwrap(),
+            "completing",
+            "state.json current_phase must match reconstruction"
+        );
+    })
+}
+
+/// Non-quick projects with `status=completed` must not be reclassified by
+/// quick-dev reconstruction logic.  Only state.json files written by the
+/// quick-dev orchestrator affect completion status.
+fn non_quick_completed_not_reclassified(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-non-quick-001";
+        h.init_workspace().expect("init failed");
+        h.create_project(project_id, "Non-Quick Project", "non-quick test prompt")
+            .expect("create_project failed");
+
+        // Verify the project has no quick_dev_phase and is not completed
+        let state = load_state(h, project_id);
+        assert!(
+            state["quick_dev_phase"].is_null(),
+            "fresh project must not have quick_dev_phase"
+        );
+        assert_ne!(
+            state["status"].as_str().unwrap_or(""),
+            "completed",
+            "fresh non-quick project must not be completed"
+        );
+
+        // Write a state.json without quick_dev_phase but with status=completed
+        // to simulate a non-quick scenario where state.json exists
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        fs::write(
+            &state_path,
+            r#"{"status":"completed","current_phase":"completing"}"#,
+        )
+        .expect("write fake state.json");
+
+        // Reconstruction should NOT mark this as completed because
+        // there's no quick_dev_phase marker and no completion_attempts
+        let state = load_state(h, project_id);
+        assert_ne!(
+            state["status"].as_str().unwrap_or(""),
+            "completed",
+            "non-quick project with fake state.json must not be reclassified as completed"
         );
     })
 }

@@ -432,9 +432,9 @@ pub(crate) fn validate_project_id(id: &str) -> Result<()> {
 /// quick-dev orchestrator.  This allows crash-safe resume: if the process
 /// dies mid-phase, the next reconstruction picks up where it left off.
 ///
-/// Also restores `status`, `review_iteration`, and `final_review_attempts`
-/// so that completed/force-completed projects are not restarted and guard
-/// counters survive across process restarts.
+/// Restores: `quick_dev_phase`, `current_phase`, `phase_iteration`,
+/// `quick_dev_review_iteration`, `quick_dev_final_review_attempts`, and
+/// `status` (scoped to quick-dev markers only).
 fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectState) {
     let state_path = project_dir.join("state.json");
     let Ok(content) = fs::read_to_string(&state_path) else {
@@ -445,6 +445,10 @@ fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectS
         #[serde(default)]
         quick_dev_phase: Option<crate::project::state::QuickDevPhase>,
         #[serde(default)]
+        current_phase: Option<Phase>,
+        #[serde(default)]
+        phase_iteration: Option<u32>,
+        #[serde(default)]
         status: Option<crate::project::state::ProjectStatus>,
         #[serde(default)]
         quick_dev_review_iteration: Option<u32>,
@@ -452,19 +456,45 @@ fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectS
         quick_dev_final_review_attempts: Option<u32>,
     }
     if let Ok(partial) = serde_json::from_str::<PartialState>(&content) {
+        // Determine whether this state.json was written by the quick-dev
+        // orchestrator.  The orchestrator always persists guard counters,
+        // so the presence of any quick-dev field is a reliable marker.
+        // Non-quick projects never write state.json with these fields.
+        let is_quick_dev_state = partial.quick_dev_phase.is_some()
+            || partial.quick_dev_review_iteration.is_some()
+            || partial.quick_dev_final_review_attempts.is_some();
+
         if partial.quick_dev_phase.is_some() {
             state.quick_dev_phase = partial.quick_dev_phase;
         }
-        // If quick-dev wrote a Completed status (normal or force-complete)
-        // and quick_dev_phase is None, honor the persisted status so reruns
-        // do not restart from PlanAndImplement.
-        if let Some(ref persisted_status) = partial.status {
-            if state.quick_dev_phase.is_none()
-                && *persisted_status == crate::project::state::ProjectStatus::Completed
-            {
-                state.status = crate::project::state::ProjectStatus::Completed;
+
+        // Restore current_phase and phase_iteration from state.json when
+        // the file was written by the quick-dev orchestrator.  This covers
+        // both mid-phase resume (quick_dev_phase is Some) and post-completion
+        // (quick_dev_phase cleared to None but counters still present).
+        if is_quick_dev_state {
+            if let Some(cp) = partial.current_phase {
+                state.current_phase = cp;
+            }
+            if let Some(pi) = partial.phase_iteration {
+                state.phase_iteration = pi;
             }
         }
+
+        // If quick-dev wrote a Completed status (normal or force-complete)
+        // and quick_dev_phase is None, honor the persisted status so reruns
+        // do not restart from PlanAndImplement.  Scoped to quick-dev: only
+        // state.json files with quick-dev markers affect completion status.
+        if is_quick_dev_state {
+            if let Some(ref persisted_status) = partial.status {
+                if state.quick_dev_phase.is_none()
+                    && *persisted_status == crate::project::state::ProjectStatus::Completed
+                {
+                    state.status = crate::project::state::ProjectStatus::Completed;
+                }
+            }
+        }
+
         // Restore guard counters for crash-safe resume.
         if let Some(ri) = partial.quick_dev_review_iteration {
             state.quick_dev_review_iteration = ri;
