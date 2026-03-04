@@ -1503,8 +1503,11 @@ async fn dispatch_task(
         }
     }
 
-    // Refine the prompt if enabled
-    let (idea, refined_title, cleaned_body) = if config.refinement_enabled {
+    // Refine the prompt if enabled.
+    // For prd-done issues, skip refinement entirely to preserve the exact
+    // approved spec (or compose_raw_idea fallback) as the dispatch payload.
+    let has_prd_done = issue_labels.iter().any(|l| l == "ralph:prd-done");
+    let (idea, refined_title, cleaned_body) = if config.refinement_enabled && !has_prd_done {
         match refine::refine_prompt(raw_idea, &config.refinement_backend, &config.global_config)
             .await
         {
