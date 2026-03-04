@@ -959,6 +959,27 @@ pub fn is_retryable_push_stderr(stderr: &str) -> bool {
     false
 }
 
+/// Determine whether a [`RalphError`] from a git push operation represents a
+/// transient failure that should be retried.
+///
+/// Extracts the git push stderr from the structured error message and
+/// classifies it, ensuring branch names (which may contain numeric codes
+/// like `403` or `500`) do not influence the decision.
+pub fn is_retryable_push_error(err: &RalphError) -> bool {
+    let message = err.to_string();
+    // Extract stderr from the canonical "git push failed for branch <branch>: <stderr>" format.
+    let Some(prefix_start) = message.find("git push failed for branch ") else {
+        return false;
+    };
+    let after_prefix = &message[prefix_start + "git push failed for branch ".len()..];
+    // Skip past the branch name to find the ": " delimiter before stderr.
+    let Some(colon_pos) = after_prefix.find(": ") else {
+        return false;
+    };
+    let stderr = &after_prefix[colon_pos + 2..];
+    is_retryable_push_stderr(stderr)
+}
+
 /// Push the current branch with bounded retry for transient failures.
 pub fn push_branch_with_retry(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
     push_branch_with_retry_impl("git", worktree_path, branch, &[10, 20, 40])
@@ -981,10 +1002,11 @@ fn push_branch_with_retry_impl(
             Ok(()) => return Ok(()),
             Err(stderr) => {
                 let attempt = attempt_index + 1;
-                if !is_retryable_push_stderr(&stderr) || attempt == total_attempts {
-                    return Err(RalphError::Orchestration(format!(
-                        "git push failed for branch {branch}: {stderr}"
-                    )));
+                let err = RalphError::Orchestration(format!(
+                    "git push failed for branch {branch}: {stderr}"
+                ));
+                if !is_retryable_push_error(&err) || attempt == total_attempts {
+                    return Err(err);
                 }
                 eprintln!(
                     "push-retry: push failed for branch {branch} in {} (attempt {attempt}/{total_attempts}), retrying in {delay_secs}s: {stderr}",
@@ -2077,9 +2099,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_is_draft,
-        parse_pr_merge_info, push_branch_with_retry_impl, GhIssue, PrMergeStatus, REQUIRED_LABELS,
+        has_diff, is_invalid_revision_error, is_retryable_push_error, parse_issue_list,
+        parse_pr_is_draft, parse_pr_merge_info, push_branch_with_retry_impl, GhIssue,
+        PrMergeStatus, REQUIRED_LABELS,
     };
+    use crate::error::RalphError;
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -2250,6 +2274,83 @@ mod tests {
     fn unknown_errors_are_not_retried() {
         assert!(!super::is_retryable_push_stderr("repository not found"));
         assert!(!super::is_retryable_push_stderr("unexpected internal error xyz"));
+    }
+
+    #[test]
+    fn is_retryable_push_error_classifies_transient_and_permanent() {
+        let transient = RalphError::Orchestration(
+            "git push failed for branch main: HTTP 503 Service Unavailable".to_owned(),
+        );
+        assert!(is_retryable_push_error(&transient));
+
+        let timeout = RalphError::Orchestration(
+            "git push failed for branch main: operation timed out".to_owned(),
+        );
+        assert!(is_retryable_push_error(&timeout));
+
+        let connection = RalphError::Orchestration(
+            "git push failed for branch main: connection reset by peer".to_owned(),
+        );
+        assert!(is_retryable_push_error(&connection));
+
+        let permanent = RalphError::Orchestration(
+            "git push failed for branch main: permission denied".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&permanent));
+
+        let nff = RalphError::Orchestration(
+            "git push failed for branch main: non-fast-forward".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&nff));
+
+        let gh013 = RalphError::Orchestration(
+            "git push failed for branch main: GH013: Repository rule violations found".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&gh013));
+
+        let forbidden = RalphError::Orchestration(
+            "git push failed for branch main: HTTP 403".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&forbidden));
+    }
+
+    #[test]
+    fn is_retryable_push_error_branch_name_collision_safety() {
+        // Branch name contains "403" but stderr is transient — should be retryable.
+        let err_403_branch = RalphError::Orchestration(
+            "git push failed for branch fix/issue-403: HTTP 503 Service Unavailable".to_owned(),
+        );
+        assert!(is_retryable_push_error(&err_403_branch));
+
+        // Branch name contains "500" but stderr is permanent — should not be retryable.
+        let err_500_branch = RalphError::Orchestration(
+            "git push failed for branch feature/500-errors: permission denied".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&err_500_branch));
+    }
+
+    #[test]
+    fn is_retryable_push_error_non_push_error_fallback() {
+        // Non-push RalphError variants should be non-retryable.
+        let io_err = RalphError::Orchestration("gh issue list failed: timeout".to_owned());
+        assert!(!is_retryable_push_error(&io_err));
+
+        let validation = RalphError::Validation("bad input".to_owned());
+        assert!(!is_retryable_push_error(&validation));
+
+        // Malformed push error (missing ": " separator) should be non-retryable.
+        let malformed = RalphError::Orchestration(
+            "git push failed for branch main".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&malformed));
+    }
+
+    #[test]
+    fn is_retryable_push_error_unknown_stderr_is_non_retryable() {
+        let unknown = RalphError::Orchestration(
+            "git push failed for branch main: unexpected internal error xyz".to_owned(),
+        );
+        assert!(!is_retryable_push_error(&unknown));
     }
 
     #[test]
