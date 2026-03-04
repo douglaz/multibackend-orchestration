@@ -32,9 +32,9 @@ mod tests_prompt_review_panel;
 mod tests_qa;
 mod tests_quick_dev;
 mod tests_role_timeouts;
-mod tests_stray_cleanup;
 mod tests_run;
 mod tests_sessions;
+mod tests_stray_cleanup;
 mod tests_streaming;
 mod tests_tail;
 

@@ -217,7 +217,11 @@ pub fn commit_and_push_phase_transition(
     }
 
     run_git(repo_root, &["add", "-A"])?;
-    remove_stray_impl_artifacts(repo_root)?;
+    // Only clean stray impl artifacts when transitioning out of Implementing —
+    // that is the only phase where implementer backends leave root-level duplicates.
+    if from_phase == Phase::Implementing {
+        remove_stray_impl_artifacts(repo_root)?;
+    }
 
     let message = build_ralph_commit_message(project_id, loop_number, from_phase, to_phase);
     let mut commit_args = vec!["commit", "--allow-empty", "-m", &message];
@@ -320,10 +324,7 @@ pub fn remove_stray_impl_artifacts(workdir: &Path) -> Result<()> {
         }
         // If the file was staged in the index (e.g. via a prior `git add -A`),
         // remove it from the index too so it won't be re-committed.
-        let _ = run_git(
-            workdir,
-            &["rm", "--cached", "--ignore-unmatch", "--", name],
-        );
+        let _ = run_git(workdir, &["rm", "--cached", "--ignore-unmatch", "--", name]);
     }
     Ok(())
 }
@@ -799,7 +800,9 @@ mod tests {
 
     #[test]
     fn is_stray_impl_artifact_canonical_notes() {
-        assert!(super::is_stray_impl_artifact("20260304123456-impl-notes.md"));
+        assert!(super::is_stray_impl_artifact(
+            "20260304123456-impl-notes.md"
+        ));
     }
 
     #[test]
