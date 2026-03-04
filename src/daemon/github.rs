@@ -903,13 +903,15 @@ pub fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
 
 /// Push the current branch to the remote from a worktree.
 pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
-    push_branch_with_git_bin("git", worktree_path, branch)
+    push_branch_with_git_bin("git", worktree_path, branch).map_err(|stderr| {
+        RalphError::Orchestration(format!("git push failed for branch {branch}: {stderr}"))
+    })
 }
 
-/// Determine whether a `git push` failure is likely transient and should be
-/// retried.
-pub fn is_retryable_push_error(err: &RalphError) -> bool {
-    let lower = err.to_string().to_ascii_lowercase();
+/// Determine whether raw `git push` stderr indicates a transient failure that
+/// should be retried.
+pub fn is_retryable_push_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
 
     let non_retryable_patterns = [
         "permission denied",
@@ -921,6 +923,7 @@ pub fn is_retryable_push_error(err: &RalphError) -> bool {
         "403",
         "gh013",
         "repository rule violation",
+        "repository not found",
     ];
     if non_retryable_patterns
         .iter()
@@ -951,8 +954,9 @@ pub fn is_retryable_push_error(err: &RalphError) -> bool {
         return true;
     }
 
-    // Retry unknown failures by default as a fail-safe.
-    true
+    // Unknown failures are treated as non-retryable so permanent failures do
+    // not get delayed by retries.
+    false
 }
 
 /// Push the current branch with bounded retry for transient failures.
@@ -975,13 +979,15 @@ fn push_branch_with_retry_impl(
     {
         match push_branch_with_git_bin(git_bin, worktree_path, branch) {
             Ok(()) => return Ok(()),
-            Err(err) => {
+            Err(stderr) => {
                 let attempt = attempt_index + 1;
-                if !is_retryable_push_error(&err) || attempt == total_attempts {
-                    return Err(err);
+                if !is_retryable_push_stderr(&stderr) || attempt == total_attempts {
+                    return Err(RalphError::Orchestration(format!(
+                        "git push failed for branch {branch}: {stderr}"
+                    )));
                 }
                 eprintln!(
-                    "push-retry: push failed for branch {branch} in {} (attempt {attempt}/{total_attempts}), retrying in {delay_secs}s: {err}",
+                    "push-retry: push failed for branch {branch} in {} (attempt {attempt}/{total_attempts}), retrying in {delay_secs}s: {stderr}",
                     worktree_path.display()
                 );
                 thread::sleep(Duration::from_secs(delay_secs));
@@ -996,19 +1002,16 @@ fn push_branch_with_git_bin(
     git_bin: &str,
     worktree_path: &std::path::Path,
     branch: &str,
-) -> Result<()> {
+) -> std::result::Result<(), String> {
     let output = Command::new(git_bin)
         .args(["push", "-u", "origin", branch])
         .current_dir(worktree_path)
         .output()
-        .map_err(|err| RalphError::Orchestration(format!("failed to run git push: {err}")))?;
+        .map_err(|err| format!("failed to run git push: {err}"))?;
 
     if !output.status.success() {
-        return Err(RalphError::Orchestration(format!(
-            "git push failed for branch {}: {}",
-            branch,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(stderr);
     }
 
     Ok(())
@@ -2077,7 +2080,6 @@ mod tests {
         has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_is_draft,
         parse_pr_merge_info, push_branch_with_retry_impl, GhIssue, PrMergeStatus, REQUIRED_LABELS,
     };
-    use crate::error::RalphError;
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -2209,31 +2211,45 @@ mod tests {
     }
 
     #[test]
-    fn is_retryable_push_error_classifies_transient_and_permanent_errors() {
-        let transient = RalphError::Orchestration("HTTP 503 Service Unavailable".to_owned());
-        assert!(super::is_retryable_push_error(&transient));
+    fn is_retryable_push_stderr_classifies_transient_and_permanent_errors() {
+        assert!(super::is_retryable_push_stderr(
+            "HTTP 503 Service Unavailable"
+        ));
+        assert!(super::is_retryable_push_stderr("operation timed out"));
+        assert!(!super::is_retryable_push_stderr("permission denied"));
+        assert!(!super::is_retryable_push_stderr("non-fast-forward"));
+        assert!(!super::is_retryable_push_stderr(
+            "GH013: Repository rule violations found"
+        ));
+        assert!(!super::is_retryable_push_stderr("HTTP 403"));
+        assert!(!super::is_retryable_push_stderr(
+            "protected branch hook declined"
+        ));
+        assert!(super::is_retryable_push_stderr("connection reset by peer"));
+    }
 
-        let timeout = RalphError::Orchestration("operation timed out".to_owned());
-        assert!(super::is_retryable_push_error(&timeout));
+    #[test]
+    fn is_retryable_push_stderr_ignores_branch_name_collisions() {
+        let stderr_403 = "permission denied";
+        assert!(!super::is_retryable_push_stderr(stderr_403));
 
-        let permanent = RalphError::Orchestration("permission denied".to_owned());
-        assert!(!super::is_retryable_push_error(&permanent));
+        let stderr_503 = "HTTP 503 Service Unavailable";
+        assert!(super::is_retryable_push_stderr(stderr_503));
+    }
 
-        let non_fast_forward = RalphError::Orchestration("non-fast-forward".to_owned());
-        assert!(!super::is_retryable_push_error(&non_fast_forward));
+    #[test]
+    fn branch_name_with_numeric_code_does_not_affect_classification() {
+        let transient_stderr = "HTTP 503 Service Unavailable";
+        assert!(super::is_retryable_push_stderr(transient_stderr));
 
-        let gh013 = RalphError::Orchestration("GH013: Repository rule violations found".to_owned());
-        assert!(!super::is_retryable_push_error(&gh013));
+        let permanent_stderr = "permission denied";
+        assert!(!super::is_retryable_push_stderr(permanent_stderr));
+    }
 
-        let http_403 = RalphError::Orchestration("HTTP 403".to_owned());
-        assert!(!super::is_retryable_push_error(&http_403));
-
-        let protected_branch =
-            RalphError::Orchestration("protected branch hook declined".to_owned());
-        assert!(!super::is_retryable_push_error(&protected_branch));
-
-        let connection_reset = RalphError::Orchestration("connection reset by peer".to_owned());
-        assert!(super::is_retryable_push_error(&connection_reset));
+    #[test]
+    fn unknown_errors_are_not_retried() {
+        assert!(!super::is_retryable_push_stderr("repository not found"));
+        assert!(!super::is_retryable_push_stderr("unexpected internal error xyz"));
     }
 
     #[test]
@@ -2275,6 +2291,52 @@ mod tests {
             read_attempts(&attempts_file),
             4,
             "should attempt initial push plus three retries"
+        );
+    }
+
+    #[test]
+    fn push_branch_with_retry_impl_classifies_on_stderr_not_branch_name() {
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_then_success");
+
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "fix/issue-403", &[0, 0, 0]);
+        assert!(
+            result.is_ok(),
+            "transient stderr should retry regardless of branch name collision: {result:?}"
+        );
+        assert_eq!(
+            read_attempts(&attempts_file),
+            3,
+            "should retry transient failures and eventually succeed"
+        );
+
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "permanent_failure");
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/500-errors", &[0, 0, 0]);
+        assert!(
+            result.is_err(),
+            "permanent stderr should fail even when branch name contains 500: {result:?}"
+        );
+        assert_eq!(
+            read_attempts(&attempts_file),
+            1,
+            "permanent failures should not retry"
+        );
+    }
+
+    #[test]
+    fn push_branch_with_retry_impl_does_not_retry_unknown_failure() {
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "unknown_failure");
+
+        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        assert!(result.is_err(), "expected unknown failure");
+        assert_eq!(
+            read_attempts(&attempts_file),
+            1,
+            "unknown errors should fail without retry"
         );
     }
 
@@ -2517,6 +2579,10 @@ case "{behavior}" in
         ;;
     transient_exhaustion)
         echo "network timeout" >&2
+        exit 1
+        ;;
+    unknown_failure)
+        echo "repository not found" >&2
         exit 1
         ;;
     *)

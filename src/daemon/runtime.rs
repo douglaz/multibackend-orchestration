@@ -2012,15 +2012,11 @@ async fn drain_all_children(
                 }
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
-                    if let Err(err) = join_handle.await {
-                        eprintln!("warning: artifact watcher join failed for {task_id}: {err}");
-                    }
+                    await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
                 }
                 handle.draft_pr_cancel.cancel();
                 if let Some(join_handle) = handle.draft_pr_handle.take() {
-                    if let Err(err) = join_handle.await {
-                        eprintln!("warning: draft PR watcher join failed for {task_id}: {err}");
-                    }
+                    await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
                 }
             }
             complete_task(
