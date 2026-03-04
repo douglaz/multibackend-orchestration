@@ -172,3 +172,71 @@ Remove this file from the tracked source tree (or relocate to `.ralph` artifacts
 ### Reviewer
 codex
 
+
+## Round 3
+
+### Amendment: QD-FR-001
+
+### Problem
+A stray non-source artifact was committed at repo root: `20260304T082736-impl-response-001.md` (starts at line 1).  
+This is implementation-process output, not runtime/source/test code, and it is outside the project’s intended deliverables.
+
+### Proposed Change
+Remove the file from the repository history for this branch/PR.
+
+### Affected Files
+- `20260304T082736-impl-response-001.md` - delete stray artifact file.
+
+### Reviewer
+codex
+
+### Amendment: QD-FR-002
+
+### Problem
+`QuickDevOrchestrator` hard-caps phase transitions at 100 (`src/workflow/quick_dev_orchestrator.rs:281`, `:781-783`).  
+This can cause false failures (`"quick-dev: exceeded maximum phase transitions (100)"`) before user-configured guards (`--max-review-iterations`, `--max-final-review-retries`) are reached, so configured limits are not reliably honored for larger values.
+
+### Proposed Change
+Replace the fixed `0..100` cap with a bound derived from configured limits (or remove the fixed cap and rely on guard-based termination). Add a regression test with elevated limits to prove no premature cap-triggered failure.
+
+### Affected Files
+- `src/workflow/quick_dev_orchestrator.rs` - remove/replace fixed 100-step bound with config-aware termination logic.
+- `tests/quick_dev_orchestrator.rs` - add regression coverage for high iteration/retry settings.
+
+### Reviewer
+codex
+
+### Amendment: QD-FR-003
+
+### Problem
+Quick-dev state persistence is non-atomic: `save_state_to_disk` writes directly via `fs::write` (`src/workflow/quick_dev_orchestrator.rs:892-896`).  
+During crash/power-loss windows, `state.json` can be partially written/corrupted, undermining the “crash-safe resumable” guarantee. Recovery currently silently ignores parse failure (`src/project/lifecycle.rs:458-503`), which can drop persisted phase/counter state.
+
+### Proposed Change
+Write `state.json` atomically (temp file in same dir, flush/fsync, then rename; optionally fsync parent dir). Also emit a warning/error log when `state.json` parsing fails during reconstruction so state-loss is observable.
+
+### Affected Files
+- `src/workflow/quick_dev_orchestrator.rs` - implement atomic state write path.
+- `src/project/lifecycle.rs` - log parse failures for `state.json` quick-dev metadata loading.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+`20260304T082736-impl-response-001.md` is a committed build-artifact/implementation-response file in the repository root (added in commit `f1a8dde`). It is not source code and should not be shipped. Prior stray files (`20260304T082736-impl-notes.md`) were already cleaned up per the file's own contents, but this response file was committed in the same loop.
+
+### Proposed Change
+Delete `20260304T082736-impl-response-001.md` from the repository root.
+
+### Affected Files
+- `20260304T082736-impl-response-001.md` — delete
+
+---
+
+### Reviewer
+claude
+
