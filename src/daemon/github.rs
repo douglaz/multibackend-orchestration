@@ -910,33 +910,47 @@ pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> 
 
 /// Determine whether raw `git push` stderr indicates a transient failure that
 /// should be retried.
+///
+/// HTTP status codes are only recognized in explicit transport-error context
+/// (e.g. `HTTP 503`, `returned error: 503`) so that numeric substrings inside
+/// URLs or repository paths (like `/repo-403/`) do not influence classification.
 pub fn is_retryable_push_stderr(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
 
-    let non_retryable_patterns = [
+    // 1. Text-based permanent (non-retryable) patterns — no numeric collision risk.
+    let permanent_text_patterns = [
         "permission denied",
         "authentication",
         "non-fast-forward",
         "protected branch",
         "denied",
         "forbidden",
-        "403",
         "gh013",
         "repository rule violation",
         "repository not found",
     ];
-    if non_retryable_patterns
+    if permanent_text_patterns
         .iter()
         .any(|pattern| lower.contains(pattern))
     {
         return false;
     }
 
-    let retryable_patterns = [
-        "500",
-        "502",
-        "503",
-        "504",
+    // 2. Extract HTTP status codes from bounded transport-error context only.
+    let codes = extract_http_status_codes(&lower);
+
+    // Non-retryable HTTP codes (auth/permission/policy).
+    if codes.iter().any(|&c| c == 401 || c == 403) {
+        return false;
+    }
+
+    // Retryable HTTP codes (server errors).
+    if codes.iter().any(|&c| (500..600).contains(&c)) {
+        return true;
+    }
+
+    // 3. Text-based transient (retryable) patterns.
+    let transient_text_patterns = [
         "timeout",
         "timed out",
         "connection refused",
@@ -947,7 +961,7 @@ pub fn is_retryable_push_stderr(stderr: &str) -> bool {
         "could not resolve",
         "unable to access",
     ];
-    if retryable_patterns
+    if transient_text_patterns
         .iter()
         .any(|pattern| lower.contains(pattern))
     {
@@ -957,6 +971,48 @@ pub fn is_retryable_push_stderr(stderr: &str) -> bool {
     // Unknown failures are treated as non-retryable so permanent failures do
     // not get delayed by retries.
     false
+}
+
+/// Extract HTTP status codes from explicit transport-error context in stderr.
+///
+/// Recognizes bounded patterns such as `HTTP 503` and `returned error: 503`
+/// (the two forms used by git/curl transport errors).  Bare numeric substrings
+/// inside URLs or paths are intentionally ignored.
+fn extract_http_status_codes(lower_stderr: &str) -> Vec<u16> {
+    let mut codes = Vec::new();
+    for prefix in &["http ", "returned error: "] {
+        let mut search_from = 0;
+        while search_from < lower_stderr.len() {
+            let haystack = &lower_stderr[search_from..];
+            let Some(pos) = haystack.find(prefix) else {
+                break;
+            };
+            let after = pos + prefix.len();
+            if let Some(code) = parse_bounded_3digit_code(&haystack[after..]) {
+                codes.push(code);
+            }
+            search_from += after;
+        }
+    }
+    codes
+}
+
+/// Parse a 3-digit HTTP status code at the start of `s`, ensuring it is not
+/// part of a longer numeric token (e.g. `5031` should not match as `503`).
+fn parse_bounded_3digit_code(s: &str) -> Option<u16> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 3 {
+        return None;
+    }
+    if !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() || !bytes[2].is_ascii_digit() {
+        return None;
+    }
+    // Reject if followed by another digit (not a bounded 3-digit code).
+    if bytes.len() > 3 && bytes[3].is_ascii_digit() {
+        return None;
+    }
+    let digits = &s[..3];
+    digits.parse().ok()
 }
 
 /// Determine whether a [`RalphError`] from a git push operation represents a
@@ -2274,6 +2330,80 @@ mod tests {
     fn unknown_errors_are_not_retried() {
         assert!(!super::is_retryable_push_stderr("repository not found"));
         assert!(!super::is_retryable_push_stderr("unexpected internal error xyz"));
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for context-aware HTTP code extraction
+    // (DAEMON-PUSH-RETRY-CLASSIFIER-001)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dns_error_with_url_containing_403_is_retryable() {
+        // The "403" in the URL path must NOT be treated as an HTTP 403 code.
+        let stderr = "fatal: unable to access 'https://github.com/org/repo-403/': \
+                       Could not resolve host: github.com";
+        assert!(
+            super::is_retryable_push_stderr(stderr),
+            "DNS error should be retryable even when URL contains '403'"
+        );
+    }
+
+    #[test]
+    fn explicit_http_401_is_non_retryable() {
+        let stderr = "The requested URL returned error: 401";
+        assert!(
+            !super::is_retryable_push_stderr(stderr),
+            "explicit HTTP 401 should be non-retryable"
+        );
+    }
+
+    #[test]
+    fn explicit_http_503_is_retryable() {
+        let stderr = "HTTP 503 Service Unavailable";
+        assert!(
+            super::is_retryable_push_stderr(stderr),
+            "explicit HTTP 503 should be retryable"
+        );
+    }
+
+    #[test]
+    fn explicit_http_403_is_non_retryable() {
+        let stderr = "The requested URL returned error: 403";
+        assert!(
+            !super::is_retryable_push_stderr(stderr),
+            "explicit HTTP 403 should be non-retryable"
+        );
+    }
+
+    #[test]
+    fn url_containing_500_plus_http_401_is_non_retryable() {
+        // URL path contains "500" but actual HTTP code is 401 — non-retryable.
+        let stderr = "fatal: unable to access 'https://github.com/org/error-500/': \
+                       The requested URL returned error: 401";
+        assert!(
+            !super::is_retryable_push_stderr(stderr),
+            "HTTP 401 should be non-retryable even when URL contains '500'"
+        );
+    }
+
+    #[test]
+    fn extract_http_status_codes_bounded_context() {
+        // Only codes in "http NNN" or "returned error: NNN" context are extracted.
+        let codes = super::extract_http_status_codes(
+            "fatal: unable to access 'https://github.com/org/repo-403/': http 503 service unavailable"
+        );
+        assert_eq!(codes, vec![503], "should only extract 503 from 'http 503', not 403 from URL");
+
+        let codes = super::extract_http_status_codes(
+            "the requested url returned error: 401"
+        );
+        assert_eq!(codes, vec![401]);
+
+        // No codes from plain URLs.
+        let codes = super::extract_http_status_codes(
+            "fatal: unable to access 'https://github.com/org/error-500/': could not resolve host"
+        );
+        assert!(codes.is_empty(), "should not extract codes from URL paths");
     }
 
     #[test]
