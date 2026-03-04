@@ -493,3 +493,55 @@ Remove `20260304T103437-impl-notes.md` from the repository root.
 ### Reviewer
 claude
 
+
+## Round 9
+
+### Amendment: QD-AMEND-001
+
+### Problem
+Quick-dev transition state is only persisted at loop entry, not at transition points. The phase is saved at the top of each iteration ([quick_dev_orchestrator.rs:297](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:297)), but several transitions only call `checkpoint_if_enabled(...)` and then mutate `current_qd_phase` in memory ([quick_dev_orchestrator.rs:409](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:409), [quick_dev_orchestrator.rs:499](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:499), [quick_dev_orchestrator.rs:565](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:565), [quick_dev_orchestrator.rs:770](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:770)).  
+If the process crashes between checkpoint and next loop-entry persistence, resume re-enters the prior phase and can re-run non-idempotent LLM decisions (for example, re-running `CodexReview` instead of entering `ApplyFixes`), which can change outcomes and skip intended fix application.
+
+### Proposed Change
+Persist destination phase/counters immediately before each transition checkpoint (or immediately after decision, before return/continue), not only at next loop entry.  
+Implement a shared helper for transition persistence to avoid missing branches, and update crash-resume tests to assert resume continues from persisted destination phase after an injected mid-transition failure.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - persist destination phase on all transitions
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - tighten crash-transition resume assertions to verify destination-phase durability
+
+### Reviewer
+codex
+
+### Amendment: QD-AMEND-002
+
+### Problem
+A root-level implementation-notes artifact was committed into source changes ([20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md)). This is a stray non-product file and outside intended runtime/test source scope.
+
+### Proposed Change
+Delete the file from the repository. If this note must be retained, move it to ephemeral orchestration output under `.ralph/` (which is excluded from source diffs).
+
+### Affected Files
+- [20260304T103437-impl-notes.md](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - remove stray artifact
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES-001
+
+### Problem
+A development notes file `20260304T103437-impl-notes.md` was committed to the repository root during loop 16 (commit `72956ab`). This file contains implementation decisions and testing notes that are development artifacts, not source code. It should not be shipped in the repository.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository via `git rm`.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete from repository
+
+---
+
+### Reviewer
+claude
+
