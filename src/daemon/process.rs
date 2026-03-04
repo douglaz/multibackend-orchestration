@@ -1,6 +1,8 @@
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use nix::errno::Errno;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
@@ -118,12 +120,7 @@ fn build_ralph_auto_command(
     project_id: Option<&str>,
     pr_url: Option<&str>,
 ) -> Result<Command> {
-    let file = std::fs::File::create(log_file).map_err(|err| {
-        RalphError::Orchestration(format!(
-            "failed to create log file {}: {err}",
-            log_file.display()
-        ))
-    })?;
+    let file = open_log_file_append(log_file)?;
     let file_clone = file.try_clone().map_err(|err| {
         RalphError::Orchestration(format!("failed to clone log file handle: {err}"))
     })?;
@@ -152,12 +149,7 @@ fn build_ralph_run_command(
     log_file: &Path,
     pr_url: Option<&str>,
 ) -> Result<Command> {
-    let file = std::fs::File::create(log_file).map_err(|err| {
-        RalphError::Orchestration(format!(
-            "failed to create log file {}: {err}",
-            log_file.display()
-        ))
-    })?;
+    let file = open_log_file_append(log_file)?;
     let file_clone = file.try_clone().map_err(|err| {
         RalphError::Orchestration(format!("failed to clone log file handle: {err}"))
     })?;
@@ -174,6 +166,39 @@ fn build_ralph_run_command(
         .stdout(std::process::Stdio::from(file))
         .stderr(std::process::Stdio::from(file_clone));
     Ok(cmd)
+}
+
+fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to open log file {} for append: {err}",
+                log_file.display()
+            ))
+        })?;
+
+    let has_content = file.metadata().map(|meta| meta.len() > 0).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to inspect log file {} metadata: {err}",
+            log_file.display()
+        ))
+    })?;
+
+    if has_content {
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let separator = format!("\n--- retrigger at {timestamp} ---\n\n");
+        if let Err(err) = file.write_all(separator.as_bytes()) {
+            eprintln!(
+                "warning: failed to write retrigger separator to {}: {err}",
+                log_file.display()
+            );
+        }
+    }
+
+    Ok(file)
 }
 
 /// Run a synchronous command with a timeout. Returns `Ok(output)` if the
@@ -304,6 +329,7 @@ pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
     use std::ffi::OsStr;
     use std::path::Path;
     #[cfg(unix)]
@@ -443,6 +469,46 @@ mod tests {
                 OsStr::new("--pr-url"),
                 OsStr::new("https://github.com/acme/widgets/pull/7"),
             ]
+        );
+    }
+
+    #[test]
+    fn append_mode_writes_retrigger_separator_for_non_empty_log() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let log_file = tmp.path().join("issue.log");
+        std::fs::write(&log_file, "previous output\n").expect("seed existing log");
+
+        let cmd = build_ralph_auto_command(
+            Path::new("/tmp/ralph"),
+            Path::new("/tmp/worktree"),
+            "implement feature",
+            &log_file,
+            None,
+            None,
+        )
+        .expect("build command");
+        drop(cmd);
+
+        let content = std::fs::read_to_string(&log_file).expect("read updated log");
+        assert!(
+            content.starts_with("previous output\n\n--- retrigger at "),
+            "expected separator after existing content, got: {content:?}"
+        );
+        assert!(
+            content.ends_with(" ---\n\n"),
+            "separator should end with blank line, got: {content:?}"
+        );
+
+        let separator_line = content
+            .lines()
+            .find(|line| line.starts_with("--- retrigger at "))
+            .expect("separator line present");
+        let timestamp = separator_line
+            .trim_start_matches("--- retrigger at ")
+            .trim_end_matches(" ---");
+        assert!(
+            DateTime::parse_from_rfc3339(timestamp).is_ok(),
+            "separator timestamp should be RFC3339 UTC, got: {timestamp}"
         );
     }
 

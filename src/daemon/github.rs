@@ -903,7 +903,98 @@ pub fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
 
 /// Push the current branch to the remote from a worktree.
 pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
-    let output = Command::new("git")
+    push_branch_with_git_bin("git", worktree_path, branch)
+}
+
+/// Determine whether a `git push` failure is likely transient and should be
+/// retried.
+pub fn is_retryable_push_error(err: &RalphError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+
+    let non_retryable_patterns = [
+        "permission denied",
+        "authentication",
+        "non-fast-forward",
+        "protected branch",
+        "denied",
+        "forbidden",
+    ];
+    if non_retryable_patterns
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        return false;
+    }
+
+    let retryable_patterns = [
+        "500",
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "network",
+        "dns",
+        "resolve host",
+        "could not resolve",
+        "unable to access",
+    ];
+    if retryable_patterns
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        return true;
+    }
+
+    // Retry unknown failures by default as a fail-safe.
+    true
+}
+
+/// Push the current branch with bounded retry for transient failures.
+pub fn push_branch_with_retry(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+    push_branch_with_retry_impl("git", worktree_path, branch, &[10, 20, 40])
+}
+
+fn push_branch_with_retry_impl(
+    git_bin: &str,
+    worktree_path: &std::path::Path,
+    branch: &str,
+    delays_secs: &[u64],
+) -> Result<()> {
+    let total_attempts = delays_secs.len() + 1;
+    for (attempt_index, delay_secs) in delays_secs
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .enumerate()
+    {
+        match push_branch_with_git_bin(git_bin, worktree_path, branch) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let attempt = attempt_index + 1;
+                if !is_retryable_push_error(&err) || attempt == total_attempts {
+                    return Err(err);
+                }
+                eprintln!(
+                    "push-retry: push failed for branch {branch} in {} (attempt {attempt}/{total_attempts}), retrying in {delay_secs}s: {err}",
+                    worktree_path.display()
+                );
+                thread::sleep(Duration::from_secs(delay_secs));
+            }
+        }
+    }
+
+    unreachable!()
+}
+
+fn push_branch_with_git_bin(
+    git_bin: &str,
+    worktree_path: &std::path::Path,
+    branch: &str,
+) -> Result<()> {
+    let output = Command::new(git_bin)
         .args(["push", "-u", "origin", branch])
         .current_dir(worktree_path)
         .output()
@@ -1971,14 +2062,19 @@ fn parse_authenticated_login(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use tempfile::tempdir;
 
     use super::{
         has_diff, is_invalid_revision_error, parse_issue_list, parse_pr_is_draft,
-        parse_pr_merge_info, GhIssue, PrMergeStatus, REQUIRED_LABELS,
+        parse_pr_merge_info, push_branch_with_retry_impl, GhIssue, PrMergeStatus, REQUIRED_LABELS,
     };
+    use crate::error::RalphError;
 
     #[test]
     fn gh_issue_deserialization_supports_body_present() {
@@ -2107,6 +2203,63 @@ mod tests {
     #[test]
     fn is_lease_rejection_returns_false_for_unrelated() {
         assert!(!super::is_lease_rejection("network timeout"));
+    }
+
+    #[test]
+    fn is_retryable_push_error_classifies_transient_and_permanent_errors() {
+        let transient = RalphError::Orchestration("HTTP 503 Service Unavailable".to_owned());
+        assert!(super::is_retryable_push_error(&transient));
+
+        let timeout = RalphError::Orchestration("operation timed out".to_owned());
+        assert!(super::is_retryable_push_error(&timeout));
+
+        let permanent = RalphError::Orchestration("permission denied".to_owned());
+        assert!(!super::is_retryable_push_error(&permanent));
+
+        let non_fast_forward = RalphError::Orchestration("non-fast-forward".to_owned());
+        assert!(!super::is_retryable_push_error(&non_fast_forward));
+    }
+
+    #[test]
+    fn push_branch_with_retry_impl_retries_transient_then_succeeds() {
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_then_success");
+
+        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        assert!(result.is_ok(), "expected retry flow to recover: {result:?}");
+        assert_eq!(
+            read_attempts(&attempts_file),
+            3,
+            "should retry twice then succeed"
+        );
+    }
+
+    #[test]
+    fn push_branch_with_retry_impl_does_not_retry_permanent_failure() {
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "permanent_failure");
+
+        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        assert!(result.is_err(), "expected permanent failure");
+        assert_eq!(
+            read_attempts(&attempts_file),
+            1,
+            "permanent failure should not retry"
+        );
+    }
+
+    #[test]
+    fn push_branch_with_retry_impl_exhausts_retries_for_transient_failure() {
+        let tmp = tempdir().expect("tempdir");
+        let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_exhaustion");
+
+        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        assert!(result.is_err(), "expected transient retry exhaustion");
+        assert_eq!(
+            read_attempts(&attempts_file),
+            4,
+            "should attempt initial push plus three retries"
+        );
     }
 
     #[test]
@@ -2315,5 +2468,64 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn write_mock_git_binary(dir: &Path, behavior: &str) -> (String, PathBuf) {
+        let script_path = dir.join("mock-git.sh");
+        let attempts_file = dir.join("attempts.txt");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+attempt_file="$(dirname "$0")/attempts.txt"
+attempt=0
+if [ -f "$attempt_file" ]; then
+    attempt=$(cat "$attempt_file")
+fi
+attempt=$((attempt + 1))
+echo "$attempt" > "$attempt_file"
+
+if [ "$1" != "push" ]; then
+    exit 0
+fi
+
+case "{behavior}" in
+    transient_then_success)
+        if [ "$attempt" -lt 3 ]; then
+            echo "HTTP 503 Service Unavailable" >&2
+            exit 1
+        fi
+        ;;
+    permanent_failure)
+        echo "permission denied" >&2
+        exit 1
+        ;;
+    transient_exhaustion)
+        echo "network timeout" >&2
+        exit 1
+        ;;
+    *)
+        echo "unknown behavior" >&2
+        exit 2
+        ;;
+esac
+
+exit 0
+"#
+        );
+        fs::write(&script_path, script).expect("write mock git script");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&script_path)
+                .expect("mock git metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("set executable permissions");
+        }
+        (script_path.display().to_string(), attempts_file)
+    }
+
+    fn read_attempts(path: &Path) -> u32 {
+        let raw = fs::read_to_string(path).expect("read attempts file");
+        raw.trim().parse::<u32>().expect("parse attempts")
     }
 }
