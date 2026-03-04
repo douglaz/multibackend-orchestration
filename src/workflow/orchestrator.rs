@@ -653,6 +653,23 @@ impl Orchestrator {
                             logs.push(format!("loop {loop_number}: planner created feature spec"));
                         }
                         PlannerDecision::CompletionRequest { body } => {
+                            // Guard: fail if planner requests completion with unaddressed
+                            // final review amendments from the most recent completion loop.
+                            if let Some(last_attempt) = state.completion_attempts.last() {
+                                let has_restart = resolve_artifact_path_by_suffix(
+                                    &project_dir,
+                                    last_attempt.loop_number,
+                                    "completion",
+                                    "final-review-exit-restart.md",
+                                )?
+                                .is_some();
+                                if has_restart {
+                                    return Err(RalphError::Orchestration(
+                                        "planner requested completion without addressing final review amendments"
+                                            .to_owned(),
+                                    ));
+                                }
+                            }
                             info!(loop = loop_number, "planner requested project completion");
                             let base_backends = registry.assign_completion_backends(
                                 loop_number,
