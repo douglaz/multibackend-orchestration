@@ -36,3 +36,38 @@ Use `await_watcher_with_timeout(...)` in `drain_all_children()` force-kill teard
 ### Reviewer
 codex
 
+
+## Round 2
+
+### Amendment: FR-149-001
+
+### Problem
+In `open_log_file_append`, separator preflight failures (`metadata`, `seek`, `read_exact`) are treated as hard errors and can fail command construction ([`src/daemon/process.rs:184`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/src/daemon/process.rs:184), [`src/daemon/process.rs:193`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/src/daemon/process.rs:193), [`src/daemon/process.rs:198`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/src/daemon/process.rs:198)).  
+This introduces new failure modes where retrigger can fail even when append logging itself would still work (e.g., transient read/seek issues). For resilience, separator handling should be best-effort.
+
+### Proposed Change
+Keep file-open failure fatal, but downgrade separator inspection failures to warnings and continue. If trailing-newline detection fails, fall back to appending a conservative separator (`\n\n--- retrigger at ... ---\n\n`) instead of returning `Err`.
+
+### Affected Files
+- `src/daemon/process.rs` - make separator inspection/write path fully best-effort so retrigger still runs.
+
+### Reviewer
+codex
+
+### Amendment: FR-149-002
+
+### Problem
+`await_watcher_with_timeout_impl_aborts_stuck_task` does not actually prove abort behavior ([`src/daemon/runtime.rs:3693`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/src/daemon/runtime.rs:3693)).  
+The test spawns a task that sleeps 5 seconds and only asserts after 50ms that it has not completed ([`src/daemon/runtime.rs:3709`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-149/src/daemon/runtime.rs:3709)). That assertion passes even if timeout returns without aborting, so the test can pass for the wrong reason.
+
+### Proposed Change
+Rewrite the test so it can distinguish timeout-return from actual abort. Example: spawn a loop that increments an atomic counter every few milliseconds; after helper returns, assert the counter stops changing over an additional observation window.
+
+### Affected Files
+- `src/daemon/runtime.rs` - strengthen watcher-timeout test to assert abort side effects, not just early return.
+
+---
+
+### Reviewer
+codex
+
