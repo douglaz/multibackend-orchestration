@@ -296,8 +296,8 @@ fn review_loop_changes_requested(h: &RalphHarness) -> TestResult {
 }
 
 /// Final review reloop: first FinalReview finds issues (both backends return
-/// ISSUES FOUND for the first 2 calls), causing a transition back to
-/// PlanAndImplement. Second time through, FinalReview both return COMPLETE.
+/// AMENDMENTS for the first 2 calls), causing a transition back to
+/// PlanAndImplement. Second time through, FinalReview both return NO AMENDMENTS.
 fn final_review_reloop(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "qd-fr-reloop-001";

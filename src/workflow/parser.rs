@@ -209,10 +209,10 @@ pub fn parse_quick_final_review_output(raw: &str) -> Result<QuickFinalReviewDeci
     };
 
     match first_h1.trim() {
-        "# Final Review: COMPLETE" => Ok(QuickFinalReviewDecision::Complete { body }),
-        "# Final Review: ISSUES FOUND" => Ok(QuickFinalReviewDecision::IssuesFound { body }),
+        "# Final Review: NO AMENDMENTS" => Ok(QuickFinalReviewDecision::Complete { body }),
+        "# Final Review: AMENDMENTS" => Ok(QuickFinalReviewDecision::IssuesFound { body }),
         other => Err(RalphError::ParseError(format!(
-            "unsupported quick final review H1: {other}; expected '# Final Review: COMPLETE' or '# Final Review: ISSUES FOUND'"
+            "unsupported quick final review H1: {other}; expected '# Final Review: NO AMENDMENTS' or '# Final Review: AMENDMENTS'"
         ))),
     }
 }
@@ -1036,14 +1036,14 @@ mod tests {
 
     #[test]
     fn parses_quick_final_review_complete() {
-        let text = "# Final Review: COMPLETE\n\nAll done.";
+        let text = "# Final Review: NO AMENDMENTS\n\nAll done.";
         let parsed = parse_quick_final_review_output(text).expect("parse should succeed");
         assert!(matches!(parsed, QuickFinalReviewDecision::Complete { .. }));
     }
 
     #[test]
     fn parses_quick_final_review_issues_found() {
-        let text = "# Final Review: ISSUES FOUND\n\nNeed additional fixes.";
+        let text = "# Final Review: AMENDMENTS\n\nNeed additional fixes.";
         let parsed = parse_quick_final_review_output(text).expect("parse should succeed");
         assert!(matches!(
             parsed,
@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn quick_final_review_parser_rejects_wrong_h1() {
-        let result = parse_quick_final_review_output("# Final Review: NO AMENDMENTS");
+        let result = parse_quick_final_review_output("# Final Review: COMPLETE");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn quick_final_review_parser_tolerates_trailing_whitespace() {
-        let text = "# Final Review: COMPLETE   \n\ndone";
+        let text = "# Final Review: NO AMENDMENTS   \n\ndone";
         let parsed =
             parse_quick_final_review_output(text).expect("trailing whitespace should parse");
         assert!(matches!(parsed, QuickFinalReviewDecision::Complete { .. }));
@@ -1081,7 +1081,7 @@ mod tests {
 
     #[test]
     fn quick_final_review_parser_tolerates_leading_whitespace() {
-        let text = "  # Final Review: ISSUES FOUND  \n\nbug";
+        let text = "  # Final Review: AMENDMENTS  \n\nbug";
         let parsed =
             parse_quick_final_review_output(text).expect("leading whitespace on H1 should parse");
         assert!(matches!(
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn quick_final_review_parser_strips_frontmatter() {
-        let text = "---\nartifact: final\n---\n# Final Review: ISSUES FOUND\n\nbug";
+        let text = "---\nartifact: final\n---\n# Final Review: AMENDMENTS\n\nbug";
         let parsed = parse_quick_final_review_output(text).expect("frontmatter should be stripped");
         assert!(matches!(
             parsed,

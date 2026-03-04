@@ -37,17 +37,6 @@ pub fn build_quick_dev_apply_fixes_prompt(
     )
 }
 
-pub fn build_quick_dev_final_review_prompt(
-    template_path: &Path,
-    vars: &BTreeMap<String, String>,
-) -> Result<String> {
-    render_template_with_fallback(
-        template_path,
-        vars,
-        default_quick_dev_final_review_template(),
-    )
-}
-
 fn default_quick_dev_plan_implement_template() -> &'static str {
     r#"You are a software developer handling the quick-dev plan-and-implement phase.
 
@@ -129,42 +118,6 @@ CRITICAL FORMAT REQUIREMENTS:
 
 ## Reviewer Feedback
 {{review_feedback}}
-
-## Master Prompt
-{{master_prompt}}
-
-## Current Diff
-{{current_diff}}
-"#
-}
-
-fn default_quick_dev_final_review_template() -> &'static str {
-    r#"You are performing a quick-dev final review pass. Verify whether the implementation is correct, safe, and properly integrated.
-
-Review checklist:
-1. **Correctness**: Does the code do what the spec requires? Are there logic errors, off-by-one mistakes, or missing edge cases?
-2. **Integration safety**: For every new function or modified call site, trace ALL callers. Verify the change is appropriate for every code path that reaches it — not just the intended one. Flag cases where a function is wired into a broad entry point but should only run in specific contexts.
-3. **Side effects**: Could the change cause unintended behavior during unrelated operations? Check that new code guarded by conditions (phase checks, feature flags, etc.) has the correct guards.
-4. **Error handling**: Are errors handled or propagated correctly? No silent failures that mask bugs.
-5. **Stray artifacts**: Are there leftover files, dead code, or debug prints that should be removed?
-
-CRITICAL FORMAT REQUIREMENTS:
-- Return markdown body only (no YAML frontmatter)
-- Your response MUST begin with one exact, case-sensitive H1 as the VERY FIRST LINE:
-  - `# Final Review: COMPLETE`
-  - `# Final Review: ISSUES FOUND`
-- No preamble or commentary before the H1
-
-If complete, briefly confirm all requirements are met.
-If issues are found, list precise blocking issues with file paths and line numbers.
-
-## Context Provided
-
-## System Guardrails
-{{system_guardrails}}
-
-## Feature Specification
-{{feature_spec}}
 
 ## Master Prompt
 {{master_prompt}}

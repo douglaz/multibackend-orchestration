@@ -82,7 +82,6 @@ pub struct ProjectTemplateOverrides {
     pub quick_dev_plan_implement: Option<String>,
     pub quick_dev_codex_review: Option<String>,
     pub quick_dev_apply_fixes: Option<String>,
-    pub quick_dev_final_review: Option<String>,
     pub planner_position: Option<String>,
     pub vote: Option<String>,
     pub arbiter: Option<String>,

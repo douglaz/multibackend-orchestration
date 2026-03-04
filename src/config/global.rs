@@ -471,8 +471,6 @@ pub struct TemplateConfig {
     pub quick_dev_codex_review: String,
     #[serde(default = "default_quick_dev_apply_fixes_template_path")]
     pub quick_dev_apply_fixes: String,
-    #[serde(default = "default_quick_dev_final_review_template_path")]
-    pub quick_dev_final_review: String,
     #[serde(default = "default_planner_position_template_path")]
     pub planner_position: String,
     #[serde(default = "default_vote_template_path")]
@@ -689,7 +687,6 @@ impl Default for TemplateConfig {
             quick_dev_plan_implement: default_quick_dev_plan_implement_template_path(),
             quick_dev_codex_review: default_quick_dev_codex_review_template_path(),
             quick_dev_apply_fixes: default_quick_dev_apply_fixes_template_path(),
-            quick_dev_final_review: default_quick_dev_final_review_template_path(),
             planner_position: default_planner_position_template_path(),
             vote: default_vote_template_path(),
             arbiter: default_arbiter_template_path(),
@@ -1090,10 +1087,6 @@ fn default_quick_dev_codex_review_template_path() -> String {
 
 fn default_quick_dev_apply_fixes_template_path() -> String {
     "templates/quick_dev_apply_fixes.md".to_owned()
-}
-
-fn default_quick_dev_final_review_template_path() -> String {
-    "templates/quick_dev_final_review.md".to_owned()
 }
 
 fn default_planner_position_template_path() -> String {
@@ -1567,9 +1560,6 @@ pub(crate) fn set_global_config_value(
         "templates.quick_dev_apply_fixes" => {
             config.templates.quick_dev_apply_fixes = raw_value.to_owned()
         }
-        "templates.quick_dev_final_review" => {
-            config.templates.quick_dev_final_review = raw_value.to_owned()
-        }
         "templates.planner_position" => config.templates.planner_position = raw_value.to_owned(),
         "templates.vote" => config.templates.vote = raw_value.to_owned(),
         "templates.arbiter" => config.templates.arbiter = raw_value.to_owned(),
@@ -1984,10 +1974,6 @@ base_branch = "main"
             config.templates.quick_dev_apply_fixes,
             defaults.templates.quick_dev_apply_fixes
         );
-        assert_eq!(
-            config.templates.quick_dev_final_review,
-            defaults.templates.quick_dev_final_review
-        );
 
         assert_eq!(config.git.base_branch, "main");
         assert_eq!(config.git.auto_branch, defaults.git.auto_branch);
@@ -2102,10 +2088,6 @@ command = "claude-custom"
         assert_eq!(
             config.templates.quick_dev_apply_fixes,
             "templates/quick_dev_apply_fixes.md"
-        );
-        assert_eq!(
-            config.templates.quick_dev_final_review,
-            "templates/quick_dev_final_review.md"
         );
         assert_eq!(
             config.templates.planner_position,
@@ -2341,10 +2323,6 @@ base_branch = "master"
             config.templates.quick_dev_apply_fixes,
             "templates/quick_dev_apply_fixes.md"
         );
-        assert_eq!(
-            config.templates.quick_dev_final_review,
-            "templates/quick_dev_final_review.md"
-        );
     }
 
     #[test]
@@ -2366,10 +2344,6 @@ planner = "templates/custom-spec.md"
         assert_eq!(
             config.templates.quick_dev_apply_fixes,
             "templates/quick_dev_apply_fixes.md"
-        );
-        assert_eq!(
-            config.templates.quick_dev_final_review,
-            "templates/quick_dev_final_review.md"
         );
     }
 

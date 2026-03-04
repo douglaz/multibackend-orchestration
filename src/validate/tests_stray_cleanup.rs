@@ -216,18 +216,18 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 EOF
   echo "quick-dev-fixed" >> mock_file.txt
   git add mock_file.txt
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
-  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
-  if [ "$result" = "ISSUES FOUND" ]; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
+  if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Mock issue.
 EOF
   else
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met.

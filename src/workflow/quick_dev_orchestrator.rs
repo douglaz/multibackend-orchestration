@@ -25,8 +25,9 @@ use crate::project::load_project_config_if_exists;
 use crate::project::state::{Phase, ProjectState, ProjectStatus, QuickDevPhase};
 use crate::prompts::quick_dev::{
     build_quick_dev_apply_fixes_prompt, build_quick_dev_codex_review_prompt,
-    build_quick_dev_final_review_prompt, build_quick_dev_plan_implement_prompt,
+    build_quick_dev_plan_implement_prompt,
 };
+use crate::prompts::templates::{default_final_reviewer_template, render_template_with_fallback};
 use crate::util::lock::ProjectLock;
 use crate::workflow::parser::{
     parse_codex_review_output, parse_quick_final_review_output, CodexReviewDecision,
@@ -678,18 +679,11 @@ impl QuickDevOrchestrator {
                         final_review_attempts, "quick-dev: FinalReview phase"
                     );
 
-                    let git_diff = current_git_diff(&self.workspace.root)?;
-
                     // Two sequential independent calls (implementer then reviewer)
                     // Each with fresh context (no session reuse)
 
                     // --- Implementer final review ---
-                    let impl_final_prompt = build_final_review_prompt(
-                        effective,
-                        &prompt_content,
-                        &spec_content,
-                        &git_diff,
-                    )?;
+                    let impl_final_prompt = build_final_review_prompt(effective, &prompt_content)?;
                     let impl_backend =
                         registry.get_or_create_for_role(implementer_spec, "implementer")?;
                     let mut impl_fr_log = LogWriter::open(
@@ -732,12 +726,7 @@ impl QuickDevOrchestrator {
                     )?;
 
                     // --- Reviewer final review (fresh context) ---
-                    let rev_final_prompt = build_final_review_prompt(
-                        effective,
-                        &prompt_content,
-                        &spec_content,
-                        &git_diff,
-                    )?;
+                    let rev_final_prompt = build_final_review_prompt(effective, &prompt_content)?;
                     let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
                     let mut rev_fr_log = LogWriter::open(
                         log_dir,
@@ -1226,21 +1215,26 @@ fn build_apply_fixes_prompt(
     build_quick_dev_apply_fixes_prompt(&effective.templates.quick_dev_apply_fixes, &vars)
 }
 
-fn build_final_review_prompt(
-    effective: &EffectiveConfig,
-    prompt_content: &str,
-    spec_content: &str,
-    git_diff: &str,
-) -> Result<String> {
+fn build_final_review_prompt(effective: &EffectiveConfig, prompt_content: &str) -> Result<String> {
     let mut vars = BTreeMap::new();
     vars.insert(
         "system_guardrails".to_owned(),
         QUICK_DEV_REVIEWER_GUARDRAILS.to_owned(),
     );
-    vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
-    vars.insert("current_diff".to_owned(), git_diff.to_owned());
-    build_quick_dev_final_review_prompt(&effective.templates.quick_dev_final_review, &vars)
+    let mut prompt = render_template_with_fallback(
+        &effective.templates.final_reviewer,
+        &vars,
+        default_final_reviewer_template(),
+    )?;
+    // The default final reviewer template only uses {{system_guardrails}}.
+    // Append the master prompt if the template didn't already reference it.
+    let template_src = default_final_reviewer_template();
+    if !template_src.contains("{{master_prompt}}") && !prompt_content.is_empty() {
+        prompt.push_str("\n\n## Master Prompt\n\n");
+        prompt.push_str(prompt_content);
+    }
+    Ok(prompt)
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,7 +1712,6 @@ mod tests {
                 quick_dev_plan_implement: PathBuf::new(),
                 quick_dev_codex_review: PathBuf::new(),
                 quick_dev_apply_fixes: PathBuf::new(),
-                quick_dev_final_review: PathBuf::new(),
                 planner_position: PathBuf::new(),
                 vote: PathBuf::new(),
                 arbiter: PathBuf::new(),

@@ -125,26 +125,26 @@ if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] ||
         echo "$count" > "$counter_file"
         if [[ $count -ge 2 ]]; then
             cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 All requirements are met from implementer perspective.
 EOF
         else
             cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 Implementation has issues that need addressing.
 EOF
         fi
     elif [[ "$mode" == "issues_found" ]]; then
         cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 Implementation has issues that need addressing.
 EOF
     else
         cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 All requirements are met from implementer perspective.
 EOF
@@ -186,26 +186,26 @@ if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] ||
         echo "$count" > "$counter_file"
         if [[ $count -ge 2 ]]; then
             cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 All requirements are met.
 EOF
         else
             cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 Missing test coverage for edge cases.
 EOF
         fi
     elif [[ "$mode" == "issues_found" ]]; then
         cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 Missing test coverage for edge cases.
 EOF
     else
         cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 All requirements are met.
 EOF
@@ -684,9 +684,9 @@ async fn max_final_review_retries_guard_force_completes() {
 
 #[tokio::test]
 async fn final_review_reloop_then_complete() {
-    // First final review: both say ISSUES FOUND (implementer: issues, reviewer: issues)
+    // First final review: both say AMENDMENTS (implementer: issues, reviewer: issues)
     // After reloop through PlanAndImplement -> CodexReview(satisfied) -> FinalReview:
-    // Second final review: both say COMPLETE
+    // Second final review: both say NO AMENDMENTS
     let (_temp, workspace_root, project_id) =
         setup_quick_dev_workspace("satisfied", "loop_then_complete");
 
@@ -1041,7 +1041,7 @@ fi
 # Check if this is a final review prompt
 if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] || [[ "$prompt" == *"final-review"* ]]; then
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 All requirements are met from implementer perspective.
 EOF
