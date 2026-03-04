@@ -1,3 +1,23 @@
+---
+artifact: prompt-review
+project: issue-149
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-04T02:03:46Z
+---
+
+# Prompt Review
+
+## Issues Found
+- Backoff behavior is underspecified: acceptance says “exponential backoff” but proposed delays `10,30,60` are not exponential, which can yield inconsistent implementations.
+- Retry attempt count is ambiguous: `PUSH_RETRY_MAX=3` conflicts with `delays.len() + 1` logic, so total attempts are unclear.
+- Error propagation expectations are split and easy to miss: `handle_pr_flow()` must return `Err` after retry exhaustion, while `complete_task_attempt()` still continues label swap.
+- Log separator behavior is not fully deterministic: exact format, insertion timing, and one-separator-per-retrigger expectations should be explicit for reliable tests.
+- Watcher shutdown guarantee lacks a hard numeric bound in acceptance criteria, which weakens testability.
+- Test plan omits direct verification of runtime propagation and watcher-timeout behavior, leaving high-risk paths weakly covered.
+- Repo conformance guidance is not reflected; prompt should explicitly state when `validate` tests are required for these behavior changes.
+
+## Refined Prompt
 Implement three independent daemon resilience fixes with minimal surface-area changes. Do not refactor unrelated code.
 
 ### Objective
