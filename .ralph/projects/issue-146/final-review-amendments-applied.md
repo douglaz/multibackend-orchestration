@@ -381,3 +381,79 @@ Delete `20260304T103437-impl-notes.md` from the repository.
 ### Reviewer
 claude
 
+
+## Round 7
+
+### Amendment: FR-CLEANUP-003
+
+### Problem
+A stray implementation artifact was committed at repo root and is outside product/runtime/test scope.
+
+- [`20260304T103437-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md)
+
+### Proposed Change
+Remove the stray root file from the branch.
+
+### Affected Files
+- [`20260304T103437-impl-notes.md`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md) - delete file.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: FR-QD-PREFLIGHT-002
+
+### Problem
+`quick-dev-auto` preflight claims fail-fast behavior but does not validate backend availability (enabled/usable), so side effects can occur before failure.
+
+- Preflight currently validates distinctness and spec validity only ([`src/cli/quick_dev_auto.rs:129`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:129)-[`158`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:158)).
+- `validate_required_backend_spec` does not check disabled backends ([`src/config/mod.rs:534`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:534)-[`559`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:559), [`566`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:566)-[`572`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs:572)).
+- The actual disabled-backend rejection happens later in orchestrator backend creation ([`src/workflow/quick_dev_orchestrator.rs:117`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:117)-[`118`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:118), [`src/backend/mod.rs:983`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/backend/mod.rs:983)-[`990`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/backend/mod.rs:990)).
+- By then `quick-prd` and project creation may already have run ([`src/cli/quick_dev_auto.rs:168`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:168)-[`229`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs:229)).
+
+### Proposed Change
+Make preflight truly fail-fast for quick-dev backends before any quick-prd/project side effects.
+
+- During preflight, verify selected implementer/reviewer are enabled/available (not just syntactically valid).
+- Perform backend `health_check` for those two selected quick-dev roles before launching quick-prd.
+- Add conformance coverage for disabled reviewer backend to assert failure happens before project creation.
+
+### Affected Files
+- [`src/cli/quick_dev_auto.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/cli/quick_dev_auto.rs) - strengthen preflight validation.
+- [`src/config/mod.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/config/mod.rs) - add/adjust helper to validate availability (or use registry-based check).
+- [`src/validate/tests_quick_dev.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/validate/tests_quick_dev.rs) - add disabled-backend fail-fast test.
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES
+
+### Problem
+A stray implementation notes file `20260304T103437-impl-notes.md` exists in the repository root. This is a development artifact from a prior implementation loop and should not be committed to the final branch. It appears in `git diff master...HEAD` as a new file and is present on disk.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository (delete the file and ensure it is not tracked).
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete entirely
+
+---
+
+## Summary
+
+The quick-dev orchestration implementation is **correct and complete** across all acceptance criteria:
+
+- **State management** (`src/project/state.rs`): `QuickDevPhase` enum, `quick_dev_phase`, `quick_dev_review_iteration`, and `quick_dev_final_review_attempts` fields are properly persisted with `#[serde(default)]` for backward compatibility. Atomic state writes with fsync ensure crash-safety.
+- **Phase machine** (`src/workflow/quick_dev_orchestrator.rs`): Full 4-phase machine with correct transitions, review loop with max-iterations guard, final-review reloop with max-retries force-complete guard, and bounded phase transitions to prevent infinite loops.
+- **Parser contracts** (`src/workflow/parser.rs`): Strict H1 matching with frontmatter stripping, trailing/leading whitespace tolerance, exact case-sensitive headers as specified.
+- **CLI commands** (`src/cli/quick_dev_run.rs`, `src/cli/quick_dev_auto.rs`): Both commands wired with all required arguments including `--workspace-root` for daemon isolation.
+- **Daemon dispatch** (`src/daemon/runtime.rs`, `src/daemon/process.rs`): Correct branching by `ralph:quick` label, `ralph:quick` in `REQUIRED_LABELS` but excluded from `LIFECYCLE_LABELS`.
+- **Backend validation**: Implementer/reviewer resolution chain follows spec (CLI -> effective config -> starting_backend). Distinct-backend check uses canonical form comparison. Missing reviewer returns exact error message.
+- **No `mark_pr_ready`** calls in the orchestrator (verified by grep).
+- **Config/templates**: All 4 template fields present in global, project override, and effective config with correct merge resolution.
+- **Tests**: All 346 tests pass in both `cargo test` and `nix build -L`. `ralph validate` passes all conformance tests.
+
+### Reviewer
+claude
+
