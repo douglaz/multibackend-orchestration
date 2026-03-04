@@ -2842,7 +2842,9 @@ inc_counter() {
 }
 
 if [[ "$prompt" == *"You are a software architect planning features for a project."* ]]; then
-  cat <<'EOF'
+  planner_call=$(inc_counter "planner_calls")
+  if [ "$planner_call" -eq 1 ] || [ "$planner_call" -ge 3 ]; then
+    cat <<'EOF'
 # Project Completion Request
 
 ## Rationale
@@ -2854,12 +2856,69 @@ This test project is ready for completion validation.
 ## Remaining Items
 - None
 EOF
+  else
+    cat <<'EOF'
+# Feature: Address Amendments
+
+## Description
+Implement changes required by final review amendments.
+
+## Acceptance Criteria
+- [ ] Amendments addressed
+
+## Files to Modify/Create
+- `mock_file.txt` - address amendments
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif [[ "$prompt" == *"You are a software developer implementing a feature specification."* ]]; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Addressed final review amendments.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+elif [[ "$prompt" == *"You are a code reviewer ensuring implementations match specifications."* ]]; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Amendments addressed
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: address final review amendments
+EOF
 elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
   cat <<'EOF'
 # Verdict: COMPLETE
 
 The project satisfies all requirements:
 - Requirement alpha: complete
+EOF
+elif [[ "$prompt" == *"You are a QA engineer validating an implementation against its specification."* ]]; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- implementation check passed
+
+## Automated Tests
+- implementation check passed
+
+## Acceptance Criteria Verification
+Implementation satisfies spec.
 EOF
 elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptance."* ]]; then
   cat <<'EOF'
