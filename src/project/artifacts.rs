@@ -315,7 +315,7 @@ fn is_candidate_better(
     }
 }
 
-fn strip_backend_frontmatter(raw: &str) -> String {
+pub(crate) fn strip_backend_frontmatter(raw: &str) -> String {
     let trimmed = raw.trim();
     if !trimmed.starts_with("---") {
         return trimmed.to_owned();

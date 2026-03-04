@@ -856,6 +856,145 @@ async fn resume_after_completion_does_not_restart() {
 }
 
 // ---------------------------------------------------------------------------
+// Integration tests - ApplyFixes resume with review feedback
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resume_from_apply_fixes_includes_review_feedback() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    // Write persisted state with quick_dev_phase = ApplyFixes and review_iteration = 1
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    state.quick_dev_phase = Some(QuickDevPhase::ApplyFixes);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Implementing;
+    state.phase_iteration = 1;
+    state.quick_dev_review_iteration = 1;
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    // Set ApplyFixes state AFTER register_feature_loop (which overrides phase)
+    state.quick_dev_phase = Some(QuickDevPhase::ApplyFixes);
+    state.current_phase = Phase::Implementing;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json).expect("write state.json");
+
+    // Write a changes-requested artifact so the orchestrator can reload
+    // reviewer feedback on resume.
+    let loop_dir = project_dir.join("loops/001-quick-dev");
+    fs::create_dir_all(&loop_dir).expect("create loop dir");
+    let review_feedback_body = "Please add proper error handling for edge cases.";
+    let artifact_content = format!(
+        "---\nartifact: quick-dev-codex-review\nloop: 1\nproject: {project_id}\nbackend: codex\nrole: reviewer\ncreated_at: 2026-03-04T02:00:00Z\n---\n\n{review_feedback_body}"
+    );
+    fs::write(
+        loop_dir.join("20260304020000-quick-dev-codex-review-changes-requested.md"),
+        &artifact_content,
+    )
+    .expect("write review artifact");
+
+    // Replace the implementer mock with one that captures the prompt and
+    // verifies it contains the review feedback.
+    let capture_script = _temp.path().join("mock_impl_capture.sh");
+    let capture_prompt_file = _temp.path().join(".captured-prompt.txt");
+    let capture_script_content = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+prompt="$(cat)"
+
+# Only capture the first prompt (the apply-fixes call); do not overwrite on
+# subsequent calls (e.g. final review).
+capture_file="{}"
+if [[ ! -f "$capture_file" ]]; then
+    echo "$prompt" > "$capture_file"
+fi
+
+# Check if this is a final review prompt
+if [[ "$prompt" == *"final review"* ]] || [[ "$prompt" == *"Final Review"* ]] || [[ "$prompt" == *"final-review"* ]]; then
+    cat <<'EOF'
+# Final Review: COMPLETE
+
+All requirements are met from implementer perspective.
+EOF
+else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Applied the requested fixes
+
+## Spec Deviations
+- None
+
+## Testing
+- All tests pass
+EOF
+fi
+"#,
+        capture_prompt_file.to_string_lossy()
+    );
+    fs::write(&capture_script, capture_script_content).expect("write capture script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&capture_script, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+    }
+
+    // Update workspace config to use the capture script as the implementer
+    let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
+    workspace.config.backends.claude.command = capture_script.to_string_lossy().to_string();
+    workspace.save_config().expect("save config");
+
+    let workspace = Workspace::load(workspace_root).expect("reload workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("orchestrator should resume from ApplyFixes");
+
+    assert!(
+        result.summary.contains("completed"),
+        "expected completion, got: {}",
+        result.summary
+    );
+
+    // Verify the captured prompt (the first backend call, which is apply-fixes)
+    // contains the review feedback from the persisted artifact.
+    let captured = fs::read_to_string(&capture_prompt_file)
+        .expect("read captured prompt");
+    assert!(
+        captured.contains("error handling"),
+        "apply-fixes prompt should contain review feedback from artifact, got: {}",
+        &captured[..captured.len().min(500)]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Integration tests - commit guard
 // ---------------------------------------------------------------------------
 

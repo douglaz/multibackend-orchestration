@@ -17,7 +17,8 @@ use crate::git::commit::{
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
 use crate::project::artifacts::{
-    write_artifact, write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
+    resolve_artifact_path_by_suffix, strip_backend_frontmatter, write_artifact,
+    write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
 use crate::project::lifecycle::reconstruct_project_state;
@@ -250,6 +251,15 @@ impl QuickDevOrchestrator {
             .unwrap_or_default();
 
         let mut last_review_feedback = String::new();
+
+        // When resuming at ApplyFixes, reconstruct reviewer feedback from the
+        // latest changes-requested artifact so the apply-fixes prompt is not
+        // empty.  The artifact was written during the prior CodexReview phase
+        // and persists on disk across process restarts.
+        if matches!(current_qd_phase, QuickDevPhase::ApplyFixes) {
+            last_review_feedback =
+                load_latest_review_feedback(project_dir, loop_number, loop_slug);
+        }
 
         // Phase machine loop (bounded to prevent infinite loops)
         for _step in 0..100 {
@@ -815,6 +825,30 @@ fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 
         | QuickDevPhase::CodexReview
         | QuickDevPhase::FinalReview => 1,
         QuickDevPhase::ApplyFixes => review_iteration.max(1),
+    }
+}
+
+/// Load the body of the latest `quick-dev-codex-review-changes-requested.md`
+/// artifact for the given loop.  Used to reconstruct reviewer feedback when
+/// resuming at the `ApplyFixes` phase after a process restart.
+fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: &str) -> String {
+    let suffix = ArtifactKind::QuickDevCodexReview { satisfied: false }.file_name();
+    let artifact_rel = match resolve_artifact_path_by_suffix(
+        project_dir,
+        loop_number,
+        loop_slug,
+        &suffix,
+    ) {
+        Ok(Some(rel)) => rel,
+        _ => return String::new(),
+    };
+    let artifact_path = project_dir.join(&artifact_rel);
+    match fs::read_to_string(&artifact_path) {
+        Ok(content) => {
+            // Strip frontmatter (between leading `---` lines) to get the body.
+            strip_backend_frontmatter(&content)
+        }
+        Err(_) => String::new(),
     }
 }
 
