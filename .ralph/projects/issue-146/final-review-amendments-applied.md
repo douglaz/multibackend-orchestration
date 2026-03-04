@@ -282,3 +282,47 @@ Delete `20260304T094223-impl-notes.md` from the repository.
 ### Reviewer
 claude
 
+
+## Round 5
+
+### Amendment: AMEND-QD-CRASH-GUARD-001
+
+### Problem
+`quick-dev` guard enforcement is not crash-durable in two counter-persist windows.
+
+In [src/workflow/quick_dev_orchestrator.rs:443](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:443), `review_iteration` is persisted before the max-review guard check at [line 447](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:447).  
+In [src/workflow/quick_dev_orchestrator.rs:715](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:715), `final_review_attempts` is persisted before the max-final-review-retries guard check at [line 719](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:719).
+
+If the process crashes between persistence and guard evaluation, resume re-enters `CodexReview` / `FinalReview` and executes backend calls again (see [FinalReview entry at line 582](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs:582)) instead of immediately honoring already-reached limits. That can bypass intended guard outcomes after restart.
+
+### Proposed Change
+Add guard checks at phase entry, before any backend invocation:
+
+1. In `CodexReview`: if `review_iteration >= max_review_iterations`, perform the warning/transition-to-`FinalReview` path immediately.
+2. In `FinalReview`: if `final_review_attempts >= max_final_review_retries`, perform force-complete immediately (artifact + completed state + checkpoint), without running final-review backends.
+
+Add regression tests that seed persisted maxed counters and assert resume enforces guard behavior without extra review calls.
+
+### Affected Files
+- [src/workflow/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/src/workflow/quick_dev_orchestrator.rs) - enforce guard-at-entry logic for crash-durable resume.
+- [tests/quick_dev_orchestrator.rs](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/tests/quick_dev_orchestrator.rs) - add resume tests for pre-guard crash windows.
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+The file `20260304T103437-impl-notes.md` exists in the repository root. This is a development artifact from loop 16 that was committed to the branch but should not be part of the final deliverable. It is tracked by git (appears in `git diff master...HEAD`).
+
+### Proposed Change
+Delete `20260304T103437-impl-notes.md` from the repository root and commit the removal.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this stray implementation-notes artifact from the repo root
+
+---
+
+### Reviewer
+claude
+
