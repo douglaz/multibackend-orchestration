@@ -425,9 +425,10 @@ fn max_final_review_retries_guard(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Resume from persisted CodexReview phase: run quick-dev-run twice.
-/// First run sets state to CodexReview, second resumes from there.
-/// Phase-sensitive: the resume must NOT create a new plan-implement artifact
+/// Resume from persisted CodexReview phase via direct state seeding.
+/// Collision-safe: no prior run is performed, so artifact-delta assertions
+/// cannot suffer from timestamp-based overwrite false positives.
+/// Phase-sensitive: resume must NOT create a plan-implement artifact
 /// and MUST produce codex-review artifacts first.
 fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
     run_case(|| {
@@ -439,7 +440,65 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
             &quick_dev_reviewer_mock_script(),
         );
 
-        // First: do a full run to completion
+        // Directly seed state.json with CodexReview phase (no prior run).
+        // This avoids timestamp-overwrite false positives from a prior full run.
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        let seeded_state = serde_json::json!({
+            "project_id": project_id,
+            "name": "Quick-Dev Test Project",
+            "prompt_hash": "seed",
+            "current_loop": 1,
+            "current_phase": "reviewing",
+            "quick_dev_phase": "codex_review",
+            "phase_iteration": 1,
+            "status": "in_progress",
+            "loops": [{
+                "loop_number": 1,
+                "slug": "quick-dev",
+                "feature_name": "Quick Dev",
+                "loop_type": "Feature",
+                "status": "InProgress",
+                "backends": {
+                    "planner": "claude",
+                    "implementer": "claude",
+                    "reviewer": "codex",
+                    "qa": ""
+                },
+                "artifacts": {
+                    "spec": "",
+                    "impl_notes": null,
+                    "reviews": [],
+                    "approval": null,
+                    "qa_results": [],
+                    "pending_qa_feedback": null
+                },
+                "commit": null,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": null
+            }],
+            "completion_attempts": [],
+            "prompt_file": "prompt.md",
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
+            .expect("write seeded state");
+
+        // Create the loop directory so artifacts can be written
+        let loops_dir = project_dir.join("loops").join("001-quick-dev");
+        fs::create_dir_all(&loops_dir).expect("create loop dir");
+
+        // Pre-artifact snapshot: should be empty (no prior run)
+        let pre_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts before resume");
+        assert!(
+            pre_artifacts.is_empty(),
+            "seeded resume should start with no artifacts; found {}",
+            pre_artifacts.len()
+        );
+
+        // Resume from CodexReview
         let output = h
             .ralph([
                 "quick-dev-run",
@@ -451,72 +510,45 @@ fn resume_from_codex_review(h: &RalphHarness) -> TestResult {
                 "codex",
                 "--skip-commit",
             ])
-            .expect("first quick-dev-run should execute");
-        assert_exit_code(&output, 0);
-
-        // Snapshot artifact inventory before resume
-        let pre_artifacts = h
-            .list_artifacts(project_id, 1)
-            .expect("list_artifacts before resume");
-        let pre_count = pre_artifacts.len();
-
-        // Manually set state to CodexReview to simulate a crash/resume
-        let project_dir = h.project_dir(project_id);
-        let state_path = project_dir.join("state.json");
-        let state_content = fs::read_to_string(&state_path).expect("read state.json");
-        let mut state: serde_json::Value =
-            serde_json::from_str(&state_content).expect("parse state.json");
-        state["quick_dev_phase"] = serde_json::json!("codex_review");
-        state["status"] = serde_json::json!("in_progress");
-        state["current_phase"] = serde_json::json!("reviewing");
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap())
-            .expect("write modified state");
-
-        // Resume
-        let output2 = h
-            .ralph([
-                "quick-dev-run",
-                "--project",
-                project_id,
-                "--implementer-backend",
-                "claude",
-                "--reviewer-backend",
-                "codex",
-                "--skip-commit",
-            ])
             .expect("resume quick-dev-run should execute");
-        assert_exit_code(&output2, 0);
-        assert_stdout_contains(&output2, "completed");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "completed");
 
         let state = load_state(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
 
         // Phase-sensitive artifact-delta assertions:
-        // After resuming from CodexReview, no new plan-implement artifact
-        // should have been created (resume must not restart).
-        // We count plan-implement artifacts: only one should exist (from the
-        // first run), proving the resume did not create a second one.
         let post_artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts after resume");
-        let plan_implement_count = post_artifacts
+        let artifact_names: Vec<String> = post_artifacts
             .iter()
-            .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .contains("quick-dev-plan-implement")
-            })
-            .count();
-        assert_eq!(
-            plan_implement_count, 1,
-            "resume from CodexReview must NOT create a second plan-implement artifact; \
-             found {plan_implement_count} plan-implement artifacts"
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        // 1. No plan-implement artifact should exist (resume must not restart)
+        assert!(
+            !artifact_names.iter().any(|n| n.contains("quick-dev-plan-implement")),
+            "resume from CodexReview must NOT create plan-implement artifact; found: {:?}",
+            artifact_names
+        );
+
+        // 2. First new artifact must be codex-review (proving phase-order)
+        assert!(
+            !artifact_names.is_empty(),
+            "resume from CodexReview must produce artifacts"
+        );
+        assert!(
+            artifact_names[0].contains("quick-dev-codex-review"),
+            "first artifact after CodexReview resume must be codex-review, got: {}",
+            artifact_names[0]
         );
     })
 }
 
-/// Resume from persisted FinalReview phase.
+/// Resume from persisted FinalReview phase via direct state seeding.
+/// Collision-safe: no prior run is performed, so artifact-delta assertions
+/// cannot suffer from timestamp-based overwrite false positives.
 /// Phase-sensitive: resume must NOT create plan-implement or apply-fixes
 /// artifacts (no restart path).
 fn resume_from_final_review(h: &RalphHarness) -> TestResult {
@@ -529,7 +561,65 @@ fn resume_from_final_review(h: &RalphHarness) -> TestResult {
             &quick_dev_reviewer_mock_script(),
         );
 
-        // Run once to completion
+        // Directly seed state.json with FinalReview phase (no prior run).
+        // This avoids timestamp-overwrite false positives from a prior full run.
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        let seeded_state = serde_json::json!({
+            "project_id": project_id,
+            "name": "Quick-Dev Test Project",
+            "prompt_hash": "seed",
+            "current_loop": 1,
+            "current_phase": "final_review",
+            "quick_dev_phase": "final_review",
+            "phase_iteration": 1,
+            "status": "in_progress",
+            "loops": [{
+                "loop_number": 1,
+                "slug": "quick-dev",
+                "feature_name": "Quick Dev",
+                "loop_type": "Feature",
+                "status": "InProgress",
+                "backends": {
+                    "planner": "claude",
+                    "implementer": "claude",
+                    "reviewer": "codex",
+                    "qa": ""
+                },
+                "artifacts": {
+                    "spec": "",
+                    "impl_notes": null,
+                    "reviews": [],
+                    "approval": null,
+                    "qa_results": [],
+                    "pending_qa_feedback": null
+                },
+                "commit": null,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": null
+            }],
+            "completion_attempts": [],
+            "prompt_file": "prompt.md",
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
+            .expect("write seeded state");
+
+        // Create the loop directory so artifacts can be written
+        let loops_dir = project_dir.join("loops").join("001-quick-dev");
+        fs::create_dir_all(&loops_dir).expect("create loop dir");
+
+        // Pre-artifact snapshot: should be empty (no prior run)
+        let pre_artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts before resume");
+        assert!(
+            pre_artifacts.is_empty(),
+            "seeded resume should start with no artifacts; found {}",
+            pre_artifacts.len()
+        );
+
+        // Resume from FinalReview
         let output = h
             .ralph([
                 "quick-dev-run",
@@ -541,56 +631,24 @@ fn resume_from_final_review(h: &RalphHarness) -> TestResult {
                 "codex",
                 "--skip-commit",
             ])
-            .expect("first quick-dev-run should execute");
-        assert_exit_code(&output, 0);
-
-        // Snapshot artifact inventory before resume
-        let pre_artifacts = h
-            .list_artifacts(project_id, 1)
-            .expect("list_artifacts before resume");
-        let pre_count = pre_artifacts.len();
-
-        // Set state to FinalReview
-        let project_dir = h.project_dir(project_id);
-        let state_path = project_dir.join("state.json");
-        let state_content = fs::read_to_string(&state_path).expect("read state.json");
-        let mut state: serde_json::Value =
-            serde_json::from_str(&state_content).expect("parse state.json");
-        state["quick_dev_phase"] = serde_json::json!("final_review");
-        state["status"] = serde_json::json!("in_progress");
-        state["current_phase"] = serde_json::json!("final_review");
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap())
-            .expect("write modified state");
-
-        // Resume
-        let output2 = h
-            .ralph([
-                "quick-dev-run",
-                "--project",
-                project_id,
-                "--implementer-backend",
-                "claude",
-                "--reviewer-backend",
-                "codex",
-                "--skip-commit",
-            ])
             .expect("resume quick-dev-run should execute");
-        assert_exit_code(&output2, 0);
-        assert_stdout_contains(&output2, "completed");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "completed");
 
         let state = load_state(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
 
         // Phase-sensitive artifact-delta assertions:
-        // After resuming from FinalReview, no plan-implement or apply-fixes
-        // artifacts should appear (no restart path taken).
+        // All artifacts are new (no prior run), so delta = full inventory.
         let post_artifacts = h
             .list_artifacts(project_id, 1)
             .expect("list_artifacts after resume");
-        let new_artifacts: Vec<_> = post_artifacts[pre_count..].to_vec();
+        let artifact_names: Vec<String> = post_artifacts
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
 
-        for artifact in &new_artifacts {
-            let name = artifact.file_name().unwrap().to_string_lossy().to_string();
+        for name in &artifact_names {
             assert!(
                 !name.contains("quick-dev-plan-implement"),
                 "resume from FinalReview must NOT create plan-implement artifact; found: {name}"
