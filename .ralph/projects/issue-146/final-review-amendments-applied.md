@@ -457,3 +457,39 @@ The quick-dev orchestration implementation is **correct and complete** across al
 ### Reviewer
 claude
 
+
+## Round 8
+
+### Amendment: AMEND-QD-STRAY-001
+
+### Problem
+A stray implementation artifact was committed at repository root: `/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-146/20260304T103437-impl-notes.md:1`.  
+This file contains transient process notes and local test claims (`:1-16`) rather than product source or test assets, and is an unintended out-of-scope change.
+
+### Proposed Change
+Remove the stray root file from version control. Keep implementation notes under runtime/project artifact paths (for example under `.ralph/...`) rather than repository root.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete file.
+
+---
+
+### Reviewer
+codex
+
+### Amendment: STRAY-001
+
+### Problem
+A stray implementation notes file `20260304T103437-impl-notes.md` exists in the repository root. This is a working artifact that should not be committed to the project. The file itself even documents removing a prior stray file (`20260304T094223-impl-notes.md`), indicating this pattern has already been identified as undesirable.
+
+### Proposed Change
+Remove `20260304T103437-impl-notes.md` from the repository root.
+
+### Affected Files
+- `20260304T103437-impl-notes.md` - delete this file
+
+---
+
+### Reviewer
+claude
+
