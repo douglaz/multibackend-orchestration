@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -278,8 +279,19 @@ impl QuickDevOrchestrator {
                 load_latest_review_feedback(project_dir, loop_number, loop_slug);
         }
 
-        // Phase machine loop (bounded to prevent infinite loops)
-        for _step in 0..100 {
+        // Compute a safe upper bound on phase transitions from the configured
+        // limits.  Each final-review cycle can traverse at most:
+        //   PlanAndImplement + CodexReview + max_review_iterations*(ApplyFixes+CodexReview) + FinalReview
+        // = 3 + 2*max_review_iterations transitions.
+        // There can be (max_final_review_retries + 1) such cycles (the initial
+        // attempt plus retries).  We add a generous buffer of 10 for resume
+        // edge cases and the initial checkpoint transition.
+        let max_transitions: u32 = (max_final_review_retries + 1)
+            .saturating_mul(3 + 2 * max_review_iterations)
+            .saturating_add(10);
+
+        // Phase machine loop (bounded by configured limits)
+        for _step in 0..max_transitions {
             // Persist state before executing phase action
             persist_quick_dev_state(
                 state,
@@ -778,9 +790,9 @@ impl QuickDevOrchestrator {
             }
         }
 
-        Err(RalphError::Orchestration(
-            "quick-dev: exceeded maximum phase transitions (100)".to_owned(),
-        ))
+        Err(RalphError::Orchestration(format!(
+            "quick-dev: exceeded maximum phase transitions ({max_transitions})"
+        )))
     }
 }
 
@@ -889,10 +901,55 @@ fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: 
     }
 }
 
+/// Persist project state to `state.json` using atomic write semantics:
+/// 1. Write to a temporary file in the same directory.
+/// 2. Flush + fsync the temp file to ensure data reaches disk.
+/// 3. Atomically rename the temp file to `state.json`.
+/// 4. Sync the parent directory (best-effort) for rename durability.
+///
+/// If any step fails, the previous `state.json` remains intact and valid.
 fn save_state_to_disk(state: &ProjectState, project_dir: &Path) -> Result<()> {
     let state_path = project_dir.join("state.json");
     let content = serde_json::to_string_pretty(state)?;
-    fs::write(&state_path, content)?;
+
+    // Create temp file in the same directory so rename is atomic (same filesystem).
+    let tmp_path = project_dir.join(".state.json.tmp");
+    let mut file = fs::File::create(&tmp_path).map_err(|e| {
+        RalphError::Orchestration(format!(
+            "failed to create temp state file '{}': {e}",
+            tmp_path.display()
+        ))
+    })?;
+
+    file.write_all(content.as_bytes()).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        RalphError::Orchestration(format!("failed to write temp state file: {e}"))
+    })?;
+
+    file.flush().map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        RalphError::Orchestration(format!("failed to flush temp state file: {e}"))
+    })?;
+
+    file.sync_all().map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        RalphError::Orchestration(format!("failed to fsync temp state file: {e}"))
+    })?;
+
+    // Atomic rename
+    fs::rename(&tmp_path, &state_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        RalphError::Orchestration(format!(
+            "failed to rename temp state to '{}': {e}",
+            state_path.display()
+        ))
+    })?;
+
+    // Best-effort parent directory sync for rename durability
+    if let Ok(dir) = fs::File::open(project_dir) {
+        let _ = dir.sync_all();
+    }
+
     Ok(())
 }
 

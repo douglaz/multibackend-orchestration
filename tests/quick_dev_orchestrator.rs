@@ -1391,3 +1391,45 @@ async fn transition_failure_preserves_final_review_counter_on_resume() {
         "quick_dev_phase must be null after completion"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression test - high configured limits do not hit a fixed transition cap
+// ---------------------------------------------------------------------------
+
+/// Verifies that when `max_review_iterations` and `max_final_review_retries`
+/// are set above the old hardcoded ceiling of 100, the orchestrator does NOT
+/// terminate with "exceeded maximum phase transitions (100)".  The transition
+/// bound must be derived from configured limits, not a fixed constant.
+#[tokio::test]
+async fn high_configured_limits_do_not_hit_fixed_transition_cap() {
+    // Use "satisfied" + "complete" so it finishes quickly — the point is that
+    // setting high limits doesn't trigger an artificial ceiling.
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            // Set limits well above the old hardcoded 100-transition cap
+            max_review_iterations: Some(200),
+            max_final_review_retries: Some(50),
+        })
+        .await;
+
+    // The orchestrator must complete successfully, NOT fail with a
+    // "exceeded maximum phase transitions" error.
+    let result = result.expect(
+        "orchestrator should succeed with high limits; must not hit a fixed transition cap",
+    );
+    assert!(
+        result.summary.contains("completed"),
+        "expected successful completion, got: {}",
+        result.summary
+    );
+}

@@ -17,6 +17,8 @@ use crate::project::state::{
     CompletionVerdict, FeatureLoopArtifacts, FeatureLoopBackends, FeatureLoopState, LoopStatus,
     LoopType, Phase, ProjectState, ProjectStatus, QaExchange, ReviewExchange,
 };
+use tracing::warn;
+
 use crate::util::hash::sha256_hex;
 use crate::util::lock::ProjectLock;
 use crate::workspace::Workspace;
@@ -455,53 +457,62 @@ fn load_quick_dev_phase_from_state_json(project_dir: &Path, state: &mut ProjectS
         #[serde(default)]
         quick_dev_final_review_attempts: Option<u32>,
     }
-    if let Ok(partial) = serde_json::from_str::<PartialState>(&content) {
-        // Determine whether this state.json was written by the quick-dev
-        // orchestrator.  The orchestrator always persists guard counters,
-        // so the presence of any quick-dev field is a reliable marker.
-        // Non-quick projects never write state.json with these fields.
-        let is_quick_dev_state = partial.quick_dev_phase.is_some()
-            || partial.quick_dev_review_iteration.is_some()
-            || partial.quick_dev_final_review_attempts.is_some();
-
-        if partial.quick_dev_phase.is_some() {
-            state.quick_dev_phase = partial.quick_dev_phase;
+    let partial = match serde_json::from_str::<PartialState>(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                path = %state_path.display(),
+                error = %e,
+                "quick-dev: failed to parse state.json; ignoring quick-dev overrides"
+            );
+            return;
         }
+    };
+    // Determine whether this state.json was written by the quick-dev
+    // orchestrator.  The orchestrator always persists guard counters,
+    // so the presence of any quick-dev field is a reliable marker.
+    // Non-quick projects never write state.json with these fields.
+    let is_quick_dev_state = partial.quick_dev_phase.is_some()
+        || partial.quick_dev_review_iteration.is_some()
+        || partial.quick_dev_final_review_attempts.is_some();
 
-        // Restore current_phase and phase_iteration from state.json when
-        // the file was written by the quick-dev orchestrator.  This covers
-        // both mid-phase resume (quick_dev_phase is Some) and post-completion
-        // (quick_dev_phase cleared to None but counters still present).
-        if is_quick_dev_state {
-            if let Some(cp) = partial.current_phase {
-                state.current_phase = cp;
+    if partial.quick_dev_phase.is_some() {
+        state.quick_dev_phase = partial.quick_dev_phase;
+    }
+
+    // Restore current_phase and phase_iteration from state.json when
+    // the file was written by the quick-dev orchestrator.  This covers
+    // both mid-phase resume (quick_dev_phase is Some) and post-completion
+    // (quick_dev_phase cleared to None but counters still present).
+    if is_quick_dev_state {
+        if let Some(cp) = partial.current_phase {
+            state.current_phase = cp;
+        }
+        if let Some(pi) = partial.phase_iteration {
+            state.phase_iteration = pi;
+        }
+    }
+
+    // If quick-dev wrote a Completed status (normal or force-complete)
+    // and quick_dev_phase is None, honor the persisted status so reruns
+    // do not restart from PlanAndImplement.  Scoped to quick-dev: only
+    // state.json files with quick-dev markers affect completion status.
+    if is_quick_dev_state {
+        if let Some(ref persisted_status) = partial.status {
+            if state.quick_dev_phase.is_none()
+                && *persisted_status == crate::project::state::ProjectStatus::Completed
+            {
+                state.status = crate::project::state::ProjectStatus::Completed;
             }
-            if let Some(pi) = partial.phase_iteration {
-                state.phase_iteration = pi;
-            }
         }
+    }
 
-        // If quick-dev wrote a Completed status (normal or force-complete)
-        // and quick_dev_phase is None, honor the persisted status so reruns
-        // do not restart from PlanAndImplement.  Scoped to quick-dev: only
-        // state.json files with quick-dev markers affect completion status.
-        if is_quick_dev_state {
-            if let Some(ref persisted_status) = partial.status {
-                if state.quick_dev_phase.is_none()
-                    && *persisted_status == crate::project::state::ProjectStatus::Completed
-                {
-                    state.status = crate::project::state::ProjectStatus::Completed;
-                }
-            }
-        }
-
-        // Restore guard counters for crash-safe resume.
-        if let Some(ri) = partial.quick_dev_review_iteration {
-            state.quick_dev_review_iteration = ri;
-        }
-        if let Some(fra) = partial.quick_dev_final_review_attempts {
-            state.quick_dev_final_review_attempts = fra;
-        }
+    // Restore guard counters for crash-safe resume.
+    if let Some(ri) = partial.quick_dev_review_iteration {
+        state.quick_dev_review_iteration = ri;
+    }
+    if let Some(fra) = partial.quick_dev_final_review_attempts {
+        state.quick_dev_final_review_attempts = fra;
     }
 }
 
@@ -1313,5 +1324,68 @@ mod tests {
             err.to_string().contains("already exists"),
             "expected existing-branch validation error"
         );
+    }
+
+    #[test]
+    fn load_quick_dev_phase_ignores_malformed_state_json() {
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        // Write corrupted/malformed JSON
+        fs::write(project_dir.join("state.json"), "{ INVALID JSON !!!").unwrap();
+
+        let mut state = ProjectState::new("test", "Test", "abc123", None);
+        // Set some pre-existing values that should NOT be overwritten
+        state.quick_dev_phase = Some(crate::project::state::QuickDevPhase::ApplyFixes);
+        state.quick_dev_review_iteration = 3;
+        state.quick_dev_final_review_attempts = 1;
+
+        // Call the function — it should warn but not crash, and should
+        // leave the pre-existing state unchanged.
+        load_quick_dev_phase_from_state_json(project_dir, &mut state);
+
+        assert_eq!(
+            state.quick_dev_phase,
+            Some(crate::project::state::QuickDevPhase::ApplyFixes),
+            "quick_dev_phase must be unchanged after malformed state.json"
+        );
+        assert_eq!(
+            state.quick_dev_review_iteration, 3,
+            "review_iteration must be unchanged after malformed state.json"
+        );
+        assert_eq!(
+            state.quick_dev_final_review_attempts, 1,
+            "final_review_attempts must be unchanged after malformed state.json"
+        );
+    }
+
+    #[test]
+    fn load_quick_dev_phase_works_with_valid_state_json() {
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path();
+
+        // Write valid state.json with quick-dev fields (snake_case serde)
+        let content = serde_json::json!({
+            "quick_dev_phase": "codex_review",
+            "current_phase": "reviewing",
+            "phase_iteration": 1,
+            "quick_dev_review_iteration": 2,
+            "quick_dev_final_review_attempts": 0
+        });
+        fs::write(
+            project_dir.join("state.json"),
+            serde_json::to_string_pretty(&content).unwrap(),
+        )
+        .unwrap();
+
+        let mut state = ProjectState::new("test", "Test", "abc123", None);
+        load_quick_dev_phase_from_state_json(project_dir, &mut state);
+
+        assert_eq!(
+            state.quick_dev_phase,
+            Some(crate::project::state::QuickDevPhase::CodexReview),
+        );
+        assert_eq!(state.quick_dev_review_iteration, 2);
+        assert_eq!(state.quick_dev_final_review_attempts, 0);
     }
 }
