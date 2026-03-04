@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-146
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-04T01:58:31Z
+---
+
+# Prompt Review
+
+## Issues Found
+- Backend requirement is contradictory: one section allows implementer and reviewer to be the same backend, while another says quick-dev requires two backends by design. This blocks deterministic implementation and testing.
+- Parser behavior is contradictory: technical approach says case-insensitive keyword matching, but tests say mixed-case headers should be rejected. This creates incompatible parser/test expectations.
+- Commit/checkpoint behavior is underspecified for review-only transitions and clean working trees, which can lead to empty-commit edge cases and flaky behavior.
+- Resume semantics are partially duplicated (`quick-dev-auto` seeds phase and orchestrator also sets phase) without a single authoritative rule for when phase is persisted.
+- Loop counter semantics are ambiguous (when to increment/reset `phase_iteration`, `review_iteration`, and `final_review_attempt`), which affects guard behavior.
+- Daemon integration change is incomplete as written: adding `issue_labels` to `dispatch_task()` requires explicit signature/callsite updates to avoid compile breaks.
+- “Existing tests pass without modification” conflicts with introducing new commands, parser behavior, and daemon branching; expected outcome should be “existing behavior preserved” rather than “no test updates.”
+- “Fresh backend instance with unique session id” needs explicit, testable contract (no session reuse for final reviews) rather than implementation hints that may vary by registry internals.
+
+## Refined Prompt
 Implement a new **quick-dev orchestration mode** in `ralph` as a parallel path to the existing `run/auto` flow. Quick-dev is for simpler tasks and uses 4 phases:
 
 `PlanAndImplement -> CodexReview -> ApplyFixes (loop) -> FinalReview`
