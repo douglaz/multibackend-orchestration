@@ -3381,10 +3381,10 @@ esac
 /// Responds to quick-dev prompts that the implementer handles:
 /// - `plan-and-implement phase` → implementation notes output + creates `mock_file.txt`
 /// - `apply-fixes phase` → implementation response
-/// - `final review pass` → `# Final Review: COMPLETE`
+/// - `final reviewer auditing` → `# Final Review: NO AMENDMENTS`
 ///
 /// Environment variable `QUICK_DEV_FINAL_REVIEW_RESULT` controls the final-review
-/// response: "COMPLETE" (default) or "ISSUES FOUND".
+/// response: "NO_AMENDMENTS" (default) or "AMENDMENTS".
 pub fn quick_dev_implementer_mock_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
@@ -3418,18 +3418,18 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 EOF
   echo "quick-dev-fixed" >> mock_file.txt
   git add mock_file.txt
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
-  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
-  if [ "$result" = "ISSUES FOUND" ]; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
+  if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Mock issue found by implementer final review.
 EOF
   else
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met per implementer review.
@@ -3447,11 +3447,11 @@ fi
 ///
 /// Responds to quick-dev prompts that the reviewer handles:
 /// - `quick-dev reviewer` → `# Review: SATISFIED`
-/// - `final review pass` → `# Final Review: COMPLETE`
+/// - `final reviewer auditing` → `# Final Review: NO AMENDMENTS`
 ///
 /// Environment variables:
 /// - `QUICK_DEV_REVIEW_RESULT`: "SATISFIED" (default) or "CHANGES REQUESTED"
-/// - `QUICK_DEV_FINAL_REVIEW_RESULT`: "COMPLETE" (default) or "ISSUES FOUND"
+/// - `QUICK_DEV_FINAL_REVIEW_RESULT`: "NO_AMENDMENTS" (default) or "AMENDMENTS"
 pub fn quick_dev_reviewer_mock_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail
@@ -3475,18 +3475,18 @@ EOF
 Implementation looks good, no changes needed.
 EOF
   fi
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
-  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
-  if [ "$result" = "ISSUES FOUND" ]; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
+  if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Mock issue found by reviewer final review.
 EOF
   else
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met per reviewer review.
@@ -3515,9 +3515,9 @@ if grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Required Changes
 - Always-reject mock: changes requested every time.
 EOF
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
   cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 Force-approved after iteration guard.
@@ -3558,9 +3558,9 @@ EOF
 - Fix the initial implementation issue.
 EOF
   fi
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
   cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met.
@@ -3573,8 +3573,8 @@ fi
     .to_owned()
 }
 
-/// Quick-dev final-review mock that returns ISSUES FOUND on the first call,
-/// then COMPLETE on subsequent calls. Used to test the final-review reloop.
+/// Quick-dev final-review mock that returns AMENDMENTS on the first call,
+/// then NO AMENDMENTS on subsequent calls. Used to test the final-review reloop.
 ///
 /// Set `QUICK_DEV_FR_STATE_FILE` to a path for the state file.
 pub fn quick_dev_final_review_issues_once_script() -> String {
@@ -3616,7 +3616,7 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 Implementation satisfactory.
 EOF
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
   count=0
   if [ -f "$STATE" ]; then
     count="$(cat "$STATE")"
@@ -3625,14 +3625,14 @@ elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
   echo "$count" > "$STATE"
   if [ "$count" -le 2 ]; then
     cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Mock issue requiring re-implementation.
 EOF
   else
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met after reloop.
@@ -3686,9 +3686,9 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 OK.
 EOF
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
   cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Always-issues mock: perpetual issues found.
@@ -3763,18 +3763,18 @@ EOF
   # Create more stray files on second iteration
   echo "stray notes 2" > 20260304130000-impl-notes.md
   echo "stray response 2" > 20260304130000-impl-response-002.md
-elif grep -q "quick-dev final review pass" <<< "$INPUT"; then
-  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-COMPLETE}"
-  if [ "$result" = "ISSUES FOUND" ]; then
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
+  if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
-# Final Review: ISSUES FOUND
+# Final Review: AMENDMENTS
 
 ## Issues
 - Mock issue found by implementer final review.
 EOF
   else
     cat <<'EOF'
-# Final Review: COMPLETE
+# Final Review: NO AMENDMENTS
 
 ## Summary
 All requirements met per implementer review.
