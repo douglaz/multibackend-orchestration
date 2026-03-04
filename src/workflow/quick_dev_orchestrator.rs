@@ -11,7 +11,7 @@ use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverri
 use crate::error::RalphError;
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition,
-    working_tree_diff_excluding_orchestration_state,
+    remove_stray_impl_artifacts, working_tree_diff_excluding_orchestration_state,
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
@@ -1129,13 +1129,20 @@ fn checkpoint_if_enabled(
     skip_commit: bool,
     sign_commits: bool,
 ) -> Result<()> {
-    if !auto_commit || skip_commit {
-        return Ok(());
-    }
     let Some(repo_root) = workspace.root.parent() else {
         return Ok(());
     };
     if !is_git_repo(repo_root) {
+        return Ok(());
+    }
+
+    // Always clean up stray impl artifacts on implementing→reviewing
+    // transitions, even when commits are disabled.
+    if from_phase == Phase::Implementing {
+        remove_stray_impl_artifacts(repo_root)?;
+    }
+
+    if !auto_commit || skip_commit {
         return Ok(());
     }
 

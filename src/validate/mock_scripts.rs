@@ -139,6 +139,149 @@ fi
     .to_owned()
 }
 
+/// Variant of `standard_mock_script` that also creates stray impl artifact
+/// files at the worktree root during the implementation phase.  Used by
+/// conformance tests to verify stray cleanup in the regular orchestrator.
+pub fn standard_mock_with_stray_files_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback in the mock implementation.
+
+## Could Not Address
+- None
+EOF
+    # Create stray files on review-response iteration too
+    echo "stray response" > 20260304130000-impl-response-002.md
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+  # Create stray impl artifacts at worktree root
+  echo "stray notes" > 20260304120000-impl-notes.md
+  echo "stray response" > 20260304120000-impl-response-001.md
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+The project is complete and requires no further amendments.
+EOF
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOF
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  if [[ "${RALPH_COMPLETE:-no}" == "yes" ]]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
 /// Auto-capable mock script that handles quick-PRD writer/reviewer prompts in
 /// addition to the standard orchestration prompts, enabling `ralph auto`
 /// conformance tests.

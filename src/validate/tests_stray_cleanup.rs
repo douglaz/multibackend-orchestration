@@ -5,7 +5,7 @@ use crate::validate::assertions::{assert_exit_code, assert_file_exists, assert_p
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
     quick_dev_implementer_with_stray_files_script, quick_dev_reviewer_mock_script,
-    quick_dev_reviewer_reject_once_script,
+    quick_dev_reviewer_reject_once_script, standard_mock_with_stray_files_script,
 };
 use crate::validate::runner::{ConformanceTest, TestResult};
 
@@ -22,6 +22,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "stray_cleanup::multi_iteration_cleanup",
             func: multi_iteration_cleanup,
+        },
+        ConformanceTest {
+            name: "stray_cleanup::regular_implementing_to_reviewing",
+            func: regular_implementing_to_reviewing,
+        },
+        ConformanceTest {
+            name: "stray_cleanup::regular_user_files_preserved",
+            func: regular_user_files_preserved,
         },
     ]
 }
@@ -96,6 +104,21 @@ fn setup_quick_dev(h: &RalphHarness, project_id: &str, impl_script: &str, rev_sc
     .expect("create_project failed");
 }
 
+fn setup_regular_with_stray_mock(h: &RalphHarness, project_id: &str) {
+    h.init_workspace().expect("init failed");
+    let script = h
+        .write_mock_script("stray-mock.sh", &standard_mock_with_stray_files_script())
+        .expect("failed to write stray mock script");
+    h.setup_mock_backends_stable(&script)
+        .expect("setup_mock_backends_stable failed");
+    h.create_project(
+        project_id,
+        "Stray Cleanup Regular Project",
+        "Test prompt for regular orchestrator stray cleanup",
+    )
+    .expect("create_project failed");
+}
+
 fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -106,7 +129,7 @@ fn git_output(repo: &std::path::Path, args: &[&str]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Test cases
+// Quick-dev test cases
 // ---------------------------------------------------------------------------
 
 /// Happy path: implementer creates stray impl-notes and impl-response files
@@ -295,5 +318,177 @@ fn multi_iteration_cleanup(h: &RalphHarness) -> TestResult {
             !log.contains("20260304120000-impl-response-001.md"),
             "stray response should not appear in any commit"
         );
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Regular orchestrator test cases
+// ---------------------------------------------------------------------------
+
+/// Regular orchestrator: implementer creates stray impl-notes and
+/// impl-response files at the worktree root.  After the implementing→reviewing
+/// transition the stray files should be absent from the worktree and the
+/// committed tree.
+fn regular_implementing_to_reviewing(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "sc-reg-001";
+        setup_regular_with_stray_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let repo = &h.repo_root;
+        // Stray files should have been cleaned up
+        assert_path_not_exists(&repo.join("20260304120000-impl-notes.md"));
+        assert_path_not_exists(&repo.join("20260304120000-impl-response-001.md"));
+
+        // The legitimate implementation file should still exist
+        assert_file_exists(&repo.join("mock_file.txt"));
+
+        // Verify stray files never appear in any commit
+        let log = git_output(repo, &["log", "--all", "--name-only", "--pretty=format:"]);
+        assert!(
+            !log.contains("20260304120000-impl-notes.md"),
+            "stray notes should not appear in any commit"
+        );
+        assert!(
+            !log.contains("20260304120000-impl-response-001.md"),
+            "stray response should not appear in any commit"
+        );
+    })
+}
+
+/// Regular orchestrator: implementer creates stray artifacts alongside
+/// non-matching user files (`impl-notes.md` without timestamp, `my-notes.md`).
+/// Verify only the timestamped artifacts are removed; user files survive.
+fn regular_user_files_preserved(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "sc-reg-002";
+
+        // Use a custom mock that also writes user-like files
+        let script_content = r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  cat <<'EOF'
+# Feature: Demo Feature
+
+## Description
+Mock feature used by validate tests.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - file created by the mock implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a mock implementation artifact.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+  # Stray artifact (should be removed)
+  echo "stray notes" > 20260304120000-impl-notes.md
+  # User files (should survive)
+  echo "user notes" > impl-notes.md
+  echo "my notes" > my-notes.md
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply mock implementation
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another mock feature.
+EOF
+elif grep -q "You are a final reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+The project is complete and requires no further amendments.
+EOF
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- Mock issue for testing
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check: passed
+
+## Automated Tests
+- mock test suite: passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified by mock QA.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###;
+
+        h.init_workspace().expect("init failed");
+        let script = h
+            .write_mock_script("stray-user-mock.sh", script_content)
+            .expect("failed to write mock script");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            project_id,
+            "Stray Cleanup User Files Project",
+            "Test prompt for regular orchestrator stray cleanup with user files",
+        )
+        .expect("create_project failed");
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let repo = &h.repo_root;
+        // Stray artifact should be gone
+        assert_path_not_exists(&repo.join("20260304120000-impl-notes.md"));
+        // User files should survive
+        assert_file_exists(&repo.join("impl-notes.md"));
+        assert_file_exists(&repo.join("my-notes.md"));
+        assert_file_exists(&repo.join("mock_file.txt"));
     })
 }
