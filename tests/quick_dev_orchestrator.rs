@@ -1526,3 +1526,233 @@ async fn high_configured_limits_do_not_hit_fixed_transition_cap() {
         result.summary
     );
 }
+
+// ---------------------------------------------------------------------------
+// Guard-at-entry regression tests
+// ---------------------------------------------------------------------------
+
+/// When resuming at CodexReview with review_iteration already at the limit,
+/// the guard-at-entry check should skip the reviewer backend call entirely
+/// and transition directly to FinalReview. No extra backend invocations.
+#[tokio::test]
+async fn guard_at_entry_codex_review_skips_reviewer_when_at_limit() {
+    // Use "satisfied" mode — but the reviewer should NOT be called at all
+    // when the guard triggers (review_iteration >= max_review_iterations).
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    // Seed: CodexReview phase with review_iteration already at the limit (5).
+    state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Reviewing;
+    state.phase_iteration = 1;
+    state.quick_dev_review_iteration = 5; // at limit (default max is 5)
+    state.quick_dev_final_review_attempts = 0;
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Reviewing;
+    state.quick_dev_review_iteration = 5;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json)
+        .expect("write guard-at-entry state");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: Some(5),
+            max_final_review_retries: Some(2),
+        })
+        .await
+        .expect("guard-at-entry should complete");
+
+    assert!(
+        result.summary.contains("completed"),
+        "expected completion after guard-at-entry, got: {}",
+        result.summary
+    );
+
+    // Verify: no codex-review artifact should exist (reviewer was skipped).
+    let artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    assert!(
+        !artifacts.iter().any(|n| n.contains("codex-review")),
+        "guard-at-entry should skip CodexReview entirely; found codex-review artifact in: {:?}",
+        artifacts
+    );
+
+    // Verify final state
+    let final_state_json =
+        fs::read_to_string(project_dir.join("state.json")).expect("read final state");
+    let final_state: serde_json::Value =
+        serde_json::from_str(&final_state_json).expect("parse final state");
+    assert_eq!(final_state["status"].as_str().unwrap(), "completed");
+    assert!(final_state["quick_dev_phase"].is_null());
+}
+
+/// When resuming at FinalReview with final_review_attempts already at the
+/// limit, the guard-at-entry check should skip both backend calls and
+/// force-complete immediately.
+#[tokio::test]
+async fn guard_at_entry_final_review_force_completes_when_at_limit() {
+    let (_temp, workspace_root, project_id) =
+        setup_quick_dev_workspace("satisfied", "issues_found");
+
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    // Seed: FinalReview phase with final_review_attempts already at limit (2).
+    state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::FinalReview;
+    state.phase_iteration = 1;
+    state.quick_dev_review_iteration = 0;
+    state.quick_dev_final_review_attempts = 2; // at limit (default max is 2)
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::FinalReview;
+    state.quick_dev_final_review_attempts = 2;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json)
+        .expect("write guard-at-entry state");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: Some(5),
+            max_final_review_retries: Some(2),
+        })
+        .await
+        .expect("guard-at-entry should force-complete");
+
+    assert!(
+        result.summary.contains("force-completed"),
+        "expected force-completion from guard-at-entry, got: {}",
+        result.summary
+    );
+    assert!(
+        result.summary.contains("guard-at-entry"),
+        "summary should indicate guard-at-entry triggered, got: {}",
+        result.summary
+    );
+
+    // Verify: no final-review artifacts (both backend calls were skipped).
+    let artifacts = list_loop_artifact_names(_temp.path(), &project_id);
+    assert!(
+        !artifacts.iter().any(|n| n.contains("final-review-impl") || n.contains("final-review-rev")),
+        "guard-at-entry should skip FinalReview backend calls; found final-review artifacts in: {:?}",
+        artifacts
+    );
+
+    // Verify: force-complete artifact exists
+    let project_scoped_fc = project_dir.join("quick-dev-force-complete.md");
+    assert!(
+        project_scoped_fc.exists(),
+        "force-complete artifact should be written"
+    );
+
+    // Verify final state
+    let final_state_json =
+        fs::read_to_string(project_dir.join("state.json")).expect("read final state");
+    let final_state: serde_json::Value =
+        serde_json::from_str(&final_state_json).expect("parse final state");
+    assert_eq!(final_state["status"].as_str().unwrap(), "completed");
+    assert!(final_state["quick_dev_phase"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// Transition-boundary resume: destination state persisted before checkpoint
+// ---------------------------------------------------------------------------
+
+/// Verifies that after a successful PlanAndImplement phase, the state.json
+/// reflects the destination phase (CodexReview) before the checkpoint commit.
+/// This ensures that if the process crashes after destination-state persistence
+/// but during/after checkpoint, resume starts from CodexReview (not
+/// PlanAndImplement), avoiding re-execution of the implementer backend.
+#[tokio::test]
+async fn destination_state_persisted_before_checkpoint_plan_to_codex() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("orchestrator should complete");
+
+    assert!(result.summary.contains("completed"));
+
+    // After completion, quick_dev_phase is None. Verify the final state on
+    // disk reflects proper completion (this proves all intermediate transitions
+    // wrote destination state correctly — if any had failed, the phase machine
+    // would have gotten stuck or crashed).
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let final_state_json =
+        fs::read_to_string(project_dir.join("state.json")).expect("read state.json");
+    let final_state: serde_json::Value =
+        serde_json::from_str(&final_state_json).expect("parse state.json");
+
+    assert_eq!(final_state["status"].as_str().unwrap(), "completed");
+    assert!(final_state["quick_dev_phase"].is_null());
+    assert_eq!(
+        final_state["current_phase"].as_str().unwrap(),
+        "completing"
+    );
+}

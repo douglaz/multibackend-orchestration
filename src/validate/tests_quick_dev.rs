@@ -92,6 +92,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "quick_dev::force_complete_persists_counter",
             func: force_complete_persists_counter,
         },
+        ConformanceTest {
+            name: "quick_dev::guard_at_entry_codex_review_skips_to_final_review",
+            func: guard_at_entry_codex_review_skips_to_final_review,
+        },
+        ConformanceTest {
+            name: "quick_dev::guard_at_entry_final_review_force_completes",
+            func: guard_at_entry_final_review_force_completes,
+        },
+        ConformanceTest {
+            name: "quick_dev::transition_boundary_resume_persists_destination",
+            func: transition_boundary_resume_persists_destination,
+        },
     ]
 }
 
@@ -1371,5 +1383,314 @@ fn force_complete_persists_counter(h: &RalphHarness) -> TestResult {
             2,
             "persisted final_review_attempts must equal max_final_review_retries after force-complete"
         );
+    })
+}
+
+/// Guard-at-entry for CodexReview: when resuming with review_iteration at the
+/// limit, the reviewer backend call must be skipped and flow goes directly to
+/// FinalReview. Verifies no codex-review artifacts are created.
+fn guard_at_entry_codex_review_skips_to_final_review(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-guard-cr-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_implementer_mock_script(),
+            &quick_dev_reviewer_mock_script(),
+        );
+
+        // Seed state at CodexReview with review_iteration=2 (at limit when max=2)
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        let seeded_state = serde_json::json!({
+            "project_id": project_id,
+            "name": "Quick-Dev Test Project",
+            "prompt_hash": "seed",
+            "current_loop": 1,
+            "current_phase": "reviewing",
+            "quick_dev_phase": "codex_review",
+            "phase_iteration": 1,
+            "status": "in_progress",
+            "quick_dev_review_iteration": 2,
+            "quick_dev_final_review_attempts": 0,
+            "loops": [{
+                "loop_number": 1,
+                "slug": "quick-dev",
+                "feature_name": "Quick Dev",
+                "loop_type": "Feature",
+                "status": "InProgress",
+                "backends": {
+                    "planner": "claude",
+                    "implementer": "claude",
+                    "reviewer": "codex",
+                    "qa": ""
+                },
+                "artifacts": {
+                    "spec": "",
+                    "impl_notes": null,
+                    "reviews": [],
+                    "approval": null,
+                    "qa_results": [],
+                    "pending_qa_feedback": null
+                },
+                "commit": null,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": null
+            }],
+            "completion_attempts": [],
+            "prompt_file": "prompt.md",
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
+            .expect("write seeded state");
+
+        let loops_dir = project_dir.join("loops").join("001-quick-dev");
+        fs::create_dir_all(&loops_dir).expect("create loop dir");
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+                "--max-review-iterations",
+                "2",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "completed");
+
+        // Verify: no codex-review artifact (reviewer call was skipped)
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts");
+        let artifact_names: Vec<String> = artifacts
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !artifact_names.iter().any(|n| n.contains("codex-review")),
+            "guard-at-entry should skip CodexReview; found codex-review artifact in: {:?}",
+            artifact_names
+        );
+
+        let state = load_state_json(h, project_id);
+        assert_eq!(state["status"].as_str().unwrap(), "completed");
+    })
+}
+
+/// Guard-at-entry for FinalReview: when resuming with final_review_attempts at
+/// the limit, both backend calls must be skipped, force-complete artifact
+/// written, and project marked completed.
+fn guard_at_entry_final_review_force_completes(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-guard-fr-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_implementer_mock_script(),
+            &quick_dev_reviewer_mock_script(),
+        );
+
+        // Seed state at FinalReview with final_review_attempts=2 (at limit when max=2)
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        let seeded_state = serde_json::json!({
+            "project_id": project_id,
+            "name": "Quick-Dev Test Project",
+            "prompt_hash": "seed",
+            "current_loop": 1,
+            "current_phase": "final_review",
+            "quick_dev_phase": "final_review",
+            "phase_iteration": 1,
+            "status": "in_progress",
+            "quick_dev_review_iteration": 0,
+            "quick_dev_final_review_attempts": 2,
+            "loops": [{
+                "loop_number": 1,
+                "slug": "quick-dev",
+                "feature_name": "Quick Dev",
+                "loop_type": "Feature",
+                "status": "InProgress",
+                "backends": {
+                    "planner": "claude",
+                    "implementer": "claude",
+                    "reviewer": "codex",
+                    "qa": ""
+                },
+                "artifacts": {
+                    "spec": "",
+                    "impl_notes": null,
+                    "reviews": [],
+                    "approval": null,
+                    "qa_results": [],
+                    "pending_qa_feedback": null
+                },
+                "commit": null,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": null
+            }],
+            "completion_attempts": [],
+            "prompt_file": "prompt.md",
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
+            .expect("write seeded state");
+
+        let loops_dir = project_dir.join("loops").join("001-quick-dev");
+        fs::create_dir_all(&loops_dir).expect("create loop dir");
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+                "--max-final-review-retries",
+                "2",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "force-completed");
+
+        // Verify: no final-review artifacts (both backend calls were skipped)
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts");
+        let artifact_names: Vec<String> = artifacts
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !artifact_names
+                .iter()
+                .any(|n| n.contains("final-review-impl") || n.contains("final-review-rev")),
+            "guard-at-entry should skip FinalReview calls; found: {:?}",
+            artifact_names
+        );
+
+        // Verify force-complete artifact exists
+        let fc_path = project_dir.join("quick-dev-force-complete.md");
+        assert_file_exists(&fc_path);
+
+        let state = load_state_json(h, project_id);
+        assert_eq!(state["status"].as_str().unwrap(), "completed");
+        assert!(state["quick_dev_phase"].is_null());
+    })
+}
+
+/// Transition-boundary resume: seed state.json at CodexReview (simulating a
+/// crash after PlanAndImplement completed and destination state was persisted).
+/// Verifies resume starts from CodexReview (not PlanAndImplement), proving
+/// destination state was persisted before the checkpoint.
+fn transition_boundary_resume_persists_destination(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-transition-001";
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_implementer_mock_script(),
+            &quick_dev_reviewer_mock_script(),
+        );
+
+        // Seed state at CodexReview (as if PlanAndImplement completed and
+        // destination state was persisted but checkpoint/process crashed).
+        let project_dir = h.project_dir(project_id);
+        let state_path = project_dir.join("state.json");
+        let seeded_state = serde_json::json!({
+            "project_id": project_id,
+            "name": "Quick-Dev Test Project",
+            "prompt_hash": "seed",
+            "current_loop": 1,
+            "current_phase": "reviewing",
+            "quick_dev_phase": "codex_review",
+            "phase_iteration": 1,
+            "status": "in_progress",
+            "quick_dev_review_iteration": 0,
+            "quick_dev_final_review_attempts": 0,
+            "loops": [{
+                "loop_number": 1,
+                "slug": "quick-dev",
+                "feature_name": "Quick Dev",
+                "loop_type": "Feature",
+                "status": "InProgress",
+                "backends": {
+                    "planner": "claude",
+                    "implementer": "claude",
+                    "reviewer": "codex",
+                    "qa": ""
+                },
+                "artifacts": {
+                    "spec": "",
+                    "impl_notes": null,
+                    "reviews": [],
+                    "approval": null,
+                    "qa_results": [],
+                    "pending_qa_feedback": null
+                },
+                "commit": null,
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": null
+            }],
+            "completion_attempts": [],
+            "prompt_file": "prompt.md",
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(&state_path, serde_json::to_string_pretty(&seeded_state).unwrap())
+            .expect("write seeded state");
+
+        let loops_dir = project_dir.join("loops").join("001-quick-dev");
+        fs::create_dir_all(&loops_dir).expect("create loop dir");
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "completed");
+
+        // Verify: no plan-implement artifact (resume skipped PlanAndImplement)
+        let artifacts = h
+            .list_artifacts(project_id, 1)
+            .expect("list_artifacts");
+        let artifact_names: Vec<String> = artifacts
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !artifact_names.iter().any(|n| n.contains("plan-implement")),
+            "transition-boundary resume should NOT re-run PlanAndImplement; found: {:?}",
+            artifact_names
+        );
+
+        // First artifact must be codex-review (proving correct resume phase)
+        assert!(
+            !artifact_names.is_empty(),
+            "resume must produce artifacts"
+        );
+        assert!(
+            artifact_names[0].contains("codex-review"),
+            "first artifact must be codex-review, got: {}",
+            artifact_names[0]
+        );
+
+        let state = load_state_json(h, project_id);
+        assert_eq!(state["status"].as_str().unwrap(), "completed");
     })
 }

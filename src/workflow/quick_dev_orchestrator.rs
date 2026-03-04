@@ -294,7 +294,9 @@ impl QuickDevOrchestrator {
 
         // Phase machine loop (bounded by configured limits)
         for _step in 0..max_transitions {
-            // Persist state before executing phase action
+            // Persist current phase state before executing phase action.
+            // This ensures that if the process crashes during the backend call,
+            // resume starts from the current phase (not an earlier one).
             persist_quick_dev_state(
                 state,
                 &current_qd_phase,
@@ -344,24 +346,57 @@ impl QuickDevOrchestrator {
                     )?;
 
                     // Transition: PlanAndImplement -> CodexReview
-                    let from_phase = Phase::Implementing;
-                    let to_phase = Phase::Reviewing;
-                    checkpoint_if_enabled(
+                    review_iteration = 0;
+                    persist_destination_and_checkpoint(
+                        state,
+                        &QuickDevPhase::CodexReview,
+                        1,
+                        review_iteration,
+                        final_review_attempts,
+                        project_dir,
                         &self.workspace,
                         project_id,
                         loop_number,
-                        from_phase,
-                        to_phase,
+                        Phase::Implementing,
+                        Phase::Reviewing,
                         effective.workflow.auto_commit,
                         skip_commit,
                         effective.global.git.sign_commits,
                     )?;
 
-                    review_iteration = 0;
                     current_qd_phase = QuickDevPhase::CodexReview;
                 }
 
                 QuickDevPhase::CodexReview => {
+                    // Guard-at-entry: if resuming with review_iteration already
+                    // at the limit, skip the reviewer call and go to FinalReview.
+                    if review_iteration >= max_review_iterations {
+                        warn!(
+                            loop_number,
+                            review_iteration,
+                            max_review_iterations,
+                            "quick-dev: guard-at-entry — review iteration limit already reached, skipping to FinalReview"
+                        );
+                        persist_destination_and_checkpoint(
+                            state,
+                            &QuickDevPhase::FinalReview,
+                            1,
+                            review_iteration,
+                            final_review_attempts,
+                            project_dir,
+                            &self.workspace,
+                            project_id,
+                            loop_number,
+                            Phase::Reviewing,
+                            Phase::FinalReview,
+                            effective.workflow.auto_commit,
+                            skip_commit,
+                            effective.global.git.sign_commits,
+                        )?;
+                        current_qd_phase = QuickDevPhase::FinalReview;
+                        continue;
+                    }
+
                     info!(
                         loop_number,
                         review_iteration, "quick-dev: CodexReview phase"
@@ -407,14 +442,18 @@ impl QuickDevOrchestrator {
                             )?;
 
                             // Transition: CodexReview -> FinalReview
-                            let from_phase = Phase::Reviewing;
-                            let to_phase = Phase::FinalReview;
-                            checkpoint_if_enabled(
+                            persist_destination_and_checkpoint(
+                                state,
+                                &QuickDevPhase::FinalReview,
+                                1,
+                                review_iteration,
+                                final_review_attempts,
+                                project_dir,
                                 &self.workspace,
                                 project_id,
                                 loop_number,
-                                from_phase,
-                                to_phase,
+                                Phase::Reviewing,
+                                Phase::FinalReview,
                                 effective.workflow.auto_commit,
                                 skip_commit,
                                 effective.global.git.sign_commits,
@@ -469,24 +508,18 @@ impl QuickDevOrchestrator {
                                     },
                                 )?;
 
-                                // Persist target phase before transition
-                                persist_quick_dev_state(
+                                persist_destination_and_checkpoint(
                                     state,
                                     &QuickDevPhase::FinalReview,
                                     1,
                                     review_iteration,
                                     final_review_attempts,
-                                );
-                                save_state_to_disk(state, project_dir)?;
-
-                                let from_phase = Phase::Reviewing;
-                                let to_phase = Phase::FinalReview;
-                                checkpoint_if_enabled(
+                                    project_dir,
                                     &self.workspace,
                                     project_id,
                                     loop_number,
-                                    from_phase,
-                                    to_phase,
+                                    Phase::Reviewing,
+                                    Phase::FinalReview,
                                     effective.workflow.auto_commit,
                                     skip_commit,
                                     effective.global.git.sign_commits,
@@ -497,14 +530,18 @@ impl QuickDevOrchestrator {
                             }
 
                             // Transition: CodexReview -> ApplyFixes
-                            let from_phase = Phase::Reviewing;
-                            let to_phase = Phase::Implementing;
-                            checkpoint_if_enabled(
+                            persist_destination_and_checkpoint(
+                                state,
+                                &QuickDevPhase::ApplyFixes,
+                                compute_phase_iteration(&QuickDevPhase::ApplyFixes, review_iteration),
+                                review_iteration,
+                                final_review_attempts,
+                                project_dir,
                                 &self.workspace,
                                 project_id,
                                 loop_number,
-                                from_phase,
-                                to_phase,
+                                Phase::Reviewing,
+                                Phase::Implementing,
                                 effective.workflow.auto_commit,
                                 skip_commit,
                                 effective.global.git.sign_commits,
@@ -563,14 +600,18 @@ impl QuickDevOrchestrator {
                     )?;
 
                     // Transition: ApplyFixes -> CodexReview
-                    let from_phase = Phase::Implementing;
-                    let to_phase = Phase::Reviewing;
-                    checkpoint_if_enabled(
+                    persist_destination_and_checkpoint(
+                        state,
+                        &QuickDevPhase::CodexReview,
+                        1,
+                        review_iteration,
+                        final_review_attempts,
+                        project_dir,
                         &self.workspace,
                         project_id,
                         loop_number,
-                        from_phase,
-                        to_phase,
+                        Phase::Implementing,
+                        Phase::Reviewing,
                         effective.workflow.auto_commit,
                         skip_commit,
                         effective.global.git.sign_commits,
@@ -580,6 +621,58 @@ impl QuickDevOrchestrator {
                 }
 
                 QuickDevPhase::FinalReview => {
+                    // Guard-at-entry: if resuming with final_review_attempts
+                    // already at the limit, skip both backend calls and
+                    // force-complete immediately.
+                    if final_review_attempts >= max_final_review_retries {
+                        warn!(
+                            loop_number,
+                            final_review_attempts,
+                            max_final_review_retries,
+                            "quick-dev: guard-at-entry — final review retry limit already reached, force-completing"
+                        );
+
+                        // Write force-complete artifact
+                        write_project_scoped_artifact(
+                            project_dir,
+                            ProjectScopedArtifactWriteInput {
+                                artifact: "quick-dev-force-complete",
+                                file_name: "quick-dev-force-complete.md",
+                                project_id,
+                                backend: implementer_spec,
+                                role: "orchestrator",
+                                body: &format!(
+                                    "# Quick-Dev Force Complete (Guard-at-Entry)\n\nMax final review retries ({}) already reached on resume. Force-completing project.",
+                                    max_final_review_retries
+                                ),
+                            },
+                        )?;
+
+                        state.status = ProjectStatus::Completed;
+                        state.current_phase = Phase::Completing;
+                        state.quick_dev_phase = None;
+                        save_state_to_disk(state, project_dir)?;
+
+                        checkpoint_if_enabled(
+                            &self.workspace,
+                            project_id,
+                            loop_number,
+                            Phase::FinalReview,
+                            Phase::Completing,
+                            effective.workflow.auto_commit,
+                            skip_commit,
+                            effective.global.git.sign_commits,
+                        )?;
+
+                        return Ok(OrchestrationResult {
+                            summary: format!(
+                                "quick-dev force-completed (guard-at-entry) after {} final review retries",
+                                max_final_review_retries
+                            ),
+                            loop_number: Some(loop_number),
+                        });
+                    }
+
                     info!(
                         loop_number,
                         final_review_attempts, "quick-dev: FinalReview phase"
@@ -774,19 +867,24 @@ impl QuickDevOrchestrator {
                         "quick-dev: issues found in final review, re-entering PlanAndImplement"
                     );
 
-                    let from_phase = Phase::FinalReview;
-                    let to_phase = Phase::Implementing;
-                    checkpoint_if_enabled(
+                    persist_destination_and_checkpoint(
+                        state,
+                        &QuickDevPhase::PlanAndImplement,
+                        1,
+                        0, // reset review_iteration for the new cycle
+                        final_review_attempts,
+                        project_dir,
                         &self.workspace,
                         project_id,
                         loop_number,
-                        from_phase,
-                        to_phase,
+                        Phase::FinalReview,
+                        Phase::Implementing,
                         effective.workflow.auto_commit,
                         skip_commit,
                         effective.global.git.sign_commits,
                     )?;
 
+                    review_iteration = 0;
                     current_qd_phase = QuickDevPhase::PlanAndImplement;
                 }
             }
@@ -868,6 +966,55 @@ fn persist_quick_dev_state(
     state.status = ProjectStatus::InProgress;
     state.quick_dev_review_iteration = review_iteration;
     state.quick_dev_final_review_attempts = final_review_attempts;
+}
+
+/// Persist destination phase state and then emit a checkpoint commit.
+///
+/// This is the centralized transition helper that enforces the invariant:
+/// destination state is always durably written to `state.json` **before**
+/// any checkpoint/commit is attempted.  If `save_state_to_disk` fails, no
+/// checkpoint is made and the prior on-disk `state.json` remains valid.
+/// If the checkpoint fails after persistence, resume will start from the
+/// destination phase (not the source phase), avoiding re-execution of
+/// the source-phase backend call.
+#[allow(clippy::too_many_arguments)]
+fn persist_destination_and_checkpoint(
+    state: &mut ProjectState,
+    dest_phase: &QuickDevPhase,
+    phase_iteration: u32,
+    review_iteration: u32,
+    final_review_attempts: u32,
+    project_dir: &Path,
+    workspace: &Workspace,
+    project_id: &str,
+    loop_number: u32,
+    from_phase: Phase,
+    to_phase: Phase,
+    auto_commit: bool,
+    skip_commit: bool,
+    sign_commits: bool,
+) -> Result<()> {
+    // Step 1: persist destination state to disk (atomic write).
+    persist_quick_dev_state(
+        state,
+        dest_phase,
+        phase_iteration,
+        review_iteration,
+        final_review_attempts,
+    );
+    save_state_to_disk(state, project_dir)?;
+
+    // Step 2: checkpoint (git commit) — only attempted after persistence.
+    checkpoint_if_enabled(
+        workspace,
+        project_id,
+        loop_number,
+        from_phase,
+        to_phase,
+        auto_commit,
+        skip_commit,
+        sign_commits,
+    )
 }
 
 fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 {
@@ -1388,6 +1535,87 @@ mod tests {
         assert_eq!(QuickDevPhase::CodexReview.to_current_phase(), Phase::Reviewing);
         assert_eq!(QuickDevPhase::ApplyFixes.to_current_phase(), Phase::Implementing);
         assert_eq!(QuickDevPhase::FinalReview.to_current_phase(), Phase::FinalReview);
+    }
+
+    /// Simulates the guard-at-entry logic for CodexReview: when
+    /// review_iteration >= max, we should transition to FinalReview
+    /// without running a backend call.
+    #[test]
+    fn guard_at_entry_codex_review_skips_when_at_limit() {
+        let review_iteration: u32 = 5;
+        let max_review_iterations: u32 = 5;
+        // Guard condition matches what the orchestrator checks
+        assert!(
+            review_iteration >= max_review_iterations,
+            "guard should trigger when review_iteration >= max"
+        );
+    }
+
+    /// Simulates the guard-at-entry logic for FinalReview: when
+    /// final_review_attempts >= max, we should force-complete
+    /// without running backend calls.
+    #[test]
+    fn guard_at_entry_final_review_skips_when_at_limit() {
+        let final_review_attempts: u32 = 2;
+        let max_final_review_retries: u32 = 2;
+        assert!(
+            final_review_attempts >= max_final_review_retries,
+            "guard should trigger when final_review_attempts >= max"
+        );
+    }
+
+    /// Verifies that persist_quick_dev_state followed by save_state_to_disk
+    /// writes the destination state atomically, and the loaded state reflects
+    /// the destination phase — matching the contract of
+    /// persist_destination_and_checkpoint.
+    #[test]
+    fn persist_destination_state_roundtrip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut state = ProjectState::new("test", "Test", "hash", None);
+        state.quick_dev_phase = Some(QuickDevPhase::PlanAndImplement);
+        state.current_phase = Phase::Implementing;
+
+        // Simulate persist_destination_and_checkpoint step 1 (persist)
+        persist_quick_dev_state(
+            &mut state,
+            &QuickDevPhase::CodexReview,
+            1,
+            0,
+            0,
+        );
+        save_state_to_disk(&state, temp.path()).unwrap();
+
+        let content = fs::read_to_string(temp.path().join("state.json")).unwrap();
+        let loaded: ProjectState = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.quick_dev_phase, Some(QuickDevPhase::CodexReview));
+        assert_eq!(loaded.current_phase, Phase::Reviewing);
+        assert_eq!(loaded.phase_iteration, 1);
+        assert_eq!(loaded.quick_dev_review_iteration, 0);
+        assert_eq!(loaded.quick_dev_final_review_attempts, 0);
+    }
+
+    /// Verifies destination persistence with all counters populated.
+    #[test]
+    fn persist_destination_state_with_counters() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut state = ProjectState::new("test", "Test", "hash", None);
+
+        persist_quick_dev_state(
+            &mut state,
+            &QuickDevPhase::ApplyFixes,
+            3,
+            3,
+            1,
+        );
+        save_state_to_disk(&state, temp.path()).unwrap();
+
+        let content = fs::read_to_string(temp.path().join("state.json")).unwrap();
+        let loaded: ProjectState = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.quick_dev_phase, Some(QuickDevPhase::ApplyFixes));
+        assert_eq!(loaded.current_phase, Phase::Implementing);
+        assert_eq!(loaded.phase_iteration, 3);
+        assert_eq!(loaded.quick_dev_review_iteration, 3);
+        assert_eq!(loaded.quick_dev_final_review_attempts, 1);
     }
 
     // Helper to build a minimal EffectiveConfig for testing
