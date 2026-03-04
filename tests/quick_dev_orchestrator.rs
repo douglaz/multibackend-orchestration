@@ -1189,3 +1189,205 @@ async fn review_iteration_persisted_after_changes_requested() {
         review_iter
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests - transition/checkpoint failure preserves counters
+// ---------------------------------------------------------------------------
+
+/// Simulates a crash between counter persistence and transition/checkpoint
+/// completion in the CodexReview phase. After `review_iteration` is incremented
+/// and persisted via `save_state_to_disk`, but before the CodexReview -> ApplyFixes
+/// transition completes, the process crashes.
+///
+/// On resume, the invariants are:
+/// - Persisted counters never decrease from their pre-crash values.
+/// - `status` remains `in_progress` until an explicit completion path is reached.
+/// - Resume continues from the last persisted `quick_dev_phase` and counters.
+#[tokio::test]
+async fn transition_failure_preserves_review_counter_on_resume() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    // Write persisted state simulating a crash at the CodexReview -> ApplyFixes
+    // boundary: review_iteration=2 was already incremented and persisted, but
+    // the transition to ApplyFixes never completed (quick_dev_phase is still
+    // CodexReview).
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Reviewing;
+    state.phase_iteration = 1;
+    state.quick_dev_review_iteration = 2;
+    state.quick_dev_final_review_attempts = 0;
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    // Restore phase/counter state after register_feature_loop (which overrides)
+    state.quick_dev_phase = Some(QuickDevPhase::CodexReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::Reviewing;
+    state.quick_dev_review_iteration = 2;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json).expect("write crash-simulated state");
+
+    // Resume: reviewer returns SATISFIED -> FinalReview (COMPLETE) -> Completed
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("resumed run should complete");
+
+    assert!(
+        result.summary.contains("completed"),
+        "resumed run should complete, got: {}",
+        result.summary
+    );
+
+    // Verify counter invariants
+    let final_state_json =
+        fs::read_to_string(project_dir.join("state.json")).expect("read final state.json");
+    let final_state: serde_json::Value =
+        serde_json::from_str(&final_state_json).expect("parse final state.json");
+
+    // review_iteration must never decrease from persisted pre-crash value
+    let review_iter = final_state["quick_dev_review_iteration"].as_u64().unwrap_or(0);
+    assert!(
+        review_iter >= 2,
+        "review_iteration must not decrease from persisted value 2 after resume, got: {}",
+        review_iter
+    );
+
+    // Status must be completed (explicit completion path reached)
+    assert_eq!(
+        final_state["status"].as_str().unwrap(),
+        "completed",
+        "status must be completed after explicit completion path"
+    );
+
+    // quick_dev_phase must be None after completion
+    assert!(
+        final_state["quick_dev_phase"].is_null(),
+        "quick_dev_phase must be null after completion"
+    );
+}
+
+/// Same as above but for FinalReview: crash after `final_review_attempts` is
+/// incremented and persisted, before the FinalReview -> PlanAndImplement
+/// transition completes. Verifies the same invariants apply to
+/// `final_review_attempts`.
+#[tokio::test]
+async fn transition_failure_preserves_final_review_counter_on_resume() {
+    let (_temp, workspace_root, project_id) = setup_quick_dev_workspace("satisfied", "complete");
+
+    // Write persisted state: final_review_attempts=1 was incremented and
+    // persisted, but the transition to PlanAndImplement never completed
+    // (quick_dev_phase is still FinalReview, status is still in_progress).
+    let project_dir = _temp.path().join(".ralph/projects").join(&project_id);
+    let mut state = ralph::project::state::ProjectState::new(
+        &project_id,
+        "Quick Dev Test",
+        "hash123",
+        None,
+    );
+    state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::FinalReview;
+    state.phase_iteration = 1;
+    state.quick_dev_review_iteration = 0;
+    state.quick_dev_final_review_attempts = 1;
+    state.register_feature_loop(
+        1,
+        "quick-dev".to_owned(),
+        "Quick Dev".to_owned(),
+        ralph::project::state::FeatureLoopBackends {
+            planner: "claude".to_owned(),
+            implementer: "claude".to_owned(),
+            reviewer: "codex".to_owned(),
+            qa: String::new(),
+        },
+        String::new(),
+        chrono::Utc::now(),
+    );
+    // Restore after register_feature_loop overrides
+    state.quick_dev_phase = Some(QuickDevPhase::FinalReview);
+    state.status = ProjectStatus::InProgress;
+    state.current_phase = Phase::FinalReview;
+    state.quick_dev_final_review_attempts = 1;
+    let state_json = serde_json::to_string_pretty(&state).unwrap();
+    fs::write(project_dir.join("state.json"), &state_json).expect("write crash-simulated state");
+
+    // Resume: both final reviews return COMPLETE -> Completed
+    let workspace = Workspace::load(workspace_root).expect("load workspace");
+    let mut orchestrator = QuickDevOrchestrator::new(workspace);
+
+    let result = orchestrator
+        .run(QuickDevRunOptions {
+            project: Some(project_id.clone()),
+            implementer_backend: Some("claude".to_owned()),
+            reviewer_backend: Some("codex".to_owned()),
+            pr_url: None,
+            skip_commit: true,
+            max_review_iterations: None,
+            max_final_review_retries: None,
+        })
+        .await
+        .expect("resumed run should complete");
+
+    assert!(
+        result.summary.contains("completed"),
+        "resumed run should complete, got: {}",
+        result.summary
+    );
+
+    // Verify counter invariants
+    let final_state_json =
+        fs::read_to_string(project_dir.join("state.json")).expect("read final state.json");
+    let final_state: serde_json::Value =
+        serde_json::from_str(&final_state_json).expect("parse final state.json");
+
+    // final_review_attempts must never decrease from persisted pre-crash value
+    let fr_attempts = final_state["quick_dev_final_review_attempts"].as_u64().unwrap_or(0);
+    assert!(
+        fr_attempts >= 1,
+        "final_review_attempts must not decrease from persisted value 1 after resume, got: {}",
+        fr_attempts
+    );
+
+    // Status must be completed (explicit completion path reached)
+    assert_eq!(
+        final_state["status"].as_str().unwrap(),
+        "completed",
+        "status must be completed after explicit completion path"
+    );
+
+    // quick_dev_phase must be None after completion
+    assert!(
+        final_state["quick_dev_phase"].is_null(),
+        "quick_dev_phase must be null after completion"
+    );
+}
