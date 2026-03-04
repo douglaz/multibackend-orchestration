@@ -3219,7 +3219,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
@@ -3691,12 +3691,21 @@ mod tests {
 
     #[tokio::test]
     async fn await_watcher_with_timeout_impl_aborts_stuck_task() {
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_for_task = completed.clone();
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_for_task = counter.clone();
         let join_handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            completed_for_task.store(true, Ordering::SeqCst);
+            loop {
+                counter_for_task.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let before_timeout = counter.load(Ordering::SeqCst);
+        assert!(
+            before_timeout > 0,
+            "counter should be incrementing before timeout"
+        );
 
         await_watcher_with_timeout_impl(
             join_handle,
@@ -3706,10 +3715,13 @@ mod tests {
         )
         .await;
 
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let snapshot_after = counter.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !completed.load(Ordering::SeqCst),
-            "stuck watcher should be aborted after timeout"
+        let snapshot_later = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            snapshot_after, snapshot_later,
+            "counter should stop changing after task is aborted (after={snapshot_after}, later={snapshot_later})"
         );
     }
 

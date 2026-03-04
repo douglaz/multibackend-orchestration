@@ -181,32 +181,30 @@ fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
             ))
         })?;
 
-    let has_content = file.metadata().map(|meta| meta.len() > 0).map_err(|err| {
-        RalphError::Orchestration(format!(
-            "failed to inspect log file {} metadata: {err}",
-            log_file.display()
-        ))
-    })?;
+    let (has_content, force_conservative_separator) =
+        has_content_for_separator(log_file, file.metadata().map(|meta| meta.len()));
 
     if has_content {
-        let ends_with_newline = file
-            .seek(SeekFrom::End(-1))
-            .and_then(|_| {
+        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let separator = if force_conservative_separator {
+            format_retrigger_separator(&timestamp, None)
+        } else {
+            let ends_with_newline = file.seek(SeekFrom::End(-1)).and_then(|_| {
                 let mut last = [0_u8; 1];
                 file.read_exact(&mut last).map(|_| last[0] == b'\n')
-            })
-            .map_err(|err| {
-                RalphError::Orchestration(format!(
-                    "failed to inspect trailing newline for log file {}: {err}",
-                    log_file.display()
-                ))
-            })?;
-
-        let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let separator = if ends_with_newline {
-            format!("\n--- retrigger at {timestamp} ---\n\n")
-        } else {
-            format!("\n\n--- retrigger at {timestamp} ---\n\n")
+            });
+            match ends_with_newline {
+                Ok(ends_with_newline) => {
+                    format_retrigger_separator(&timestamp, Some(ends_with_newline))
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to inspect trailing newline for log file {}: {err}",
+                        log_file.display()
+                    );
+                    format_retrigger_separator(&timestamp, None)
+                }
+            }
         };
         if let Err(err) = file.write_all(separator.as_bytes()) {
             eprintln!(
@@ -217,6 +215,28 @@ fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
     }
 
     Ok(file)
+}
+
+fn has_content_for_separator(log_file: &Path, metadata_len: std::io::Result<u64>) -> (bool, bool) {
+    match metadata_len {
+        Ok(len) => (len > 0, false),
+        Err(err) => {
+            eprintln!(
+                "warning: failed to inspect log file {} metadata: {err}",
+                log_file.display()
+            );
+            // Conservative fallback: assume existing content and avoid relying on
+            // trailing-newline inspection.
+            (true, true)
+        }
+    }
+}
+
+fn format_retrigger_separator(timestamp: &str, ends_with_newline: Option<bool>) -> String {
+    match ends_with_newline {
+        Some(true) => format!("\n--- retrigger at {timestamp} ---\n\n"),
+        Some(false) | None => format!("\n\n--- retrigger at {timestamp} ---\n\n"),
+    }
 }
 
 /// Run a synchronous command with a timeout. Returns `Ok(output)` if the
@@ -349,11 +369,15 @@ pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
 mod tests {
     use chrono::DateTime;
     use std::ffi::OsStr;
+    use std::io;
     use std::path::Path;
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::{build_ralph_auto_command, build_ralph_run_command};
+    use super::{
+        build_ralph_auto_command, build_ralph_run_command, format_retrigger_separator,
+        has_content_for_separator,
+    };
     #[cfg(unix)]
     use super::{pid_exists, terminate_process_group_blocking};
 
@@ -555,6 +579,25 @@ mod tests {
         assert!(
             content.ends_with(" ---\n\n"),
             "separator should end with blank line, got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_inspection_failure_forces_conservative_separator_path() {
+        let (has_content, force_conservative_separator) = has_content_for_separator(
+            Path::new("/tmp/issue.log"),
+            Err(io::Error::other("metadata probe failed")),
+        );
+        assert!(has_content);
+        assert!(force_conservative_separator);
+    }
+
+    #[test]
+    fn conservative_separator_format_is_used_on_probe_failure() {
+        let separator = format_retrigger_separator("2026-03-04T03:32:00Z", None);
+        assert_eq!(
+            separator,
+            "\n\n--- retrigger at 2026-03-04T03:32:00Z ---\n\n"
         );
     }
 
