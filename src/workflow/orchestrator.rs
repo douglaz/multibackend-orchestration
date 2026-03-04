@@ -655,6 +655,8 @@ impl Orchestrator {
                         PlannerDecision::CompletionRequest { body } => {
                             // Guard: fail if planner requests completion with unaddressed
                             // final review amendments from the most recent completion loop.
+                            // Only triggers for the immediate bad transition (restart → completion
+                            // without an intervening feature loop to address amendments).
                             if let Some(last_attempt) = state.completion_attempts.last() {
                                 let has_restart = resolve_artifact_path_by_suffix(
                                     &project_dir,
@@ -663,7 +665,11 @@ impl Orchestrator {
                                     "final-review-exit-restart.md",
                                 )?
                                 .is_some();
-                                if has_restart {
+                                let has_feature_after = state
+                                    .loops
+                                    .iter()
+                                    .any(|l| l.loop_number > last_attempt.loop_number);
+                                if has_restart && !has_feature_after {
                                     return Err(RalphError::Orchestration(
                                         "planner requested completion without addressing final review amendments"
                                             .to_owned(),

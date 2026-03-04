@@ -186,7 +186,7 @@ elif [[ "$prompt" == *"You are a project completion validator."* ]]; then
 The project satisfies all requirements:
 - Requirement: satisfied
 EOF
-elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptance."* ]]; then
+elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
   cat <<'EOF'
 # QA: PASS
 
@@ -372,6 +372,27 @@ fn planner_completion_after_amendments_fails(h: &RalphHarness) -> TestResult {
             completion_attempts.len(),
             1,
             "guard should fire before a second completion attempt is registered"
+        );
+
+        // Verify restart budget non-consumption: exactly one restart artifact
+        // exists (from the single completion loop that ended with amendments).
+        let loop_number = completion_attempts[0]["loop_number"]
+            .as_u64()
+            .expect("loop_number should be u64") as u32;
+        let artifacts = h
+            .list_artifacts(project_id, loop_number)
+            .expect("list_artifacts should succeed");
+        let restart_count = artifacts
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("-final-review-exit-restart.md"))
+            })
+            .count();
+        assert_eq!(
+            restart_count, 1,
+            "expected exactly one final-review-exit-restart artifact"
         );
     })
 }
