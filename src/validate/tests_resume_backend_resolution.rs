@@ -5,6 +5,7 @@ use crate::validate::harness::RalphHarness;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -367,6 +368,106 @@ fn setup_resume_fixture(h: &RalphHarness, project_id: &str, script_name: &str, s
     .expect("create project");
     h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
         .expect("disable prompt review");
+}
+
+/// Build a direct fixture that parks state in the `Completing` phase.
+///
+/// Completer command failures are non-fatal (skipped votes) in the orchestrator,
+/// so we cannot rely on them to crash the process mid-phase. Instead, this
+/// function manually creates the completion loop directory with a
+/// termination-request artifact and a git checkpoint commit that positions the
+/// reconstructed state at `completing`.
+///
+/// If `verdict_backend` is `Some((backend, verdict))`, a per-backend completer
+/// verdict artifact is also written so that `reconstructed_completers` is
+/// non-empty (required for panel drift detection).
+fn create_completing_fixture(
+    h: &RalphHarness,
+    project_id: &str,
+    planner_backend: &str,
+    verdict_backend: Option<(&str, &str)>,
+) {
+    let project_dir = h.project_dir(project_id);
+    let completion_dir = project_dir.join("loops").join("002-completion");
+    fs::create_dir_all(&completion_dir).expect("create completion loop directory");
+
+    // Write termination-request artifact with frontmatter matching what
+    // the orchestrator would produce.
+    let termination_content = format!(
+        "---\n\
+         artifact: termination-request\n\
+         loop: 2\n\
+         project: {project_id}\n\
+         backend: {planner_backend}\n\
+         role: planner\n\
+         created_at: 2026-03-05T00:00:00Z\n\
+         ---\n\n\
+         # Project Completion Request\n\n\
+         ## Rationale\n\
+         All required behavior is complete.\n\n\
+         ## Summary of Work\n\
+         - Prior loops implemented and reviewed successfully.\n\n\
+         ## Remaining Items\n\
+         - None\n"
+    );
+    fs::write(
+        completion_dir.join("20260305000000-termination-request.md"),
+        &termination_content,
+    )
+    .expect("write termination-request artifact");
+
+    // Optionally write a partial completer verdict artifact so that
+    // reconstructed_completers is non-empty (enabling the panel drift
+    // detection path). The verdict body is intentionally left without a
+    // parseable `# Verdict:` heading so that `parse_completion_verdict`
+    // returns `None`, keeping the completion attempt status as InProgress.
+    // An InProgress status is required because `has_in_progress_loop()`
+    // would return false for a Completed attempt, resetting the phase to
+    // Planning before the Completing branch is ever reached.
+    if let Some((backend, _verdict)) = verdict_backend {
+        let verdict_content = format!(
+            "---\n\
+             artifact: completer-verdict\n\
+             loop: 2\n\
+             project: {project_id}\n\
+             backend: {backend}\n\
+             role: completer\n\
+             created_at: 2026-03-05T00:00:01Z\n\
+             ---\n\n\
+             Completer execution was interrupted before producing a verdict.\n"
+        );
+        fs::write(
+            completion_dir.join(format!(
+                "20260305000001-completer-verdict-{backend}.md"
+            )),
+            &verdict_content,
+        )
+        .expect("write partial completer-verdict artifact");
+    }
+
+    // Stage all new files and create a ralph checkpoint commit so that
+    // derive_position returns (2, Phase::Completing).
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&h.repo_root)
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {e}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["add", "-A"]);
+    let commit_msg = format!(
+        "ralph({project_id}): loop 2 planning -> completing\n\n\
+         Ralph-Project: {project_id}\n\
+         Ralph-Loop: 2\n\
+         Ralph-Phase: completing"
+    );
+    git(&["commit", "-m", &commit_msg]);
 }
 
 fn backend_from_frontmatter(path: &Path) -> String {
@@ -813,13 +914,12 @@ fi
 fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "resume-completion-planner-drift";
-        let fail_marker = h.temp_dir.path().join("fail-completer.marker");
-        fs::write(&fail_marker, "1").expect("write completer fail marker");
+        // Use "none" as fail_role so the first feature loop succeeds normally.
         setup_resume_fixture(
             h,
             project_id,
             "resume-completion-planner-drift.sh",
-            &completion_resume_mock_script("completer", &fail_marker),
+            &completion_resume_mock_script("none", Path::new("/nonexistent")),
         );
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
@@ -828,7 +928,6 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
             .expect("disable final review");
         h.ralph_ok(["config", "set", "workflow.starting_backend", "claude"])
             .expect("set starting_backend to claude");
-        // Use single completer to keep things simple
         h.ralph_ok([
             "config",
             "set",
@@ -839,27 +938,26 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
-        // Use --until-complete so execution continues past the feature loop
-        // count and reaches Completing (the planner emits a completion request
-        // on its second invocation).
+        // Complete one feature loop only (planner count=1 emits feature spec).
         let first = h
-            .ralph(["run", "--until-complete"])
-            .expect("initial run should execute");
-        assert!(
-            !first.status.success(),
-            "initial run should fail in completing phase; stderr:\n{}",
-            String::from_utf8_lossy(&first.stderr)
-        );
+            .ralph(["run", "--loops", "1"])
+            .expect("initial feature loop run should execute");
+        assert_exit_code(&first, 0);
 
-        let failed_state = h
+        // Build a direct fixture in Completing: create the completion loop
+        // directory with a termination-request artifact and a git checkpoint
+        // commit. Completer command failures are non-fatal (skipped votes),
+        // so we cannot rely on them to park state at Completing.
+        create_completing_fixture(h, project_id, "claude", None);
+
+        let parked_state = h
             .load_state(project_id)
-            .expect("load_state after completing failure");
-        assert_json_field(&failed_state, "current_phase", &json!("completing"));
+            .expect("load_state after completing fixture");
+        assert_json_field(&parked_state, "current_phase", &json!("completing"));
 
         // Change starting_backend to alter planner resolution for the completion loop
         h.ralph_ok(["config", "set", "workflow.starting_backend", "codex"])
             .expect("set starting_backend to codex");
-        fs::remove_file(&fail_marker).expect("remove completer fail marker");
 
         let resumed = h
             .ralph(["run", "--until-complete"])
@@ -882,13 +980,12 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
 fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "resume-completion-panel-drift";
-        let fail_marker = h.temp_dir.path().join("fail-panel-completer.marker");
-        fs::write(&fail_marker, "1").expect("write completer fail marker");
+        // Use "none" as fail_role so the first feature loop succeeds normally.
         setup_resume_fixture(
             h,
             project_id,
             "resume-completion-panel-drift.sh",
-            &completion_resume_mock_script("completer", &fail_marker),
+            &completion_resume_mock_script("none", Path::new("/nonexistent")),
         );
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
@@ -905,21 +1002,27 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
-        // Use --until-complete so execution continues past the feature loop
-        // count and reaches Completing.
+        // Complete one feature loop only (planner count=1 emits feature spec).
         let first = h
-            .ralph(["run", "--until-complete"])
-            .expect("initial run should execute");
-        assert!(
-            !first.status.success(),
-            "initial run should fail in completing phase; stderr:\n{}",
-            String::from_utf8_lossy(&first.stderr)
+            .ralph(["run", "--loops", "1"])
+            .expect("initial feature loop run should execute");
+        assert_exit_code(&first, 0);
+
+        // Build a direct fixture in Completing with a prior completer verdict
+        // so that reconstructed_completers is non-empty (needed for panel
+        // drift detection). Completer command failures are non-fatal (skipped
+        // votes), so we cannot rely on them to park state at Completing.
+        create_completing_fixture(
+            h,
+            project_id,
+            "claude",
+            Some(("claude", "CONTINUE")),
         );
 
-        let failed_state = h
+        let parked_state = h
             .load_state(project_id)
-            .expect("load_state after completing failure");
-        assert_json_field(&failed_state, "current_phase", &json!("completing"));
+            .expect("load_state after completing fixture");
+        assert_json_field(&parked_state, "current_phase", &json!("completing"));
 
         // Change completion_backends to trigger completer panel drift
         h.ralph_ok([
@@ -929,7 +1032,6 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
             "[\"codex\"]",
         ])
         .expect("set new completion_backends");
-        fs::remove_file(&fail_marker).expect("remove completer fail marker");
 
         let resumed = h
             .ralph(["run", "--until-complete"])
