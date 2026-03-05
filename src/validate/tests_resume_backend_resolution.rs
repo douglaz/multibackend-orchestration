@@ -439,9 +439,7 @@ fn create_completing_fixture(
              Completer execution was interrupted before producing a verdict.\n"
         );
         fs::write(
-            completion_dir.join(format!(
-                "20260305000001-completer-verdict-{backend}.md"
-            )),
+            completion_dir.join(format!("20260305000001-completer-verdict-{backend}.md")),
             &verdict_content,
         )
         .expect("write partial completer-verdict artifact");
@@ -496,10 +494,12 @@ fn find_completion_loop_dir(project_dir: &Path) -> std::path::PathBuf {
         })
         .collect();
     candidates.sort();
-    candidates
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no completion loop directory found under {}", loops_dir.display()))
+    candidates.last().cloned().unwrap_or_else(|| {
+        panic!(
+            "no completion loop directory found under {}",
+            loops_dir.display()
+        )
+    })
 }
 
 /// Find the newest `completer-verdict-*.md` file in a loop directory by
@@ -519,10 +519,12 @@ fn find_newest_verdict_artifact(loop_dir: &Path) -> std::path::PathBuf {
         })
         .collect();
     verdicts.sort();
-    verdicts
-        .last()
-        .cloned()
-        .unwrap_or_else(|| panic!("no completer-verdict artifact found in {}", loop_dir.display()))
+    verdicts.last().cloned().unwrap_or_else(|| {
+        panic!(
+            "no completer-verdict artifact found in {}",
+            loop_dir.display()
+        )
+    })
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1269,12 +1271,7 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         // so that reconstructed_completers is non-empty (needed for panel
         // drift detection). Completer command failures are non-fatal (skipped
         // votes), so we cannot rely on them to park state at Completing.
-        create_completing_fixture(
-            h,
-            project_id,
-            "claude",
-            Some(("claude", "CONTINUE")),
-        );
+        create_completing_fixture(h, project_id, "claude", Some(("claude", "CONTINUE")));
 
         let parked_state = h
             .load_state(project_id)
@@ -1415,19 +1412,13 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         // feature loop was 1, completion was 2).
         let amendment_loop = loops
             .iter()
-            .filter(|l| {
-                l["loop_number"]
-                    .as_u64()
-                    .map(|n| n > 2)
-                    .unwrap_or(false)
-            })
-            .last()
+            .rev()
+            .find(|l| l["loop_number"].as_u64().map(|n| n > 2).unwrap_or(false))
             .expect("should have an amendment feature loop after final review AMENDMENTS");
         let spec_rel = amendment_loop["artifacts"]["spec"]
             .as_str()
             .expect("amendment loop should have a spec artifact");
-        let spec_backend =
-            backend_from_frontmatter(&h.project_dir(project_id).join(spec_rel));
+        let spec_backend = backend_from_frontmatter(&h.project_dir(project_id).join(spec_rel));
         assert!(
             spec_backend.starts_with("codex"),
             "amendment planner spec artifact backend should be codex-based (re-resolved), got: {spec_backend}"
