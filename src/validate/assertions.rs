@@ -327,6 +327,15 @@ pub fn assert_json_array(value: &Value) -> &Vec<Value> {
 /// Normalize a backend string by stripping model suffixes.
 /// For example: `"claude(sonnet-4)"` → `"claude"`, `"codex(gpt-5.3-codex)"` → `"codex"`.
 /// If the string has no parenthesized suffix, it is returned as-is (lowercased).
+pub fn normalize_backend(backend: &str) -> String {
+    let s = backend.trim();
+    if let Some(idx) = s.find('(') {
+        s[..idx].trim().to_lowercase()
+    } else {
+        s.to_lowercase()
+    }
+}
+
 /// Strip ANSI SGR escape sequences from a string.
 ///
 /// `tracing_subscriber::fmt()` may emit ANSI colour/style codes around
@@ -336,13 +345,4 @@ pub fn assert_json_array(value: &Value) -> &Vec<Value> {
 pub fn strip_ansi(s: &str) -> String {
     let re = Regex::new(r"\x1b\[[0-9;]*m").expect("valid ANSI regex");
     re.replace_all(s, "").into_owned()
-}
-
-pub fn normalize_backend(backend: &str) -> String {
-    let s = backend.trim();
-    if let Some(idx) = s.find('(') {
-        s[..idx].trim().to_lowercase()
-    } else {
-        s.to_lowercase()
-    }
 }

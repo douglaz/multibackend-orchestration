@@ -772,6 +772,176 @@ fi
     )
 }
 
+/// Mock script for the final-review amendment resume test.
+///
+/// Identical to `completion_resume_mock_script` except the final reviewer
+/// uses a counter file:
+///  - first successful call → AMENDMENTS (forces planner re-execution)
+///  - second successful call → NO AMENDMENTS (allows completion)
+///
+/// The planner counter is also extended:
+///  - count 1 → feature spec (loop 1)
+///  - count 2 → completion request (loop 2)
+///  - count 3 → amendment feature spec (loop 3, triggered by AMENDMENTS)
+///  - count ≥ 4 → completion request (loop 4+)
+fn final_review_amendment_resume_mock_script(fail_marker: &Path) -> String {
+    let fail_marker = shell_single_quote(&fail_marker.to_string_lossy());
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+FAIL_MARKER={fail_marker}
+
+# Use per-repo counter files for planner and final reviewer
+PLANNER_COUNTER=".ralph-planner-counter"
+FINAL_REVIEWER_COUNTER=".ralph-final-reviewer-counter"
+
+if grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- none
+
+## Refined Prompt
+No changes.
+EOF
+elif grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  COUNT=0
+  if [ -f "$PLANNER_COUNTER" ]; then
+    COUNT="$(cat "$PLANNER_COUNTER")"
+  fi
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$PLANNER_COUNTER"
+  if [ "$COUNT" -eq 1 ] || [ "$COUNT" -eq 3 ]; then
+    cat <<'EOF'
+# Feature: Final Review Amendment Feature
+
+## Description
+A feature used to validate planner re-execution on final review amendments.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - written by implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  else
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  fi
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Implemented mock feature for final review amendment resume tests.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only.
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check passed
+
+## Automated Tests
+- mock test suite passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified.
+EOF
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: approve final review amendment test feature
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+  if [ -f "$FAIL_MARKER" ]; then
+    echo "forced final reviewer failure for resume test" >&2
+    exit 1
+  fi
+  COUNT=0
+  if [ -f "$FINAL_REVIEWER_COUNTER" ]; then
+    COUNT="$(cat "$FINAL_REVIEWER_COUNTER")"
+  fi
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$FINAL_REVIEWER_COUNTER"
+  if [ "$COUNT" -le 1 ]; then
+    cat <<'EOF'
+# Final Review: AMENDMENTS
+
+## Amendments
+1. Add documentation to mock_file.txt
+
+## Summary
+Minor amendment required for completeness.
+EOF
+  else
+    cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No amendments required.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    )
+}
+
 fn review_feedback_then_fail_implementer_response_script(
     fail_marker: &Path,
     reviewer_counter: &Path,
@@ -967,14 +1137,24 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         assert_exit_code(&resumed, 0);
 
         let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
+        // Find the specific planner drift warning line and verify concrete fields.
+        let planner_drift_line = resumed_stderr
+            .lines()
+            .find(|l| {
+                l.contains("role=\"planner\"")
+                    && l.contains("backend drift detected on resume, using config-resolved value")
+            })
+            .expect("expected a single log line with planner drift warning");
         assert!(
-            resumed_stderr
-                .contains("backend drift detected on resume, using config-resolved value"),
-            "expected planner drift warning on completion resume, stderr:\n{resumed_stderr}"
+            planner_drift_line.contains("original=claude"),
+            "expected original=claude (bare fixture value), got: {planner_drift_line}"
         );
+        // The resolved planner is planner_for_loop(2, "codex") = opposite("codex")
+        // = "claude", but with default model injection → "claude(opus)" (or similar).
+        // Assert resolved starts with "claude(" to verify model injection occurred.
         assert!(
-            resumed_stderr.contains("role=\"planner\""),
-            "expected planner role field in drift warning, stderr:\n{resumed_stderr}"
+            planner_drift_line.contains("resolved=claude("),
+            "expected resolved planner to include model suffix, got: {planner_drift_line}"
         );
     })
 }
@@ -1041,26 +1221,45 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         assert_exit_code(&resumed, 0);
 
         let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
+        // Find the specific completer drift warning line.
+        let completer_drift_line = resumed_stderr
+            .lines()
+            .find(|l| {
+                l.contains("role=\"completer\"")
+                    && l.contains("backend drift detected on resume, using config-resolved value")
+            })
+            .expect("expected a single log line with completer panel drift warning");
         assert!(
-            resumed_stderr.contains("role=\"completer\""),
-            "expected completer role field in drift warning, stderr:\n{resumed_stderr}"
+            completer_drift_line.contains("loop_number="),
+            "expected loop_number field in completer panel drift warning, got: {completer_drift_line}"
         );
         assert!(
-            resumed_stderr
-                .contains("backend drift detected on resume, using config-resolved value"),
-            "expected drift warning message on resume, stderr:\n{resumed_stderr}"
+            completer_drift_line.contains("original="),
+            "expected original field in completer panel drift warning, got: {completer_drift_line}"
         );
         assert!(
-            resumed_stderr.contains("loop_number="),
-            "expected loop_number field in completer panel drift warning, stderr:\n{resumed_stderr}"
+            completer_drift_line.contains("resolved="),
+            "expected resolved field in completer panel drift warning, got: {completer_drift_line}"
         );
+
+        // Execution proof: the completer verdict artifact produced on resume
+        // should have its backend field matching the re-resolved panel backend
+        // (codex-based, not the original claude).
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after panel drift resume");
+        let completion = &state["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be array");
+        let latest_attempt = completion.last().expect("should have at least one completion attempt");
+        let verdict_rel = latest_attempt["artifacts"]["verdict"]
+            .as_str()
+            .expect("verdict artifact should exist after completion");
+        let verdict_backend =
+            backend_from_frontmatter(&h.project_dir(project_id).join(verdict_rel));
         assert!(
-            resumed_stderr.contains("original="),
-            "expected original field in completer panel drift warning, stderr:\n{resumed_stderr}"
-        );
-        assert!(
-            resumed_stderr.contains("resolved="),
-            "expected resolved field in completer panel drift warning, stderr:\n{resumed_stderr}"
+            verdict_backend.starts_with("codex"),
+            "completer verdict artifact backend should match re-resolved panel (codex), got: {verdict_backend}"
         );
     })
 }
@@ -1074,7 +1273,7 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
             h,
             project_id,
             "resume-finalreview-planner-drift.sh",
-            &completion_resume_mock_script("final_reviewer", &fail_marker),
+            &final_review_amendment_resume_mock_script(&fail_marker),
         );
 
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
@@ -1114,20 +1313,56 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
             .expect("set starting_backend to codex");
         fs::remove_file(&fail_marker).expect("remove final reviewer fail marker");
 
+        // On resume, final reviewer returns AMENDMENTS which forces the planner
+        // to execute (planning an amendment feature). The planner-produced
+        // artifact should have the re-resolved backend in its frontmatter.
         let resumed = h
             .ralph_with_log(["run", "--until-complete"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
         let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
+        // Find the specific planner drift warning line.
+        let planner_drift_line = resumed_stderr
+            .lines()
+            .find(|l| {
+                l.contains("role=\"planner\"")
+                    && l.contains("backend drift detected on resume, using config-resolved value")
+            })
+            .expect("expected planner drift warning on final review resume");
         assert!(
-            resumed_stderr
-                .contains("backend drift detected on resume, using config-resolved value"),
-            "expected planner drift warning on final review resume, stderr:\n{resumed_stderr}"
+            planner_drift_line.contains("original="),
+            "expected original field in planner drift warning, got: {planner_drift_line}"
         );
+
+        // Execution proof: the amendment feature spec artifact produced by the
+        // planner on resume should have a backend field matching the re-resolved
+        // planner backend (codex-based, since starting_backend was changed to codex).
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after final review amendment resume");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        // The amendment feature loop is the last one added after final review
+        // triggered re-planning. Find a loop with loop_number > 2 (the original
+        // feature loop was 1, completion was 2).
+        let amendment_loop = loops
+            .iter()
+            .filter(|l| {
+                l["loop_number"]
+                    .as_u64()
+                    .map(|n| n > 2)
+                    .unwrap_or(false)
+            })
+            .last()
+            .expect("should have an amendment feature loop after final review AMENDMENTS");
+        let spec_rel = amendment_loop["artifacts"]["spec"]
+            .as_str()
+            .expect("amendment loop should have a spec artifact");
+        let spec_backend =
+            backend_from_frontmatter(&h.project_dir(project_id).join(spec_rel));
         assert!(
-            resumed_stderr.contains("role=\"planner\""),
-            "expected planner role field in drift warning, stderr:\n{resumed_stderr}"
+            spec_backend.starts_with("codex"),
+            "amendment planner spec artifact backend should be codex-based (re-resolved), got: {spec_backend}"
         );
     })
 }
@@ -1146,13 +1381,19 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             .expect("disable QA");
         h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
             .expect("disable final review");
+        // Include an unavailable optional completer (?gemini) alongside the
+        // required completer. Gemini is disabled in the mock setup, so
+        // resolve_completion_panel will skip it with a deterministic warning.
+        // If the panel were re-resolved on same-run completion entry, the
+        // skip warning would appear twice; asserting it appears exactly once
+        // proves resolution happens only at planning time.
         h.ralph_ok([
             "config",
             "set",
             "workflow.completion_backends",
-            "[\"claude\"]",
+            "[\"claude\", \"?gemini\"]",
         ])
-        .expect("set completion_backends");
+        .expect("set completion_backends with optional unavailable backend");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
@@ -1180,6 +1421,19 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
                 || !stderr
                     .contains("backend drift detected on resume, using config-resolved value"),
             "did not expect completer panel drift warning on same-run completion, stderr:\n{stderr}"
+        );
+
+        // The optional gemini skip warning from resolve_completion_panel
+        // should appear exactly once (at planning-time panel resolution),
+        // proving that panel resolution does NOT happen again at same-run
+        // completion entry.
+        let skip_count = stderr
+            .lines()
+            .filter(|l| l.contains("optional completion backend unavailable, skipping"))
+            .count();
+        assert_eq!(
+            skip_count, 1,
+            "expected exactly 1 optional-backend skip warning (planning-time only), got {skip_count}; stderr:\n{stderr}"
         );
     })
 }
