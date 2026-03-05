@@ -12,6 +12,14 @@ It coordinates planner, implementer, QA, reviewer, and completer phases across A
 - First-class project state, history, artifact tailing, and rollback.
 - Built-in conformance validation suite (`ralph validate`).
 
+## Install
+
+Run directly from GitHub without cloning:
+
+```bash
+nix run github:douglaz/multibackend-orchestration -- --help
+```
+
 ## Build
 
 ```bash
