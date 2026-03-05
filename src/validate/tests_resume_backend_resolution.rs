@@ -839,7 +839,12 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
-        let first = h.ralph(["run"]).expect("initial run should execute");
+        // Use --until-complete so execution continues past the feature loop
+        // count and reaches Completing (the planner emits a completion request
+        // on its second invocation).
+        let first = h
+            .ralph(["run", "--until-complete"])
+            .expect("initial run should execute");
         assert!(
             !first.status.success(),
             "initial run should fail in completing phase; stderr:\n{}",
@@ -857,7 +862,7 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove completer fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph(["run", "--until-complete"])
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
@@ -900,7 +905,11 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
-        let first = h.ralph(["run"]).expect("initial run should execute");
+        // Use --until-complete so execution continues past the feature loop
+        // count and reaches Completing.
+        let first = h
+            .ralph(["run", "--until-complete"])
+            .expect("initial run should execute");
         assert!(
             !first.status.success(),
             "initial run should fail in completing phase; stderr:\n{}",
@@ -923,14 +932,31 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove completer fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph(["run", "--until-complete"])
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
         let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
         assert!(
             resumed_stderr.contains("role=\"completer\""),
-            "expected completer panel drift warning on resume, stderr:\n{resumed_stderr}"
+            "expected completer role field in drift warning, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr
+                .contains("backend drift detected on resume, using config-resolved value"),
+            "expected drift warning message on resume, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr.contains("loop_number="),
+            "expected loop_number field in completer panel drift warning, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr.contains("original="),
+            "expected original field in completer panel drift warning, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr.contains("resolved="),
+            "expected resolved field in completer panel drift warning, stderr:\n{resumed_stderr}"
         );
     })
 }
@@ -963,7 +989,11 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
             .expect("set min completers to 1");
 
-        let first = h.ralph(["run"]).expect("initial run should execute");
+        // Use --until-complete so execution continues past the feature loop
+        // count and reaches FinalReview.
+        let first = h
+            .ralph(["run", "--until-complete"])
+            .expect("initial run should execute");
         assert!(
             !first.status.success(),
             "initial run should fail in final review phase; stderr:\n{}",
@@ -981,7 +1011,7 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove final reviewer fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph(["run", "--until-complete"])
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
@@ -1023,12 +1053,19 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             .expect("set min completers to 1");
 
         // Run to completion in a single invocation (no resume).
-        // is_resumed_state becomes false after the first feature loop iteration,
+        // is_resumed_state becomes false after the first outer-loop iteration,
         // so the Completing phase should NOT re-resolve the completer panel.
         let result = h
-            .ralph(["run", "--loops", "1"])
+            .ralph(["run", "--until-complete"])
             .expect("single run should execute");
         assert_exit_code(&result, 0);
+
+        // Verify that the completion phase was actually reached by checking
+        // that the project completed (state.status == "completed").
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after same-run completion");
+        assert_json_field(&state, "status", &json!("completed"));
 
         let stderr = String::from_utf8_lossy(&result.stderr);
         // No completer panel drift warning should appear because this is

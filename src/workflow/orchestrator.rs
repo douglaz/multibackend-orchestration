@@ -1831,9 +1831,6 @@ impl Orchestrator {
                     state.current_loop = state.last_loop_number();
                     state.status = ProjectStatus::InProgress;
                     completed_feature_loops += 1;
-                    if is_resumed_state {
-                        is_resumed_state = false;
-                    }
                 }
                 Phase::Completing => {
                     info!(loop = state.current_loop, "starting completion validation phase");
@@ -2373,6 +2370,12 @@ impl Orchestrator {
                     pending_phase_checkpoint = checkpoint;
                 }
             }
+
+            // After the first outer-loop iteration, mark the run as no longer
+            // in resumed state. This ensures resume-only behaviors (e.g.
+            // completer panel re-resolution) are gated to the first phase step
+            // only, independent of which phase was processed.
+            is_resumed_state = false;
 
             // Handle ReviewIterationLimitExceeded: rollback the current loop
             if let Some((ln, max_iter)) = review_limit_hit {
