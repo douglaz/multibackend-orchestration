@@ -232,6 +232,9 @@ impl Orchestrator {
 
         let mut state = reconstruct_project_state(&self.workspace, &project_id)?;
         check_parent_project_consistency(&self.workspace, &state)?;
+        // Tracks whether execution is still on the first post-reconstruction run pass.
+        // Later resume-gated behaviors can key off this without changing state schema.
+        let mut is_resumed_state = true;
 
         // Propagate PR URL from CLI / daemon into project state so it is
         // available across orchestration phases (completion, final review, etc.).
@@ -733,8 +736,8 @@ impl Orchestrator {
                         loop_number,
                         loop_slug,
                         feature_name,
-                        planner_backend,
-                        implementer_backend_name,
+                        reconstructed_planner_backend,
+                        reconstructed_implementer_backend,
                         spec_rel,
                         impl_notes_rel,
                     ) = {
@@ -756,25 +759,25 @@ impl Orchestrator {
                         )
                     };
 
-                    // If the stored backend is missing or disabled, recalculate
-                    // from the loop alternation cycle.
-                    let implementer_backend_name =
-                        if registry.is_backend_available(&implementer_backend_name) {
-                            implementer_backend_name
-                        } else {
-                            let recalc = registry.assign_feature_backends(
-                                loop_number,
-                                &effective.workflow.starting_backend,
-                                &role_overrides,
-                            )?;
-                            warn!(
-                                original = %implementer_backend_name,
-                                recalculated = %recalc.implementer,
-                                loop_number,
-                                "implementer backend unavailable, recalculated from loop cycle"
-                            );
-                            recalc.implementer
-                        };
+                    let resolved_backends = registry.assign_feature_backends(
+                        loop_number,
+                        &effective.workflow.starting_backend,
+                        &role_overrides,
+                    )?;
+                    let planner_backend = resolved_backends.planner;
+                    let implementer_backend_name = resolved_backends.implementer;
+                    log_backend_drift_if_mismatch(
+                        "planner",
+                        loop_number,
+                        &reconstructed_planner_backend,
+                        &planner_backend,
+                    );
+                    log_backend_drift_if_mismatch(
+                        "implementer",
+                        loop_number,
+                        &reconstructed_implementer_backend,
+                        &implementer_backend_name,
+                    );
                     let implementer_backend =
                         registry.get_or_create_for_role(&implementer_backend_name, "implementer")?;
 
@@ -1254,8 +1257,8 @@ impl Orchestrator {
                         loop_number,
                         loop_slug,
                         feature_name,
-                        planner_backend_name,
-                        qa_backend_name,
+                        reconstructed_planner_backend_name,
+                        reconstructed_qa_backend_name,
                         spec_rel,
                         impl_notes_rel,
                     ) = {
@@ -1307,23 +1310,25 @@ impl Orchestrator {
                         });
                     }
 
-                    let qa_backend_name =
-                        if registry.is_backend_available(&qa_backend_name) {
-                            qa_backend_name
-                        } else {
-                            let recalc = registry.assign_feature_backends(
-                                loop_number,
-                                &effective.workflow.starting_backend,
-                                &role_overrides,
-                            )?;
-                            warn!(
-                                original = %qa_backend_name,
-                                recalculated = %recalc.qa,
-                                loop_number,
-                                "qa backend unavailable, recalculated from loop cycle"
-                            );
-                            recalc.qa
-                        };
+                    let resolved_backends = registry.assign_feature_backends(
+                        loop_number,
+                        &effective.workflow.starting_backend,
+                        &role_overrides,
+                    )?;
+                    let planner_backend_name = resolved_backends.planner;
+                    let qa_backend_name = resolved_backends.qa;
+                    log_backend_drift_if_mismatch(
+                        "planner",
+                        loop_number,
+                        &reconstructed_planner_backend_name,
+                        &planner_backend_name,
+                    );
+                    log_backend_drift_if_mismatch(
+                        "qa",
+                        loop_number,
+                        &reconstructed_qa_backend_name,
+                        &qa_backend_name,
+                    );
                     let qa_backend = registry.get_or_create_for_role(&qa_backend_name, "qa")?;
 
                     let spec_content = read_project_relative_file(&project_dir, &spec_rel)?;
@@ -1531,8 +1536,8 @@ impl Orchestrator {
                         loop_number,
                         loop_slug,
                         feature_name,
-                        planner_backend_name,
-                        reviewer_backend_name,
+                        reconstructed_planner_backend_name,
+                        reconstructed_reviewer_backend_name,
                         spec_rel,
                         impl_notes_rel,
                         review_count,
@@ -1556,23 +1561,25 @@ impl Orchestrator {
                         )
                     };
 
-                    let reviewer_backend_name =
-                        if registry.is_backend_available(&reviewer_backend_name) {
-                            reviewer_backend_name
-                        } else {
-                            let recalc = registry.assign_feature_backends(
-                                loop_number,
-                                &effective.workflow.starting_backend,
-                                &role_overrides,
-                            )?;
-                            warn!(
-                                original = %reviewer_backend_name,
-                                recalculated = %recalc.reviewer,
-                                loop_number,
-                                "reviewer backend unavailable, recalculated from loop cycle"
-                            );
-                            recalc.reviewer
-                        };
+                    let resolved_backends = registry.assign_feature_backends(
+                        loop_number,
+                        &effective.workflow.starting_backend,
+                        &role_overrides,
+                    )?;
+                    let planner_backend_name = resolved_backends.planner;
+                    let reviewer_backend_name = resolved_backends.reviewer;
+                    log_backend_drift_if_mismatch(
+                        "planner",
+                        loop_number,
+                        &reconstructed_planner_backend_name,
+                        &planner_backend_name,
+                    );
+                    log_backend_drift_if_mismatch(
+                        "reviewer",
+                        loop_number,
+                        &reconstructed_reviewer_backend_name,
+                        &reviewer_backend_name,
+                    );
                     if state.phase_iteration > effective.workflow.max_review_iterations {
                         review_limit_hit =
                             Some((loop_number, effective.workflow.max_review_iterations));
@@ -1824,6 +1831,9 @@ impl Orchestrator {
                     state.current_loop = state.last_loop_number();
                     state.status = ProjectStatus::InProgress;
                     completed_feature_loops += 1;
+                    if is_resumed_state {
+                        is_resumed_state = false;
+                    }
                 }
                 Phase::Completing => {
                     info!(loop = state.current_loop, "starting completion validation phase");
@@ -5024,6 +5034,20 @@ fn phase_label(phase: &Phase) -> &'static str {
         Phase::Completing => "completing",
         Phase::FinalReview => "final_review",
     }
+}
+
+fn log_backend_drift_if_mismatch(role: &str, loop_number: u32, original: &str, resolved: &str) {
+    if original == resolved {
+        return;
+    }
+
+    warn!(
+        role = role,
+        loop_number,
+        original = %original,
+        resolved = %resolved,
+        "backend drift detected on resume, using config-resolved value"
+    );
 }
 
 fn ensure_clean_start_for_new_loop(workspace_root: &Path) -> Result<()> {
