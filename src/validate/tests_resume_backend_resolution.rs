@@ -479,6 +479,52 @@ fn backend_from_frontmatter(path: &Path) -> String {
         .to_owned()
 }
 
+/// Find the completion loop directory (e.g. `loops/002-completion`) inside a
+/// project directory.  Panics if none exists.
+fn find_completion_loop_dir(project_dir: &Path) -> std::path::PathBuf {
+    let loops_dir = project_dir.join("loops");
+    let mut candidates: Vec<_> = fs::read_dir(&loops_dir)
+        .unwrap_or_else(|e| panic!("failed to read loops dir {}: {e}", loops_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains("completion") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort();
+    candidates
+        .last()
+        .cloned()
+        .unwrap_or_else(|| panic!("no completion loop directory found under {}", loops_dir.display()))
+}
+
+/// Find the newest `completer-verdict-*.md` file in a loop directory by
+/// timestamp prefix, falling back to `completer-verdict.md` if no per-backend
+/// verdicts exist.  Panics if no verdict artifact is found.
+fn find_newest_verdict_artifact(loop_dir: &Path) -> std::path::PathBuf {
+    let mut verdicts: Vec<_> = fs::read_dir(loop_dir)
+        .unwrap_or_else(|e| panic!("failed to read loop dir {}: {e}", loop_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains("completer-verdict") && name.ends_with(".md") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+    verdicts.sort();
+    verdicts
+        .last()
+        .cloned()
+        .unwrap_or_else(|| panic!("no completer-verdict artifact found in {}", loop_dir.display()))
+}
+
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -920,11 +966,16 @@ elif grep -q "You are a final reviewer auditing a completed project for correctn
     cat <<'EOF'
 # Final Review: AMENDMENTS
 
-## Amendments
-1. Add documentation to mock_file.txt
+## Amendment: DOC-001
 
-## Summary
-Minor amendment required for completeness.
+### Problem
+mock_file.txt lacks documentation comments.
+
+### Proposed Change
+Add a documentation header to mock_file.txt.
+
+### Affected Files
+- `mock_file.txt`
 EOF
   else
     cat <<'EOF'
@@ -934,6 +985,30 @@ EOF
 No amendments required.
 EOF
   fi
+elif grep -q "You are a technical evaluator assessing proposed amendments from final reviewers." <<< "$INPUT"; then
+  cat <<'EOF'
+# Planner Positions
+
+## Amendment: DOC-001
+
+### Position
+ACCEPT
+
+### Rationale
+The amendment identifies a genuine documentation gap in mock_file.txt.
+EOF
+elif grep -q "You are a reviewer voting on proposed amendments after considering the planner's positions." <<< "$INPUT"; then
+  cat <<'EOF'
+# Vote Results
+
+## Amendment: DOC-001
+
+### Vote
+ACCEPT
+
+### Rationale
+Agreed with planner assessment; documentation should be added.
+EOF
 else
   echo "unrecognized prompt" >&2
   exit 1
@@ -1242,21 +1317,14 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
             "expected resolved field in completer panel drift warning, got: {completer_drift_line}"
         );
 
-        // Execution proof: the completer verdict artifact produced on resume
-        // should have its backend field matching the re-resolved panel backend
-        // (codex-based, not the original claude).
-        let state = h
-            .load_state(project_id)
-            .expect("load_state after panel drift resume");
-        let completion = &state["completion_attempts"]
-            .as_array()
-            .expect("completion_attempts should be array");
-        let latest_attempt = completion.last().expect("should have at least one completion attempt");
-        let verdict_rel = latest_attempt["artifacts"]["verdict"]
-            .as_str()
-            .expect("verdict artifact should exist after completion");
-        let verdict_backend =
-            backend_from_frontmatter(&h.project_dir(project_id).join(verdict_rel));
+        // Execution proof: discover the newest completer-verdict artifact by
+        // filename pattern in the completion loop directory, rather than relying
+        // on reconstructed state pointers which may prefer stale per-backend
+        // verdict artifacts.
+        let project_dir = h.project_dir(project_id);
+        let completion_loop_dir = find_completion_loop_dir(&project_dir);
+        let newest_verdict = find_newest_verdict_artifact(&completion_loop_dir);
+        let verdict_backend = backend_from_frontmatter(&newest_verdict);
         assert!(
             verdict_backend.starts_with("codex"),
             "completer verdict artifact backend should match re-resolved panel (codex), got: {verdict_backend}"
