@@ -1839,8 +1839,8 @@ impl Orchestrator {
                     info!(loop = state.current_loop, "starting completion validation phase");
                     let (
                         loop_number,
-                        planner_backend_name,
-                        mut effective_completers,
+                        reconstructed_planner,
+                        reconstructed_completers,
                         termination_rel,
                     ) = {
                         let completion = state.current_completion_attempt().ok_or_else(|| {
@@ -1858,22 +1858,48 @@ impl Orchestrator {
                         )
                     };
 
-                    // If reconstructed completers list is empty (e.g. process
-                    // stopped after writing termination-request but before any
-                    // completer verdict), re-resolve from config so the
-                    // completing phase doesn't silently skip all completers.
-                    if effective_completers.is_empty() {
-                        effective_completers = registry
+                    // Always resolve effective planner from current config
+                    // (preserves alternation parity with feature loops).
+                    let resolved_completion = registry.assign_completion_backends(
+                        loop_number,
+                        &effective.workflow.starting_backend,
+                        &role_overrides,
+                    )?;
+                    let planner_backend_name = resolved_completion.planner;
+                    log_backend_drift_if_mismatch(
+                        "planner",
+                        loop_number,
+                        &reconstructed_planner,
+                        &planner_backend_name,
+                    );
+
+                    // Completer panel: re-resolve only on true resume entry.
+                    let effective_completers = if is_resumed_state {
+                        let resolved_panel = registry
                             .resolve_completion_panel(
                                 &effective.workflow.completion_backends,
                                 effective.workflow.completion_min_completers,
                             )
                             .await?;
-                        // Persist the resolved completers back into state.
-                        if let Some(completion) = state.current_completion_attempt_mut() {
-                            completion.backends.completers = effective_completers.clone();
+                        // Log panel drift only when the reconstructed list is
+                        // non-empty and differs from the freshly resolved panel.
+                        if !reconstructed_completers.is_empty()
+                            && reconstructed_completers != resolved_panel
+                        {
+                            warn!(
+                                role = "completer",
+                                loop_number,
+                                original = ?reconstructed_completers,
+                                resolved = ?resolved_panel,
+                                "backend drift detected on resume, using config-resolved value"
+                            );
                         }
-                    }
+                        resolved_panel
+                    } else {
+                        // Same-run entry: completers were already resolved
+                        // in-process; use them as-is without re-health-checking.
+                        reconstructed_completers
+                    };
 
                     let termination_content =
                         read_project_relative_file(&project_dir, &termination_rel)?;
@@ -2311,6 +2337,27 @@ impl Orchestrator {
                     }
                 }
                 Phase::FinalReview => {
+                    // Resolve planner at call site from current config so
+                    // run_final_review_phase never reads stale reconstructed
+                    // completion.backends.planner for execution decisions.
+                    let completion_loop_number = state
+                        .current_completion_attempt()
+                        .map(|c| c.loop_number)
+                        .unwrap_or(state.current_loop);
+                    let resolved_completion = registry.assign_completion_backends(
+                        completion_loop_number,
+                        &effective.workflow.starting_backend,
+                        &role_overrides,
+                    )?;
+                    let resolved_planner = resolved_completion.planner;
+                    if let Some(completion) = state.current_completion_attempt() {
+                        log_backend_drift_if_mismatch(
+                            "planner",
+                            completion_loop_number,
+                            &completion.backends.planner,
+                            &resolved_planner,
+                        );
+                    }
                     let checkpoint = run_final_review_phase(
                         &project_dir,
                         &self.workspace.root,
@@ -2320,6 +2367,7 @@ impl Orchestrator {
                         &prompt_content,
                         &mut logs,
                         repo_root_ref,
+                        &resolved_planner,
                     )
                     .await?;
                     pending_phase_checkpoint = checkpoint;
@@ -3397,6 +3445,7 @@ async fn run_final_review_phase(
     prompt_content: &str,
     logs: &mut Vec<String>,
     repo_root_ref: Option<&Path>,
+    planner_backend: &str,
 ) -> Result<Option<(Phase, Phase)>> {
     info!(
         loop = state.current_loop,
@@ -3411,7 +3460,7 @@ async fn run_final_review_phase(
     })?;
     let loop_number = completion.loop_number;
     let loop_slug = completion.slug.clone();
-    let planner_backend_name = completion.backends.planner.clone();
+    let planner_backend_name = planner_backend.to_owned();
 
     let reviewer_specs =
         normalize_final_review_backends(&effective.workflow.final_review_backends)?;

@@ -24,6 +24,22 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "resume_backend_resolution::no_drift_emits_no_warning",
             func: no_drift_emits_no_warning,
         },
+        ConformanceTest {
+            name: "resume_backend_resolution::completion_planner_drift_on_resume",
+            func: completion_planner_drift_on_resume,
+        },
+        ConformanceTest {
+            name: "resume_backend_resolution::completion_completer_panel_drift_on_resume",
+            func: completion_completer_panel_drift_on_resume,
+        },
+        ConformanceTest {
+            name: "resume_backend_resolution::final_review_planner_drift_on_resume",
+            func: final_review_planner_drift_on_resume,
+        },
+        ConformanceTest {
+            name: "resume_backend_resolution::same_run_completion_no_panel_reresolution",
+            func: same_run_completion_no_panel_reresolution,
+        },
     ]
 }
 
@@ -497,6 +513,162 @@ fi
     )
 }
 
+/// Mock script for completion/final-review resume tests.
+///
+/// The planner uses a counter file to first emit a feature spec (loop 1),
+/// then a Project Completion Request (loop 2 / second invocation).
+/// `fail_role` can be "completer" or "final_reviewer" to simulate a crash
+/// during that phase. If `fail_role` is "none", nothing fails.
+fn completion_resume_mock_script(fail_role: &str, fail_marker: &Path) -> String {
+    let fail_role = shell_single_quote(fail_role);
+    let fail_marker = shell_single_quote(&fail_marker.to_string_lossy());
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+FAIL_ROLE={fail_role}
+FAIL_MARKER={fail_marker}
+
+should_fail() {{
+  local role="$1"
+  [[ "$FAIL_ROLE" == "$role" && -f "$FAIL_MARKER" ]]
+}}
+
+# Use a per-repo counter file so the planner alternates between feature/completion
+PLANNER_COUNTER=".ralph-planner-counter"
+
+if grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- none
+
+## Refined Prompt
+No changes.
+EOF
+elif grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  COUNT=0
+  if [ -f "$PLANNER_COUNTER" ]; then
+    COUNT="$(cat "$PLANNER_COUNTER")"
+  fi
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$PLANNER_COUNTER"
+  if [ "$COUNT" -le 1 ]; then
+    cat <<'EOF'
+# Feature: Completion Resume Drift Feature
+
+## Description
+A feature used to validate completion/final-review backend re-resolution on resume.
+
+## Acceptance Criteria
+- [ ] Mock implementation file is created
+
+## Files to Modify/Create
+- `mock_file.txt` - written by implementer
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  else
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  fi
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  if grep -q "## Review Feedback" <<< "$INPUT" && ! grep -q "(none)" <<< "$INPUT"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed reviewer feedback.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Implemented mock feature for completion resume tests.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only.
+EOF
+  fi
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "You are a QA engineer" <<< "$INPUT"; then
+  cat <<'EOF'
+# QA: PASS
+
+## Manual Testing
+- mock manual check passed
+
+## Automated Tests
+- mock test suite passed
+
+## Acceptance Criteria Verification
+All acceptance criteria verified.
+EOF
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file is created
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: approve completion resume test feature
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  if should_fail "completer"; then
+    echo "forced completer failure for resume test" >&2
+    exit 1
+  fi
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+  if should_fail "final_reviewer"; then
+    echo "forced final reviewer failure for resume test" >&2
+    exit 1
+  fi
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No amendments required.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    )
+}
+
 fn review_feedback_then_fail_implementer_response_script(
     fail_marker: &Path,
     reviewer_counter: &Path,
@@ -636,6 +808,238 @@ else
 fi
 "###
     )
+}
+
+fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "resume-completion-planner-drift";
+        let fail_marker = h.temp_dir.path().join("fail-completer.marker");
+        fs::write(&fail_marker, "1").expect("write completer fail marker");
+        setup_resume_fixture(
+            h,
+            project_id,
+            "resume-completion-planner-drift.sh",
+            &completion_resume_mock_script("completer", &fail_marker),
+        );
+
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable QA");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("disable final review");
+        h.ralph_ok(["config", "set", "workflow.starting_backend", "claude"])
+            .expect("set starting_backend to claude");
+        // Use single completer to keep things simple
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set single completer");
+        h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
+            .expect("set min completers to 1");
+
+        let first = h.ralph(["run"]).expect("initial run should execute");
+        assert!(
+            !first.status.success(),
+            "initial run should fail in completing phase; stderr:\n{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+
+        let failed_state = h
+            .load_state(project_id)
+            .expect("load_state after completing failure");
+        assert_json_field(&failed_state, "current_phase", &json!("completing"));
+
+        // Change starting_backend to alter planner resolution for the completion loop
+        h.ralph_ok(["config", "set", "workflow.starting_backend", "codex"])
+            .expect("set starting_backend to codex");
+        fs::remove_file(&fail_marker).expect("remove completer fail marker");
+
+        let resumed = h
+            .ralph(["run", "--loops", "1"])
+            .expect("resumed run should execute");
+        assert_exit_code(&resumed, 0);
+
+        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        assert!(
+            resumed_stderr
+                .contains("backend drift detected on resume, using config-resolved value"),
+            "expected planner drift warning on completion resume, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr.contains("role=\"planner\""),
+            "expected planner role field in drift warning, stderr:\n{resumed_stderr}"
+        );
+    })
+}
+
+fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "resume-completion-panel-drift";
+        let fail_marker = h.temp_dir.path().join("fail-panel-completer.marker");
+        fs::write(&fail_marker, "1").expect("write completer fail marker");
+        setup_resume_fixture(
+            h,
+            project_id,
+            "resume-completion-panel-drift.sh",
+            &completion_resume_mock_script("completer", &fail_marker),
+        );
+
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable QA");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("disable final review");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set initial completion_backends");
+        h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
+            .expect("set min completers to 1");
+
+        let first = h.ralph(["run"]).expect("initial run should execute");
+        assert!(
+            !first.status.success(),
+            "initial run should fail in completing phase; stderr:\n{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+
+        let failed_state = h
+            .load_state(project_id)
+            .expect("load_state after completing failure");
+        assert_json_field(&failed_state, "current_phase", &json!("completing"));
+
+        // Change completion_backends to trigger completer panel drift
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"codex\"]",
+        ])
+        .expect("set new completion_backends");
+        fs::remove_file(&fail_marker).expect("remove completer fail marker");
+
+        let resumed = h
+            .ralph(["run", "--loops", "1"])
+            .expect("resumed run should execute");
+        assert_exit_code(&resumed, 0);
+
+        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        assert!(
+            resumed_stderr.contains("role=\"completer\""),
+            "expected completer panel drift warning on resume, stderr:\n{resumed_stderr}"
+        );
+    })
+}
+
+fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "resume-finalreview-planner-drift";
+        let fail_marker = h.temp_dir.path().join("fail-final-reviewer.marker");
+        fs::write(&fail_marker, "1").expect("write final reviewer fail marker");
+        setup_resume_fixture(
+            h,
+            project_id,
+            "resume-finalreview-planner-drift.sh",
+            &completion_resume_mock_script("final_reviewer", &fail_marker),
+        );
+
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable QA");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "true"])
+            .expect("enable final review");
+        h.ralph_ok(["config", "set", "workflow.starting_backend", "claude"])
+            .expect("set starting_backend to claude");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set single completer");
+        h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
+            .expect("set min completers to 1");
+
+        let first = h.ralph(["run"]).expect("initial run should execute");
+        assert!(
+            !first.status.success(),
+            "initial run should fail in final review phase; stderr:\n{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+
+        let failed_state = h
+            .load_state(project_id)
+            .expect("load_state after final review failure");
+        assert_json_field(&failed_state, "current_phase", &json!("final_review"));
+
+        // Change starting_backend to alter planner resolution for the completion loop
+        h.ralph_ok(["config", "set", "workflow.starting_backend", "codex"])
+            .expect("set starting_backend to codex");
+        fs::remove_file(&fail_marker).expect("remove final reviewer fail marker");
+
+        let resumed = h
+            .ralph(["run", "--loops", "1"])
+            .expect("resumed run should execute");
+        assert_exit_code(&resumed, 0);
+
+        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        assert!(
+            resumed_stderr
+                .contains("backend drift detected on resume, using config-resolved value"),
+            "expected planner drift warning on final review resume, stderr:\n{resumed_stderr}"
+        );
+        assert!(
+            resumed_stderr.contains("role=\"planner\""),
+            "expected planner role field in drift warning, stderr:\n{resumed_stderr}"
+        );
+    })
+}
+
+fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "resume-samerun-completion";
+        setup_resume_fixture(
+            h,
+            project_id,
+            "resume-samerun-completion.sh",
+            &completion_resume_mock_script("none", Path::new("/nonexistent")),
+        );
+
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable QA");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("disable final review");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set completion_backends");
+        h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
+            .expect("set min completers to 1");
+
+        // Run to completion in a single invocation (no resume).
+        // is_resumed_state becomes false after the first feature loop iteration,
+        // so the Completing phase should NOT re-resolve the completer panel.
+        let result = h
+            .ralph(["run", "--loops", "1"])
+            .expect("single run should execute");
+        assert_exit_code(&result, 0);
+
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        // No completer panel drift warning should appear because this is
+        // a same-run entry (is_resumed_state == false).
+        assert!(
+            !stderr.contains("role=\"completer\"")
+                || !stderr
+                    .contains("backend drift detected on resume, using config-resolved value"),
+            "did not expect completer panel drift warning on same-run completion, stderr:\n{stderr}"
+        );
+    })
 }
 
 fn run_case<F>(f: F) -> TestResult
