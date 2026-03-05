@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-152
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-05T02:47:27Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The prompt contains conflicting implementation guidance for completion-phase re-resolution (multiple heuristics, then a different final approach), so an implementer could choose the wrong path.
+- Acceptance criterion 8 says behavior should apply only on resume, but feature-phase instructions propose unconditional re-resolution on every entry without explicitly reconciling that tension.
+- Many instructions are tied to specific line numbers in `orchestrator.rs`; those are brittle and will quickly become incorrect as the file changes.
+- Drift logging requirements are not fully specified (required fields and role naming are implied but not consistently enforced), which hurts testability.
+- The completion resume-gating logic is described through exploratory narrative instead of one normative rule, reducing clarity.
+- Testing guidance references a non-standard validate file pattern and does not consistently follow this repo’s `src/validate/tests_<feature>.rs` convention.
+- Several test cases depend on warning-log assertions without defining how logs are captured in the harness, which may make tests flaky or infeasible.
+- The prompt mixes requirements, rationale, rejected alternatives, and code sketches in one flow, making the source of truth ambiguous for downstream loops.
+
+## Refined Prompt
 ### Objective
 Fix backend selection during orchestrator resume so execution always uses the current config, while reconstructed backend values remain provenance-only.
 
