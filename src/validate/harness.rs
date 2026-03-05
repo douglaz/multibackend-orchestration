@@ -311,6 +311,21 @@ impl RalphHarness {
         Ok(())
     }
 
+    /// Run a CLI command with `RUST_LOG` explicitly set so that log output is
+    /// deterministic regardless of ambient environment settings.  This prevents
+    /// flaky warning-capture tests when the parent process sets e.g.
+    /// `RUST_LOG=error`.  The given `rust_log` value completely overrides any
+    /// inherited `RUST_LOG`.  `NO_COLOR=1` is also set to suppress ANSI escape
+    /// codes in `tracing_subscriber` output, making substring assertions on
+    /// structured log fields reliable.
+    pub fn ralph_with_log<I, S>(&self, args: I, rust_log: &str) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.ralph_env(args, &[("RUST_LOG", rust_log), ("NO_COLOR", "1")])
+    }
+
     /// Run a CLI command with extra environment variables and explicit removals.
     /// `env_removals` lists variable names to remove from the child process environment.
     pub fn ralph_env_with_removals<I, S>(

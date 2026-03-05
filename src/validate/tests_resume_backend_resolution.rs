@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::validate::assertions::{assert_exit_code, assert_json_field, parse_yaml_frontmatter};
+use crate::validate::assertions::{
+    assert_exit_code, assert_json_field, parse_yaml_frontmatter, strip_ansi,
+};
 use crate::validate::harness::RalphHarness;
 use serde_json::json;
 use std::fs;
@@ -88,11 +90,11 @@ fn implementing_uses_reresolved_backend(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove implementer fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_with_log(["run", "--loops", "1"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -160,11 +162,11 @@ fn qa_uses_reresolved_backend(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove QA fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_with_log(["run", "--loops", "1"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -248,11 +250,11 @@ fn reviewing_uses_reresolved_backend(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove reviewer fail marker");
 
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_with_log(["run", "--loops", "1"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -322,11 +324,11 @@ fn no_drift_emits_no_warning(h: &RalphHarness) -> TestResult {
 
         fs::remove_file(&fail_marker).expect("remove no-drift fail marker");
         let resumed = h
-            .ralph(["run", "--loops", "1"])
+            .ralph_with_log(["run", "--loops", "1"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             !resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -960,11 +962,11 @@ fn completion_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
             .expect("set starting_backend to codex");
 
         let resumed = h
-            .ralph(["run", "--until-complete"])
+            .ralph_with_log(["run", "--until-complete"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -1034,11 +1036,11 @@ fn completion_completer_panel_drift_on_resume(h: &RalphHarness) -> TestResult {
         .expect("set new completion_backends");
 
         let resumed = h
-            .ralph(["run", "--until-complete"])
+            .ralph_with_log(["run", "--until-complete"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr.contains("role=\"completer\""),
             "expected completer role field in drift warning, stderr:\n{resumed_stderr}"
@@ -1113,11 +1115,11 @@ fn final_review_planner_drift_on_resume(h: &RalphHarness) -> TestResult {
         fs::remove_file(&fail_marker).expect("remove final reviewer fail marker");
 
         let resumed = h
-            .ralph(["run", "--until-complete"])
+            .ralph_with_log(["run", "--until-complete"], "warn")
             .expect("resumed run should execute");
         assert_exit_code(&resumed, 0);
 
-        let resumed_stderr = String::from_utf8_lossy(&resumed.stderr);
+        let resumed_stderr = strip_ansi(&String::from_utf8_lossy(&resumed.stderr));
         assert!(
             resumed_stderr
                 .contains("backend drift detected on resume, using config-resolved value"),
@@ -1158,7 +1160,7 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
         // is_resumed_state becomes false after the first outer-loop iteration,
         // so the Completing phase should NOT re-resolve the completer panel.
         let result = h
-            .ralph(["run", "--until-complete"])
+            .ralph_with_log(["run", "--until-complete"], "warn")
             .expect("single run should execute");
         assert_exit_code(&result, 0);
 
@@ -1169,9 +1171,10 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             .expect("load_state after same-run completion");
         assert_json_field(&state, "status", &json!("completed"));
 
-        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stderr = strip_ansi(&String::from_utf8_lossy(&result.stderr));
         // No completer panel drift warning should appear because this is
-        // a same-run entry (is_resumed_state == false).
+        // a same-run entry (is_resumed_state == false).  RUST_LOG=warn
+        // ensures this assertion is not vacuously true.
         assert!(
             !stderr.contains("role=\"completer\"")
                 || !stderr

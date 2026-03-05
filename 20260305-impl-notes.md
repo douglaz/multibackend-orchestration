@@ -1,0 +1,18 @@
+# Implementation Notes
+
+## Decisions Made
+- **Two-layer defense against non-deterministic stderr assertions**: Combined explicit `RUST_LOG=warn` override (prevents ambient log-level suppression) with `strip_ansi()` on captured stderr (prevents ANSI SGR escape codes from breaking substring matches on structured tracing fields like `role="implementer"`).
+- **Added `ralph_with_log` helper to harness**: Wraps `ralph_env` with both `RUST_LOG` and `NO_COLOR=1` env vars. Provides clear semantics for "run ralph with deterministic, assertion-friendly log output." Used by all 8 resume drift test functions for the resumed/checked invocations.
+- **Added `strip_ansi` to assertions.rs**: Uses `Regex` (already a project dependency) to strip `\x1b[...m` SGR sequences. Applied to all stderr conversions in the resume tests — both drift-present and no-drift cases — so no assertion is vacuously true.
+- **Root cause of nix build failures was ANSI escape codes, not log level suppression**: In the Nix sandbox, `RUST_LOG` is unset so the default `info` level applies (warnings visible). But `tracing_subscriber::fmt()` emits ANSI style codes around structured field names (e.g. `\x1b[3mrole\x1b[0m="implementer"`), breaking `contains("role=\"implementer\"")`. The `NO_COLOR=1` env var and `strip_ansi` together eliminate this.
+- **Initial runs that don't check warnings left unchanged**: Only the resumed runs (where stderr is inspected for drift warnings or their absence) use `ralph_with_log`. Initial runs that just check exit codes continue using plain `ralph()`.
+
+## Spec Deviations
+- The spec anticipated `RUST_LOG` suppression as the primary issue. The actual nix build failures were caused by ANSI escape codes in tracing output. Both issues are now addressed: `RUST_LOG=warn` handles ambient log-level suppression, and `strip_ansi` + `NO_COLOR=1` handle ANSI formatting interference.
+- No changes to `assertions.rs` "helper(s) for stable warning-field assertions without brittle formatting assumptions" beyond `strip_ansi` — the existing `contains()` pattern is stable once ANSI codes are stripped, so a higher-level assertion helper was unnecessary.
+
+## Testing
+- `cargo check` passes cleanly.
+- `nix build -L` succeeds: 363 conformance tests passed, 0 failed, 0 skipped. All 8 `resume_backend_resolution::*` tests pass including the previously-failing 6.
+- The pre-existing flaky `daemon::github::tests::push_branch_with_retry_impl_does_not_retry_unknown_failure` unit test (unrelated to this feature) passed in the final nix build run.
+- Verified that the unmodified branch fails with 6 resume_backend_resolution conformance failures in nix build.
