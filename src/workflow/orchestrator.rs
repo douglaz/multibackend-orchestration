@@ -5992,7 +5992,9 @@ mod tests {
         summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
-    use crate::config::global::{BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt};
+    use crate::config::global::{
+        BackendEnabled, BackendRoleModels, PlannerStateInPrompt, PreviousSpecsInPrompt,
+    };
     use crate::config::{resolve_effective_config, GlobalConfig, RunWorkflowOverrides};
     use crate::error::RalphError;
     use crate::output_log::LogWriter;
@@ -6119,7 +6121,6 @@ mod tests {
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-high)").is_some());
         assert!(registry.get("codex(gpt-5.3-codex-medium)").is_some());
-        assert!(registry.get("gemini(gemini-3-pro-preview)").is_some());
     }
 
     #[test]
@@ -6127,7 +6128,7 @@ mod tests {
         let mut config = GlobalConfig::default();
         config.backends.claude.models = BackendRoleModels::default();
         config.backends.codex.models = BackendRoleModels::default();
-        config.backends.gemini.models = BackendRoleModels::default();
+        config.backends.openrouter.models = BackendRoleModels::default();
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         preload_role_model_backends(&mut registry)
@@ -6135,7 +6136,7 @@ mod tests {
 
         assert!(registry.get("claude(opus)").is_none());
         assert!(registry.get("codex(gpt-5.3-codex-xhigh)").is_none());
-        assert!(registry.get("gemini(gemini-3-pro-preview)").is_none());
+        assert!(registry.get("openrouter(gpt-5.3-codex-xhigh)").is_none());
     }
 
     #[test]
@@ -6163,16 +6164,17 @@ mod tests {
             acceptance_qa: Some("codex-acceptance-qa".to_owned()),
             reformatter: Some("codex-reformatter".to_owned()),
         };
-        config.backends.gemini.models = BackendRoleModels {
-            planner: Some("gemini-planner".to_owned()),
-            implementer: Some("gemini-implementer".to_owned()),
-            reviewer: Some("gemini-reviewer".to_owned()),
-            final_reviewer: Some("gemini-final-reviewer".to_owned()),
-            arbiter: Some("gemini-arbiter".to_owned()),
-            qa: Some("gemini-qa".to_owned()),
-            completer: Some("gemini-completer".to_owned()),
-            acceptance_qa: Some("gemini-acceptance-qa".to_owned()),
-            reformatter: Some("gemini-reformatter".to_owned()),
+        config.backends.openrouter.enabled = BackendEnabled::Enabled;
+        config.backends.openrouter.models = BackendRoleModels {
+            planner: Some("openrouter-planner".to_owned()),
+            implementer: Some("openrouter-implementer".to_owned()),
+            reviewer: Some("openrouter-reviewer".to_owned()),
+            final_reviewer: Some("openrouter-final-reviewer".to_owned()),
+            arbiter: Some("openrouter-arbiter".to_owned()),
+            qa: Some("openrouter-qa".to_owned()),
+            completer: Some("openrouter-completer".to_owned()),
+            acceptance_qa: Some("openrouter-acceptance-qa".to_owned()),
+            reformatter: Some("openrouter-reformatter".to_owned()),
         };
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
@@ -6198,15 +6200,15 @@ mod tests {
             "codex(codex-completer)",
             "codex(codex-acceptance-qa)",
             "codex(codex-reformatter)",
-            "gemini(gemini-planner)",
-            "gemini(gemini-implementer)",
-            "gemini(gemini-reviewer)",
-            "gemini(gemini-final-reviewer)",
-            "gemini(gemini-arbiter)",
-            "gemini(gemini-qa)",
-            "gemini(gemini-completer)",
-            "gemini(gemini-acceptance-qa)",
-            "gemini(gemini-reformatter)",
+            "openrouter(openrouter-planner)",
+            "openrouter(openrouter-implementer)",
+            "openrouter(openrouter-reviewer)",
+            "openrouter(openrouter-final-reviewer)",
+            "openrouter(openrouter-arbiter)",
+            "openrouter(openrouter-qa)",
+            "openrouter(openrouter-completer)",
+            "openrouter(openrouter-acceptance-qa)",
+            "openrouter(openrouter-reformatter)",
         ] {
             assert!(
                 registry.get(expected_spec).is_some(),

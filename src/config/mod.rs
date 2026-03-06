@@ -29,13 +29,6 @@ impl ValidationSurface {
     fn allows_optional(self) -> bool {
         matches!(self, ValidationSurface::PanelList)
     }
-
-    fn allows_gemini(self) -> bool {
-        matches!(
-            self,
-            ValidationSurface::PanelList | ValidationSurface::RequiredPanel
-        )
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -543,17 +536,11 @@ fn validate_backend_spec(
         )));
     }
 
-    if parsed.name == "gemini" && !surface.allows_gemini() {
-        return Err(RalphError::Validation(format!(
-            "gemini backend is not supported for {label}; it may only be used in panel surfaces (final review, completion, prompt review)"
-        )));
-    }
-
     Ok(parsed)
 }
 
 /// Public wrapper for validating a backend spec with `Required` surface
-/// semantics (rejects optional `?backend` prefixes and gemini backends).
+/// semantics (rejects optional `?backend` prefixes).
 /// Use this when pre-validating backends outside `resolve_effective_config`,
 /// e.g. in `quick-dev-auto` preflight.
 pub fn validate_required_backend_spec(
@@ -969,9 +956,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_config_rejects_gemini_on_required_surfaces() {
+    fn resolve_effective_config_rejects_unknown_backend_on_required_surfaces() {
         let mut global = GlobalConfig::default();
-        global.workspace.default_backend = "gemini".to_owned();
+        global.workspace.default_backend = "badbackend".to_owned();
         let error = resolve_effective_config(
             Path::new("/workspace"),
             Path::new("/workspace/project"),
@@ -979,13 +966,13 @@ mod tests {
             None,
             RunWorkflowOverrides::default(),
         )
-        .expect_err("gemini should be rejected for starting backend");
+        .expect_err("unknown backend should be rejected for starting backend");
         assert!(error
             .to_string()
-            .contains("gemini backend is not supported"));
+            .contains("unknown backend configured as starting backend"));
 
         let mut global = GlobalConfig::default();
-        global.workflow.planner_backend = Some("gemini(gemini-3-pro-preview)".to_owned());
+        global.workflow.planner_backend = Some("badbackend(pro)".to_owned());
         let error = resolve_effective_config(
             Path::new("/workspace"),
             Path::new("/workspace/project"),
@@ -993,11 +980,11 @@ mod tests {
             None,
             RunWorkflowOverrides::default(),
         )
-        .expect_err("gemini should be rejected for planner backend");
+        .expect_err("unknown backend should be rejected for planner backend");
         assert!(error.to_string().contains("planner backend override"));
         assert!(error
             .to_string()
-            .contains("gemini backend is not supported"));
+            .contains("unknown backend configured as planner backend override"));
     }
 
     #[test]
@@ -1229,44 +1216,44 @@ mod tests {
     }
 
     #[test]
-    fn validate_prd_config_rejects_gemini_backend_specs() {
+    fn validate_prd_config_rejects_unknown_backend_specs() {
         let mut global = GlobalConfig::default();
         global.workspace.daemon_prd_question_backends = vec![
             "claude(opus)".to_owned(),
-            "gemini(gemini-3-pro-preview)".to_owned(),
+            "badbackend(pro)".to_owned(),
         ];
 
         let error = validate_interactive_prd_workspace_config(&global)
-            .expect_err("gemini should be rejected on daemon PRD surfaces");
+            .expect_err("unknown backend should be rejected on daemon PRD surfaces");
         assert!(error
             .to_string()
-            .contains("gemini backend is not supported"));
+            .contains("unknown backend configured as workspace.daemon_prd_question_backends[1]"));
         assert!(error
             .to_string()
             .contains("workspace.daemon_prd_question_backends[1]"));
     }
 
     #[test]
-    fn validate_daemon_workspace_config_rejects_gemini_refinement_backend() {
+    fn validate_daemon_workspace_config_rejects_unknown_refinement_backend() {
         let mut global = GlobalConfig::default();
-        global.workspace.daemon_refinement_backend = "gemini(gemini-3-pro-preview)".to_owned();
+        global.workspace.daemon_refinement_backend = "badbackend(pro)".to_owned();
 
         let error = validate_daemon_workspace_config(&global)
-            .expect_err("gemini should be rejected on daemon refinement backend");
+            .expect_err("unknown backend should be rejected on daemon refinement backend");
         assert!(error
             .to_string()
-            .contains("gemini backend is not supported"));
+            .contains("unknown backend configured as workspace.daemon_refinement_backend"));
         assert!(error
             .to_string()
             .contains("workspace.daemon_refinement_backend"));
     }
 
     #[test]
-    fn validate_effective_daemon_config_rejects_project_gemini_refinement_backend() {
+    fn validate_effective_daemon_config_rejects_project_unknown_refinement_backend() {
         let global = GlobalConfig::default();
         let project = ProjectConfig {
             daemon: ProjectDaemonOverrides {
-                refinement_backend: Some("gemini(gemini-3-pro-preview)".to_owned()),
+                refinement_backend: Some("badbackend(pro)".to_owned()),
                 ..ProjectDaemonOverrides::default()
             },
             ..ProjectConfig::default()
@@ -1274,10 +1261,10 @@ mod tests {
 
         let daemon = resolve_daemon_config(&global, Some(&project));
         let error = validate_effective_daemon_config(&global, &daemon)
-            .expect_err("gemini should be rejected on effective daemon refinement backend");
+            .expect_err("unknown backend should be rejected on effective daemon refinement backend");
         assert!(error
             .to_string()
-            .contains("gemini backend is not supported"));
+            .contains("unknown backend configured as daemon.refinement_backend"));
         assert!(error.to_string().contains("daemon.refinement_backend"));
     }
 
@@ -1719,7 +1706,7 @@ mod tests {
         global.workflow.final_review_backends = vec![
             "claude".to_owned(),
             "codex".to_owned(),
-            "?gemini".to_owned(),
+            "?openrouter".to_owned(),
         ];
         global.workflow.final_review_min_reviewers = 2;
 
@@ -1816,7 +1803,7 @@ mod tests {
     #[test]
     fn prompt_review_alias_rejects_optional_global_singular_backend() {
         let mut global = GlobalConfig::default();
-        global.workflow.prompt_review_backend = "?gemini".to_owned();
+        global.workflow.prompt_review_backend = "?openrouter".to_owned();
         global.workflow.prompt_review_backends = None;
 
         let err = resolve_effective_config(
@@ -1998,10 +1985,10 @@ mod tests {
     }
 
     #[test]
-    fn prompt_review_panel_accepts_optional_gemini_backend() {
+    fn prompt_review_panel_accepts_optional_openrouter_backend() {
         let mut global = GlobalConfig::default();
         global.workflow.prompt_review_backends =
-            Some(vec!["claude".to_owned(), "?gemini".to_owned()]);
+            Some(vec!["claude".to_owned(), "?openrouter".to_owned()]);
 
         resolve_effective_config(
             Path::new("/workspace"),
@@ -2010,7 +1997,7 @@ mod tests {
             None,
             RunWorkflowOverrides::default(),
         )
-        .expect("optional gemini should be accepted on prompt review panel");
+        .expect("optional openrouter should be accepted on prompt review panel");
     }
 
     // --- Completion panel config validation tests ---

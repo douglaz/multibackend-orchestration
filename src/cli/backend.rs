@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 use crate::backend::output_normalizer;
-use crate::backend::{claude, codex, gemini, openrouter, parse_backend_spec, CliBackend};
+use crate::backend::{claude, codex, openrouter, parse_backend_spec, CliBackend};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -54,7 +54,6 @@ async fn execute_exec(args: BackendExecArgs) -> Result<()> {
     let backend: CliBackend = match spec.name.as_str() {
         "claude" => claude::backend_from_config(config, model, role, None),
         "codex" => codex::backend_from_config(config, model, role, None),
-        "gemini" => gemini::backend_from_config(config, model, role, None),
         "openrouter" => openrouter::backend_from_config(config, model, role, None),
         _ => {
             return Err(crate::error::RalphError::Validation(format!(

@@ -81,8 +81,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: auto_optional_reviewer_fails_fast,
         },
         ConformanceTest {
-            name: "quick_dev::auto_gemini_reviewer_fails_fast",
-            func: auto_gemini_reviewer_fails_fast,
+            name: "quick_dev::auto_unknown_reviewer_fails_fast",
+            func: auto_unknown_reviewer_fails_fast,
         },
         ConformanceTest {
             name: "quick_dev::auto_whitespace_equal_backends_fails_fast",
@@ -166,15 +166,15 @@ fn setup_quick_dev(h: &RalphHarness, project_id: &str, impl_script: &str, rev_sc
         .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
     }
 
-    // Disable gemini
+    // Disable openrouter
     h.ralph_ok(vec![
         "config".to_owned(),
         "set".to_owned(),
-        "backends.gemini.enabled".to_owned(),
+        "backends.openrouter.enabled".to_owned(),
         "false".to_owned(),
         "--global".to_owned(),
     ])
-    .expect("disable gemini");
+    .expect("disable openrouter");
 
     h.create_project(
         project_id,
@@ -783,11 +783,11 @@ fn reviewer_backend_missing_fails(h: &RalphHarness) -> TestResult {
         h.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])
-        .expect("disable gemini");
+        .expect("disable openrouter");
 
         h.create_project(project_id, "No Reviewer Project", "test prompt")
             .expect("create_project");
@@ -957,11 +957,11 @@ fn auto_missing_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
         h.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])
-        .expect("disable gemini");
+        .expect("disable openrouter");
 
         let output = h
             .ralph([
@@ -1023,11 +1023,11 @@ fn auto_equal_backends_fails_fast(h: &RalphHarness) -> TestResult {
         h.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])
-        .expect("disable gemini");
+        .expect("disable openrouter");
 
         let output = h
             .ralph([
@@ -1143,11 +1143,11 @@ fn auto_optional_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
         h.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])
-        .expect("disable gemini");
+        .expect("disable openrouter");
 
         let output = h
             .ralph([
@@ -1175,10 +1175,8 @@ fn auto_optional_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// `quick-dev-auto` with gemini as reviewer backend must fail-fast (exit 2).
-/// Gemini is only allowed on panel surfaces (final review, completion, prompt
-/// review), not as implementer or reviewer in quick-dev.
-fn auto_gemini_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
+/// `quick-dev-auto` with an unknown reviewer backend must fail-fast (exit 2).
+fn auto_unknown_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
@@ -1214,20 +1212,20 @@ fn auto_gemini_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
             .ralph([
                 "quick-dev-auto",
                 "--idea",
-                "auto-gemini-reviewer-test",
+                "auto-unknown-reviewer-test",
                 "--implementer-backend",
                 "claude",
                 "--reviewer-backend",
-                "gemini",
+                "badbackend",
             ])
             .expect("quick-dev-auto should execute");
 
         // Must fail with exit code 2
         assert_exit_code(&output, 2);
-        assert_stderr_contains(&output, "gemini backend is not supported");
+        assert_stderr_contains(&output, "unknown backend configured as quick-dev reviewer backend");
 
         // No project should have been created
-        let project_dir = h.project_dir("auto-gemini-reviewer-test");
+        let project_dir = h.project_dir("auto-unknown-reviewer-test");
         assert!(
             !project_dir.exists(),
             "project directory must not exist after fail-fast: {}",
@@ -1316,11 +1314,11 @@ fn auto_whitespace_equal_backends_fails_fast(h: &RalphHarness) -> TestResult {
         h.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])
-        .expect("disable gemini");
+        .expect("disable openrouter");
 
         // Pass semantically equal but differently formatted backends
         let output = h

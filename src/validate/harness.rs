@@ -232,7 +232,7 @@ impl RalphHarness {
         self.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])?;
@@ -273,7 +273,7 @@ impl RalphHarness {
         self.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])?;
@@ -304,7 +304,7 @@ impl RalphHarness {
         self.ralph_ok(vec![
             "config".to_owned(),
             "set".to_owned(),
-            "backends.gemini.enabled".to_owned(),
+            "backends.openrouter.enabled".to_owned(),
             "false".to_owned(),
             "--global".to_owned(),
         ])?;
@@ -386,12 +386,12 @@ impl RalphHarness {
     }
 
     /// Configure mock backends via production APIs instead of CLI subprocesses.
-    /// Sets claude and codex commands to the given script and disables gemini.
+    /// Sets claude and codex commands to the given script and disables openrouter.
     pub fn setup_mock_backends_fast<P: AsRef<Path>>(&self, script: P) -> Result<()> {
         let script = script.as_ref().to_string_lossy().into_owned();
         self.set_config_fast("backends.claude.command", &script)?;
         self.set_config_fast("backends.codex.command", &script)?;
-        self.set_config_fast("backends.gemini.enabled", "false")
+        self.set_config_fast("backends.openrouter.enabled", "false")
     }
 
     fn prepare_cli_args<I, S>(&self, args: I) -> Vec<OsString>

@@ -20,7 +20,6 @@ mod tests_daemon_rebase;
 mod tests_e2e_conformance;
 mod tests_final_review;
 mod tests_final_review_cap_skip;
-mod tests_gemini_backend;
 mod tests_init;
 mod tests_interactive_prd;
 mod tests_pr_lifecycle;
@@ -112,7 +111,6 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_prompt_review_panel::tests());
     tests.extend(tests_final_review::tests());
     tests.extend(tests_final_review_cap_skip::tests());
-    tests.extend(tests_gemini_backend::tests());
     tests.extend(tests_prd::tests());
     tests.extend(tests_qa::tests());
     tests.extend(tests_role_timeouts::tests());

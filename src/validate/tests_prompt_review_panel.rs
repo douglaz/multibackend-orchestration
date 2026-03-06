@@ -53,12 +53,12 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: project_singular_override_wins_over_global_plural,
         },
         ConformanceTest {
-            name: "prompt_review_panel::singular_alias_rejects_optional_global_gemini",
-            func: singular_alias_rejects_optional_global_gemini,
+            name: "prompt_review_panel::singular_alias_rejects_optional_global_openrouter",
+            func: singular_alias_rejects_optional_global_openrouter,
         },
         ConformanceTest {
-            name: "prompt_review_panel::singular_alias_rejects_optional_project_gemini",
-            func: singular_alias_rejects_optional_project_gemini,
+            name: "prompt_review_panel::singular_alias_rejects_optional_project_openrouter",
+            func: singular_alias_rejects_optional_project_openrouter,
         },
         ConformanceTest {
             name: "prompt_review_panel::singular_alias_rejects_optional_global_claude",
@@ -235,11 +235,11 @@ fn setup_panel_mocks(
     h.ralph_ok([
         "config",
         "set",
-        "backends.gemini.enabled",
+        "backends.openrouter.enabled",
         "false",
         "--global",
     ])
-    .expect("disable gemini");
+    .expect("disable openrouter");
 
     h.create_project(
         project_id,
@@ -249,30 +249,30 @@ fn setup_panel_mocks(
     .expect("create project failed");
 }
 
-fn configure_gemini_mock(h: &RalphHarness, validator_verdict: &str) {
-    let gemini_wrapper = write_wrapped_mock(
+fn configure_openrouter_mock(h: &RalphHarness, validator_verdict: &str) {
+    let openrouter_wrapper = write_wrapped_mock(
         h,
-        "prompt-panel-gemini.sh",
+        "prompt-panel-openrouter.sh",
         &panel_backend_script(validator_verdict),
     );
     h.ralph_ok(vec![
         "config".to_owned(),
         "set".to_owned(),
-        "backends.gemini.command".to_owned(),
-        gemini_wrapper.to_string_lossy().into_owned(),
+        "backends.openrouter.command".to_owned(),
+        openrouter_wrapper.to_string_lossy().into_owned(),
         "--global".to_owned(),
     ])
-    .expect("set gemini command");
-    h.ralph_ok(["config", "set", "backends.gemini.args", "[]", "--global"])
-        .expect("set gemini args");
+    .expect("set openrouter command");
+    h.ralph_ok(["config", "set", "backends.openrouter.args", "[]", "--global"])
+        .expect("set openrouter args");
     h.ralph_ok([
         "config",
         "set",
-        "backends.gemini.enabled",
+        "backends.openrouter.enabled",
         "true",
         "--global",
     ])
-    .expect("enable gemini");
+    .expect("enable openrouter");
 }
 
 fn multi_validator_accept_path(h: &RalphHarness) -> TestResult {
@@ -350,13 +350,13 @@ fn mixed_accept_reject_aggregation(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "pr-panel-mixed";
         setup_panel_mocks(h, project_id, "ACCEPT", "REJECT(reason-from-codex)");
-        configure_gemini_mock(h, "REJECT(reason-from-gemini)");
+        configure_openrouter_mock(h, "REJECT(reason-from-openrouter)");
 
         h.ralph_ok([
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"claude\",\"codex\",\"claude(opus)\",\"gemini\"]",
+            "[\"claude\",\"codex\",\"claude(opus)\",\"openrouter\"]",
         ])
         .expect("set prompt_review_backends");
         h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "2"])
@@ -368,12 +368,12 @@ fn mixed_accept_reject_aggregation(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 1);
         assert_stderr_contains(&output, "prompt review rejected by validator(s)");
         assert_stderr_contains(&output, "reason-from-codex");
-        assert_stderr_contains(&output, "reason-from-gemini");
+        assert_stderr_contains(&output, "reason-from-openrouter");
 
         let project_dir = h.project_dir(project_id);
         assert_file_exists(&project_dir.join("prompt-review-validator-codex.md"));
         assert_file_exists(&project_dir.join("prompt-review-validator-claude-opus.md"));
-        assert_file_exists(&project_dir.join("prompt-review-validator-gemini.md"));
+        assert_file_exists(&project_dir.join("prompt-review-validator-openrouter.md"));
     })
 }
 
@@ -386,7 +386,7 @@ fn optional_validator_skipping(h: &RalphHarness) -> TestResult {
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"claude\",\"codex\",\"?gemini\"]",
+            "[\"claude\",\"codex\",\"?openrouter\"]",
         ])
         .expect("set prompt_review_backends");
         h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "1"])
@@ -397,7 +397,7 @@ fn optional_validator_skipping(h: &RalphHarness) -> TestResult {
 
         let project_dir = h.project_dir(project_id);
         assert_file_exists(&project_dir.join("prompt-review-validator-codex.md"));
-        assert_path_not_exists(&project_dir.join("prompt-review-validator-gemini.md"));
+        assert_path_not_exists(&project_dir.join("prompt-review-validator-openrouter.md"));
     })
 }
 
@@ -410,7 +410,7 @@ fn optional_first_backend_falls_through(h: &RalphHarness) -> TestResult {
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"?gemini\",\"claude\"]",
+            "[\"?openrouter\",\"claude\"]",
         ])
         .expect("set prompt_review_backends");
         h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "1"])
@@ -425,7 +425,7 @@ fn optional_first_backend_falls_through(h: &RalphHarness) -> TestResult {
         let fm = parse_yaml_frontmatter(&review);
         assert_eq!(fm["backend"].as_str(), Some("claude"));
         assert_path_not_exists(&project_dir.join("prompt-review-validator-claude.md"));
-        assert_path_not_exists(&project_dir.join("prompt-review-validator-gemini.md"));
+        assert_path_not_exists(&project_dir.join("prompt-review-validator-openrouter.md"));
     })
 }
 
@@ -491,7 +491,7 @@ fn min_reviewers_enforcement(h: &RalphHarness) -> TestResult {
             "config",
             "set",
             "workflow.prompt_review_backends",
-            "[\"claude\",\"?gemini\"]",
+            "[\"claude\",\"?openrouter\"]",
         ])
         .expect("set prompt_review_backends");
         h.ralph_ok(["config", "set", "workflow.prompt_review_min_reviewers", "1"])
@@ -590,7 +590,7 @@ fn project_singular_override_wins_over_global_plural(h: &RalphHarness) -> TestRe
     })
 }
 
-fn singular_alias_rejects_optional_global_gemini(h: &RalphHarness) -> TestResult {
+fn singular_alias_rejects_optional_global_openrouter(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
 
@@ -599,7 +599,7 @@ fn singular_alias_rejects_optional_global_gemini(h: &RalphHarness) -> TestResult
                 "config",
                 "set",
                 "workflow.prompt_review_backend",
-                "?gemini",
+                "?openrouter",
                 "--global",
             ])
             .expect("config set should execute");
@@ -611,13 +611,13 @@ fn singular_alias_rejects_optional_global_gemini(h: &RalphHarness) -> TestResult
     })
 }
 
-fn singular_alias_rejects_optional_project_gemini(h: &RalphHarness) -> TestResult {
+fn singular_alias_rejects_optional_project_openrouter(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_id = "pr-panel-optional-project-gemini";
+        let project_id = "pr-panel-optional-project-openrouter";
         h.init_workspace().expect("init failed");
         h.create_project(
             project_id,
-            "Prompt Review Optional Project Gemini",
+            "Prompt Review Optional Project Openrouter",
             "Prompt review optional syntax rejection test",
         )
         .expect("create project failed");
@@ -627,7 +627,7 @@ fn singular_alias_rejects_optional_project_gemini(h: &RalphHarness) -> TestResul
                 "config",
                 "set",
                 "workflow.prompt_review_backend",
-                "?gemini(gemini-3-pro-preview)",
+                "?openrouter(gpt-5.3-codex-xhigh)",
                 "--project",
                 project_id,
             ])

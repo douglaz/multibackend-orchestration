@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn ensure_required_backend_rejects_optional_syntax() {
-        let err = ensure_required_backend("?gemini", "workflow.prompt_review_backend")
+        let err = ensure_required_backend("?openrouter", "workflow.prompt_review_backend")
             .expect_err("optional syntax should be rejected for required surfaces");
         assert!(err.to_string().contains(
             "optional backend specs (?backend) are not supported for workflow.prompt_review_backend"
@@ -907,10 +907,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_optional_backend_accepts_optional_gemini() {
-        let result = parse_optional_backend("?gemini(gemini-3-pro-preview)")
-            .expect("optional gemini should parse successfully");
-        assert_eq!(result, Some("?gemini(gemini-3-pro-preview)".to_owned()));
+    fn parse_optional_backend_accepts_optional_openrouter() {
+        let result = parse_optional_backend("?openrouter(gpt-5.3-codex-xhigh)")
+            .expect("optional openrouter should parse successfully");
+        assert_eq!(result, Some("?openrouter(gpt-5.3-codex-xhigh)".to_owned()));
     }
 
     #[test]
@@ -935,7 +935,7 @@ mod tests {
         let err = set_global_value(
             &mut config,
             "workflow.prompt_review_backend",
-            "?gemini(gemini-3-pro-preview)",
+            "?openrouter(gpt-5.3-codex-xhigh)",
         )
         .expect_err("optional syntax should be rejected for singular alias");
         assert!(err.to_string().contains(

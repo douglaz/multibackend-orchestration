@@ -1440,8 +1440,8 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             .expect("disable QA");
         h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
             .expect("disable final review");
-        // Include an unavailable optional completer (?gemini) alongside the
-        // required completer. Gemini is disabled in the mock setup, so
+        // Include an unavailable optional completer (?openrouter) alongside the
+        // required completer. OpenRouter is disabled in the mock setup, so
         // resolve_completion_panel will skip it with a deterministic warning.
         // If the panel were re-resolved on same-run completion entry, the
         // skip warning would appear twice; asserting it appears exactly once
@@ -1450,7 +1450,7 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             "config",
             "set",
             "workflow.completion_backends",
-            "[\"claude\", \"?gemini\"]",
+            "[\"claude\", \"?openrouter\"]",
         ])
         .expect("set completion_backends with optional unavailable backend");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
@@ -1482,7 +1482,7 @@ fn same_run_completion_no_panel_reresolution(h: &RalphHarness) -> TestResult {
             "did not expect completer panel drift warning on same-run completion, stderr:\n{stderr}"
         );
 
-        // The optional gemini skip warning from resolve_completion_panel
+        // The optional openrouter skip warning from resolve_completion_panel
         // should appear exactly once (at planning-time panel resolution),
         // proving that panel resolution does NOT happen again at same-run
         // completion entry.
