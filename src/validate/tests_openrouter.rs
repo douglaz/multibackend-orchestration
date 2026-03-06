@@ -123,9 +123,18 @@ fn disabled_default_backend(h: &RalphHarness) -> TestResult {
         h.create_project("disabled-or-test", "Disabled OR Test", "Test prompt")
             .expect("create project");
 
-        // Run a command that resolves the default backend through BackendRegistry
+        // Run a command that resolves the default backend through BackendRegistry.
+        // Pass --skip-prompt-review so prompt review doesn't fail first on a
+        // missing codex binary, which would make this test vacuously pass.
         let output = h
-            .ralph(["run", "--project", "disabled-or-test", "--loops", "1"])
+            .ralph([
+                "run",
+                "--project",
+                "disabled-or-test",
+                "--loops",
+                "1",
+                "--skip-prompt-review",
+            ])
             .expect("run with disabled default backend");
 
         assert!(
@@ -137,6 +146,11 @@ fn disabled_default_backend(h: &RalphHarness) -> TestResult {
         assert!(
             stderr.contains("unavailable"),
             "expected stderr to contain 'unavailable', got:\n{}",
+            stderr
+        );
+        assert!(
+            stderr.contains("openrouter"),
+            "expected stderr to mention 'openrouter', got:\n{}",
             stderr
         );
 
