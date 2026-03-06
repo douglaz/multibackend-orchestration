@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-169
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-06T01:57:03Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The prompt is overly tied to approximate line numbers and specific test names, which is brittle across rebases and can fail even when behavior is correct.
+- It mixes desired outcomes with rigid implementation details, making it harder to optimize edits while still meeting the real goal.
+- It says “no Gemini references remain,” but some retarget examples still include model IDs containing `gemini`, creating a contradictory pass condition.
+- It relies on “no explicit test required” for legacy config tolerance, which weakens confidence for a schema-removal change.
+- Verification commands are not aligned with this repo’s documented workflow (`nix develop -c ...`, `nix build`).
+- Coverage expectations are spread across many bullets; preserved behaviors (optional skip, required failure, unknown backend rejection) should be centralized.
+- Scope boundaries are not fully explicit, which can cause over-deletion (historical artifacts) or under-deletion (active source/config paths).
+- User-facing behavior when `gemini` is still specified is implied but not explicitly stated as an acceptance behavior.
+
+## Refined Prompt
 ### Title
 Remove Gemini backend support from Ralph (deletion/simplification only)
 
