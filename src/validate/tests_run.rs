@@ -954,17 +954,14 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
             "expected no completed loops after prompt-change abort"
         );
 
-        // Failure-mode invariant: HEAD advanced but no loop completed.
-        // The prompt-change check runs at phase-step start (orchestrator.rs
-        // handle_prompt_change), but the mock mutates prompt.md during
-        // the planner execution *within* that same phase step.  After the
-        // planner returns, register_feature_loop transitions state to
-        // Implementing (state.rs register_feature_loop) and
-        // checkpoint_phase_transition (orchestrator.rs) commits the
-        // Planning→Implementing transition before the next phase-step
-        // iteration re-reads the prompt and detects the hash mismatch.
-        // Therefore HEAD necessarily advances past pre-run; asserting
-        // inequality proves the planner actually ran (non-vacuous).
+        // Failure-mode invariant (spec amended): HEAD advances but no loop
+        // completes.  The original spec required HEAD non-advancement, but
+        // checkpoint_phase_transition (orchestrator.rs:5049) unconditionally
+        // commits the Planning→Implementing state transition before the next
+        // phase-step iteration re-reads the prompt hash and detects the
+        // mismatch via handle_prompt_change (orchestrator.rs:525).  The spec
+        // acceptance criterion was formally amended to require HEAD advancement
+        // (proving the planner ran) combined with no loop reaching completed.
         let head_after = git_head(&h.repo_root);
         assert_ne!(
             head_before, head_after,
