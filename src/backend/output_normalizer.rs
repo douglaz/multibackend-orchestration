@@ -33,7 +33,7 @@ const STREAM_EVENT_TYPES: &[&str] = &[
     "system",
     // Codex CLI (first event is "thread.started")
     "thread.started",
-    // Gemini CLI stream-json
+    // Additional stream-json event names emitted by CLI backends
     "init",
     "message",
     "tool_use",
@@ -52,7 +52,7 @@ pub fn normalize_output(raw: &str) -> Result<NormalizedOutput> {
 
     if !first_content_line.is_some_and(|l| l.starts_with('{')) {
         // Before returning raw text, check for multi-line JSON after preamble
-        // (e.g. gemini CLI outputs "YOLO mode..." status lines before its JSON response).
+        // (some CLIs print status lines before the JSON response).
         if let Some(output) = try_extract_multiline_json_after_preamble(raw) {
             tracing::debug!(
                 path = "preamble_multiline",
@@ -198,7 +198,7 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
             }
             "message" => {
                 // Goose CLI wraps messages in {"type":"message","message":{...}}.
-                // Gemini CLI has {"type":"message","role":"assistant","content":"..."}.
+                // Some CLIs emit {"type":"message","role":"assistant","content":"..."}.
                 if let Some(inner) = event.get("message") {
                     // Goose format: extract text from inner message.content[]
                     // Only extract "text" type content, skip "reasoning" and "toolRequest".
@@ -238,7 +238,7 @@ pub fn normalize_claude_stream_json(raw: &str) -> Result<NormalizedOutput> {
                             inner.get("id").and_then(Value::as_str).map(str::to_owned);
                     }
                 } else if event.get("role").and_then(Value::as_str) == Some("assistant") {
-                    // Gemini format: role at top level
+                    // Alternate stream format: role is at top level
                     if let Some(content) = event.get("content") {
                         if let Some(text) = extract_text_from_content(content) {
                             if !output.text.is_empty() && !output.text.ends_with('\n') {
@@ -432,8 +432,8 @@ fn first_valid_json_object(raw: &str) -> Option<Value> {
 }
 
 /// Attempt to extract a multi-line JSON object from output that may have
-/// non-JSON preamble lines (e.g. gemini CLI's "YOLO mode is enabled" status
-/// messages before the pretty-printed JSON response body).
+/// non-JSON preamble lines (for example, status messages printed before a
+/// pretty-printed JSON response body).
 ///
 /// When the output contains multiple JSON-like blocks (e.g. a 429 error JSON
 /// followed by the actual response JSON), we try each `{`-starting line from
@@ -931,7 +931,7 @@ Done."#;
     }
 
     #[test]
-    fn normalize_output_gemini_stream_extracts_session_and_text() {
+    fn normalize_output_stream_events_extracts_session_and_text() {
         let raw = concat!(
             r#"{"type":"init","session_id":"gem-sess-1"}"#,
             "\n",
@@ -945,13 +945,13 @@ Done."#;
             "\n",
             r#"{"type":"result","text":"final response"}"#,
         );
-        let normalized = normalize_output(raw).expect("gemini stream parse");
+        let normalized = normalize_output(raw).expect("stream parse");
         assert_eq!(normalized.session_id.as_deref(), Some("gem-sess-1"));
         assert_eq!(normalized.text, "final response");
     }
 
     #[test]
-    fn normalize_output_gemini_message_requires_assistant_role_for_text() {
+    fn normalize_output_message_event_requires_assistant_role_for_text() {
         let raw = concat!(
             r#"{"type":"init","session_id":"gem-sess-2"}"#,
             "\n",
@@ -959,16 +959,16 @@ Done."#;
             "\n",
             r#"{"type":"result","content":[{"text":"assistant final"}]}"#,
         );
-        let normalized = normalize_output(raw).expect("gemini stream parse");
+        let normalized = normalize_output(raw).expect("stream parse");
         assert_eq!(normalized.session_id.as_deref(), Some("gem-sess-2"));
         assert_eq!(normalized.text, "assistant final");
     }
 
-    // --- Gemini CLI pipe-mode: multi-line JSON with preamble ---
+    // --- CLI pipe-mode: multi-line JSON with preamble ---
 
     #[test]
-    fn normalize_output_gemini_pipe_multiline_json_with_preamble() {
-        // Gemini CLI -p mode outputs status lines then a pretty-printed JSON summary.
+    fn normalize_output_pipe_multiline_json_with_preamble() {
+        // Pipe mode may output status lines then a pretty-printed JSON summary.
         let raw = "YOLO mode is enabled. All tool calls will be automatically approved.\n\
                     Loaded cached credentials.\n\
                     YOLO mode is enabled. All tool calls will be automatically approved.\n\
@@ -977,7 +977,7 @@ Done."#;
                     \x20 \"response\": \"# Verdict: COMPLETE\\n\\nAll requirements satisfied.\",\n\
                     \x20 \"stats\": { \"models\": {} }\n\
                     }";
-        let normalized = normalize_output(raw).expect("gemini pipe mode");
+        let normalized = normalize_output(raw).expect("pipe mode");
         assert_eq!(normalized.session_id.as_deref(), Some("gem-pipe-1"));
         assert_eq!(
             normalized.text,
@@ -1010,8 +1010,8 @@ Done."#;
     }
 
     #[test]
-    fn normalize_output_gemini_429_error_before_response_json() {
-        // Gemini CLI outputs 429 retry error messages (including error JSON +
+    fn normalize_output_429_error_before_response_json() {
+        // Some CLIs output 429 retry error messages (including error JSON +
         // stack traces) on stdout before the actual response JSON.
         let raw = "Attempt 1 failed with status 429. Retrying with backoff... GaxiosError: [{\n\
                     \x20 \"error\": {\n\
@@ -1027,7 +1027,7 @@ Done."#;
                     \x20 \"response\": \"# Verdict: COMPLETE\\n\\nAll requirements met.\",\n\
                     \x20 \"stats\": { \"models\": {} }\n\
                     }";
-        let normalized = normalize_output(raw).expect("gemini 429 then response");
+        let normalized = normalize_output(raw).expect("429 then response");
         assert_eq!(normalized.session_id.as_deref(), Some("gem-429-test"));
         assert_eq!(
             normalized.text,

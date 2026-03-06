@@ -1,6 +1,5 @@
 pub mod claude;
 pub mod codex;
-pub mod gemini;
 pub mod mock;
 pub mod openrouter;
 pub mod output_normalizer;
@@ -230,7 +229,6 @@ impl CliBackend {
                     self.effective_args_goose(id)
                 }
                 n if n.starts_with("codex") || n == "codex" => self.effective_args_codex(id),
-                n if n.starts_with("gemini") || n == "gemini" => self.effective_args_gemini(id),
                 _ => Ok(self.args.clone()),
             },
             None if ctx.json_output_required => self.ensure_json_output_args(),
@@ -266,27 +264,6 @@ impl CliBackend {
                         args.push("--json".to_owned());
                     }
                 }
-                Ok(args)
-            }
-            n if n.starts_with("gemini") || n == "gemini" => {
-                let mut args = Vec::with_capacity(self.args.len() + 2);
-                let mut skip_next = false;
-                for arg in &self.args {
-                    if skip_next {
-                        skip_next = false;
-                        continue;
-                    }
-                    if arg == "--output-format" {
-                        skip_next = true;
-                        continue;
-                    }
-                    if arg.starts_with("--output-format=") {
-                        continue;
-                    }
-                    args.push(arg.clone());
-                }
-                args.push("--output-format".to_owned());
-                args.push("json".to_owned());
                 Ok(args)
             }
             n if n.starts_with("openrouter") || n == "openrouter" => {
@@ -426,36 +403,6 @@ impl CliBackend {
         result.push("--json".to_owned());
         result.push("-".to_owned());
 
-        Ok(result)
-    }
-
-    fn effective_args_gemini(&self, session_id: &str) -> Result<Vec<String>> {
-        // Gemini resume rules:
-        // 1. Keep -p if present.
-        // 2. Remove all existing --resume and --output-format forms.
-        // 3. Add exactly one --resume <id> and --output-format json.
-        let mut result = Vec::new();
-        let mut skip_next = false;
-
-        for arg in self.args.iter() {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if arg == "--resume" || arg == "--output-format" {
-                skip_next = true;
-                continue;
-            }
-            if arg.starts_with("--resume=") || arg.starts_with("--output-format=") {
-                continue;
-            }
-            result.push(arg.clone());
-        }
-
-        result.push("--resume".to_owned());
-        result.push(session_id.to_owned());
-        result.push("--output-format".to_owned());
-        result.push("json".to_owned());
         Ok(result)
     }
 
@@ -898,12 +845,6 @@ impl BackendRegistry {
             "codex".to_owned(),
             backend_with_optional_tmux(codex_backend, &tmux, shared_ctx.clone()),
         );
-        let mut gemini_backend = gemini::backend_from_config(config, None, None, None);
-        gemini_backend.invocation_ctx = shared_invocation.clone();
-        backends.insert(
-            "gemini".to_owned(),
-            backend_with_optional_tmux(gemini_backend, &tmux, shared_ctx.clone()),
-        );
         let mut openrouter_backend = openrouter::backend_from_config(config, None, None, None);
         openrouter_backend.invocation_ctx = shared_invocation.clone();
         backends.insert(
@@ -1219,11 +1160,6 @@ impl BackendRegistry {
                 &self.config.backends.codex.enabled,
             ),
             (
-                "gemini",
-                &self.config.backends.gemini.models,
-                &self.config.backends.gemini.enabled,
-            ),
-            (
                 "openrouter",
                 &self.config.backends.openrouter.models,
                 &self.config.backends.openrouter.enabled,
@@ -1246,7 +1182,6 @@ impl BackendRegistry {
         for (name, enabled_mode) in [
             ("claude", self.config.backends.claude.enabled.clone()),
             ("codex", self.config.backends.codex.enabled.clone()),
-            ("gemini", self.config.backends.gemini.enabled.clone()),
             (
                 "openrouter",
                 self.config.backends.openrouter.enabled.clone(),
@@ -1321,12 +1256,6 @@ impl BackendRegistry {
                 self.cwd.clone(),
             )),
             "codex" => Ok(codex::backend_from_config(
-                &self.config,
-                model,
-                role,
-                self.cwd.clone(),
-            )),
-            "gemini" => Ok(gemini::backend_from_config(
                 &self.config,
                 model,
                 role,
@@ -1418,12 +1347,12 @@ mod tests {
 
     #[test]
     fn parse_backend_spec_accepts_optional_bare_name() {
-        let parsed = parse_backend_spec("?gemini").expect("optional backend should parse");
+        let parsed = parse_backend_spec("?openrouter").expect("optional backend should parse");
         assert_eq!(
             parsed,
             BackendSpec {
                 optional: true,
-                name: "gemini".to_owned(),
+                name: "openrouter".to_owned(),
                 model: None,
             }
         );
@@ -1431,14 +1360,14 @@ mod tests {
 
     #[test]
     fn parse_backend_spec_accepts_optional_name_with_model() {
-        let parsed =
-            parse_backend_spec("?gemini(gemini-3-pro-preview)").expect("optional modeled backend");
+        let parsed = parse_backend_spec("?openrouter(gpt-5.3-codex-xhigh)")
+            .expect("optional modeled backend");
         assert_eq!(
             parsed,
             BackendSpec {
                 optional: true,
-                name: "gemini".to_owned(),
-                model: Some("gemini-3-pro-preview".to_owned()),
+                name: "openrouter".to_owned(),
+                model: Some("gpt-5.3-codex-xhigh".to_owned()),
             }
         );
     }
@@ -1512,25 +1441,26 @@ mod tests {
     }
 
     #[test]
-    fn backend_registry_creates_gemini_backend_for_modeled_spec() {
-        let config = GlobalConfig::default();
+    fn backend_registry_creates_openrouter_backend_for_modeled_spec() {
+        let mut config = GlobalConfig::default();
+        config.backends.openrouter.enabled = BackendEnabled::Enabled;
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
 
         let backend = registry
-            .get_or_create_for_spec("gemini(gemini-3-pro-preview)")
-            .expect("gemini backend should be creatable from registry");
-        assert_eq!(backend.name(), "gemini(gemini-3-pro-preview)");
+            .get_or_create_for_spec("openrouter(gpt-5.3-codex-xhigh)")
+            .expect("openrouter backend should be creatable from registry");
+        assert_eq!(backend.name(), "openrouter(gpt-5.3-codex-xhigh)");
     }
 
     #[test]
     fn backend_registry_rejects_disabled_backend() {
         let mut config = GlobalConfig::default();
-        config.backends.gemini.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Disabled;
         let mut registry = BackendRegistry::new(&config, tmux_disabled());
-        let result = registry.get_or_create_for_spec("gemini");
+        let result = registry.get_or_create_for_spec("openrouter");
         assert!(matches!(
             result,
-            Err(RalphError::BackendUnavailable { backend }) if backend == "gemini"
+            Err(RalphError::BackendUnavailable { backend }) if backend == "openrouter"
         ));
     }
 
@@ -1724,14 +1654,13 @@ sleep 30
     }
 
     #[test]
-    fn effective_args_no_session_gemini_rewrites_output_format_to_json() {
+    fn effective_args_no_session_openrouter_rewrites_output_format_to_stream_json() {
         let backend = CliBackend::new(
-            "gemini",
-            "gemini".to_owned(),
+            "openrouter",
+            "openrouter".to_owned(),
             vec![
-                "-p".to_owned(),
                 "--output-format".to_owned(),
-                "stream-json".to_owned(),
+                "json".to_owned(),
                 "--other".to_owned(),
             ],
             Duration::from_secs(10),
@@ -1741,8 +1670,8 @@ sleep 30
         let args = backend.effective_args(&ctx).unwrap();
         assert_eq!(
             args,
-            vec!["-p", "--other", "--output-format", "json"],
-            "gemini first call should force output-format=json"
+            vec!["--other", "--output-format", "stream-json"],
+            "openrouter first call should force output-format=stream-json"
         );
     }
 
@@ -2055,54 +1984,66 @@ sleep 30
     }
 
     #[test]
-    fn effective_args_gemini_rewrites_for_resume_and_keeps_print_flag() {
+    fn effective_args_openrouter_rewrites_for_resume_and_preserves_other_flags() {
         let backend = CliBackend::new(
-            "gemini",
-            "gemini".to_owned(),
+            "openrouter",
+            "openrouter".to_owned(),
             vec![
-                "-p".to_owned(),
-                "--yolo".to_owned(),
+                "run".to_owned(),
                 "--resume".to_owned(),
-                "old-session".to_owned(),
+                "--name".to_owned(),
+                "old-name".to_owned(),
                 "--output-format".to_owned(),
-                "stream-json".to_owned(),
+                "json".to_owned(),
+                "--other".to_owned(),
             ],
             Duration::from_secs(10),
             BTreeMap::new(),
         );
         let ctx = make_invocation_ctx(Some("new-session"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(args.contains(&"-p".to_owned()), "gemini should keep -p");
         assert!(
-            !args.contains(&"old-session".to_owned()),
-            "old session id must be replaced"
+            args.contains(&"run".to_owned()),
+            "openrouter should keep base args"
+        );
+        assert!(
+            args.contains(&"--other".to_owned()),
+            "other args should be kept"
+        );
+        assert!(
+            !args.contains(&"old-name".to_owned()),
+            "old --name value must be replaced"
         );
         assert_eq!(
             args.iter().filter(|a| *a == "--resume").count(),
             1,
             "exactly one --resume"
         );
-        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
-        assert_eq!(args[resume_idx + 1], "new-session");
+        assert_eq!(
+            args.iter().filter(|a| *a == "--name").count(),
+            1,
+            "exactly one --name"
+        );
+        let name_idx = args.iter().position(|a| a == "--name").unwrap();
+        assert_eq!(args[name_idx + 1], "new-session");
         assert_eq!(
             args.iter().filter(|a| *a == "--output-format").count(),
             1,
             "exactly one --output-format"
         );
         let fmt_idx = args.iter().position(|a| a == "--output-format").unwrap();
-        assert_eq!(args[fmt_idx + 1], "json");
+        assert_eq!(args[fmt_idx + 1], "stream-json");
     }
 
     #[test]
-    fn effective_args_gemini_resume_rewrite_is_idempotent() {
+    fn effective_args_openrouter_resume_rewrite_is_idempotent() {
         let backend = CliBackend::new(
-            "gemini",
-            "gemini".to_owned(),
+            "openrouter",
+            "openrouter".to_owned(),
             vec![
-                "-p".to_owned(),
-                "--yolo".to_owned(),
+                "run".to_owned(),
                 "--output-format".to_owned(),
-                "stream-json".to_owned(),
+                "json".to_owned(),
             ],
             Duration::from_secs(10),
             BTreeMap::new(),
@@ -2110,8 +2051,8 @@ sleep 30
         let ctx = make_invocation_ctx(Some("sess-1"));
         let args1 = backend.effective_args(&ctx).unwrap();
         let backend2 = CliBackend::new(
-            "gemini",
-            "gemini".to_owned(),
+            "openrouter",
+            "openrouter".to_owned(),
             args1.clone(),
             Duration::from_secs(10),
             BTreeMap::new(),
@@ -2270,10 +2211,10 @@ done
     #[test]
     fn is_backend_available_returns_false_for_disabled_backend() {
         let mut config = GlobalConfig::default();
-        config.backends.gemini.enabled = BackendEnabled::Disabled;
+        config.backends.openrouter.enabled = BackendEnabled::Disabled;
         let registry = BackendRegistry::new(&config, tmux_disabled());
-        assert!(!registry.is_backend_available("gemini"));
-        assert!(!registry.is_backend_available("gemini(gemini-3-pro-preview)"));
+        assert!(!registry.is_backend_available("openrouter"));
+        assert!(!registry.is_backend_available("openrouter(gpt-5.3-codex-xhigh)"));
     }
 
     #[test]

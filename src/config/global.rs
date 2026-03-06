@@ -94,11 +94,6 @@ pub struct BackendConfigs {
     )]
     pub codex: BackendConfig,
     #[serde(
-        default = "default_gemini_backend_config",
-        deserialize_with = "deserialize_gemini_backend_config"
-    )]
-    pub gemini: BackendConfig,
-    #[serde(
         default = "default_openrouter_backend_config",
         deserialize_with = "deserialize_openrouter_backend_config"
     )]
@@ -529,7 +524,6 @@ impl Default for BackendConfigs {
         Self {
             claude: default_claude_backend_config(),
             codex: default_codex_backend_config(),
-            gemini: default_gemini_backend_config(),
             openrouter: default_openrouter_backend_config(),
         }
     }
@@ -608,16 +602,6 @@ where
 {
     let partial = PartialBackendConfig::deserialize(deserializer)?;
     Ok(partial.into_backend_config_with_defaults(default_codex_backend_config()))
-}
-
-fn deserialize_gemini_backend_config<'de, D>(
-    deserializer: D,
-) -> std::result::Result<BackendConfig, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let partial = PartialBackendConfig::deserialize(deserializer)?;
-    Ok(partial.into_backend_config_with_defaults(default_gemini_backend_config()))
 }
 
 fn deserialize_openrouter_backend_config<'de, D>(
@@ -782,33 +766,6 @@ fn default_codex_backend_config() -> BackendConfig {
             completer: Some("gpt-5.3-codex-xhigh".to_owned()),
             acceptance_qa: Some("gpt-5.3-codex-xhigh".to_owned()),
             reformatter: Some("gpt-5.3-codex-medium".to_owned()),
-        },
-        role_timeouts: RoleTimeouts::default(),
-    }
-}
-
-fn default_gemini_backend_config() -> BackendConfig {
-    BackendConfig {
-        command: "gemini".to_owned(),
-        args: vec![
-            "-p".to_owned(),
-            "--yolo".to_owned(),
-            "--output-format".to_owned(),
-            "stream-json".to_owned(),
-        ],
-        timeout_seconds: default_backend_timeout_seconds(),
-        enabled: BackendEnabled::Auto,
-        env: BTreeMap::new(),
-        models: BackendRoleModels {
-            planner: None,
-            implementer: None,
-            reviewer: None,
-            final_reviewer: Some("gemini-3-pro-preview".to_owned()),
-            arbiter: Some("gemini-3-pro-preview".to_owned()),
-            qa: None,
-            completer: Some("gemini-3-pro-preview".to_owned()),
-            acceptance_qa: None,
-            reformatter: None,
         },
         role_timeouts: RoleTimeouts::default(),
     }
@@ -1009,7 +966,7 @@ fn default_final_review_backends() -> Vec<String> {
     vec![
         "claude".to_owned(),
         "codex".to_owned(),
-        "?gemini".to_owned(),
+        "?openrouter".to_owned(),
     ]
 }
 
@@ -1033,7 +990,7 @@ fn default_completion_backends() -> Vec<String> {
     vec![
         "claude".to_owned(),
         "codex".to_owned(),
-        "?gemini".to_owned(),
+        "?openrouter".to_owned(),
     ]
 }
 
@@ -1128,14 +1085,14 @@ impl GlobalConfig {
             .fill_from(&defaults.backends.codex.role_timeouts);
         config
             .backends
-            .gemini
+            .openrouter
             .models
-            .fill_from(&defaults.backends.gemini.models);
+            .fill_from(&defaults.backends.openrouter.models);
         config
             .backends
-            .gemini
+            .openrouter
             .role_timeouts
-            .fill_from(&defaults.backends.gemini.role_timeouts);
+            .fill_from(&defaults.backends.openrouter.role_timeouts);
         Ok(config)
     }
 
@@ -1149,7 +1106,6 @@ impl GlobalConfig {
         match name {
             "claude" => Some(&self.backends.claude),
             "codex" => Some(&self.backends.codex),
-            "gemini" => Some(&self.backends.gemini),
             "openrouter" => Some(&self.backends.openrouter),
             _ => None,
         }
@@ -1159,7 +1115,6 @@ impl GlobalConfig {
         match name {
             "claude" => Some(&mut self.backends.claude),
             "codex" => Some(&mut self.backends.codex),
-            "gemini" => Some(&mut self.backends.gemini),
             "openrouter" => Some(&mut self.backends.openrouter),
             _ => None,
         }
@@ -1569,15 +1524,15 @@ pub(crate) fn set_global_config_value(
         "git.base_branch" => config.git.base_branch = raw_value.to_owned(),
         "backends.claude.command" => config.backends.claude.command = raw_value.to_owned(),
         "backends.codex.command" => config.backends.codex.command = raw_value.to_owned(),
-        "backends.gemini.command" => config.backends.gemini.command = raw_value.to_owned(),
+        "backends.openrouter.command" => config.backends.openrouter.command = raw_value.to_owned(),
         "backends.claude.timeout_seconds" => {
             config.backends.claude.timeout_seconds = cfg_parse_u64(raw_value, key)?;
         }
         "backends.codex.timeout_seconds" => {
             config.backends.codex.timeout_seconds = cfg_parse_u64(raw_value, key)?;
         }
-        "backends.gemini.timeout_seconds" => {
-            config.backends.gemini.timeout_seconds = cfg_parse_u64(raw_value, key)?;
+        "backends.openrouter.timeout_seconds" => {
+            config.backends.openrouter.timeout_seconds = cfg_parse_u64(raw_value, key)?;
         }
         "backends.claude.enabled" => {
             config.backends.claude.enabled = cfg_parse_backend_enabled(raw_value, key)?;
@@ -1585,8 +1540,8 @@ pub(crate) fn set_global_config_value(
         "backends.codex.enabled" => {
             config.backends.codex.enabled = cfg_parse_backend_enabled(raw_value, key)?;
         }
-        "backends.gemini.enabled" => {
-            config.backends.gemini.enabled = cfg_parse_backend_enabled(raw_value, key)?;
+        "backends.openrouter.enabled" => {
+            config.backends.openrouter.enabled = cfg_parse_backend_enabled(raw_value, key)?;
         }
         _ if key.starts_with("backends.claude.role_timeouts.") => {
             let role = key.trim_start_matches("backends.claude.role_timeouts.");
@@ -1596,13 +1551,19 @@ pub(crate) fn set_global_config_value(
             let role = key.trim_start_matches("backends.codex.role_timeouts.");
             cfg_set_role_timeout(&mut config.backends.codex.role_timeouts, role, raw_value)?;
         }
-        _ if key.starts_with("backends.gemini.role_timeouts.") => {
-            let role = key.trim_start_matches("backends.gemini.role_timeouts.");
-            cfg_set_role_timeout(&mut config.backends.gemini.role_timeouts, role, raw_value)?;
+        _ if key.starts_with("backends.openrouter.role_timeouts.") => {
+            let role = key.trim_start_matches("backends.openrouter.role_timeouts.");
+            cfg_set_role_timeout(
+                &mut config.backends.openrouter.role_timeouts,
+                role,
+                raw_value,
+            )?;
         }
         "backends.claude.args" => config.backends.claude.args = cfg_parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = cfg_parse_string_list(raw_value)?,
-        "backends.gemini.args" => config.backends.gemini.args = cfg_parse_string_list(raw_value)?,
+        "backends.openrouter.args" => {
+            config.backends.openrouter.args = cfg_parse_string_list(raw_value)?
+        }
         _ if key.starts_with("backends.claude.models.") => {
             let role = key.trim_start_matches("backends.claude.models.");
             cfg_set_backend_model(&mut config.backends.claude.models, role, raw_value)?;
@@ -1611,9 +1572,9 @@ pub(crate) fn set_global_config_value(
             let role = key.trim_start_matches("backends.codex.models.");
             cfg_set_backend_model(&mut config.backends.codex.models, role, raw_value)?;
         }
-        _ if key.starts_with("backends.gemini.models.") => {
-            let role = key.trim_start_matches("backends.gemini.models.");
-            cfg_set_backend_model(&mut config.backends.gemini.models, role, raw_value)?;
+        _ if key.starts_with("backends.openrouter.models.") => {
+            let role = key.trim_start_matches("backends.openrouter.models.");
+            cfg_set_backend_model(&mut config.backends.openrouter.models, role, raw_value)?;
         }
         _ if key.starts_with("backends.claude.env.") => {
             let env_key = key.trim_start_matches("backends.claude.env.");
@@ -1631,11 +1592,11 @@ pub(crate) fn set_global_config_value(
                 .env
                 .insert(env_key.to_owned(), raw_value.to_owned());
         }
-        _ if key.starts_with("backends.gemini.env.") => {
-            let env_key = key.trim_start_matches("backends.gemini.env.");
+        _ if key.starts_with("backends.openrouter.env.") => {
+            let env_key = key.trim_start_matches("backends.openrouter.env.");
             config
                 .backends
-                .gemini
+                .openrouter
                 .env
                 .insert(env_key.to_owned(), raw_value.to_owned());
         }
@@ -2111,38 +2072,34 @@ command = "claude-custom"
     }
 
     #[test]
-    fn gemini_defaults_match_expected_values() {
+    fn openrouter_defaults_match_expected_values() {
         let config = GlobalConfig::default();
-        assert_eq!(config.backends.gemini.command, "gemini");
+        assert_eq!(config.backends.openrouter.command, "goose");
         assert_eq!(
-            config.backends.gemini.args,
+            config.backends.openrouter.args,
             vec![
-                "-p".to_owned(),
-                "--yolo".to_owned(),
+                "run".to_owned(),
+                "--no-profile".to_owned(),
+                "--quiet".to_owned(),
+                "--with-builtin".to_owned(),
+                "developer".to_owned(),
                 "--output-format".to_owned(),
-                "stream-json".to_owned()
+                "stream-json".to_owned(),
+                "-i".to_owned(),
+                "-".to_owned(),
             ]
         );
-        assert_eq!(
-            config.backends.gemini.models.final_reviewer.as_deref(),
-            Some("gemini-3-pro-preview")
-        );
-        assert_eq!(
-            config.backends.gemini.models.arbiter.as_deref(),
-            Some("gemini-3-pro-preview")
-        );
-        assert_eq!(
-            config.backends.gemini.models.completer.as_deref(),
-            Some("gemini-3-pro-preview")
-        );
-        assert!(config.backends.gemini.models.planner.is_none());
-        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Auto);
+        assert!(config.backends.openrouter.models.final_reviewer.is_none());
+        assert!(config.backends.openrouter.models.arbiter.is_none());
+        assert!(config.backends.openrouter.models.completer.is_none());
+        assert!(config.backends.openrouter.models.planner.is_none());
+        assert_eq!(config.backends.openrouter.enabled, BackendEnabled::Disabled);
         assert_eq!(
             config.workflow.final_review_backends,
             vec![
                 "claude".to_owned(),
                 "codex".to_owned(),
-                "?gemini".to_owned()
+                "?openrouter".to_owned()
             ]
         );
     }
@@ -2150,55 +2107,58 @@ command = "claude-custom"
     #[test]
     fn backend_enabled_accepts_bool_and_auto_string() {
         let enabled_raw = r#"
-[backends.gemini]
+[backends.openrouter]
 enabled = true
 "#;
         let enabled_cfg: GlobalConfig =
             toml::from_str(enabled_raw).expect("enabled=true should deserialize");
-        assert_eq!(enabled_cfg.backends.gemini.enabled, BackendEnabled::Enabled);
+        assert_eq!(
+            enabled_cfg.backends.openrouter.enabled,
+            BackendEnabled::Enabled
+        );
 
         let disabled_raw = r#"
-[backends.gemini]
+[backends.openrouter]
 enabled = false
 "#;
         let disabled_cfg: GlobalConfig =
             toml::from_str(disabled_raw).expect("enabled=false should deserialize");
         assert_eq!(
-            disabled_cfg.backends.gemini.enabled,
+            disabled_cfg.backends.openrouter.enabled,
             BackendEnabled::Disabled
         );
 
         let auto_raw = r#"
-[backends.gemini]
+[backends.openrouter]
 enabled = "auto"
 "#;
         let auto_cfg: GlobalConfig =
             toml::from_str(auto_raw).expect("enabled=\"auto\" should deserialize");
-        assert_eq!(auto_cfg.backends.gemini.enabled, BackendEnabled::Auto);
+        assert_eq!(auto_cfg.backends.openrouter.enabled, BackendEnabled::Auto);
     }
 
     #[test]
     fn backend_enabled_serde_roundtrip_preserves_values() {
         for (source, expected) in [
             (
-                "[backends.gemini]\nenabled = true\n",
+                "[backends.openrouter]\nenabled = true\n",
                 BackendEnabled::Enabled,
             ),
             (
-                "[backends.gemini]\nenabled = false\n",
+                "[backends.openrouter]\nenabled = false\n",
                 BackendEnabled::Disabled,
             ),
             (
-                "[backends.gemini]\nenabled = \"auto\"\n",
+                "[backends.openrouter]\nenabled = \"auto\"\n",
                 BackendEnabled::Auto,
             ),
         ] {
             let config: GlobalConfig = toml::from_str(source).expect("deserialize backend enabled");
-            assert_eq!(config.backends.gemini.enabled, expected);
+            assert_eq!(config.backends.openrouter.enabled, expected);
             let encoded = toml::to_string(&config).expect("serialize backend enabled");
             let reparsed: GlobalConfig =
                 toml::from_str(&encoded).expect("roundtrip deserialize backend enabled");
-            assert_eq!(reparsed.backends.gemini.enabled, expected);
+            assert_eq!(reparsed.backends.openrouter.enabled, expected);
         }
     }
 
@@ -2280,7 +2240,7 @@ base_branch = "master"
             vec![
                 "claude".to_owned(),
                 "codex".to_owned(),
-                "?gemini".to_owned()
+                "?openrouter".to_owned()
             ]
         );
         assert_eq!(config.workflow.final_review_arbiter_backend, "claude");
@@ -2949,16 +2909,21 @@ base_branch = "master"
             defaults.backends.codex.models.reformatter.as_deref(),
         );
         assert_eq!(
-            config.backends.gemini.models.final_reviewer.as_deref(),
-            defaults.backends.gemini.models.final_reviewer.as_deref(),
+            config.backends.openrouter.models.final_reviewer.as_deref(),
+            defaults
+                .backends
+                .openrouter
+                .models
+                .final_reviewer
+                .as_deref(),
         );
         assert_eq!(
-            config.backends.gemini.models.arbiter.as_deref(),
-            defaults.backends.gemini.models.arbiter.as_deref(),
+            config.backends.openrouter.models.arbiter.as_deref(),
+            defaults.backends.openrouter.models.arbiter.as_deref(),
         );
         assert_eq!(
-            config.backends.gemini.models.completer.as_deref(),
-            defaults.backends.gemini.models.completer.as_deref(),
+            config.backends.openrouter.models.completer.as_deref(),
+            defaults.backends.openrouter.models.completer.as_deref(),
         );
     }
 
@@ -3238,13 +3203,13 @@ planner_state_in_prompt = "summary"
             vec!["--flag".to_owned(), "value".to_owned()]
         );
 
-        set_global_config_value(&mut config, "backends.gemini.enabled", "false")
-            .expect("set gemini enabled");
-        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Disabled);
+        set_global_config_value(&mut config, "backends.openrouter.enabled", "false")
+            .expect("set openrouter enabled");
+        assert_eq!(config.backends.openrouter.enabled, BackendEnabled::Disabled);
 
-        set_global_config_value(&mut config, "backends.gemini.enabled", "auto")
-            .expect("set gemini enabled auto");
-        assert_eq!(config.backends.gemini.enabled, BackendEnabled::Auto);
+        set_global_config_value(&mut config, "backends.openrouter.enabled", "auto")
+            .expect("set openrouter enabled auto");
+        assert_eq!(config.backends.openrouter.enabled, BackendEnabled::Auto);
 
         set_global_config_value(&mut config, "backends.claude.models.planner", "sonnet")
             .expect("set claude planner model");

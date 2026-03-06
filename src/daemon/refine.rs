@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn create_backend_rejects_unknown() {
         let config = GlobalConfig::default();
-        let result = create_backend("gemini(pro)", &config);
+        let result = create_backend("badbackend(pro)", &config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown"));
     }

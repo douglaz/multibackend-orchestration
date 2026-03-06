@@ -575,23 +575,23 @@ fn per_backend_verdict_artifacts(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Optional backend (`?gemini`) is unavailable → skipped with warning,
+/// Optional backend (`?openrouter`) is unavailable → skipped with warning,
 /// remaining completers satisfy min_completers and consensus proceeds.
 fn optional_backend_skip(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "panel-optional-skip-1";
         // setup_panel_mock uses setup_mock_backends_stable which already sets
-        // backends.gemini.enabled = false at global scope.
+        // backends.openrouter.enabled = false at global scope.
         setup_panel_mock(h, project_id);
 
         // Configure panel with an optional backend that will not be available.
-        // `?gemini` is optional; gemini is already disabled by setup_panel_mock.
+        // `?openrouter` is optional; openrouter is already disabled by setup_panel_mock.
         // Claude and codex are mocked and available.
         h.ralph_ok([
             "config",
             "set",
             "workflow.completion_backends",
-            "[\"claude\",\"codex\",\"?gemini\"]",
+            "[\"claude\",\"codex\",\"?openrouter\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
@@ -624,17 +624,17 @@ fn optional_backend_skip(h: &RalphHarness) -> TestResult {
         assert_eq!(
             attempt["verdict"].as_str().unwrap(),
             "complete",
-            "panel should reach COMPLETE despite optional gemini being skipped"
+            "panel should reach COMPLETE despite optional openrouter being skipped"
         );
 
-        // Verify only 2 completers were effective (gemini skipped)
+        // Verify only 2 completers were effective (openrouter skipped)
         let completers = attempt["backends"]["completers"]
             .as_array()
             .expect("completers should be array");
         assert_eq!(
             completers.len(),
             2,
-            "should have 2 effective completers (gemini skipped)"
+            "should have 2 effective completers (openrouter skipped)"
         );
     })
 }
@@ -644,17 +644,17 @@ fn required_backend_failure(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "panel-required-fail-1";
         // setup_panel_mock uses setup_mock_backends_stable which already sets
-        // backends.gemini.enabled = false at global scope.
+        // backends.openrouter.enabled = false at global scope.
         setup_panel_mock(h, project_id);
 
         // Configure panel with a required (non-optional) backend that is disabled.
-        // `gemini` (without ?) is required; gemini is already disabled by
+        // `openrouter` (without ?) is required; openrouter is already disabled by
         // setup_panel_mock, so the run should fail when resolving the panel.
         h.ralph_ok([
             "config",
             "set",
             "workflow.completion_backends",
-            "[\"claude\",\"gemini\"]",
+            "[\"claude\",\"openrouter\"]",
         ])
         .expect("set completion_backends");
         h.ralph_ok(["config", "set", "workflow.completion_min_completers", "2"])
@@ -667,7 +667,7 @@ fn required_backend_failure(h: &RalphHarness) -> TestResult {
         ])
         .expect("set completion_consensus_threshold");
 
-        // The run should fail because a required backend (gemini) is unavailable
+        // The run should fail because a required backend (openrouter) is unavailable
         let output = h
             .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
             .expect("ralph run should execute");

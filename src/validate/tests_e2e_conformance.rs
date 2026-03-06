@@ -613,7 +613,7 @@ fn set_separate_mock_backends_fast(
 ) -> crate::Result<()> {
     h.set_config_fast("backends.claude.command", &claude_script.to_string_lossy())?;
     h.set_config_fast("backends.codex.command", &codex_script.to_string_lossy())?;
-    h.set_config_fast("backends.gemini.enabled", "false")
+    h.set_config_fast("backends.openrouter.enabled", "false")
 }
 
 fn planner_attempt_count(h: &RalphHarness, project_id: &str) -> usize {

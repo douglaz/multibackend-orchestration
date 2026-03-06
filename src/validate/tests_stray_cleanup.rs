@@ -86,15 +86,15 @@ fn setup_quick_dev(h: &RalphHarness, project_id: &str, impl_script: &str, rev_sc
         .unwrap_or_else(|e| panic!("set {backend} args failed: {e}"));
     }
 
-    // Disable gemini
+    // Disable openrouter
     h.ralph_ok(vec![
         "config".to_owned(),
         "set".to_owned(),
-        "backends.gemini.enabled".to_owned(),
+        "backends.openrouter.enabled".to_owned(),
         "false".to_owned(),
         "--global".to_owned(),
     ])
-    .expect("disable gemini");
+    .expect("disable openrouter");
 
     h.create_project(
         project_id,
