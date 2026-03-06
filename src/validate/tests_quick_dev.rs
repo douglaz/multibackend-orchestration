@@ -1222,7 +1222,10 @@ fn auto_unknown_reviewer_fails_fast(h: &RalphHarness) -> TestResult {
 
         // Must fail with exit code 2
         assert_exit_code(&output, 2);
-        assert_stderr_contains(&output, "unknown backend configured as quick-dev reviewer backend");
+        assert_stderr_contains(
+            &output,
+            "unknown backend configured as quick-dev reviewer backend",
+        );
 
         // No project should have been created
         let project_dir = h.project_dir("auto-unknown-reviewer-test");

@@ -1218,10 +1218,8 @@ mod tests {
     #[test]
     fn validate_prd_config_rejects_unknown_backend_specs() {
         let mut global = GlobalConfig::default();
-        global.workspace.daemon_prd_question_backends = vec![
-            "claude(opus)".to_owned(),
-            "badbackend(pro)".to_owned(),
-        ];
+        global.workspace.daemon_prd_question_backends =
+            vec!["claude(opus)".to_owned(), "badbackend(pro)".to_owned()];
 
         let error = validate_interactive_prd_workspace_config(&global)
             .expect_err("unknown backend should be rejected on daemon PRD surfaces");
@@ -1260,8 +1258,9 @@ mod tests {
         };
 
         let daemon = resolve_daemon_config(&global, Some(&project));
-        let error = validate_effective_daemon_config(&global, &daemon)
-            .expect_err("unknown backend should be rejected on effective daemon refinement backend");
+        let error = validate_effective_daemon_config(&global, &daemon).expect_err(
+            "unknown backend should be rejected on effective daemon refinement backend",
+        );
         assert!(error
             .to_string()
             .contains("unknown backend configured as daemon.refinement_backend"));

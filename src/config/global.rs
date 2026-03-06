@@ -1553,7 +1553,11 @@ pub(crate) fn set_global_config_value(
         }
         _ if key.starts_with("backends.openrouter.role_timeouts.") => {
             let role = key.trim_start_matches("backends.openrouter.role_timeouts.");
-            cfg_set_role_timeout(&mut config.backends.openrouter.role_timeouts, role, raw_value)?;
+            cfg_set_role_timeout(
+                &mut config.backends.openrouter.role_timeouts,
+                role,
+                raw_value,
+            )?;
         }
         "backends.claude.args" => config.backends.claude.args = cfg_parse_string_list(raw_value)?,
         "backends.codex.args" => config.backends.codex.args = cfg_parse_string_list(raw_value)?,
@@ -2108,7 +2112,10 @@ enabled = true
 "#;
         let enabled_cfg: GlobalConfig =
             toml::from_str(enabled_raw).expect("enabled=true should deserialize");
-        assert_eq!(enabled_cfg.backends.openrouter.enabled, BackendEnabled::Enabled);
+        assert_eq!(
+            enabled_cfg.backends.openrouter.enabled,
+            BackendEnabled::Enabled
+        );
 
         let disabled_raw = r#"
 [backends.openrouter]
@@ -2903,7 +2910,12 @@ base_branch = "master"
         );
         assert_eq!(
             config.backends.openrouter.models.final_reviewer.as_deref(),
-            defaults.backends.openrouter.models.final_reviewer.as_deref(),
+            defaults
+                .backends
+                .openrouter
+                .models
+                .final_reviewer
+                .as_deref(),
         );
         assert_eq!(
             config.backends.openrouter.models.arbiter.as_deref(),

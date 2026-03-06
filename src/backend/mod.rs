@@ -2002,8 +2002,14 @@ sleep 30
         );
         let ctx = make_invocation_ctx(Some("new-session"));
         let args = backend.effective_args(&ctx).unwrap();
-        assert!(args.contains(&"run".to_owned()), "openrouter should keep base args");
-        assert!(args.contains(&"--other".to_owned()), "other args should be kept");
+        assert!(
+            args.contains(&"run".to_owned()),
+            "openrouter should keep base args"
+        );
+        assert!(
+            args.contains(&"--other".to_owned()),
+            "other args should be kept"
+        );
         assert!(
             !args.contains(&"old-name".to_owned()),
             "old --name value must be replaced"

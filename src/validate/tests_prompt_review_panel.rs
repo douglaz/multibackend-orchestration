@@ -263,8 +263,14 @@ fn configure_openrouter_mock(h: &RalphHarness, validator_verdict: &str) {
         "--global".to_owned(),
     ])
     .expect("set openrouter command");
-    h.ralph_ok(["config", "set", "backends.openrouter.args", "[]", "--global"])
-        .expect("set openrouter args");
+    h.ralph_ok([
+        "config",
+        "set",
+        "backends.openrouter.args",
+        "[]",
+        "--global",
+    ])
+    .expect("set openrouter args");
     h.ralph_ok([
         "config",
         "set",
