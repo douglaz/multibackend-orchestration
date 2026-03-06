@@ -31,6 +31,7 @@ mod tests_prompt_review;
 mod tests_prompt_review_panel;
 mod tests_qa;
 mod tests_quick_dev;
+mod tests_resume_backend_resolution;
 mod tests_role_timeouts;
 mod tests_run;
 mod tests_sessions;
@@ -115,6 +116,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_prd::tests());
     tests.extend(tests_qa::tests());
     tests.extend(tests_role_timeouts::tests());
+    tests.extend(tests_resume_backend_resolution::tests());
     tests.extend(tests_commands::tests());
     tests.extend(tests_auto_init::tests());
     tests.extend(tests_streaming::tests());
