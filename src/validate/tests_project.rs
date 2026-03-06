@@ -30,6 +30,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: new_rejects_duplicate,
         },
         ConformanceTest {
+            name: "project::new_from_parent",
+            func: new_from_parent,
+        },
+        ConformanceTest {
             name: "project::list_shows_project",
             func: list_shows_project,
         },
@@ -193,6 +197,34 @@ fn new_rejects_duplicate(h: &RalphHarness) -> TestResult {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
     }
+}
+
+fn new_from_parent(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+        h.create_project("parent-proj", "Parent Project", "Parent prompt content")
+            .expect("create parent project failed");
+
+        h.ralph_ok([
+            "project",
+            "new",
+            "--id",
+            "child-proj",
+            "--name",
+            "Child Project",
+            "--from",
+            "parent-proj",
+        ])
+        .expect("project new --from should succeed");
+
+        let stdout = h
+            .ralph_ok(["project", "show", "child-proj", "--json"])
+            .expect("project show --json should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("project show --json output should be valid JSON");
+
+        assert_json_field(&parsed, "project.parent_project", &json!("parent-proj"));
+    })
 }
 
 fn list_shows_project(h: &RalphHarness) -> TestResult {
@@ -492,6 +524,16 @@ fn corrupt_active_project(h: &RalphHarness) -> TestResult {
             "corrupt active project should result in exit code 2"
         );
     })) {
+        Ok(()) => TestResult::Pass,
+        Err(e) => TestResult::Fail(panic_message(e)),
+    }
+}
+
+fn run_case<F>(f: F) -> TestResult
+where
+    F: FnOnce(),
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
     }

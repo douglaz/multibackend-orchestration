@@ -1,7 +1,11 @@
 use super::*;
 
+use std::path::Path;
+use std::process::Command;
+
 use crate::validate::assertions::{
-    assert_exit_code, assert_json_field, assert_stdout_contains, assert_stdout_eq, git_head_commit,
+    assert_exit_code, assert_json_field, assert_stderr_contains, assert_stdout_contains,
+    assert_stdout_eq, git_head_commit,
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::standard_mock_script;
@@ -42,6 +46,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: rollback_hard,
         },
         ConformanceTest {
+            name: "commands::rollback_dry_run",
+            func: rollback_dry_run,
+        },
+        ConformanceTest {
+            name: "commands::rollback_with_completion_attempts",
+            func: rollback_with_completion_attempts,
+        },
+        ConformanceTest {
+            name: "commands::rollback_force_push",
+            func: rollback_force_push,
+        },
+        ConformanceTest {
             name: "commands::config_get",
             func: config_get,
         },
@@ -56,6 +72,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "commands::config_show_project",
             func: config_show_project,
+        },
+        ConformanceTest {
+            name: "commands::config_edit_no_editor",
+            func: config_edit_no_editor,
         },
         ConformanceTest {
             name: "commands::project_list_empty",
@@ -359,6 +379,185 @@ fn rollback_hard(h: &RalphHarness) -> TestResult {
     })
 }
 
+fn rollback_dry_run(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-506-dry-run";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let head_before = git_head_commit(&h.repo_root);
+        let loop2_before = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_before.is_some(),
+            "expected loop-2 directory to exist before dry-run rollback"
+        );
+
+        let output = h
+            .ralph(["rollback", "--dry-run", "1"])
+            .expect("ralph rollback --dry-run 1 should execute");
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "dry-run");
+
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_before, head_after,
+            "expected HEAD unchanged after rollback --dry-run"
+        );
+
+        let loop2_after = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_after.is_some(),
+            "expected loop-2 directory to remain after rollback --dry-run"
+        );
+
+        let state = h.load_state(project_id).expect("load_state after dry-run");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(
+            loops.len(),
+            2,
+            "rollback --dry-run should not mutate loop state"
+        );
+    })
+}
+
+fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-506-completion-rollback";
+        setup_with_standard_mock(h, project_id);
+
+        // Create a completed feature loop first.
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        // Trigger a completion-attempt loop.
+        let completion_output = h
+            .ralph_env(["run"], &[("RALPH_COMPLETE", "yes")])
+            .expect("ralph run with completion request should execute");
+        assert_exit_code(&completion_output, 0);
+
+        let state_before = h.load_state(project_id).expect("load_state before rollback");
+        let attempts_before = state_before["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert!(
+            !attempts_before.is_empty(),
+            "expected at least one completion attempt before rollback"
+        );
+
+        let completion_loop_dir = h
+            .loop_dir(project_id, 2)
+            .expect("loop_dir should succeed before rollback");
+        assert!(
+            completion_loop_dir.is_some(),
+            "expected completion attempt loop directory to exist before rollback"
+        );
+
+        let head_before = git_head_commit(&h.repo_root);
+        let dry_run = h
+            .ralph(["rollback", "--dry-run", "1"])
+            .expect("rollback --dry-run 1 should execute");
+        assert_exit_code(&dry_run, 0);
+        let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
+        let reset_ref = dry_stdout
+            .split("git reset --hard ")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .expect("dry-run output should include reset reference");
+        let target_commit = git_rev_parse(&h.repo_root, reset_ref);
+
+        h.ralph_ok(["rollback", "1"])
+            .expect("ralph rollback 1 should succeed");
+
+        let head_after = git_head_commit(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "expected HEAD to move after rolling back completion attempt"
+        );
+        assert_eq!(
+            head_after, target_commit,
+            "expected HEAD to reset to rollback target after completion rollback"
+        );
+
+        let state_after = h.load_state(project_id).expect("load_state after rollback");
+        let loops_after = state_after["loops"]
+            .as_array()
+            .expect("loops should be an array");
+        assert_eq!(loops_after.len(), 1, "expected one feature loop after rollback");
+
+        let attempts_after = state_after["completion_attempts"]
+            .as_array()
+            .expect("completion_attempts should be an array");
+        assert!(
+            attempts_after.is_empty(),
+            "expected completion_attempts to be cleared by rollback"
+        );
+
+        let completion_loop_dir_after = h
+            .loop_dir(project_id, 2)
+            .expect("loop_dir should succeed after rollback");
+        assert!(
+            completion_loop_dir_after.is_none(),
+            "expected completion attempt loop directory to be removed after rollback"
+        );
+    })
+}
+
+fn rollback_force_push(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-506-force-push";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let branch = git_current_branch(&h.repo_root);
+        let remote_head_before = git_remote_branch_head(&h.repo_root, &branch);
+
+        // Capture the exact reset target from dry-run output.
+        let dry_run = h
+            .ralph(["rollback", "--dry-run", "1"])
+            .expect("rollback --dry-run should execute");
+        assert_exit_code(&dry_run, 0);
+        let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
+        let reset_ref = dry_stdout
+            .split("git reset --hard ")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .expect("dry-run output should include reset reference");
+        let target_commit = git_rev_parse(&h.repo_root, reset_ref);
+
+        assert_ne!(
+            remote_head_before, target_commit,
+            "remote head before rollback should differ from rollback target"
+        );
+
+        h.ralph_ok(["rollback", "--hard", "1"])
+            .expect("rollback --hard 1 should succeed");
+
+        let local_head_after = git_head_commit(&h.repo_root);
+        let remote_head_after = git_remote_branch_head(&h.repo_root, &branch);
+
+        assert_eq!(
+            local_head_after, target_commit,
+            "local HEAD should match rollback target commit"
+        );
+        assert_eq!(
+            remote_head_after, local_head_after,
+            "remote HEAD should match local HEAD after force-push rollback"
+        );
+        assert_ne!(
+            remote_head_before, remote_head_after,
+            "remote HEAD should change after force-push rollback"
+        );
+    })
+}
+
 fn config_get(h: &RalphHarness) -> TestResult {
     run_case(|| {
         h.init_workspace().expect("init failed");
@@ -458,6 +657,41 @@ fn config_show_project(h: &RalphHarness) -> TestResult {
         assert!(
             parsed.get("backends").is_some(),
             "expected project config JSON to include 'backends'"
+        );
+    })
+}
+
+fn config_edit_no_editor(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init failed");
+
+        let config_path = h.repo_root.join(".ralph").join("ralph.toml");
+        let before = std::fs::read_to_string(&config_path).expect("read config before edit");
+
+        let missing_editor = h.temp_dir.path().join("definitely-missing-editor");
+        assert!(
+            !missing_editor.exists(),
+            "missing editor path should not exist"
+        );
+        let missing_editor_str = missing_editor.to_string_lossy().into_owned();
+
+        let output = h
+            .ralph_env_with_removals(
+                ["config", "edit"],
+                &[("EDITOR", &missing_editor_str)],
+                &["VISUAL"],
+            )
+            .expect("ralph config edit should execute");
+        assert!(
+            !output.status.success(),
+            "config edit should fail when editor cannot be launched"
+        );
+        assert_stderr_contains(&output, "failed to launch editor");
+
+        let after = std::fs::read_to_string(&config_path).expect("read config after edit");
+        assert_eq!(
+            before, after,
+            "config file should remain unchanged when editor launch fails"
         );
     })
 }
@@ -795,6 +1029,54 @@ fn config_set_global_inline_table_clear(h: &RalphHarness) -> TestResult {
             "other keys should be preserved after clear, got:\n{raw}"
         );
     })
+}
+
+fn git_current_branch(repo_root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git rev-parse --abbrev-ref should execute");
+    assert!(
+        output.status.success(),
+        "failed to read current branch: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn git_remote_branch_head(repo_root: &Path, branch: &str) -> String {
+    let refspec = format!("refs/heads/{branch}");
+    let output = Command::new("git")
+        .args(["ls-remote", "origin", &refspec])
+        .current_dir(repo_root)
+        .output()
+        .expect("git ls-remote should execute");
+    assert!(
+        output.status.success(),
+        "git ls-remote failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let hash = stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or_else(|| panic!("ls-remote returned no hash for {refspec}: {stdout}"));
+    hash.to_owned()
+}
+
+fn git_rev_parse(repo_root: &Path, reference: &str) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", reference])
+        .current_dir(repo_root)
+        .output()
+        .expect("git rev-parse should execute");
+    assert!(
+        output.status.success(),
+        "git rev-parse {reference} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {

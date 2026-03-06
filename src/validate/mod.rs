@@ -39,6 +39,8 @@ mod tests_sessions;
 mod tests_stray_cleanup;
 mod tests_streaming;
 mod tests_tail;
+mod tests_quick_prd;
+mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
 
@@ -134,6 +136,8 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_stray_cleanup::tests());
     tests.extend(tests_backend_exec::tests());
     tests.extend(tests_openrouter::tests());
+    tests.extend(tests_validate_flags::tests());
+    tests.extend(tests_quick_prd::tests());
     tests
 }
 
