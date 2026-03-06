@@ -11,7 +11,7 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    always_reject_review_script, mock_tmux_script, prompt_mutating_mock_script,
+    always_reject_review_script, mock_tmux_script,
     review_feedback_once_then_approve_script, standard_mock_script,
 };
 use serde_json::json;
@@ -893,17 +893,55 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
         let project_id = "issue-opc-abort";
         h.init_workspace().expect("init failed");
 
-        let prompt_path = h
-            .repo_root
-            .join(".ralph")
-            .join("projects")
-            .join(project_id)
-            .join("prompt.md");
+        // Use a mock that succeeds for all standard roles EXCEPT the
+        // implementer.  The first run creates an in-progress loop (planner
+        // succeeded → register_feature_loop) and seeds `.last-prompt-hash`,
+        // then fails during implementing.  This leaves the loop in-progress
+        // so that a subsequent inter-run prompt mutation is detected by
+        // handle_prompt_change BEFORE any new checkpoint commit.
+        let planner_only_script = r#"#!/usr/bin/env bash
+set -euo pipefail
 
-        // We need to create the project first so the prompt path exists
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  cat <<'EOF'
+# Feature: Prompt Change Test
+
+## Description
+Mock feature for prompt-change abort conformance test.
+
+## Acceptance Criteria
+- [ ] Prompt change detection works
+
+## Files to Modify/Create
+- `mock_file.txt`
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- None
+
+## Refined Prompt
+This is the refined prompt from the mock reviewer.
+EOF
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  echo "intentional implementer failure for prompt-change test" >&2
+  exit 1
+else
+  echo "intentional failure for unhandled role" >&2
+  exit 1
+fi
+"#;
         let script = h
-            .write_mock_script("standard-for-opc.sh", &standard_mock_script())
-            .expect("failed to write standard mock script");
+            .write_stable_mock_script("planner-only-mock.sh", planner_only_script)
+            .expect("write planner-only mock");
         h.setup_mock_backends_stable(&script)
             .expect("setup_mock_backends_stable failed");
         h.create_project(
@@ -913,16 +951,73 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
         )
         .expect("create_project failed");
 
-        // Now replace mock with prompt-mutating mock
-        let mutating_script = prompt_mutating_mock_script(&prompt_path);
-        let mutating_path = h
-            .write_stable_mock_script("prompt-mutating-mock.sh", &mutating_script)
-            .expect("failed to write prompt-mutating mock script");
-        h.setup_mock_backends_stable(&mutating_path)
-            .expect("setup_mock_backends_stable failed");
+        // First run: planner succeeds (checkpoint commit Planning→Implementing),
+        // then implementer fails — leaves loop 1 in-progress and seeds
+        // .last-prompt-hash with original prompt hash.
+        let first_run = h
+            .ralph(["run", "--on-prompt-change", "continue", "--loops", "1"])
+            .expect("first ralph run should execute");
+        assert!(
+            !first_run.status.success(),
+            "first run should fail (implementer error)"
+        );
+
+        // Mutate prompt between runs.  The mutation must be committed on the
+        // project branch so it survives the `checkout_branch` the next run
+        // performs before entering the main loop.  `.last-prompt-hash`
+        // (committed by the first run with the original hash) is NOT touched,
+        // so the mismatch will be detected.
+        let prompt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+            .join("prompt.md");
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write as IoWrite;
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(&prompt_path)
+                .expect("open prompt for append");
+            writeln!(f, "\n<!-- prompt mutated by validate test -->")
+                .expect("append to prompt");
+        }
+        let prompt_rel = format!(".ralph/projects/{project_id}/prompt.md");
+        let commit_out = Command::new("git")
+            .args(["add", &prompt_rel])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git add prompt should execute");
+        assert!(commit_out.status.success(), "git add prompt failed");
+        let commit_out = Command::new("git")
+            .args(["commit", "-m", "test: mutate prompt for abort test"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git commit should execute");
+        assert!(
+            commit_out.status.success(),
+            "git commit prompt mutation failed: {}",
+            String::from_utf8_lossy(&commit_out.stderr)
+        );
+        // Push so the next run's merge_base_branch and checkout don't diverge.
+        let push_out = Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git push should execute");
+        assert!(
+            push_out.status.success(),
+            "git push prompt mutation failed: {}",
+            String::from_utf8_lossy(&push_out.stderr)
+        );
 
         let head_before = git_head(&h.repo_root);
 
+        // Second run: reconstruct_project_state sees in-progress loop 1 and
+        // loads the old prompt hash from .last-prompt-hash.  The very first
+        // handle_prompt_change call detects the mismatch and aborts before
+        // any new checkpoint_phase_transition commit.
         let output = h
             .ralph(["run", "--on-prompt-change", "abort", "--loops", "1"])
             .expect("ralph run should execute");
@@ -937,7 +1032,7 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
             "expected stderr to contain 'prompt changed', got: {stderr}"
         );
 
-        // Failure-mode invariant: no new completed loop recorded
+        // Failure-mode invariant: no new completed loop recorded.
         let state = h.load_state(project_id).expect("load_state failed");
         let loops = state["loops"].as_array().expect("loops should be an array");
         let completed_loops: Vec<_> = loops
@@ -949,26 +1044,14 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
             "expected no completed loops after prompt-change abort"
         );
 
-        // HEAD may advance due to mandatory phase checkpoint commits (e.g.,
-        // planning -> implementing), but no completed loop should be recorded.
-        // Verify HEAD advanced only for phase-transition checkpoints, not loop
-        // completion commits.
+        // Failure-mode invariant: HEAD remains at pre-run commit.
+        // The abort fires on the first phase step of the second run,
+        // before any checkpoint commit occurs.
         let head_after = git_head(&h.repo_root);
-        if head_before != head_after {
-            // Verify any new commits are only phase-transition checkpoints
-            let log_output = Command::new("git")
-                .args(["log", "--format=%s", &format!("{head_before}..{head_after}")])
-                .current_dir(&h.repo_root)
-                .output()
-                .expect("git log should execute");
-            let subjects = String::from_utf8_lossy(&log_output.stdout);
-            for subject in subjects.lines() {
-                assert!(
-                    !subject.contains("completing") && !subject.contains("committing"),
-                    "expected only phase-transition checkpoint commits, got: {subject}"
-                );
-            }
-        }
+        assert_eq!(
+            head_before, head_after,
+            "expected HEAD to remain at pre-run commit after prompt-change abort"
+        );
     })
 }
 
