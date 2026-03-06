@@ -63,8 +63,7 @@ fn model_injection(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         // Verify the arg-logging mock captured --model and test-model
-        let logged_args =
-            std::fs::read_to_string(&log_path).expect("read openrouter arg log");
+        let logged_args = std::fs::read_to_string(&log_path).expect("read openrouter arg log");
         assert!(
             logged_args.contains("--model"),
             "expected logged args to contain '--model', got:\n{}",

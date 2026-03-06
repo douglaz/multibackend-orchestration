@@ -74,7 +74,10 @@ fn backend_override_proof(h: &RalphHarness) -> TestResult {
 
         // Poison default codex backend path so default quick-prd routing fails.
         let poisoned_path = h.temp_dir.path().join("missing-codex-binary");
-        assert!(!poisoned_path.exists(), "poisoned binary path must not exist");
+        assert!(
+            !poisoned_path.exists(),
+            "poisoned binary path must not exist"
+        );
         let poisoned = poisoned_path.to_string_lossy().into_owned();
         h.ralph_ok(vec![
             "config".to_owned(),

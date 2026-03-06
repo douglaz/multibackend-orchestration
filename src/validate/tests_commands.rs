@@ -437,7 +437,9 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
             .expect("ralph run with completion request should execute");
         assert_exit_code(&completion_output, 0);
 
-        let state_before = h.load_state(project_id).expect("load_state before rollback");
+        let state_before = h
+            .load_state(project_id)
+            .expect("load_state before rollback");
         let attempts_before = state_before["completion_attempts"]
             .as_array()
             .expect("completion_attempts should be an array");
@@ -486,7 +488,11 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
         let loops_after = state_after["loops"]
             .as_array()
             .expect("loops should be an array");
-        assert_eq!(loops_after.len(), 1, "expected one feature loop after rollback");
+        assert_eq!(
+            loops_after.len(),
+            1,
+            "expected one feature loop after rollback"
+        );
 
         let attempts_after = state_after["completion_attempts"]
             .as_array()

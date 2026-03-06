@@ -32,6 +32,7 @@ mod tests_prompt_review;
 mod tests_prompt_review_panel;
 mod tests_qa;
 mod tests_quick_dev;
+mod tests_quick_prd;
 mod tests_resume_backend_resolution;
 mod tests_role_timeouts;
 mod tests_run;
@@ -39,7 +40,6 @@ mod tests_sessions;
 mod tests_stray_cleanup;
 mod tests_streaming;
 mod tests_tail;
-mod tests_quick_prd;
 mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};

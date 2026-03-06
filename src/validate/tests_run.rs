@@ -11,8 +11,8 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    always_reject_review_script, mock_tmux_script,
-    prompt_mutating_mock_script, review_feedback_once_then_approve_script, standard_mock_script,
+    always_reject_review_script, mock_tmux_script, prompt_mutating_mock_script,
+    review_feedback_once_then_approve_script, standard_mock_script,
 };
 use serde_json::json;
 
@@ -985,14 +985,27 @@ fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
         let alt_origin = h.temp_dir.path().join("alt-origin.git");
         for (args, dir) in [
             (vec!["init"], alt_root.as_path()),
-            (vec!["config", "user.email", "test@example.com"], alt_root.as_path()),
+            (
+                vec!["config", "user.email", "test@example.com"],
+                alt_root.as_path(),
+            ),
             (vec!["config", "user.name", "Test"], alt_root.as_path()),
-            (vec!["init", "--bare", alt_origin.to_str().unwrap()], alt_root.as_path()),
+            (
+                vec!["init", "--bare", alt_origin.to_str().unwrap()],
+                alt_root.as_path(),
+            ),
         ] {
-            let out = Command::new("git").args(&args).current_dir(dir).output()
+            let out = Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .output()
                 .expect("git command should execute");
-            assert!(out.status.success(), "git {:?} failed: {}", args,
-                String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         fs::write(alt_root.join(".gitkeep"), "").expect("write gitkeep");
         for args in [
@@ -1000,10 +1013,17 @@ fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
             vec!["commit", "-m", "initial"],
             vec!["remote", "add", "origin", alt_origin.to_str().unwrap()],
         ] {
-            let out = Command::new("git").args(&args).current_dir(&alt_root).output()
+            let out = Command::new("git")
+                .args(&args)
+                .current_dir(&alt_root)
+                .output()
                 .expect("git command should execute");
-            assert!(out.status.success(), "git {:?} failed: {}", args,
-                String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
 
         // Resolve the current branch dynamically so the test works regardless
@@ -1018,7 +1038,9 @@ fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
             "branch resolution failed before .ralph move: {}",
             String::from_utf8_lossy(&branch_out.stderr)
         );
-        let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_owned();
+        let branch = String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_owned();
         assert!(
             !branch.is_empty(),
             "resolved branch name is empty; stderr: {}",
