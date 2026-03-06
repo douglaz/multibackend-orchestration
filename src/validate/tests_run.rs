@@ -1084,13 +1084,43 @@ fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
             vec!["add", ".gitkeep"],
             vec!["commit", "-m", "initial"],
             vec!["remote", "add", "origin", alt_origin.to_str().unwrap()],
-            vec!["push", "-u", "origin", "master"],
         ] {
             let out = Command::new("git").args(&args).current_dir(&alt_root).output()
                 .expect("git command should execute");
             assert!(out.status.success(), "git {:?} failed: {}", args,
                 String::from_utf8_lossy(&out.stderr));
         }
+
+        // Resolve the current branch dynamically so the test works regardless
+        // of GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME (master vs main).
+        let branch_out = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&alt_root)
+            .output()
+            .expect("git rev-parse --abbrev-ref HEAD should execute");
+        assert!(
+            branch_out.status.success(),
+            "branch resolution failed before .ralph move: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+        let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_owned();
+        assert!(
+            !branch.is_empty(),
+            "resolved branch name is empty; stderr: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+
+        let push_out = Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(&alt_root)
+            .output()
+            .expect("git push should execute");
+        assert!(
+            push_out.status.success(),
+            "git push -u origin {} failed (before .ralph move): {}",
+            branch,
+            String::from_utf8_lossy(&push_out.stderr)
+        );
 
         let original_ralph = h.repo_root.join(".ralph");
         let alt_ralph = alt_root.join(".ralph");
