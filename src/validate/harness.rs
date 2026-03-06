@@ -213,6 +213,22 @@ impl RalphHarness {
         Ok(path)
     }
 
+    /// Write a stable mock script wrapper suitable for Nix sandboxes:
+    /// - inner file: executable bash script containing `bash_content`
+    /// - wrapper file: executable POSIX shell script that runs `bash "<inner>"`
+    pub fn write_stable_mock_script(&self, name: &str, bash_content: &str) -> Result<PathBuf> {
+        let inner_name = format!("{name}.inner.bash");
+        let inner_path = self.write_mock_script(&inner_name, bash_content)?;
+
+        // Keep the wrapper POSIX-compatible while preserving literal path bytes.
+        let inner_for_wrapper = inner_path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let wrapper = format!("#!/bin/sh\nexec bash \"{inner_for_wrapper}\"\n");
+        self.write_mock_script(name, &wrapper)
+    }
+
     pub fn setup_mock_backends<P: AsRef<Path>>(&self, script: P) -> Result<()> {
         let script = script.as_ref().to_string_lossy().into_owned();
         self.ralph_ok(vec![

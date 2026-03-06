@@ -2,6 +2,7 @@ use super::*;
 
 use crate::validate::assertions::{assert_exit_code, assert_file_contains, assert_file_exists};
 use crate::validate::harness::RalphHarness;
+use crate::validate::mock_scripts::prd_mock_response_body;
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -126,135 +127,15 @@ fn setup_prd_mock(h: &RalphHarness) {
 }
 
 fn prd_mock_script() -> String {
-    r###"#!/usr/bin/env bash
+    let response_body = prd_mock_response_body();
+    format!(
+        r###"#!/usr/bin/env bash
 set -euo pipefail
 
 INPUT="$(cat)"
-
-if grep -q "You are a product ideation specialist" <<< "$INPUT"; then
-  cat <<'EOF'
-## Core Concept
-Clear idea framing for the proposed product.
-
-## Target Users
-- Internal team
-
-## Key Problems Solved
-- Reduced manual burden
-
-## Proposed Features
-- A focused set of starter features
-
-## Success Metrics
-- Faster task completion
-
-## Constraints & Assumptions
-- Basic implementation assumptions
-EOF
-elif grep -q "You are a technical research analyst" <<< "$INPUT"; then
-  cat <<'EOF'
-## Market Context
-- Market overview
-
-## Technical Landscape
-- Existing approaches
-
-## Comparable Solutions
-- Baseline alternatives
-
-## Technical Feasibility
-- Feasible with current stack
-
-## Risk Assessment
-- Low risk scope
-EOF
-elif grep -q "You are a product strategist" <<< "$INPUT"; then
-  cat <<'EOF'
-## Product Vision
-- Vision summary
-
-## User Stories
-- User story example
-
-## Feature Prioritization
-- P0: core features
-
-## Architecture Overview
-- High-level architecture notes
-
-## MVP Scope
-- Core scope only
-
-## Open Questions
-- None
-EOF
-elif grep -q "You are a technical product manager" <<< "$INPUT"; then
-  cat <<'EOF'
-## Executive Summary
-- Summary
-
-## Goals & Non-Goals
-- Goals and boundaries
-
-## User Stories
-- User story
-
-## Functional Requirements
-- Feature requirements
-
-## Non-Functional Requirements
-- Performance and reliability
-
-## Technical Architecture
-- Architecture outline
-
-## Data Model
-- Data structures
-
-## API Design
-- API boundaries
-
-## Security Considerations
-- Secure auth
-
-## Testing Strategy
-- Unit and integration tests
-
-## Rollout Plan
-- Phased rollout
-
-## Success Metrics
-- Uptake and retention
-
-## Open Questions
-- None
-EOF
-elif grep -q "You are a requirements analyst" <<< "$INPUT"; then
-  cat <<'EOF'
-```json
-{
-  "missing_fields": [],
-  "ambiguities": [],
-  "questions": [],
-  "suggested_defaults": []
-}
-```
-EOF
-elif grep -q "You are a PRD reviewer." <<< "$INPUT"; then
-  cat <<'EOF'
-```json
-{
-  "valid": true,
-  "issues": []
-}
-```
-EOF
-else
-  echo "unrecognized prompt" >&2
-  exit 1
-fi
+{response_body}
 "###
-    .to_owned()
+    )
 }
 
 fn run_case<F>(f: F) -> TestResult
