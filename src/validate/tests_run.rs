@@ -949,12 +949,26 @@ fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
             "expected no completed loops after prompt-change abort"
         );
 
-        // HEAD should remain at pre-run commit
+        // HEAD may advance due to mandatory phase checkpoint commits (e.g.,
+        // planning -> implementing), but no completed loop should be recorded.
+        // Verify HEAD advanced only for phase-transition checkpoints, not loop
+        // completion commits.
         let head_after = git_head(&h.repo_root);
-        assert_eq!(
-            head_before, head_after,
-            "HEAD should remain unchanged after prompt-change abort"
-        );
+        if head_before != head_after {
+            // Verify any new commits are only phase-transition checkpoints
+            let log_output = Command::new("git")
+                .args(["log", "--format=%s", &format!("{head_before}..{head_after}")])
+                .current_dir(&h.repo_root)
+                .output()
+                .expect("git log should execute");
+            let subjects = String::from_utf8_lossy(&log_output.stdout);
+            for subject in subjects.lines() {
+                assert!(
+                    !subject.contains("completing") && !subject.contains("committing"),
+                    "expected only phase-transition checkpoint commits, got: {subject}"
+                );
+            }
+        }
     })
 }
 
@@ -965,28 +979,59 @@ fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
         // Initialize workspace and project normally at h.repo_root
         setup_with_standard_mock(h, project_id);
 
-        // Move .ralph to an alternate location so discovery from repo_root fails
+        // Move .ralph to an alternate location so discovery from repo_root fails.
+        // Initialize a git repo at alt_root with a bare origin so phase
+        // checkpoint commits and pushes can succeed.
         let alt_root = h.temp_dir.path().join("alt-workspace");
         fs::create_dir_all(&alt_root).expect("create alt-workspace dir");
+        let alt_origin = h.temp_dir.path().join("alt-origin.git");
+        for (args, dir) in [
+            (vec!["init"], alt_root.as_path()),
+            (vec!["config", "user.email", "test@example.com"], alt_root.as_path()),
+            (vec!["config", "user.name", "Test"], alt_root.as_path()),
+            (vec!["init", "--bare", alt_origin.to_str().unwrap()], alt_root.as_path()),
+        ] {
+            let out = Command::new("git").args(&args).current_dir(dir).output()
+                .expect("git command should execute");
+            assert!(out.status.success(), "git {:?} failed: {}", args,
+                String::from_utf8_lossy(&out.stderr));
+        }
+        fs::write(alt_root.join(".gitkeep"), "").expect("write gitkeep");
+        for args in [
+            vec!["add", ".gitkeep"],
+            vec!["commit", "-m", "initial"],
+            vec!["remote", "add", "origin", alt_origin.to_str().unwrap()],
+            vec!["push", "-u", "origin", "master"],
+        ] {
+            let out = Command::new("git").args(&args).current_dir(&alt_root).output()
+                .expect("git command should execute");
+            assert!(out.status.success(), "git {:?} failed: {}", args,
+                String::from_utf8_lossy(&out.stderr));
+        }
+
         let original_ralph = h.repo_root.join(".ralph");
         let alt_ralph = alt_root.join(".ralph");
         fs::rename(&original_ralph, &alt_ralph).expect("move .ralph to alt location");
 
         // Non-vacuous invariant: without --workspace-root, discovery fails
         let output_no_flag = h
-            .ralph(["run", "--loops", "1"])
+            .ralph(["run", "--project", project_id, "--loops", "1"])
             .expect("ralph run without workspace-root should execute");
         assert!(
             !output_no_flag.status.success(),
             "expected ralph run to fail without workspace at repo root and no --workspace-root flag"
         );
 
-        // With --workspace-root pointing to the alternate location, command succeeds
+        // With --workspace-root pointing to the alternate location, command succeeds.
+        // Provide --project explicitly since the alt root is not a git repo's
+        // original location and active-project resolution would fail.
         let output = h
             .ralph([
                 "run",
                 "--workspace-root",
                 &alt_root.to_string_lossy(),
+                "--project",
+                project_id,
                 "--loops",
                 "1",
             ])

@@ -191,12 +191,13 @@ fn prd_answers_ingested(h: &RalphHarness) -> TestResult {
         h.setup_mock_backends_stable(&script_path)
             .expect("setup_mock_backends_stable failed");
 
-        // Write answers YAML with a sentinel value
+        // Write answers YAML as a flat map (key: value) matching AnswerStore's
+        // BTreeMap<String, String> deserialization format.
         let sentinel = "SENTINEL_ANSWER_VALUE_12345";
         let answers_path = h.temp_dir.path().join("test-answers.yaml");
         fs::write(
             &answers_path,
-            format!("- question: What is the target audience?\n  answer: {sentinel}\n"),
+            format!("What is the target audience?: {sentinel}\n"),
         )
         .expect("failed to write answers file");
 
