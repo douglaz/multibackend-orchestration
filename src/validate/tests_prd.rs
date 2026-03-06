@@ -1,8 +1,12 @@
 use super::*;
 
+use std::fs;
+
 use crate::validate::assertions::{assert_exit_code, assert_file_contains, assert_file_exists};
 use crate::validate::harness::RalphHarness;
-use crate::validate::mock_scripts::prd_mock_response_body;
+use crate::validate::mock_scripts::{
+    prd_invocation_counting_script, prd_mock_response_body, prd_stdin_capturing_script,
+};
 
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
@@ -21,6 +25,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "prd::explicit_ask_max_preempts_preset",
             func: explicit_ask_max_preempts_preset,
+        },
+        ConformanceTest {
+            name: "prd::prd_resume_fewer_invocations",
+            func: prd_resume_fewer_invocations,
+        },
+        ConformanceTest {
+            name: "prd::prd_answers_ingested",
+            func: prd_answers_ingested,
         },
     ]
 }
@@ -113,6 +125,110 @@ fn explicit_ask_max_preempts_preset(h: &RalphHarness) -> TestResult {
         assert!(
             stdout.contains("ask max rounds: 2"),
             "expected explicit ask max to override preset"
+        );
+    })
+}
+
+fn prd_resume_fewer_invocations(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init_workspace failed");
+
+        let counter_path = h.temp_dir.path().join("prd-invocation-counter.txt");
+        let script = prd_invocation_counting_script(&counter_path);
+        let script_path = h
+            .write_stable_mock_script("prd-counting-mock.sh", &script)
+            .expect("failed to write counting mock script");
+        h.setup_mock_backends_stable(&script_path)
+            .expect("setup_mock_backends_stable failed");
+
+        // First run: fresh PRD generation
+        let output = h
+            .ralph(["prd", "--idea", "Build a task scheduler"])
+            .expect("prd first run should execute");
+        assert_exit_code(&output, 0);
+
+        let first_count: u64 = fs::read_to_string(&counter_path)
+            .expect("counter file should exist after first run")
+            .trim()
+            .parse()
+            .expect("counter should be a number");
+        assert!(
+            first_count > 0,
+            "expected at least one invocation in first run"
+        );
+
+        // Reset counter for second run
+        fs::write(&counter_path, "0").expect("failed to reset counter");
+
+        // Second run: resume should reuse cached stages
+        let output = h
+            .ralph(["prd", "--idea", "Build a task scheduler", "--resume"])
+            .expect("prd resume run should execute");
+        assert_exit_code(&output, 0);
+
+        let second_count: u64 = fs::read_to_string(&counter_path)
+            .expect("counter file should exist after resume run")
+            .trim()
+            .parse()
+            .expect("counter should be a number");
+
+        assert!(
+            second_count < first_count,
+            "expected resume run ({second_count}) to invoke backend fewer times than first run ({first_count})"
+        );
+    })
+}
+
+fn prd_answers_ingested(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init_workspace failed");
+
+        let capture_dir = h.temp_dir.path().join("prd-stdin-captures");
+        let script = prd_stdin_capturing_script(&capture_dir);
+        let script_path = h
+            .write_stable_mock_script("prd-capture-mock.sh", &script)
+            .expect("failed to write stdin-capturing mock script");
+        h.setup_mock_backends_stable(&script_path)
+            .expect("setup_mock_backends_stable failed");
+
+        // Write answers YAML with a sentinel value
+        let sentinel = "SENTINEL_ANSWER_VALUE_12345";
+        let answers_path = h.temp_dir.path().join("test-answers.yaml");
+        fs::write(
+            &answers_path,
+            format!("- question: What is the target audience?\n  answer: {sentinel}\n"),
+        )
+        .expect("failed to write answers file");
+
+        let output = h
+            .ralph([
+                "prd",
+                "--idea",
+                "Build a notification service",
+                "--answers",
+                &answers_path.to_string_lossy(),
+            ])
+            .expect("prd with answers should execute");
+        assert_exit_code(&output, 0);
+
+        // Check that at least one captured stdin file contains the sentinel
+        let entries: Vec<_> = fs::read_dir(&capture_dir)
+            .expect("capture dir should exist")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "expected at least one captured stdin file"
+        );
+
+        let found_sentinel = entries.iter().any(|entry| {
+            fs::read_to_string(entry.path())
+                .unwrap_or_default()
+                .contains(sentinel)
+        });
+        assert!(
+            found_sentinel,
+            "expected sentinel '{sentinel}' in at least one captured stdin file"
         );
     })
 }
