@@ -12,6 +12,7 @@ pub mod mock_scripts;
 pub mod runner;
 
 mod tests_auto_init;
+mod tests_backend_exec;
 mod tests_commands;
 mod tests_completion_panel;
 mod tests_daemon;
@@ -22,6 +23,7 @@ mod tests_final_review;
 mod tests_final_review_cap_skip;
 mod tests_init;
 mod tests_interactive_prd;
+mod tests_openrouter;
 mod tests_pr_lifecycle;
 mod tests_pr_runtime;
 mod tests_prd;
@@ -130,6 +132,8 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_pr_lifecycle::tests());
     tests.extend(tests_quick_dev::tests());
     tests.extend(tests_stray_cleanup::tests());
+    tests.extend(tests_backend_exec::tests());
+    tests.extend(tests_openrouter::tests());
     tests
 }
 
