@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-170
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-06T15:44:58Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The prompt is highly detailed but repetitive across sections, which creates drift risk when implementers miss one copy of a requirement.
+- There is no single explicit definition of done (for example, expected number of new tests and exact module registration), which makes completion ambiguous.
+- Several assertions are under-specified for stable automation (for example, quick-prd output artifact location and `tail --follow` timing), which can cause flaky or vacuous tests.
+- Requirements, rationale, and implementation suggestions are mixed together; this weakens prioritization and increases interpretation variance.
+- Many references rely on exact source line numbers, which are brittle and can distract from behavior-level requirements.
+- It is not stated early enough that this is test-only work; without that guardrail, downstream loops may make unnecessary production changes.
+- Verification steps are present but not normalized to project conventions (`nix develop -c cargo check`, `cargo test`, `nix build -L`, validate runs).
+- Some non-vacuous proof requirements are implied rather than consistently enforced as mandatory acceptance checks.
+
+## Refined Prompt
 ## Objective
 Expand `ralph validate` conformance coverage for currently untested CLI surfaces, backend families (`claude`, `codex`, `openrouter`), and key behavioral gaps.
 
