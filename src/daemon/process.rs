@@ -568,18 +568,6 @@ pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
     let _ = killpg(pgid, Signal::SIGKILL);
 }
 
-pub fn terminate_process_group_blocking(pgid: u32, timeout: Duration) {
-    match tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-    {
-        Ok(runtime) => runtime.block_on(terminate_process_group(pgid, timeout)),
-        Err(err) => {
-            eprintln!("warning: failed to initialize tokio runtime for abort path: {err}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::DateTime;
@@ -595,7 +583,7 @@ mod tests {
         has_content_for_separator,
     };
     #[cfg(unix)]
-    use super::{pid_exists, terminate_process_group_blocking};
+    use super::{pid_exists, terminate_process_group};
 
     #[test]
     fn spawn_command_uses_long_idea_flag() {
@@ -837,22 +825,22 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_terminate_process_group_noop_for_low_pgid() {
-        terminate_process_group_blocking(0, Duration::from_millis(50));
-        terminate_process_group_blocking(1, Duration::from_millis(50));
+    #[tokio::test]
+    async fn test_terminate_process_group_noop_for_low_pgid() {
+        terminate_process_group(0, Duration::from_millis(50)).await;
+        terminate_process_group(1, Duration::from_millis(50)).await;
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_terminate_process_group_dead_pgid() {
+    #[tokio::test]
+    async fn test_terminate_process_group_dead_pgid() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn child");
         let non_group_id = child.id();
 
-        terminate_process_group_blocking(non_group_id, Duration::from_millis(50));
+        terminate_process_group(non_group_id, Duration::from_millis(50)).await;
         assert!(
             child.try_wait().expect("poll child").is_none(),
             "child should still be running"
@@ -863,8 +851,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_terminate_spawned_process_group() {
+    #[tokio::test]
+    async fn test_terminate_spawned_process_group() {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
         let mut child = std::process::Command::new("sleep")
@@ -874,7 +862,7 @@ mod tests {
             .expect("spawn process-group leader");
         let pgid = child.id();
 
-        terminate_process_group_blocking(pgid, Duration::from_secs(2));
+        terminate_process_group(pgid, Duration::from_secs(2)).await;
 
         let deadline = Instant::now() + Duration::from_secs(3);
         let status = loop {

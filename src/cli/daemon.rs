@@ -8,7 +8,7 @@ use crate::config::{resolve_daemon_config, validate_effective_daemon_config};
 use crate::daemon::bootstrap;
 use crate::daemon::github;
 use crate::daemon::rebase_agent;
-use crate::daemon::runtime::{retrigger_failed_task, spawn_blocking_op, DaemonRuntimeConfig};
+use crate::daemon::runtime::{retrigger_failed_task, DaemonRuntimeConfig};
 use crate::project::load_project_config_if_exists;
 use crate::util::lock::DaemonLock;
 use crate::workspace::Workspace;
@@ -84,15 +84,9 @@ pub struct DaemonRetriggerArgs {
 pub async fn execute(args: DaemonArgs) -> Result<()> {
     match args.command {
         DaemonCommand::Start(start_args) => execute_start(start_args).await,
-        DaemonCommand::Status(status_args) => {
-            spawn_blocking_op(move || execute_status(status_args)).await
-        }
-        DaemonCommand::Abort(abort_args) => {
-            spawn_blocking_op(move || execute_abort(abort_args)).await
-        }
-        DaemonCommand::Retrigger(retrigger_args) => {
-            spawn_blocking_op(move || execute_retrigger(retrigger_args)).await
-        }
+        DaemonCommand::Status(status_args) => execute_status(status_args).await,
+        DaemonCommand::Abort(abort_args) => execute_abort(abort_args).await,
+        DaemonCommand::Retrigger(retrigger_args) => execute_retrigger(retrigger_args).await,
     }
 }
 
@@ -182,10 +176,10 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         preflight_check_gh(&gh_bin)?;
 
         // Ensure lifecycle labels exist (best-effort, non-blocking)
-        github::ensure_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name);
+        github::ensure_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name).await;
 
         // Ensure PRD lifecycle labels exist (best-effort, non-blocking)
-        github::ensure_prd_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name);
+        github::ensure_prd_labels_best_effort_with_gh_bin(&gh_bin, &owner, &repo_name).await;
 
         // Load project config if an active project exists
         let project_config = match workspace.active_project_id() {
@@ -307,7 +301,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
 }
 
 /// Status: query GitHub labels to show current issue lifecycle state.
-fn execute_status(args: DaemonStatusArgs) -> Result<()> {
+async fn execute_status(args: DaemonStatusArgs) -> Result<()> {
     let repos = if args.repo.is_empty() {
         // Scan data-dir for owner/repo directories
         scan_repo_slugs(&args.data_dir)?
@@ -338,7 +332,7 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for label in &["ralph:ready", "ralph:in-progress"] {
             let query_labels = vec![label.to_string()];
-            match github::poll_issues(&owner, &repo_name, &query_labels) {
+            match github::poll_issues(&owner, &repo_name, &query_labels).await {
                 Ok((batch, _overflow)) => {
                     for issue in batch {
                         if seen.insert(issue.number) {
@@ -381,7 +375,7 @@ fn execute_status(args: DaemonStatusArgs) -> Result<()> {
 }
 
 /// Abort: kill child (if running locally) and swap label to `ralph:failed`.
-fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
+async fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
         RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
@@ -392,7 +386,7 @@ fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
     // Verify the issue is currently in-progress
-    let labels = github::fetch_issue_labels(&owner, &repo_name, issue_number)?;
+    let labels = github::fetch_issue_labels(&owner, &repo_name, issue_number).await?;
     let lifecycle = github::classify_lifecycle_labels(&labels);
 
     if !lifecycle.iter().any(|l| l == "ralph:in-progress") {
@@ -403,13 +397,13 @@ fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     }
 
     // Swap label: in-progress -> failed (no PID info available from CLI)
-    crate::daemon::abort_task_by_labels(&owner, &repo_name, issue_number, None, None)?;
+    crate::daemon::abort_task_by_labels(&owner, &repo_name, issue_number, None, None).await?;
 
     println!("aborted issue {slug}#{issue_number}");
     Ok(())
 }
 
-fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
+async fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
     let issue_number: u32 = args.issue_number.parse().map_err(|_| {
         RalphError::Validation(format!("invalid issue number: {}", args.issue_number))
     })?;
@@ -419,7 +413,7 @@ fn execute_retrigger(args: DaemonRetriggerArgs) -> Result<()> {
         .ok_or_else(|| RalphError::Validation("--repo is required for retrigger".to_owned()))?;
     let (owner, repo_name) = parse_repo_slug(&slug)?;
 
-    retrigger_failed_task(&owner, &repo_name, issue_number)?;
+    retrigger_failed_task(&owner, &repo_name, issue_number).await?;
     println!("retriggered issue {slug}#{issue_number}");
     Ok(())
 }

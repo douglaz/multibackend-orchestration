@@ -78,7 +78,7 @@ fn draft_watcher_creates_draft_when_branch_ahead(h: &RalphHarness) -> TestResult
         unsafe { std::env::set_var("PATH", composed) };
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -147,7 +147,7 @@ fn draft_watcher_pushes_before_create(h: &RalphHarness) -> TestResult {
         unsafe { std::env::set_var("PATH", composed) };
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -209,7 +209,7 @@ fn draft_watcher_exits_cleanly_on_cancellation(h: &RalphHarness) -> TestResult {
         let poll_guard = EnvVarRestoreGuard::new("RALPH_DRAFT_PR_WATCH_POLL_SECS", original_poll);
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -466,15 +466,17 @@ fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
         let composed = format!("{}:{}", mock_dir.display(), original_path);
         unsafe { std::env::set_var("PATH", &composed) };
 
-        let url = crate::daemon::github::create_pr(
-            "acme",
-            "widgets",
-            "ralph/issue-93",
-            "Draft PR title",
-            "Body",
-            true,
-        )
-        .expect("create_pr draft=true");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt
+            .block_on(crate::daemon::github::create_pr(
+                "acme",
+                "widgets",
+                "ralph/issue-93",
+                "Draft PR title",
+                "Body",
+                true,
+            ))
+            .expect("create_pr draft=true");
         assert_eq!(url, "https://github.com/acme/widgets/pull/99");
 
         let logged = fs::read_to_string(&args_log).expect("read gh args log");
@@ -483,15 +485,16 @@ fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
             "expected --draft arg in gh invocation, got: {logged}"
         );
 
-        let _ = crate::daemon::github::create_pr(
-            "acme",
-            "widgets",
-            "ralph/issue-93",
-            "Ready PR",
-            "Body",
-            false,
-        )
-        .expect("create_pr draft=false");
+        let _ = rt
+            .block_on(crate::daemon::github::create_pr(
+                "acme",
+                "widgets",
+                "ralph/issue-93",
+                "Ready PR",
+                "Body",
+                false,
+            ))
+            .expect("create_pr draft=false");
         let logged_after =
             fs::read_to_string(&args_log).expect("read gh args log after second call");
         let draft_count = logged_after
@@ -546,7 +549,7 @@ fn draft_watcher_fallback_base_when_configured_missing(h: &RalphHarness) -> Test
         unsafe { std::env::set_var("PATH", composed) };
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 

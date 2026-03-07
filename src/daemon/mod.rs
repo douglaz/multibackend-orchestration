@@ -51,14 +51,14 @@ pub fn format_task_id(owner: &str, repo: &str, issue_number: u32) -> String {
 ///
 /// The caller is responsible for removing the child from the in-memory map.
 /// This function only performs process termination and label updates.
-pub fn abort_task_by_labels(
+pub async fn abort_task_by_labels(
     owner: &str,
     repo: &str,
     issue_number: u32,
     child_pid: Option<u32>,
     child_pgid: Option<u32>,
 ) -> Result<()> {
-    terminate_process_group_if_present(child_pid, child_pgid);
+    terminate_process_group_if_present(child_pid, child_pgid).await;
 
     // Swap label: ralph:in-progress -> ralph:failed
     github::swap_lifecycle_label(
@@ -68,6 +68,7 @@ pub fn abort_task_by_labels(
         "ralph:in-progress",
         "ralph:failed",
     )
+    .await
     .map_err(|err| {
         RalphError::Orchestration(format!(
             "failed to update labels for abort of {owner}/{repo}#{issue_number}: {err}"
@@ -77,15 +78,15 @@ pub fn abort_task_by_labels(
     Ok(())
 }
 
-fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>) {
+async fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>) {
     // Prefer killing by process group; fall back to single PID.
     if let Some(pgid) = child_pgid.filter(|v| *v > 0) {
-        daemon_process::terminate_process_group_blocking(pgid, Duration::from_secs(10));
+        daemon_process::terminate_process_group(pgid, Duration::from_secs(10)).await;
         return;
     }
     if let Some(pid) = child_pid.filter(|v| *v > 0) {
         // No PGID available — treat the single PID as a one-member "group".
-        daemon_process::terminate_process_group_blocking(pid, Duration::from_secs(10));
+        daemon_process::terminate_process_group(pid, Duration::from_secs(10)).await;
     }
 }
 

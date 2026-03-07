@@ -19,7 +19,7 @@ use crate::workflow::parser::{
 use crate::workspace::Workspace;
 use crate::{error::RalphError, Result};
 
-pub fn execute(args: StatusArgs) -> Result<()> {
+pub async fn execute(args: StatusArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
     let project_id = workspace.resolve_project_id(args.project.as_deref())?;
 
@@ -31,7 +31,7 @@ pub fn execute(args: StatusArgs) -> Result<()> {
     // Position is already derived from checkpoint commits in
     // reconstruct_project_state — no additional remap needed here.
 
-    if let Some(label_status) = derive_project_status_from_labels(&workspace, &project_id) {
+    if let Some(label_status) = derive_project_status_from_labels(&workspace, &project_id).await {
         state.status = label_status;
     }
 
@@ -185,7 +185,7 @@ fn project_status_label(status: &crate::project::state::ProjectStatus) -> &'stat
     }
 }
 
-fn derive_project_status_from_labels(
+async fn derive_project_status_from_labels(
     workspace: &Workspace,
     project_id: &str,
 ) -> Option<ProjectStatus> {
@@ -193,7 +193,7 @@ fn derive_project_status_from_labels(
     let git_context = project_git_context(workspace, project_id)?;
     let (owner, repo) = parse_github_repo_slug(&git_context.repo_root)?;
 
-    let labels = fetch_issue_labels(&owner, &repo, issue_number).ok()?;
+    let labels = fetch_issue_labels(&owner, &repo, issue_number).await.ok()?;
     let lifecycle = classify_lifecycle_labels(&labels);
     if lifecycle.len() > 1 {
         return Some(ProjectStatus::Failed);

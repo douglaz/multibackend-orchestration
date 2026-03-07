@@ -15,6 +15,24 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{claude, codex, parse_backend_spec, Backend, CliBackend};
+
+/// Block on an async future from sync code.
+///
+/// When called from within a tokio runtime (e.g. via `spawn_blocking`), uses
+/// `Handle::current().block_on()`. When no runtime is active (e.g. in sync
+/// tests), creates a temporary single-threaded runtime.
+fn block_on_async<F: std::future::Future>(f: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(f),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create temporary tokio runtime");
+            rt.block_on(f)
+        }
+    }
+}
 use crate::config::GlobalConfig;
 use crate::daemon::github::{self, GhIssue};
 use crate::error::RalphError;
@@ -618,13 +636,13 @@ fn ensure_waiting_feedback_label(config: &PrdPollConfig, issue_number: u32, labe
         return;
     }
 
-    let _ = github::add_label_with_retry_with_gh_bin(
+    let _ = block_on_async(github::add_label_with_retry_with_gh_bin(
         &config.gh_bin,
         &config.owner,
         &config.repo,
         issue_number,
         WAITING_FEEDBACK_LABEL,
-    );
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -723,16 +741,20 @@ pub const REQUIRED_SPEC_SECTION_COUNT: usize = 6;
 pub fn poll_and_advance_prd(config: &PrdPollConfig) -> Result<()> {
     // Phase 1: sequential polls
     let labels = vec!["ralph:prd".to_owned()];
-    let (issues, _overflow) =
-        github::poll_issues_with_gh_bin(&config.gh_bin, &config.owner, &config.repo, &labels)?;
+    let (issues, _overflow) = block_on_async(github::poll_issues_with_gh_bin(
+        &config.gh_bin,
+        &config.owner,
+        &config.repo,
+        &labels,
+    ))?;
 
     let active_labels = vec!["ralph:prd-active".to_owned()];
-    let (active_issues, _) = github::poll_issues_with_gh_bin(
+    let (active_issues, _) = block_on_async(github::poll_issues_with_gh_bin(
         &config.gh_bin,
         &config.owner,
         &config.repo,
         &active_labels,
-    )?;
+    ))?;
 
     // Phase 2: deduplicate issues across both passes
     let mut seen = std::collections::HashSet::new();
@@ -1014,13 +1036,13 @@ fn do_pending_to_awaiting(
     let has_active = issue.labels.iter().any(|l| l == "ralph:prd-active");
 
     if !has_active {
-        github::add_label_with_retry_with_gh_bin(
+        block_on_async(github::add_label_with_retry_with_gh_bin(
             &config.gh_bin,
             owner,
             repo,
             issue_number,
             "ralph:prd-active",
-        )
+        ))
         .map_err(|err| {
             RalphError::InteractivePrdFailed(format!(
                 "failed to add ralph:prd-active for {owner}/{repo}#{issue_number}: {err}"
@@ -1028,24 +1050,24 @@ fn do_pending_to_awaiting(
         })?;
     }
     if has_prd {
-        let _ = github::remove_label_with_retry_with_gh_bin(
+        let _ = block_on_async(github::remove_label_with_retry_with_gh_bin(
             &config.gh_bin,
             owner,
             repo,
             issue_number,
             "ralph:prd",
-        );
+        ));
     }
 
     // 2. Remove ralph:ready if present (prevent dual workflow ownership)
     if issue.labels.iter().any(|l| l == "ralph:ready") {
-        let _ = github::remove_label_with_retry_with_gh_bin(
+        let _ = block_on_async(github::remove_label_with_retry_with_gh_bin(
             &config.gh_bin,
             owner,
             repo,
             issue_number,
             "ralph:ready",
-        );
+        ));
     }
 
     // 3. Check if questions marker already exists (idempotent restart/retry).
@@ -1054,14 +1076,14 @@ fn do_pending_to_awaiting(
     let next_revision = state.question_revision + 1;
     let marker = prd_marker(issue_number, "questions", next_revision);
 
-    let existing_marker_comment = github::find_bot_comment_with_marker_with_gh_bin(
+    let existing_marker_comment = block_on_async(github::find_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         &marker,
         bot_login,
-    )
+    ))
     .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to check existing marker for {owner}/{repo}#{issue_number}: {err}"
@@ -1095,20 +1117,21 @@ fn do_pending_to_awaiting(
         // timestamp rather than local wall clock. This ensures answer-gating
         // compares against the real comment time consistently.
         // Uses bot-scoped posting so user-authored spoof markers are ignored.
-        let posted_meta = github::post_bot_comment_with_marker_metadata_with_gh_bin(
-            &config.gh_bin,
-            owner,
-            repo,
-            issue_number,
-            &marker,
-            &comment_body,
-            bot_login,
-        )
-        .map_err(|err| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
+        let posted_meta =
+            block_on_async(github::post_bot_comment_with_marker_metadata_with_gh_bin(
+                &config.gh_bin,
+                owner,
+                repo,
+                issue_number,
+                &marker,
+                &comment_body,
+                bot_login,
             ))
-        })?;
+            .map_err(|err| {
+                RalphError::InteractivePrdFailed(format!(
+                    "failed to post questions comment for {owner}/{repo}#{issue_number}: {err}"
+                ))
+            })?;
 
         match posted_meta {
             Some(meta) => (Some(meta.id), meta.created_at),
@@ -1137,7 +1160,10 @@ fn get_or_fetch_bot_login(
         return Ok(login);
     }
 
-    let login = github::fetch_authenticated_login_with_gh_bin(&config.gh_bin).map_err(|err| {
+    let login = block_on_async(github::fetch_authenticated_login_with_gh_bin(
+        &config.gh_bin,
+    ))
+    .map_err(|err| {
         RalphError::InteractivePrdFailed(format!("failed to resolve authenticated gh login: {err}"))
     })?;
     *bot_login_cache = Some(login.clone());
@@ -1185,13 +1211,17 @@ fn do_awaiting_answers_to_awaiting_feedback(
         ))
     })?;
 
-    let comments =
-        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
-            .map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            })?;
+    let comments = block_on_async(github::fetch_issue_comments_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+    ))
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     let Some(answer_comment) = find_first_answer_comment(
         &comments,
@@ -1241,7 +1271,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
     let draft_comment_body = format_draft_comment(next_revision, &draft_spec);
-    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+    let comment_id = block_on_async(github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
@@ -1249,7 +1279,7 @@ fn do_awaiting_answers_to_awaiting_feedback(
         &marker,
         &draft_comment_body,
         bot_login,
-    )
+    ))
     .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to post draft comment for {owner}/{repo}#{issue_number}: {err}"
@@ -1321,20 +1351,29 @@ fn do_awaiting_feedback(
     let repo = &config.repo;
 
     // Fetch current labels and comments
-    let labels = github::fetch_issue_labels_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
-        .map_err(|err| {
-            RalphError::InteractivePrdFailed(format!(
-                "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
-            ))
-        })?;
+    let labels = block_on_async(github::fetch_issue_labels_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+    ))
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch labels for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
-    let comments =
-        github::fetch_issue_comments_with_gh_bin(&config.gh_bin, owner, repo, issue_number)
-            .map_err(|err| {
-                RalphError::InteractivePrdFailed(format!(
-                    "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
-                ))
-            })?;
+    let comments = block_on_async(github::fetch_issue_comments_with_gh_bin(
+        &config.gh_bin,
+        owner,
+        repo,
+        issue_number,
+    ))
+    .map_err(|err| {
+        RalphError::InteractivePrdFailed(format!(
+            "failed to fetch comments for {owner}/{repo}#{issue_number}: {err}"
+        ))
+    })?;
 
     // Check approval by label
     if labels.iter().any(|l| l == "ralph:prd-approved") {
@@ -1401,7 +1440,7 @@ fn do_awaiting_feedback(
     let next_revision = state.draft_revision + 1;
     let marker = prd_marker(issue_number, "draft", next_revision);
     let draft_comment_body = format_draft_comment(next_revision, &revised_spec);
-    let comment_id = github::post_bot_comment_with_marker_with_gh_bin(
+    let comment_id = block_on_async(github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
@@ -1409,7 +1448,7 @@ fn do_awaiting_feedback(
         &marker,
         &draft_comment_body,
         bot_login,
-    )
+    ))
     .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to post revision comment for {owner}/{repo}#{issue_number}: {err}"
@@ -1452,7 +1491,7 @@ fn do_approval_transition(
          *The interactive PRD workflow is now complete.*",
         state.draft_revision
     );
-    github::post_bot_comment_with_marker_with_gh_bin(
+    block_on_async(github::post_bot_comment_with_marker_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
@@ -1460,7 +1499,7 @@ fn do_approval_transition(
         &marker,
         &approval_body,
         bot_login,
-    )
+    ))
     .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to post approval comment for {owner}/{repo}#{issue_number}: {err}"
@@ -1469,13 +1508,13 @@ fn do_approval_transition(
 
     // Add ralph:prd-done BEFORE removing ralph:prd-active. On partial failure
     // the issue retains ralph:prd-active (poll-visible) and gains ralph:prd-done.
-    github::add_label_with_retry_with_gh_bin(
+    block_on_async(github::add_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-done",
-    )
+    ))
     .map_err(|err| {
         RalphError::InteractivePrdFailed(format!(
             "failed to add ralph:prd-done for {owner}/{repo}#{issue_number}: {err}"
@@ -1504,21 +1543,21 @@ fn do_approval_transition(
     // Save succeeded — now safe to remove terminal cleanup labels.
     // Attempt both removals independently so one failure never suppresses
     // the other cleanup operation.
-    let active_remove_err = github::remove_label_with_retry_with_gh_bin(
+    let active_remove_err = block_on_async(github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-active",
-    )
+    ))
     .err();
-    let waiting_remove_err = github::remove_label_with_retry_with_gh_bin(
+    let waiting_remove_err = block_on_async(github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         WAITING_FEEDBACK_LABEL,
-    )
+    ))
     .err();
 
     if let Some(err) = &active_remove_err {
@@ -2099,7 +2138,7 @@ fn transition_to_failed(
     );
 
     if let Some(login) = bot_login {
-        let _ = github::post_bot_comment_with_marker_with_gh_bin(
+        let _ = block_on_async(github::post_bot_comment_with_marker_with_gh_bin(
             &config.gh_bin,
             owner,
             repo,
@@ -2107,28 +2146,28 @@ fn transition_to_failed(
             &marker,
             &error_body,
             login,
-        );
+        ));
     } else {
         // No bot identity — post without idempotency check rather than using
         // body-only lookup (which a user spoof could suppress).
         let full_body = format!("{marker}\n{error_body}");
-        let _ = github::post_raw_issue_comment_with_gh_bin(
+        let _ = block_on_async(github::post_raw_issue_comment_with_gh_bin(
             &config.gh_bin,
             owner,
             repo,
             issue_number,
             &full_body,
-        );
+        ));
     }
 
     // Add ralph:prd-failed BEFORE removing ralph:prd-active (boundary-safe ordering).
-    let _ = github::add_label_with_retry_with_gh_bin(
+    let _ = block_on_async(github::add_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-failed",
-    );
+    ));
 
     // Set terminal state and persist BEFORE removing the poll-visible labels.
     let prev_state = state.state.clone();
@@ -2152,27 +2191,27 @@ fn transition_to_failed(
     }
 
     // Save succeeded — now safe to remove poll-visible labels
-    let _ = github::remove_label_with_retry_with_gh_bin(
+    let _ = block_on_async(github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd-active",
-    );
-    let _ = github::remove_label_with_retry_with_gh_bin(
+    ));
+    let _ = block_on_async(github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         "ralph:prd",
-    );
-    let _ = github::remove_label_with_retry_with_gh_bin(
+    ));
+    let _ = block_on_async(github::remove_label_with_retry_with_gh_bin(
         &config.gh_bin,
         owner,
         repo,
         issue_number,
         WAITING_FEEDBACK_LABEL,
-    );
+    ));
 
     Ok(())
 }
@@ -2296,9 +2335,14 @@ pub fn extract_approved_spec(
     repo: &str,
     issue_number: u32,
 ) -> Option<String> {
-    let bot_login = github::fetch_authenticated_login_with_gh_bin(gh_bin).ok()?;
-    let comments =
-        github::fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number).ok()?;
+    let bot_login = block_on_async(github::fetch_authenticated_login_with_gh_bin(gh_bin)).ok()?;
+    let comments = block_on_async(github::fetch_issue_comments_with_gh_bin(
+        gh_bin,
+        owner,
+        repo,
+        issue_number,
+    ))
+    .ok()?;
     parse_approved_spec_from_comments(&comments, &bot_login, issue_number)
 }
 

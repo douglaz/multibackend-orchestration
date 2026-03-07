@@ -2144,7 +2144,10 @@ fn daemon_has_diff_invalid_base_returns_false(_h: &RalphHarness) -> TestResult {
         git(&repo_root, &["commit", "-m", "initial"]);
         git(&repo_root, &["branch", "-M", "trunk"]);
 
-        let has_changes = github::has_diff(&repo_root).expect("has_diff should not hard-fail");
+        let has_changes = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(github::has_diff(&repo_root))
+            .expect("has_diff should not hard-fail");
         assert!(
             !has_changes,
             "invalid base revision in single-commit repo should be treated as no diff"
@@ -3774,13 +3777,14 @@ exit 1
             .write_mock_script("gh", &gh_script)
             .expect("write mock gh script");
 
-        let result = github::add_label_with_retry_with_gh_bin(
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(github::add_label_with_retry_with_gh_bin(
             gh_bin.to_str().expect("mock gh path should be UTF-8"),
             "acme",
             "widgets",
             1,
             "ralph:in-progress",
-        );
+        ));
 
         assert!(
             result.is_ok(),

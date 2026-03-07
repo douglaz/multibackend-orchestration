@@ -165,13 +165,7 @@ impl ArtifactCommentClient for GitHubArtifactCommentClient {
         issue_number: u32,
         marker: &str,
     ) -> Result<bool> {
-        let owner = owner.to_owned();
-        let repo = repo.to_owned();
-        let marker = marker.to_owned();
-        spawn_blocking_op(move || {
-            github::comment_marker_exists(&owner, &repo, issue_number, &marker)
-        })
-        .await
+        github::comment_marker_exists(owner, repo, issue_number, marker).await
     }
 
     async fn post_idempotent_comment(
@@ -183,22 +177,7 @@ impl ArtifactCommentClient for GitHubArtifactCommentClient {
         phase: &str,
         body_text: &str,
     ) -> Result<()> {
-        let owner = owner.to_owned();
-        let repo = repo.to_owned();
-        let task_id = task_id.to_owned();
-        let phase = phase.to_owned();
-        let body_text = body_text.to_owned();
-        spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &task_id,
-                &phase,
-                &body_text,
-            )
-        })
-        .await
+        github::post_idempotent_comment(owner, repo, issue_number, task_id, phase, body_text).await
     }
 }
 
@@ -258,9 +237,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
     loop {
         // Check if branch has commits ahead of base
         let has_ahead = {
-            let wt = worktree_path.clone();
-            let base = base_branch.clone();
-            match spawn_blocking_op(move || github::has_commits_ahead_of_base(&wt, &base)).await {
+            match github::has_commits_ahead_of_base(&worktree_path, &base_branch).await {
                 Ok(v) => {
                     consecutive_failures = 0;
                     v
@@ -286,9 +263,7 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
         if has_ahead && !pr_created {
             // Step 1: push unconditionally before creating draft PR
             let push_ok = {
-                let wt = worktree_path.clone();
-                let br = branch.clone();
-                match spawn_blocking_op(move || github::push_branch_with_retry(&wt, &br)).await {
+                match github::push_branch_with_retry(&worktree_path, &branch).await {
                     Ok(()) => {
                         eprintln!("draft-pr-watcher: pushed branch {branch} for {task_id}");
                         true
@@ -304,17 +279,10 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
 
             // Step 2: create draft PR
             if push_ok {
-                let owner_c = owner.clone();
-                let repo_c = repo.clone();
-                let br = branch.clone();
-                let tid = task_id.clone();
-                let title = format!("[Draft] {tid}");
-                let body = format!("Automated draft PR for task `{tid}` (issue #{issue_number}).");
-                match spawn_blocking_op(move || {
-                    github::create_pr(&owner_c, &repo_c, &br, &title, &body, true)
-                })
-                .await
-                {
+                let title = format!("[Draft] {task_id}");
+                let body =
+                    format!("Automated draft PR for task `{task_id}` (issue #{issue_number}).");
+                match github::create_pr(&owner, &repo, &branch, &title, &body, true).await {
                     Ok(url) => {
                         eprintln!("draft-pr-watcher: created draft PR for {task_id}: {url}");
                         pr_created = true;
@@ -330,13 +298,8 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
                             "draft-pr-watcher: failed to create draft PR for {task_id}: {err}"
                         );
                         // Re-check: another process may have created the PR concurrently.
-                        let owner_retry = owner.clone();
-                        let repo_retry = repo.clone();
-                        let br_retry = branch.clone();
-                        if let Ok(Some(url)) = spawn_blocking_op(move || {
-                            github::find_existing_pr(&owner_retry, &repo_retry, &br_retry)
-                        })
-                        .await
+                        if let Ok(Some(url)) =
+                            github::find_existing_pr(&owner, &repo, &branch).await
                         {
                             eprintln!("draft-pr-watcher: found existing PR for {task_id}: {url}");
                             pr_created = true;
@@ -695,9 +658,9 @@ fn read_nonempty_artifact(path: &Path) -> Option<String> {
 
 /// Re-trigger a failed task by claiming its GitHub issue via label swap:
 /// `ralph:failed` -> `ralph:ready`.
-pub fn retrigger_failed_task(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
+pub async fn retrigger_failed_task(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
     // Verify current label state from GitHub
-    let labels = github::fetch_issue_labels(owner, repo, issue_number)?;
+    let labels = github::fetch_issue_labels(owner, repo, issue_number).await?;
     let lifecycle = github::classify_lifecycle_labels(&labels);
 
     if !lifecycle.iter().any(|l| l == "ralph:failed") {
@@ -708,7 +671,7 @@ pub fn retrigger_failed_task(owner: &str, repo: &str, issue_number: u32) -> Resu
     }
 
     // Swap failed -> ready so the daemon picks it up on next poll
-    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:failed", "ralph:ready")?;
+    github::swap_lifecycle_label(owner, repo, issue_number, "ralph:failed", "ralph:ready").await?;
 
     eprintln!(
         "retrigger: event=success repo={owner}/{repo} issue_number={issue_number} transition=failed_to_ready"
@@ -824,12 +787,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 
     // Phase 1: Startup reconciliation — reset all `ralph:in-progress` to `ralph:ready`.
     // Always queries `ralph:in-progress` regardless of configured poll labels.
-    {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let verbose = config.verbose;
-        spawn_blocking_op(move || reconcile_in_progress_labels(&owner, &repo, verbose)).await?;
-    }
+    reconcile_in_progress_labels(&config.owner, &config.repo, config.verbose).await?;
 
     // Phase 2: PRD background task lifecycle
     let prd_cancel = CancellationToken::new();
@@ -1002,10 +960,10 @@ async fn run_prd_phase(
 ///
 /// Always queries `ralph:in-progress` directly rather than using configured
 /// poll labels, ensuring stale issues are caught regardless of label config.
-fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Result<()> {
+async fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Result<()> {
     // Always query ralph:in-progress explicitly to catch all stale issues
     let reconcile_labels = vec!["ralph:in-progress".to_owned()];
-    let (issues, _overflow) = github::poll_issues(owner, repo, &reconcile_labels)?;
+    let (issues, _overflow) = github::poll_issues(owner, repo, &reconcile_labels).await?;
 
     let mut reconciled = 0u32;
     for issue in &issues {
@@ -1017,7 +975,9 @@ fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Resul
                 issue.number,
                 "ralph:in-progress",
                 "ralph:ready",
-            ) {
+            )
+            .await
+            {
                 eprintln!(
                     "reconcile: failed to reset issue #{} from in-progress to ready: {err}",
                     issue.number
@@ -1082,12 +1042,8 @@ async fn poll_and_claim(
     slots: u32,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
-    let (issues, overflow) = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let labels = config.labels.clone();
-        spawn_blocking_op(move || github::poll_issues(&owner, &repo, &labels)).await?
-    };
+    let (issues, overflow) =
+        github::poll_issues(&config.owner, &config.repo, &config.labels).await?;
 
     if overflow {
         eprintln!("warning: gh issue list returned exactly 100 issues; results may be truncated");
@@ -1105,18 +1061,12 @@ async fn poll_and_claim(
 
         // Multi-lifecycle-label normalization
         if lifecycle.len() > 1 {
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            let issue_number = issue.number;
-            let lifecycle_clone = lifecycle.clone();
-            match spawn_blocking_op(move || {
-                github::normalize_multi_lifecycle_labels(
-                    &owner,
-                    &repo,
-                    issue_number,
-                    &lifecycle_clone,
-                )
-            })
+            match github::normalize_multi_lifecycle_labels(
+                &config.owner,
+                &config.repo,
+                issue.number,
+                &lifecycle,
+            )
             .await
             {
                 Ok(true) => {
@@ -1159,24 +1109,17 @@ async fn poll_and_claim(
         }
 
         // Claim: ready -> in-progress
+        if let Err(err) = github::swap_lifecycle_label(
+            &config.owner,
+            &config.repo,
+            issue.number,
+            "ralph:ready",
+            "ralph:in-progress",
+        )
+        .await
         {
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            let issue_number = issue.number;
-            if let Err(err) = spawn_blocking_op(move || {
-                github::swap_lifecycle_label(
-                    &owner,
-                    &repo,
-                    issue_number,
-                    "ralph:ready",
-                    "ralph:in-progress",
-                )
-            })
-            .await
-            {
-                eprintln!("warning: failed to claim issue #{}: {err}", issue.number);
-                continue;
-            }
+            eprintln!("warning: failed to claim issue #{}: {err}", issue.number);
+            continue;
         }
 
         // Dispatch input selection: for prd-done issues, attempt to recover
@@ -1296,17 +1239,13 @@ async fn poll_and_claim(
             } => {
                 eprintln!("warning: failed to dispatch issue #{issue_number}: {detail}");
                 // Per-issue rollback: swap ralph:in-progress -> ralph:failed
-                let owner = config.owner.clone();
-                let repo = config.repo.clone();
-                if let Err(rollback_err) = spawn_blocking_op(move || {
-                    github::swap_lifecycle_label(
-                        &owner,
-                        &repo,
-                        issue_number,
-                        "ralph:in-progress",
-                        "ralph:failed",
-                    )
-                })
+                if let Err(rollback_err) = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    issue_number,
+                    "ralph:in-progress",
+                    "ralph:failed",
+                )
                 .await
                 {
                     eprintln!(
@@ -1320,17 +1259,13 @@ async fn poll_and_claim(
             } => {
                 eprintln!("warning: dispatch worker panicked for issue #{issue_number}: {detail}");
                 // Per-issue rollback: same path as Err — swap ralph:in-progress -> ralph:failed
-                let owner = config.owner.clone();
-                let repo = config.repo.clone();
-                if let Err(rollback_err) = spawn_blocking_op(move || {
-                    github::swap_lifecycle_label(
-                        &owner,
-                        &repo,
-                        issue_number,
-                        "ralph:in-progress",
-                        "ralph:failed",
-                    )
-                })
+                if let Err(rollback_err) = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    issue_number,
+                    "ralph:in-progress",
+                    "ralph:failed",
+                )
                 .await
                 {
                     eprintln!(
@@ -1523,13 +1458,8 @@ async fn dispatch_task(
 
     // Update GitHub issue title with refined title (best-effort)
     if let Some(ref title) = refined_title {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let title = title.clone();
-        if let Err(err) = spawn_blocking_op(move || {
-            github::update_issue_title(&owner, &repo, issue_number, &title)
-        })
-        .await
+        if let Err(err) =
+            github::update_issue_title(&config.owner, &config.repo, issue_number, title).await
         {
             eprintln!("warning: failed to update issue title for {task_id}: {err}");
         }
@@ -1537,12 +1467,8 @@ async fn dispatch_task(
 
     // Update GitHub issue body with cleaned body (best-effort)
     if let Some(ref cleaned_body) = cleaned_body {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let cb = cleaned_body.clone();
         if let Err(err) =
-            spawn_blocking_op(move || github::update_issue_body(&owner, &repo, issue_number, &cb))
-                .await
+            github::update_issue_body(&config.owner, &config.repo, issue_number, cleaned_body).await
         {
             eprintln!("warning: failed to update issue body for {task_id}: {err}");
         }
@@ -1550,23 +1476,18 @@ async fn dispatch_task(
 
     // Post refined-prompt comment (best-effort)
     {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let tid = task_id.clone();
         let comment_body = match &refined_title {
             Some(title) => format!("**{title}**\n\n{idea}"),
             None => idea.clone(),
         };
-        if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                "refined-prompt",
-                &comment_body,
-            )
-        })
+        if let Err(err) = github::post_idempotent_comment(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            &task_id,
+            "refined-prompt",
+            &comment_body,
+        )
         .await
         {
             eprintln!("warning: failed to post refined-prompt comment for {task_id}: {err}");
@@ -1597,10 +1518,7 @@ async fn dispatch_task(
         );
         persisted_meta.pr_url
     } else {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let br = branch_name.clone();
-        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+        match github::find_existing_pr(&config.owner, &config.repo, &branch_name).await {
             Ok(url) => url,
             Err(err) => {
                 eprintln!("dispatch: PR URL lookup failed for {task_id}: {err}");
@@ -1911,17 +1829,13 @@ async fn collect_children(
                 );
                 // Explicitly transition to terminal failure state so the
                 // issue does not remain stuck as ralph:in-progress.
-                let owner = config.owner.clone();
-                let repo = config.repo.clone();
-                if let Err(rollback_err) = spawn_blocking_op(move || {
-                    github::swap_lifecycle_label(
-                        &owner,
-                        &repo,
-                        issue_number,
-                        "ralph:in-progress",
-                        "ralph:failed",
-                    )
-                })
+                if let Err(rollback_err) = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    issue_number,
+                    "ralph:in-progress",
+                    "ralph:failed",
+                )
                 .await
                 {
                     eprintln!(
@@ -1962,10 +1876,7 @@ async fn kill_aborted_children(
                 let owner = config.owner.clone();
                 let repo = config.repo.clone();
                 join_set.spawn(async move {
-                    let result = spawn_blocking_op(move || {
-                        github::fetch_issue_labels(&owner, &repo, issue_number)
-                    })
-                    .await;
+                    let result = github::fetch_issue_labels(&owner, &repo, issue_number).await;
                     (issue_number, task_id, result)
                 });
                 in_flight += 1;
@@ -2005,10 +1916,8 @@ async fn kill_aborted_children(
     for issue_number in to_kill {
         if let Some(mut handle) = children.remove(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-            crate::daemon::process::terminate_process_group_blocking(
-                handle.pgid,
-                Duration::from_secs(10),
-            );
+            crate::daemon::process::terminate_process_group(handle.pgid, Duration::from_secs(10))
+                .await;
             handle.watcher_cancel.cancel();
             if let Some(join_handle) = handle.watcher_handle.take() {
                 await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
@@ -2162,21 +2071,16 @@ async fn complete_task_attempt(
 ) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let tid = task_id.to_owned();
-        let phase = terminal_label.trim_start_matches("ralph:").to_owned();
-        let comment_body = format!("Task `{tid}` finished with status: **{phase}**.");
-        spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner,
-                &repo,
-                issue_number,
-                &tid,
-                &phase,
-                &comment_body,
-            )
-        })
+        let phase = terminal_label.trim_start_matches("ralph:");
+        let comment_body = format!("Task `{task_id}` finished with status: **{phase}**.");
+        github::post_idempotent_comment(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            task_id,
+            phase,
+            &comment_body,
+        )
         .await?;
     }
 
@@ -2193,15 +2097,14 @@ async fn complete_task_attempt(
     }
 
     // Swap lifecycle label: in-progress -> terminal (required)
-    {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let label = terminal_label.to_owned();
-        spawn_blocking_op(move || {
-            github::swap_lifecycle_label(&owner, &repo, issue_number, "ralph:in-progress", &label)
-        })
-        .await?;
-    }
+    github::swap_lifecycle_label(
+        &config.owner,
+        &config.repo,
+        issue_number,
+        "ralph:in-progress",
+        terminal_label,
+    )
+    .await?;
 
     // Worktree cleanup
     cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
@@ -2357,10 +2260,7 @@ async fn auto_rebase_phase(
         let pr_url = if let Some(url) = cached_pr_url {
             url
         } else {
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            let br = branch.clone();
-            match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+            match github::find_existing_pr(&config.owner, &config.repo, branch).await {
                 Ok(Some(url)) => {
                     // Back-fill cached PR URL so future cycles skip the lookup.
                     if let Some(h) = children.get_mut(issue_number) {
@@ -2389,11 +2289,7 @@ async fn auto_rebase_phase(
 
         // Query PR merge info — on failure, break the loop (rate limit safety)
         let merge_info = {
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            match spawn_blocking_op(move || github::query_pr_merge_info(&owner, &repo, pr_number))
-                .await
-            {
+            match github::query_pr_merge_info(&config.owner, &config.repo, pr_number).await {
                 Ok(info) => info,
                 Err(err) => {
                     eprintln!(
@@ -2515,12 +2411,8 @@ async fn auto_rebase_phase(
                     let body = format!(
                         "{marker}\nAuto-rebase failed for task `{task_id}` (head: `{head_sha}`).\n\nError: {error}"
                     );
-                    let owner = config.owner.clone();
-                    let repo = config.repo.clone();
-                    let _ = spawn_blocking_op(move || {
-                        github::post_pr_comment(&owner, &repo, pr_number, &body)
-                    })
-                    .await;
+                    let _ = github::post_pr_comment(&config.owner, &config.repo, pr_number, &body)
+                        .await;
                     if let Some(h) = children.get_mut(&issue_number) {
                         h.last_rebase_failure_sha = Some(head_sha.clone());
                     }
@@ -2961,8 +2853,7 @@ pub(crate) async fn handle_pr_flow(
 ) -> Result<()> {
     // Resolve branch from worktree
     let branch = {
-        let wt = wt_path.to_path_buf();
-        match spawn_blocking_op(move || github::current_branch(&wt)).await {
+        match github::current_branch(wt_path).await {
             Ok(b) => b,
             Err(err) => {
                 eprintln!("warning: failed to read current branch for {task_id}: {err}");
@@ -2973,10 +2864,7 @@ pub(crate) async fn handle_pr_flow(
 
     // Step 0: Check for existing PR (used by both no-diff and update paths)
     let existing_pr_url = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        let br = branch.clone();
-        match spawn_blocking_op(move || github::find_existing_pr(&owner, &repo, &br)).await {
+        match github::find_existing_pr(&config.owner, &config.repo, &branch).await {
             Ok(url) => url,
             Err(err) => {
                 eprintln!("warning: failed to check for existing PR: {err}");
@@ -2987,9 +2875,7 @@ pub(crate) async fn handle_pr_flow(
 
     // Step 1: Check if there's a diff against the configured base branch
     let has_changes = {
-        let wt = wt_path.to_path_buf();
-        let base = config.base_branch.clone();
-        match spawn_blocking_op(move || github::has_diff_with_base(&wt, Some(&base))).await {
+        match github::has_diff_with_base(wt_path, Some(&config.base_branch)).await {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("warning: failed to check diff for {task_id}: {err}");
@@ -2999,26 +2885,15 @@ pub(crate) async fn handle_pr_flow(
     };
 
     if !has_changes {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
         if let Some(url) = existing_pr_url.as_ref() {
             if let Some(pr_number) = github::extract_pr_number(url) {
-                let owner_for_draft = owner.clone();
-                let repo_for_draft = repo.clone();
-                let pr_is_draft = spawn_blocking_op(move || {
-                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
-                })
-                .await?;
+                let pr_is_draft =
+                    github::is_pr_draft(&config.owner, &config.repo, pr_number).await?;
 
                 if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
                     == DraftPrTransition::CloseNoDiff
                 {
-                    let owner_for_close = owner.clone();
-                    let repo_for_close = repo.clone();
-                    spawn_blocking_op(move || {
-                        github::close_pr(&owner_for_close, &repo_for_close, pr_number)
-                    })
-                    .await?;
+                    github::close_pr(&config.owner, &config.repo, pr_number).await?;
 
                     // Clear persisted PR URL so future flows do not reuse closed draft PRs.
                     save_task_metadata(
@@ -3039,19 +2914,14 @@ pub(crate) async fn handle_pr_flow(
             body.push_str(" Existing draft PR was closed if it was still in draft state.");
         }
 
-        let owner_for_comment = config.owner.clone();
-        let repo = config.repo.clone();
-        let tid = task_id.to_owned();
-        if let Err(err) = spawn_blocking_op(move || {
-            github::post_idempotent_comment(
-                &owner_for_comment,
-                &repo,
-                issue_number,
-                &tid,
-                "no-diff",
-                &body,
-            )
-        })
+        if let Err(err) = github::post_idempotent_comment(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            task_id,
+            "no-diff",
+            &body,
+        )
         .await
         {
             eprintln!("warning: failed to post no-diff comment for {task_id}: {err}");
@@ -3061,8 +2931,7 @@ pub(crate) async fn handle_pr_flow(
 
     // Skip push/PR flow when no origin remote exists
     {
-        let wt = wt_path.to_path_buf();
-        let has_origin = match spawn_blocking_op(move || github::has_origin_remote(&wt)).await {
+        let has_origin = match github::has_origin_remote(wt_path).await {
             Ok(v) => v,
             Err(err) => {
                 eprintln!(
@@ -3078,16 +2947,11 @@ pub(crate) async fn handle_pr_flow(
     }
 
     // Step 2: Push branch
-    {
-        let wt = wt_path.to_path_buf();
-        let br = branch.clone();
-        spawn_blocking_op(move || github::push_branch_with_retry(&wt, &br)).await?;
-    }
+    github::push_branch_with_retry(wt_path, &branch).await?;
 
     // Step 3: Gather context
     let diff_stat: Option<String> = {
-        let wt = wt_path.to_path_buf();
-        match spawn_blocking_op(move || github::diff_stat(&wt)).await {
+        match github::diff_stat(wt_path).await {
             Ok(stat) => stat,
             Err(err) => {
                 eprintln!("warning: diff stat failed for {task_id}: {err}; using fallback");
@@ -3098,10 +2962,7 @@ pub(crate) async fn handle_pr_flow(
 
     // Fetch raw_idea from GitHub for PR body context
     let raw_idea = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number)).await
-        {
+        match github::fetch_issue_body(&config.owner, &config.repo, issue_number).await {
             Ok((title, body)) => Some(compose_raw_idea(&title, body.as_deref())),
             Err(_) => None,
         }
@@ -3128,10 +2989,7 @@ pub(crate) async fn handle_pr_flow(
 
     // Try to get refined title from GitHub issue
     let refined_title = {
-        let owner = config.owner.clone();
-        let repo = config.repo.clone();
-        match spawn_blocking_op(move || github::fetch_issue_body(&owner, &repo, issue_number)).await
-        {
+        match github::fetch_issue_body(&config.owner, &config.repo, issue_number).await {
             Ok((title, _)) => {
                 if title.is_empty() {
                     None
@@ -3150,14 +3008,8 @@ pub(crate) async fn handle_pr_flow(
     match existing_pr_url {
         Some(url) => {
             eprintln!("editing existing PR for {task_id}: {url}");
-            let url_for_edit = url.clone();
-            let title_clone = title.clone();
             let body_path = body_file.path().to_path_buf();
-            match spawn_blocking_op(move || {
-                github::edit_pr(&url_for_edit, &title_clone, &body_path)
-            })
-            .await
-            {
+            match github::edit_pr(&url, &title, &body_path).await {
                 Ok(()) => {}
                 Err(err) => {
                     return Err(RalphError::Orchestration(format!(
@@ -3167,8 +3019,6 @@ pub(crate) async fn handle_pr_flow(
             }
 
             if let Some(pr_number) = github::extract_pr_number(&url) {
-                let owner_for_draft = config.owner.clone();
-                let repo_for_draft = config.repo.clone();
                 save_task_metadata(
                     &config.workspace_root,
                     task_id,
@@ -3176,41 +3026,27 @@ pub(crate) async fn handle_pr_flow(
                         pr_url: Some(url.clone()),
                     },
                 );
-                let pr_is_draft = spawn_blocking_op(move || {
-                    github::is_pr_draft(&owner_for_draft, &repo_for_draft, pr_number)
-                })
-                .await?;
+                let pr_is_draft =
+                    github::is_pr_draft(&config.owner, &config.repo, pr_number).await?;
 
                 if decide_draft_pr_transition(has_changes, pr_is_draft, "ralph:completed")
                     == DraftPrTransition::MarkReady
                 {
-                    let owner_for_ready = config.owner.clone();
-                    let repo_for_ready = config.repo.clone();
-                    spawn_blocking_op(move || {
-                        github::mark_pr_ready(&owner_for_ready, &repo_for_ready, pr_number)
-                    })
-                    .await?;
+                    github::mark_pr_ready(&config.owner, &config.repo, pr_number).await?;
                 }
             }
         }
         None => {
-            let owner = config.owner.clone();
-            let repo = config.repo.clone();
-            let br = branch.clone();
-            let title_clone = title.clone();
             let body_path = body_file.path().to_path_buf();
-            let base = config.base_branch.clone();
-            match spawn_blocking_op(move || {
-                github::create_pr_with_body_file(
-                    &owner,
-                    &repo,
-                    &br,
-                    &title_clone,
-                    &body_path,
-                    Some(&base),
-                    false,
-                )
-            })
+            match github::create_pr_with_body_file(
+                &config.owner,
+                &config.repo,
+                &branch,
+                &title,
+                &body_path,
+                Some(&config.base_branch),
+                false,
+            )
             .await
             {
                 Ok(url) => {

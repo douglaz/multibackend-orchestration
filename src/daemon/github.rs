@@ -1,6 +1,5 @@
-use std::process::Command;
-use std::thread;
 use std::time::Duration;
+use tokio::process::Command;
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -89,11 +88,15 @@ pub struct PrMergeInfo {
 ///
 /// Returns `(issues, overflow)` where overflow is true when exactly 100 issues
 /// were returned, indicating possible truncation.
-pub fn poll_issues(owner: &str, repo: &str, labels: &[String]) -> Result<(Vec<GhIssue>, bool)> {
-    poll_issues_with_gh_bin(DEFAULT_GH_BIN, owner, repo, labels)
+pub async fn poll_issues(
+    owner: &str,
+    repo: &str,
+    labels: &[String],
+) -> Result<(Vec<GhIssue>, bool)> {
+    poll_issues_with_gh_bin(DEFAULT_GH_BIN, owner, repo, labels).await
 }
 
-pub fn poll_issues_with_gh_bin(
+pub async fn poll_issues_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -121,6 +124,7 @@ pub fn poll_issues_with_gh_bin(
     let output = Command::new(gh_bin)
         .args(&args)
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to run gh issue list: {err}")))?;
 
     if !output.status.success() {
@@ -157,7 +161,7 @@ pub fn poll_issues_with_gh_bin(
 }
 
 /// Fetch an issue's title/body for restart recovery of legacy daemon tasks.
-pub fn fetch_issue_body(
+pub async fn fetch_issue_body(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -174,6 +178,7 @@ pub fn fetch_issue_body(
             "title,body",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run gh issue view for title/body: {err}"))
         })?;
@@ -196,7 +201,7 @@ pub fn fetch_issue_body(
 }
 
 /// Query PR mergeability/status metadata needed by daemon rebase logic.
-pub fn query_pr_merge_info(owner: &str, repo: &str, pr_number: u32) -> Result<PrMergeInfo> {
+pub async fn query_pr_merge_info(owner: &str, repo: &str, pr_number: u32) -> Result<PrMergeInfo> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -209,6 +214,7 @@ pub fn query_pr_merge_info(owner: &str, repo: &str, pr_number: u32) -> Result<Pr
             "mergeable,state,baseRefName,headRefOid",
         ])
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to run gh pr view: {err}")))?;
 
     if !output.status.success() {
@@ -244,7 +250,7 @@ pub fn filter_claimable(issues: Vec<GhIssue>) -> Vec<GhIssue> {
 }
 
 /// Claim an issue by adding the `ralph:in-progress` label.
-pub fn claim_issue(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
+pub async fn claim_issue(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -257,6 +263,7 @@ pub fn claim_issue(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
             "ralph:in-progress",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run gh issue edit for claiming: {err}"))
         })?;
@@ -275,7 +282,7 @@ pub fn claim_issue(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
 
 /// Release a previously-claimed issue by removing the `ralph:in-progress`
 /// label.
-pub fn release_claim(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
+pub async fn release_claim(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -288,6 +295,7 @@ pub fn release_claim(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
             "ralph:in-progress",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to run gh issue edit for claim release: {err}"
@@ -307,7 +315,12 @@ pub fn release_claim(owner: &str, repo: &str, issue_number: u32) -> Result<()> {
 }
 
 /// Update the title of a GitHub issue.
-pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &str) -> Result<()> {
+pub async fn update_issue_title(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    title: &str,
+) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -320,6 +333,7 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
             title,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run gh issue edit --title: {err}"))
         })?;
@@ -337,7 +351,12 @@ pub fn update_issue_title(owner: &str, repo: &str, issue_number: u32, title: &st
 }
 
 /// Update the body of a GitHub issue.
-pub fn update_issue_body(owner: &str, repo: &str, issue_number: u32, body: &str) -> Result<()> {
+pub async fn update_issue_body(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    body: &str,
+) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -350,6 +369,7 @@ pub fn update_issue_body(owner: &str, repo: &str, issue_number: u32, body: &str)
             body,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run gh issue edit --body: {err}"))
         })?;
@@ -367,7 +387,7 @@ pub fn update_issue_body(owner: &str, repo: &str, issue_number: u32, body: &str)
 }
 
 /// Check whether a comment with the given marker already exists on the issue.
-pub fn comment_marker_exists(
+pub async fn comment_marker_exists(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -387,6 +407,7 @@ pub fn comment_marker_exists(
             ".comments[].body",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to check issue comments: {err}"))
         })?;
@@ -406,7 +427,7 @@ pub fn comment_marker_exists(
 
 /// Post an idempotent comment on the issue. If a comment with the given marker
 /// already exists, skip posting.
-pub fn post_idempotent_comment(
+pub async fn post_idempotent_comment(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -415,7 +436,7 @@ pub fn post_idempotent_comment(
     body_text: &str,
 ) -> Result<()> {
     let marker = format!("<!-- ralph:task:{task_id}:{phase} -->");
-    if comment_marker_exists(owner, repo, issue_number, &marker)? {
+    if comment_marker_exists(owner, repo, issue_number, &marker).await? {
         return Ok(());
     }
 
@@ -432,6 +453,7 @@ pub fn post_idempotent_comment(
             &full_body,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to post comment on {}#{}: {err}",
@@ -452,7 +474,7 @@ pub fn post_idempotent_comment(
 }
 
 /// Post a comment on a pull request.
-pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> Result<()> {
+pub async fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
@@ -465,6 +487,7 @@ pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> R
             body,
         ])
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to run gh pr comment: {err}")))?;
 
     if !output.status.success() {
@@ -484,16 +507,16 @@ pub fn post_pr_comment(owner: &str, repo: &str, pr_number: u32, body: &str) -> R
 /// This is used when bot identity is unavailable and body-only marker lookup
 /// would be vulnerable to user spoofing.  Callers should include any marker
 /// text in `body` themselves.
-pub fn post_raw_issue_comment(
+pub async fn post_raw_issue_comment(
     owner: &str,
     repo: &str,
     issue_number: u32,
     body: &str,
 ) -> Result<()> {
-    post_raw_issue_comment_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, body)
+    post_raw_issue_comment_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, body).await
 }
 
-pub fn post_raw_issue_comment_with_gh_bin(
+pub async fn post_raw_issue_comment_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -512,6 +535,7 @@ pub fn post_raw_issue_comment_with_gh_bin(
             body,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to post raw comment on {full_repo}#{issue_number}: {err}"
@@ -530,13 +554,14 @@ pub fn post_raw_issue_comment_with_gh_bin(
 
 /// Check for an existing PR with the given head branch.
 /// Returns `Some(url)` if found, `None` otherwise.
-pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
+pub async fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
     let full_repo = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
             "pr", "list", "--repo", &full_repo, "--head", branch, "--json", "url", "-q", ".[0].url",
         ])
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to check existing PRs: {err}")))?;
 
     if !output.status.success() {
@@ -552,7 +577,7 @@ pub fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<Option<
 }
 
 /// Create a pull request. Returns the PR URL on success, or an error.
-pub fn create_pr(
+pub async fn create_pr(
     owner: &str,
     repo: &str,
     branch: &str,
@@ -570,6 +595,7 @@ pub fn create_pr(
     let output = Command::new("gh")
         .args(&args)
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
     if !output.status.success() {
@@ -588,16 +614,17 @@ pub fn create_pr(
 /// exists, otherwise falls back to `detect_base_branch` (which tries
 /// `origin/HEAD`, common default branch names, etc.).  Returns a typed error
 /// when no valid base ref can be resolved.
-pub fn has_commits_ahead_of_base(
+pub async fn has_commits_ahead_of_base(
     worktree_path: &std::path::Path,
     base_branch: &str,
 ) -> Result<bool> {
-    let base = resolve_ahead_base(worktree_path, base_branch)?;
+    let base = resolve_ahead_base(worktree_path, base_branch).await?;
     let range = format!("{base}..HEAD");
     let output = Command::new("git")
         .args(["rev-list", "--count", &range])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run git rev-list --count {range}: {err}"))
         })?;
@@ -626,25 +653,30 @@ pub fn has_commits_ahead_of_base(
 /// Tries `origin/{base_branch}` first, then falls back to auto-detection via
 /// `detect_base_branch`.  Returns an error only if no resolvable base ref can
 /// be found at all.
-fn resolve_ahead_base(worktree_path: &std::path::Path, configured_base: &str) -> Result<String> {
+async fn resolve_ahead_base(
+    worktree_path: &std::path::Path,
+    configured_base: &str,
+) -> Result<String> {
     // Try the configured base as a remote ref first.
     let candidate = format!("origin/{configured_base}");
     let check = Command::new("git")
         .args(["rev-parse", "--verify", &candidate])
         .current_dir(worktree_path)
-        .output();
+        .output()
+        .await;
     if check.map(|o| o.status.success()).unwrap_or(false) {
         return Ok(candidate);
     }
 
     // Configured base not found as remote ref — fall back to auto-detection.
-    let detected = detect_base_branch(worktree_path);
+    let detected = detect_base_branch(worktree_path).await;
 
     // Verify the detected ref actually resolves.
     let verify = Command::new("git")
         .args(["rev-parse", "--verify", &detected])
         .current_dir(worktree_path)
-        .output();
+        .output()
+        .await;
     if verify.map(|o| o.status.success()).unwrap_or(false) {
         return Ok(detected);
     }
@@ -656,12 +688,13 @@ fn resolve_ahead_base(worktree_path: &std::path::Path, configured_base: &str) ->
 }
 
 /// Mark a draft pull request as ready for review.
-pub fn mark_pr_ready(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+pub async fn mark_pr_ready(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let pr_number_str = pr_number.to_string();
     let output = Command::new("gh")
         .args(["pr", "ready", &pr_number_str, "--repo", &full_repo])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to run gh pr ready for {full_repo}#{pr_number}: {err}"
@@ -679,7 +712,7 @@ pub fn mark_pr_ready(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
 }
 
 /// Return whether a pull request is currently a draft.
-pub fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
+pub async fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
     let full_repo = format!("{owner}/{repo}");
     let pr_number_str = pr_number.to_string();
     let output = Command::new("gh")
@@ -693,6 +726,7 @@ pub fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
             "isDraft",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to run gh pr view for draft state on {full_repo}#{pr_number}: {err}"
@@ -711,12 +745,13 @@ pub fn is_pr_draft(owner: &str, repo: &str, pr_number: u32) -> Result<bool> {
 }
 
 /// Close a pull request.
-pub fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
+pub async fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
     let full_repo = format!("{owner}/{repo}");
     let pr_number_str = pr_number.to_string();
     let output = Command::new("gh")
         .args(["pr", "close", &pr_number_str, "--repo", &full_repo])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to run gh pr close for {full_repo}#{pr_number}: {err}"
@@ -737,12 +772,13 @@ pub fn close_pr(owner: &str, repo: &str, pr_number: u32) -> Result<()> {
 ///
 /// Returns `Ok(Some(stat))` on success, `Ok(None)` if the diff stat cannot be
 /// determined (e.g. no merge-base), or `Err` on execution failure.
-pub fn diff_stat(worktree_path: &std::path::Path) -> Result<Option<String>> {
-    let base = detect_base_branch(worktree_path);
+pub async fn diff_stat(worktree_path: &std::path::Path) -> Result<Option<String>> {
+    let base = detect_base_branch(worktree_path).await;
     let output = Command::new("git")
         .args(["diff", "--stat", &format!("{base}...HEAD")])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run git diff --stat: {err}"))
         })?;
@@ -761,7 +797,7 @@ pub fn diff_stat(worktree_path: &std::path::Path) -> Result<Option<String>> {
 
 /// Create a pull request using `--body-file` for large body content.
 /// Returns the PR URL on success, or an error.
-pub fn create_pr_with_body_file(
+pub async fn create_pr_with_body_file(
     owner: &str,
     repo: &str,
     branch: &str,
@@ -796,6 +832,7 @@ pub fn create_pr_with_body_file(
     let output = Command::new("gh")
         .args(&args)
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to create PR: {err}")))?;
 
     if !output.status.success() {
@@ -809,7 +846,7 @@ pub fn create_pr_with_body_file(
 }
 
 /// Edit an existing PR by URL using `--body-file` for large body content.
-pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
+pub async fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result<()> {
     let body_file_str = body_file.to_string_lossy();
     let output = Command::new("gh")
         .args([
@@ -822,6 +859,7 @@ pub fn edit_pr(pr_url: &str, title: &str, body_file: &std::path::Path) -> Result
             &body_file_str,
         ])
         .output()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to edit PR: {err}")))?;
 
     if !output.status.success() {
@@ -850,11 +888,12 @@ pub fn extract_pr_number(pr_url: &str) -> Option<u32> {
 /// Push with `--force-with-lease` from a worktree. Returns `Ok(())` on
 /// success, or an error. The caller can inspect the error message for
 /// lease rejection (see `is_lease_rejection`).
-pub fn push_force_with_lease(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+pub async fn push_force_with_lease(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["push", "--force-with-lease", "origin", branch])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run git push --force-with-lease: {err}"))
         })?;
@@ -883,11 +922,12 @@ pub fn is_lease_rejection(error_msg: &str) -> bool {
 /// The orchestrator may switch the worktree to a project-specific branch
 /// (e.g. `ralph/{project_id}`) during `ralph auto`, so the branch may differ
 /// from the one the daemon originally created (`ralph/daemon/{task_id}`).
-pub fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
+pub async fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to read current branch: {err}"))
         })?;
@@ -903,10 +943,12 @@ pub fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
 }
 
 /// Push the current branch to the remote from a worktree.
-pub fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
-    push_branch_with_git_bin("git", worktree_path, branch).map_err(|stderr| {
-        RalphError::Orchestration(format!("git push failed for branch {branch}: {stderr}"))
-    })
+pub async fn push_branch(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+    push_branch_with_git_bin("git", worktree_path, branch)
+        .await
+        .map_err(|stderr| {
+            RalphError::Orchestration(format!("git push failed for branch {branch}: {stderr}"))
+        })
 }
 
 /// Determine whether raw `git push` stderr indicates a transient failure that
@@ -1038,11 +1080,11 @@ pub fn is_retryable_push_error(err: &RalphError) -> bool {
 }
 
 /// Push the current branch with bounded retry for transient failures.
-pub fn push_branch_with_retry(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
-    push_branch_with_retry_impl("git", worktree_path, branch, &[10, 20, 40])
+pub async fn push_branch_with_retry(worktree_path: &std::path::Path, branch: &str) -> Result<()> {
+    push_branch_with_retry_impl("git", worktree_path, branch, &[10, 20, 40]).await
 }
 
-fn push_branch_with_retry_impl(
+async fn push_branch_with_retry_impl(
     git_bin: &str,
     worktree_path: &std::path::Path,
     branch: &str,
@@ -1055,7 +1097,7 @@ fn push_branch_with_retry_impl(
         .chain(std::iter::once(0))
         .enumerate()
     {
-        match push_branch_with_git_bin(git_bin, worktree_path, branch) {
+        match push_branch_with_git_bin(git_bin, worktree_path, branch).await {
             Ok(()) => return Ok(()),
             Err(stderr) => {
                 let attempt = attempt_index + 1;
@@ -1069,7 +1111,7 @@ fn push_branch_with_retry_impl(
                     "push-retry: push failed for branch {branch} in {} (attempt {attempt}/{total_attempts}), retrying in {delay_secs}s: {stderr}",
                     worktree_path.display()
                 );
-                thread::sleep(Duration::from_secs(delay_secs));
+                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
             }
         }
     }
@@ -1077,7 +1119,7 @@ fn push_branch_with_retry_impl(
     unreachable!()
 }
 
-fn push_branch_with_git_bin(
+async fn push_branch_with_git_bin(
     git_bin: &str,
     worktree_path: &std::path::Path,
     branch: &str,
@@ -1086,6 +1128,7 @@ fn push_branch_with_git_bin(
         .args(["push", "-u", "origin", branch])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| format!("failed to run git push: {err}"))?;
 
     if !output.status.success() {
@@ -1097,11 +1140,12 @@ fn push_branch_with_git_bin(
 }
 
 /// Returns true when the worktree has an `origin` remote configured.
-pub fn has_origin_remote(worktree_path: &std::path::Path) -> Result<bool> {
+pub async fn has_origin_remote(worktree_path: &std::path::Path) -> Result<bool> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to check origin remote: {err}"))
         })?;
@@ -1115,13 +1159,13 @@ pub fn has_origin_remote(worktree_path: &std::path::Path) -> Result<bool> {
 /// then checks for committed changes by comparing the merge-base of the
 /// default branch with the current HEAD. This ensures that committed changes
 /// on the task branch are detected even when the working tree is clean.
-pub fn has_diff(worktree_path: &std::path::Path) -> Result<bool> {
-    has_diff_with_base(worktree_path, None)
+pub async fn has_diff(worktree_path: &std::path::Path) -> Result<bool> {
+    has_diff_with_base(worktree_path, None).await
 }
 
 /// Check whether the task branch has diverged from the given base branch
 /// (or an auto-detected default if `base_branch` is `None`).
-pub fn has_diff_with_base(
+pub async fn has_diff_with_base(
     worktree_path: &std::path::Path,
     base_branch: Option<&str>,
 ) -> Result<bool> {
@@ -1130,6 +1174,7 @@ pub fn has_diff_with_base(
         .args(["diff", "--quiet", "HEAD"])
         .current_dir(worktree_path)
         .status()
+        .await
         .map_err(|err| RalphError::Orchestration(format!("failed to run git diff: {err}")))?;
 
     if !wt_status.success() {
@@ -1146,14 +1191,15 @@ pub fn has_diff_with_base(
             let check = Command::new("git")
                 .args(["rev-parse", "--verify", &candidate])
                 .current_dir(worktree_path)
-                .output();
+                .output()
+                .await;
             if check.map(|o| o.status.success()).unwrap_or(false) {
                 candidate
             } else {
-                detect_base_branch(worktree_path)
+                detect_base_branch(worktree_path).await
             }
         }
-        None => detect_base_branch(worktree_path),
+        None => detect_base_branch(worktree_path).await,
     };
 
     // 3. Compare committed changes: merge-base of base..HEAD
@@ -1161,6 +1207,7 @@ pub fn has_diff_with_base(
         .args(["diff", "--quiet", &format!("{base}...HEAD")])
         .current_dir(worktree_path)
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run git diff against base: {err}"))
         })?;
@@ -1188,12 +1235,13 @@ pub fn has_diff_with_base(
 }
 
 /// Try to detect the base/default branch for diff comparison.
-fn detect_base_branch(worktree_path: &std::path::Path) -> String {
+async fn detect_base_branch(worktree_path: &std::path::Path) -> String {
     // Try symbolic-ref of origin/HEAD
     if let Ok(output) = Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
         .current_dir(worktree_path)
         .output()
+        .await
     {
         if output.status.success() {
             let refname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -1214,7 +1262,8 @@ fn detect_base_branch(worktree_path: &std::path::Path) -> String {
         let check = Command::new("git")
             .args(["rev-parse", "--verify", candidate])
             .current_dir(worktree_path)
-            .output();
+            .output()
+            .await;
         if let Ok(output) = check {
             if output.status.success() {
                 return candidate.to_string();
@@ -1235,7 +1284,7 @@ fn is_invalid_revision_error(stderr_lower: &str) -> bool {
 
 /// Update labels for task completion: remove `ralph:in-progress`, add the
 /// given terminal label.
-pub fn update_terminal_labels_best_effort(
+pub async fn update_terminal_labels_best_effort(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -1254,7 +1303,8 @@ pub fn update_terminal_labels_best_effort(
             "--add-label",
             terminal_label,
         ])
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(output) if output.status.success() => {}
@@ -1279,11 +1329,11 @@ pub fn update_terminal_labels_best_effort(
 ///
 /// This is best-effort and intentionally non-failing: startup must continue
 /// even when label creation fails.
-pub fn ensure_labels_best_effort(owner: &str, repo: &str) {
-    ensure_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo);
+pub async fn ensure_labels_best_effort(owner: &str, repo: &str) {
+    ensure_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo).await;
 }
 
-pub fn ensure_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
+pub async fn ensure_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
     let full_repo = format!("{owner}/{repo}");
 
     for (name, color, description) in REQUIRED_LABELS {
@@ -1299,7 +1349,8 @@ pub fn ensure_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &s
                 "--description",
                 description,
             ])
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(output) if output.status.success() => {}
@@ -1350,7 +1401,7 @@ pub fn classify_lifecycle_labels(labels: &[String]) -> Vec<String> {
 ///
 /// Spec: "If issue has more than one lifecycle label, normalize to only
 /// `ralph:failed` and skip processing this poll cycle."
-pub fn normalize_multi_lifecycle_labels(
+pub async fn normalize_multi_lifecycle_labels(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -1365,12 +1416,12 @@ pub fn normalize_multi_lifecycle_labels(
         if label == "ralph:failed" {
             continue;
         }
-        remove_label_with_retry(owner, repo, issue_number, label)?;
+        remove_label_with_retry(owner, repo, issue_number, label).await?;
     }
 
     // Ensure ralph:failed is present
     if !lifecycle_labels.iter().any(|l| l == "ralph:failed") {
-        add_label_with_retry(owner, repo, issue_number, "ralph:failed")?;
+        add_label_with_retry(owner, repo, issue_number, "ralph:failed").await?;
     }
 
     Ok(true)
@@ -1380,24 +1431,29 @@ pub fn normalize_multi_lifecycle_labels(
 ///
 /// Removes `from_label` and adds `to_label`. Both operations are retried
 /// individually with bounded attempts and exponential backoff.
-pub fn swap_lifecycle_label(
+pub async fn swap_lifecycle_label(
     owner: &str,
     repo: &str,
     issue_number: u32,
     from_label: &str,
     to_label: &str,
 ) -> Result<()> {
-    remove_label_with_retry(owner, repo, issue_number, from_label)?;
-    add_label_with_retry(owner, repo, issue_number, to_label)?;
+    remove_label_with_retry(owner, repo, issue_number, from_label).await?;
+    add_label_with_retry(owner, repo, issue_number, to_label).await?;
     Ok(())
 }
 
 /// Add a label with retry-on-conflict/transient-failure behavior.
-pub fn add_label_with_retry(owner: &str, repo: &str, issue_number: u32, label: &str) -> Result<()> {
-    add_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label)
+pub async fn add_label_with_retry(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    label: &str,
+) -> Result<()> {
+    add_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label).await
 }
 
-pub fn add_label_with_retry_with_gh_bin(
+pub async fn add_label_with_retry_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1417,6 +1473,7 @@ pub fn add_label_with_retry_with_gh_bin(
                 label,
             ])
             .output()
+            .await
             .map_err(|err| {
                 RalphError::Orchestration(format!(
                     "failed to run gh issue edit --add-label {label}: {err}"
@@ -1436,7 +1493,7 @@ pub fn add_label_with_retry_with_gh_bin(
                 delay.as_millis(),
                 stderr.trim()
             );
-            thread::sleep(delay);
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -1450,16 +1507,16 @@ pub fn add_label_with_retry_with_gh_bin(
 }
 
 /// Remove a label with retry-on-conflict/transient-failure behavior.
-pub fn remove_label_with_retry(
+pub async fn remove_label_with_retry(
     owner: &str,
     repo: &str,
     issue_number: u32,
     label: &str,
 ) -> Result<()> {
-    remove_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label)
+    remove_label_with_retry_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number, label).await
 }
 
-pub fn remove_label_with_retry_with_gh_bin(
+pub async fn remove_label_with_retry_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1479,6 +1536,7 @@ pub fn remove_label_with_retry_with_gh_bin(
                 label,
             ])
             .output()
+            .await
             .map_err(|err| {
                 RalphError::Orchestration(format!(
                     "failed to run gh issue edit --remove-label {label}: {err}"
@@ -1498,7 +1556,7 @@ pub fn remove_label_with_retry_with_gh_bin(
                 delay.as_millis(),
                 stderr.trim()
             );
-            thread::sleep(delay);
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -1512,11 +1570,11 @@ pub fn remove_label_with_retry_with_gh_bin(
 }
 
 /// Fetch the current lifecycle labels for an issue from GitHub.
-pub fn fetch_issue_labels(owner: &str, repo: &str, issue_number: u32) -> Result<Vec<String>> {
-    fetch_issue_labels_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number)
+pub async fn fetch_issue_labels(owner: &str, repo: &str, issue_number: u32) -> Result<Vec<String>> {
+    fetch_issue_labels_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number).await
 }
 
-pub fn fetch_issue_labels_with_gh_bin(
+pub async fn fetch_issue_labels_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1534,6 +1592,7 @@ pub fn fetch_issue_labels_with_gh_bin(
             "labels",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!("failed to run gh issue view for labels: {err}"))
         })?;
@@ -1719,15 +1778,15 @@ pub struct IssueComment {
 /// Fetch all comments on an issue as structured data.
 ///
 /// Returns a list of [`IssueComment`] in chronological order.
-pub fn fetch_issue_comments(
+pub async fn fetch_issue_comments(
     owner: &str,
     repo: &str,
     issue_number: u32,
 ) -> Result<Vec<IssueComment>> {
-    fetch_issue_comments_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number)
+    fetch_issue_comments_with_gh_bin(DEFAULT_GH_BIN, owner, repo, issue_number).await
 }
 
-pub fn fetch_issue_comments_with_gh_bin(
+pub async fn fetch_issue_comments_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1745,6 +1804,7 @@ pub fn fetch_issue_comments_with_gh_bin(
             "comments",
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to fetch issue comments for {full_repo}#{issue_number}: {err}"
@@ -1805,14 +1865,15 @@ pub fn fetch_issue_comments_with_gh_bin(
 /// Resolve the GitHub login of the currently authenticated `gh` user.
 ///
 /// Uses `gh api user -q .login` and returns a non-empty login string.
-pub fn fetch_authenticated_login() -> Result<String> {
-    fetch_authenticated_login_with_gh_bin(DEFAULT_GH_BIN)
+pub async fn fetch_authenticated_login() -> Result<String> {
+    fetch_authenticated_login_with_gh_bin(DEFAULT_GH_BIN).await
 }
 
-pub fn fetch_authenticated_login_with_gh_bin(gh_bin: &str) -> Result<String> {
+pub async fn fetch_authenticated_login_with_gh_bin(gh_bin: &str) -> Result<String> {
     let output = Command::new(gh_bin)
         .args(["api", "user", "-q", ".login"])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to run gh api user for authenticated login: {err}"
@@ -1830,13 +1891,13 @@ pub fn fetch_authenticated_login_with_gh_bin(gh_bin: &str) -> Result<String> {
 }
 
 /// Check whether any comment on the issue contains the given marker string.
-pub fn find_comment_with_marker(
+pub async fn find_comment_with_marker(
     owner: &str,
     repo: &str,
     issue_number: u32,
     marker: &str,
 ) -> Result<Option<IssueComment>> {
-    let comments = fetch_issue_comments(owner, repo, issue_number)?;
+    let comments = fetch_issue_comments(owner, repo, issue_number).await?;
     Ok(comments.into_iter().find(|c| c.body.contains(marker)))
 }
 
@@ -1844,28 +1905,29 @@ pub fn find_comment_with_marker(
 /// marker already exists, skip posting and return the existing comment's ID.
 ///
 /// Returns the comment ID of the posted (or existing) comment.
-pub fn post_comment_with_marker(
+pub async fn post_comment_with_marker(
     owner: &str,
     repo: &str,
     issue_number: u32,
     marker: &str,
     body_text: &str,
 ) -> Result<Option<u64>> {
-    let meta = post_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text)?;
+    let meta =
+        post_comment_with_marker_metadata(owner, repo, issue_number, marker, body_text).await?;
     Ok(meta.map(|c| c.id))
 }
 
 /// Post a comment on an issue with a marker prefix and return full structured
 /// metadata (id, created_at, etc.). If a comment with the same marker already
 /// exists, skip posting and return the existing comment's metadata.
-pub fn post_comment_with_marker_metadata(
+pub async fn post_comment_with_marker_metadata(
     owner: &str,
     repo: &str,
     issue_number: u32,
     marker: &str,
     body_text: &str,
 ) -> Result<Option<IssueComment>> {
-    if let Some(existing) = find_comment_with_marker(owner, repo, issue_number, marker)? {
+    if let Some(existing) = find_comment_with_marker(owner, repo, issue_number, marker).await? {
         return Ok(Some(existing));
     }
 
@@ -1882,6 +1944,7 @@ pub fn post_comment_with_marker_metadata(
             &full_body,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to post marker comment on {full_repo}#{issue_number}: {err}"
@@ -1896,7 +1959,7 @@ pub fn post_comment_with_marker_metadata(
     }
 
     // Fetch back to get the full metadata of the newly posted comment.
-    find_comment_with_marker(owner, repo, issue_number, marker)
+    find_comment_with_marker(owner, repo, issue_number, marker).await
 }
 
 /// Find a comment with the given marker string authored by the specified bot login.
@@ -1904,7 +1967,7 @@ pub fn post_comment_with_marker_metadata(
 /// Bot-scoped lookup: only matches comments where `author_login == bot_login`
 /// AND the body contains the marker string.  User-authored comments with the
 /// same marker text are ignored, preventing marker spoofing.
-pub fn find_bot_comment_with_marker(
+pub async fn find_bot_comment_with_marker(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -1919,9 +1982,10 @@ pub fn find_bot_comment_with_marker(
         marker,
         bot_login,
     )
+    .await
 }
 
-pub fn find_bot_comment_with_marker_with_gh_bin(
+pub async fn find_bot_comment_with_marker_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1929,7 +1993,7 @@ pub fn find_bot_comment_with_marker_with_gh_bin(
     marker: &str,
     bot_login: &str,
 ) -> Result<Option<IssueComment>> {
-    let comments = fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number)?;
+    let comments = fetch_issue_comments_with_gh_bin(gh_bin, owner, repo, issue_number).await?;
     Ok(comments
         .into_iter()
         .find(|c| c.author_login == bot_login && c.body.contains(marker)))
@@ -1940,7 +2004,7 @@ pub fn find_bot_comment_with_marker_with_gh_bin(
 /// Only considers existing bot-authored comments when checking for duplicate
 /// markers.  User-authored spoof markers are ignored.  Returns `Some(id)` of
 /// the posted (or existing bot) comment.
-pub fn post_bot_comment_with_marker(
+pub async fn post_bot_comment_with_marker(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -1957,9 +2021,10 @@ pub fn post_bot_comment_with_marker(
         body_text,
         bot_login,
     )
+    .await
 }
 
-pub fn post_bot_comment_with_marker_with_gh_bin(
+pub async fn post_bot_comment_with_marker_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -1976,7 +2041,8 @@ pub fn post_bot_comment_with_marker_with_gh_bin(
         marker,
         body_text,
         bot_login,
-    )?;
+    )
+    .await?;
     Ok(meta.map(|c| c.id))
 }
 
@@ -1985,7 +2051,7 @@ pub fn post_bot_comment_with_marker_with_gh_bin(
 ///
 /// Only considers existing bot-authored comments when checking for duplicate
 /// markers.  User-authored spoof markers are ignored.
-pub fn post_bot_comment_with_marker_metadata(
+pub async fn post_bot_comment_with_marker_metadata(
     owner: &str,
     repo: &str,
     issue_number: u32,
@@ -2002,9 +2068,10 @@ pub fn post_bot_comment_with_marker_metadata(
         body_text,
         bot_login,
     )
+    .await
 }
 
-pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
+pub async fn post_bot_comment_with_marker_metadata_with_gh_bin(
     gh_bin: &str,
     owner: &str,
     repo: &str,
@@ -2020,7 +2087,9 @@ pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
         issue_number,
         marker,
         bot_login,
-    )? {
+    )
+    .await?
+    {
         return Ok(Some(existing));
     }
 
@@ -2037,6 +2106,7 @@ pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
             &full_body,
         ])
         .output()
+        .await
         .map_err(|err| {
             RalphError::Orchestration(format!(
                 "failed to post bot marker comment on {full_repo}#{issue_number}: {err}"
@@ -2052,14 +2122,15 @@ pub fn post_bot_comment_with_marker_metadata_with_gh_bin(
 
     // Fetch back to get the full metadata of the newly posted comment.
     find_bot_comment_with_marker_with_gh_bin(gh_bin, owner, repo, issue_number, marker, bot_login)
+        .await
 }
 
 /// Ensure PRD lifecycle labels exist in the repository (idempotent, best-effort).
-pub fn ensure_prd_labels_best_effort(owner: &str, repo: &str) {
-    ensure_prd_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo);
+pub async fn ensure_prd_labels_best_effort(owner: &str, repo: &str) {
+    ensure_prd_labels_best_effort_with_gh_bin(DEFAULT_GH_BIN, owner, repo).await;
 }
 
-pub fn ensure_prd_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
+pub async fn ensure_prd_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo: &str) {
     use crate::daemon::interactive_prd::PRD_LABELS;
     let full_repo = format!("{owner}/{repo}");
 
@@ -2076,7 +2147,8 @@ pub fn ensure_prd_labels_best_effort_with_gh_bin(gh_bin: &str, owner: &str, repo
                 "--description",
                 description,
             ])
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(output) if output.status.success() => {}
@@ -2205,8 +2277,8 @@ mod tests {
         assert!(is_invalid_revision_error("fatal: bad revision 'foo'"));
     }
 
-    #[test]
-    fn has_diff_returns_false_for_single_commit_head_tilde_base() {
+    #[tokio::test]
+    async fn has_diff_returns_false_for_single_commit_head_tilde_base() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path();
 
@@ -2218,7 +2290,9 @@ mod tests {
         git(repo, &["add", "README.md"]);
         git(repo, &["commit", "-m", "initial"]);
 
-        let diff = has_diff(repo).expect("has_diff should not error for invalid base revision");
+        let diff = has_diff(repo)
+            .await
+            .expect("has_diff should not error for invalid base revision");
         assert!(
             !diff,
             "single-commit fallback HEAD~1 should be treated as no diff"
@@ -2485,12 +2559,13 @@ mod tests {
         assert!(!is_retryable_push_error(&unknown));
     }
 
-    #[test]
-    fn push_branch_with_retry_impl_retries_transient_then_succeeds() {
+    #[tokio::test]
+    async fn push_branch_with_retry_impl_retries_transient_then_succeeds() {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_then_success");
 
-        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]).await;
         assert!(result.is_ok(), "expected retry flow to recover: {result:?}");
         assert_eq!(
             read_attempts(&attempts_file),
@@ -2499,12 +2574,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn push_branch_with_retry_impl_does_not_retry_permanent_failure() {
+    #[tokio::test]
+    async fn push_branch_with_retry_impl_does_not_retry_permanent_failure() {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "permanent_failure");
 
-        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]).await;
         assert!(result.is_err(), "expected permanent failure");
         assert_eq!(
             read_attempts(&attempts_file),
@@ -2513,12 +2589,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn push_branch_with_retry_impl_exhausts_retries_for_transient_failure() {
+    #[tokio::test]
+    async fn push_branch_with_retry_impl_exhausts_retries_for_transient_failure() {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_exhaustion");
 
-        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]).await;
         assert!(result.is_err(), "expected transient retry exhaustion");
         assert_eq!(
             read_attempts(&attempts_file),
@@ -2527,12 +2604,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn push_branch_with_retry_impl_classifies_on_stderr_not_branch_name() {
+    #[tokio::test]
+    async fn push_branch_with_retry_impl_classifies_on_stderr_not_branch_name() {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "transient_then_success");
 
-        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "fix/issue-403", &[0, 0, 0]);
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "fix/issue-403", &[0, 0, 0]).await;
         assert!(
             result.is_ok(),
             "transient stderr should retry regardless of branch name collision: {result:?}"
@@ -2546,7 +2624,8 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "permanent_failure");
         let result =
-            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/500-errors", &[0, 0, 0]);
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/500-errors", &[0, 0, 0])
+                .await;
         assert!(
             result.is_err(),
             "permanent stderr should fail even when branch name contains 500: {result:?}"
@@ -2558,12 +2637,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn push_branch_with_retry_impl_does_not_retry_unknown_failure() {
+    #[tokio::test]
+    async fn push_branch_with_retry_impl_does_not_retry_unknown_failure() {
         let tmp = tempdir().expect("tempdir");
         let (git_bin, attempts_file) = write_mock_git_binary(tmp.path(), "unknown_failure");
 
-        let result = push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]);
+        let result =
+            push_branch_with_retry_impl(&git_bin, tmp.path(), "feature/test", &[0, 0, 0]).await;
         assert!(result.is_err(), "expected unknown failure");
         assert_eq!(
             read_attempts(&attempts_file),

@@ -4,9 +4,23 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use crate::daemon::github::has_origin_remote;
 use crate::error::RalphError;
 use crate::Result;
+
+/// Synchronous check for whether the repo has an `origin` remote.
+///
+/// This is a sync equivalent of `github::has_origin_remote` for use in
+/// sync worktree functions that cannot call async code.
+fn has_origin_remote_sync(repo_root: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to check origin remote: {err}"))
+        })?;
+    Ok(output.status.success())
+}
 
 /// Return the base directory for daemon worktrees.
 pub fn worktrees_dir(workspace_root: &Path) -> PathBuf {
@@ -49,7 +63,7 @@ pub fn create_worktree(
 
     // Remote-first: fetch and use origin/HEAD as base ref, falling back to
     // origin/main, origin/master, or local HEAD for fresh/empty repos.
-    match has_origin_remote(repo_root) {
+    match has_origin_remote_sync(repo_root) {
         Ok(has_origin) => {
             if has_origin {
                 if let Err(err) = fetch_origin(repo_root, task_id) {
