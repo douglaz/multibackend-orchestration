@@ -4544,7 +4544,10 @@ pub(super) fn compute_merge_base_sha(repo_root: &Path, base_branch: &str) -> Opt
 
 pub(super) fn build_review_diff_command(merge_base_sha: &str) -> String {
     if merge_base_sha.is_empty() {
-        "git diff HEAD -- . ':(exclude).ralph'".to_owned()
+        // Fallback: diff from the root commit so the reviewer sees the full
+        // committed history instead of an empty working-tree diff.
+        "git diff $(git rev-list --max-parents=0 HEAD | head -1)..HEAD -- . ':(exclude).ralph'"
+            .to_owned()
     } else {
         format!("git diff {merge_base_sha}...HEAD -- . ':(exclude).ralph'")
     }
