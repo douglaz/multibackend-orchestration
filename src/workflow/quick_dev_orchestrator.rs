@@ -269,6 +269,7 @@ impl QuickDevOrchestrator {
             .unwrap_or_default();
 
         let mut last_review_feedback = String::new();
+        let mut pending_pre_commit_feedback: Option<String> = None;
 
         // When resuming at ApplyFixes, reconstruct reviewer feedback from the
         // latest changes-requested artifact so the apply-fixes prompt is not
@@ -308,12 +309,21 @@ impl QuickDevOrchestrator {
                     info!(loop_number, "quick-dev: PlanAndImplement phase");
 
                     let git_diff = current_git_diff(&self.workspace.root)?;
-                    let prompt = build_plan_implement_prompt(
+                    let mut prompt = build_plan_implement_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
                         &git_diff,
                     )?;
+
+                    // If re-entering after a pre-commit failure, append the
+                    // check output so the implementer knows what to fix.
+                    if let Some(feedback) = pending_pre_commit_feedback.take() {
+                        prompt.push_str("\n\n## Pre-Commit Check Failures\n\
+                             The following automated checks (fmt/clippy/build) failed after \
+                             reviewer approval. Fix these issues without changing unrelated logic:\n\n");
+                        prompt.push_str(&feedback);
+                    }
 
                     let impl_backend =
                         registry.get_or_create_for_role(implementer_spec, "implementer")?;
@@ -776,7 +786,8 @@ impl QuickDevOrchestrator {
                             || effective.workflow.pre_commit_clippy
                             || effective.workflow.pre_commit_nix_build;
 
-                        let pre_commit_passed = if any_pre_commit_check_enabled {
+                        // Returns Some(feedback) on failure, None on pass.
+                        let pre_commit_failure = if any_pre_commit_check_enabled {
                             if let Some(check_repo_root) = repo_root {
                                 let result = pre_commit_checks::run_pre_commit_checks(
                                     check_repo_root,
@@ -800,18 +811,18 @@ impl QuickDevOrchestrator {
                                             body: &result.feedback,
                                         },
                                     )?;
-                                    false
+                                    Some(result.feedback)
                                 } else {
-                                    true
+                                    None
                                 }
                             } else {
-                                true // no repo root, skip checks
+                                None // no repo root, skip checks
                             }
                         } else {
-                            true
+                            None
                         };
 
-                        if !pre_commit_passed {
+                        if let Some(ref failure_feedback) = pre_commit_failure {
                             info!(
                                 loop_number,
                                 "quick-dev: pre-commit checks failed after final review approval"
@@ -888,6 +899,9 @@ impl QuickDevOrchestrator {
 
                             review_iteration = 0;
                             current_qd_phase = QuickDevPhase::PlanAndImplement;
+                            // Capture the feedback so the next PlanAndImplement
+                            // prompt tells the implementer what to fix.
+                            pending_pre_commit_feedback = Some(failure_feedback.clone());
                             continue;
                         }
                         // --- End pre-commit check gate ---
