@@ -291,7 +291,11 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
     // commit pointer.  Only use `-B` (create-or-reset) for the migration
     // case where the branch does not exist yet.
     let branch_exists = Command::new("git")
-        .args(["rev-parse", "--verify", &format!("refs/heads/{expected_branch}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{expected_branch}"),
+        ])
         .current_dir(wt_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
