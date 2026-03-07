@@ -4,6 +4,255 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Shared PRD-stage response dispatcher for mock backends.
+///
+/// Expects an `INPUT` shell variable in scope containing full stdin.
+pub fn prd_mock_response_body() -> String {
+    r###"if grep -q "You are a product ideation specialist" <<< "$INPUT"; then
+  cat <<'EOF'
+## Core Concept
+Clear idea framing for the proposed product.
+
+## Target Users
+- Internal team
+
+## Key Problems Solved
+- Reduced manual burden
+
+## Proposed Features
+- A focused set of starter features
+
+## Success Metrics
+- Faster task completion
+
+## Constraints & Assumptions
+- Basic implementation assumptions
+EOF
+elif grep -q "You are a technical research analyst" <<< "$INPUT"; then
+  cat <<'EOF'
+## Market Context
+- Market overview
+
+## Technical Landscape
+- Existing approaches
+
+## Comparable Solutions
+- Baseline alternatives
+
+## Technical Feasibility
+- Feasible with current stack
+
+## Risk Assessment
+- Low risk scope
+EOF
+elif grep -q "You are a product strategist" <<< "$INPUT"; then
+  cat <<'EOF'
+## Product Vision
+- Vision summary
+
+## User Stories
+- User story example
+
+## Feature Prioritization
+- P0: core features
+
+## Architecture Overview
+- High-level architecture notes
+
+## MVP Scope
+- Core scope only
+
+## Open Questions
+- None
+EOF
+elif grep -q "You are a technical product manager" <<< "$INPUT"; then
+  cat <<'EOF'
+## Executive Summary
+- Summary
+
+## Goals & Non-Goals
+- Goals and boundaries
+
+## User Stories
+- User story
+
+## Functional Requirements
+- Feature requirements
+
+## Non-Functional Requirements
+- Performance and reliability
+
+## Technical Architecture
+- Architecture outline
+
+## Data Model
+- Data structures
+
+## API Design
+- API boundaries
+
+## Security Considerations
+- Secure auth
+
+## Testing Strategy
+- Unit and integration tests
+
+## Rollout Plan
+- Phased rollout
+
+## Success Metrics
+- Uptake and retention
+
+## Open Questions
+- None
+EOF
+elif grep -q "You are a requirements analyst" <<< "$INPUT"; then
+  cat <<'EOF'
+```json
+{
+  "missing_fields": [],
+  "ambiguities": [],
+  "questions": [],
+  "suggested_defaults": []
+}
+```
+EOF
+elif grep -q "You are a PRD reviewer." <<< "$INPUT"; then
+  cat <<'EOF'
+```json
+{
+  "valid": true,
+  "issues": []
+}
+```
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// POSIX backend script for `backend exec` tests; echoes stdin to stdout.
+pub fn backend_exec_echo_script() -> String {
+    r###"#!/bin/sh
+set -eu
+cat
+"###
+    .to_owned()
+}
+
+/// POSIX backend script that logs argv (one arg per line), consumes stdin, and exits 0.
+pub fn openrouter_arg_logging_script(log_path: &Path) -> String {
+    let quoted_log_path = shell_single_quote(&log_path.to_string_lossy());
+    format!(
+        r###"#!/bin/sh
+set -eu
+
+: > {quoted_log_path}
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> {quoted_log_path}
+done
+
+cat >/dev/null
+exit 0
+"###
+    )
+}
+
+/// Bash backend script that atomically increments a counter file and emits PRD output.
+pub fn prd_invocation_counting_script(counter_path: &Path) -> String {
+    let quoted_counter_path = shell_single_quote(&counter_path.to_string_lossy());
+    let response_body = prd_mock_response_body();
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+COUNTER_PATH={quoted_counter_path}
+LOCK_DIR="${{COUNTER_PATH}}.lock"
+
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+  sleep 0.01
+done
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+count=0
+if [ -f "$COUNTER_PATH" ]; then
+  count="$(cat "$COUNTER_PATH" 2>/dev/null || echo 0)"
+fi
+case "$count" in
+  ''|*[!0-9]*) count=0 ;;
+esac
+count=$((count + 1))
+printf '%s\n' "$count" > "$COUNTER_PATH"
+
+rmdir "$LOCK_DIR" 2>/dev/null || true
+trap - EXIT
+
+INPUT="$(cat)"
+{response_body}
+"###
+    )
+}
+
+/// Bash backend script that captures stdin to unique files and emits PRD output.
+pub fn prd_stdin_capturing_script(output_dir: &Path) -> String {
+    let quoted_output_dir = shell_single_quote(&output_dir.to_string_lossy());
+    let response_body = prd_mock_response_body();
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+OUTPUT_DIR={quoted_output_dir}
+mkdir -p "$OUTPUT_DIR"
+
+INPUT="$(cat)"
+capture_file="$OUTPUT_DIR/stdin-$(date +%s%N)-$$.md"
+suffix=0
+while [ -e "$capture_file" ]; do
+  suffix=$((suffix + 1))
+  capture_file="$OUTPUT_DIR/stdin-$(date +%s%N)-$$-$suffix.md"
+done
+printf '%s' "$INPUT" > "$capture_file"
+
+{response_body}
+"###
+    )
+}
+
+/// Bash mock script that mutates prompt.md once during planner invocation
+/// and otherwise behaves like `standard_mock_script`.
+pub fn prompt_mutating_mock_script(prompt_path: &Path) -> String {
+    let quoted_prompt_path = shell_single_quote(&prompt_path.to_string_lossy());
+    let sentinel_path = format!("{}.mutated-once", prompt_path.to_string_lossy());
+    let quoted_sentinel_path = shell_single_quote(&sentinel_path);
+    let mut script = standard_mock_script();
+    let injection = format!(
+        r###"INPUT="$(cat)"
+
+PROMPT_PATH={quoted_prompt_path}
+SENTINEL_PATH={quoted_sentinel_path}
+planner_invocation=0
+for arg in "$@"; do
+  case "$arg" in
+    *planner*) planner_invocation=1 ;;
+  esac
+done
+if printf '%s' "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  planner_invocation=1
+fi
+if [ "$planner_invocation" -eq 1 ] && [ ! -f "$SENTINEL_PATH" ]; then
+  printf '\n<!-- prompt mutated by validate mock -->\n' >> "$PROMPT_PATH"
+  : > "$SENTINEL_PATH"
+fi
+"###
+    );
+
+    script = script.replacen("INPUT=\"$(cat)\"\n", &injection, 1);
+    script
+}
+
 pub fn standard_mock_script() -> String {
     r###"#!/usr/bin/env bash
 set -euo pipefail

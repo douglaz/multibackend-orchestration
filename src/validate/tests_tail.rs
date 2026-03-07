@@ -1,5 +1,9 @@
 use super::*;
 
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::Duration;
+
 use crate::validate::assertions::{assert_exit_code, assert_stdout_contains};
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::standard_mock_script;
@@ -21,6 +25,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "tail::no_project_fails_gracefully",
             func: no_project_fails_gracefully,
+        },
+        ConformanceTest {
+            name: "tail::follow_flag_accepted",
+            func: follow_flag_accepted,
         },
     ]
 }
@@ -128,6 +136,76 @@ fn no_project_fails_gracefully(h: &RalphHarness) -> TestResult {
             "expected no-project error to mention active project, got:\n{combined}"
         );
     })
+}
+
+fn follow_flag_accepted(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-104";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed");
+
+        let child = Command::new(&h.ralph_bin)
+            .args(["tail", "--follow"])
+            .current_dir(&h.repo_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn ralph tail --follow");
+        let mut child_guard = ChildGuard::new(child);
+
+        thread::sleep(Duration::from_millis(500));
+
+        let liveness = child_guard
+            .child_mut()
+            .try_wait()
+            .expect("try_wait should succeed");
+        assert!(
+            liveness.is_none(),
+            "expected `tail --follow` to still be running after 500ms, got: {liveness:?}"
+        );
+
+        let output = child_guard.kill_and_wait_with_output();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        assert!(
+            !stderr.contains("unrecognized")
+                && !stderr.contains("unknown option")
+                && !stderr.contains("unexpected argument '--follow'"),
+            "expected no unknown/unrecognized flag error for --follow, got stderr:\n{stderr}"
+        );
+    })
+}
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child process already consumed")
+    }
+
+    fn kill_and_wait_with_output(&mut self) -> Output {
+        let mut child = self.child.take().expect("child process already consumed");
+        let _ = child.kill();
+        child
+            .wait_with_output()
+            .expect("wait_with_output should succeed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {

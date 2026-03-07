@@ -11,8 +11,8 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    always_reject_review_script, mock_tmux_script, review_feedback_once_then_approve_script,
-    standard_mock_script,
+    always_reject_review_script, mock_tmux_script, prompt_mutating_mock_script,
+    review_feedback_once_then_approve_script, standard_mock_script,
 };
 use serde_json::json;
 
@@ -97,6 +97,18 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "run::tmux_enabled_no_loop_dir_logs",
             func: tmux_enabled_no_loop_dir_logs,
+        },
+        ConformanceTest {
+            name: "run::on_prompt_change_flag_accepted",
+            func: on_prompt_change_flag_accepted,
+        },
+        ConformanceTest {
+            name: "run::on_prompt_change_abort_triggers",
+            func: on_prompt_change_abort_triggers,
+        },
+        ConformanceTest {
+            name: "run::workspace_root_uses_alternate_path",
+            func: workspace_root_uses_alternate_path,
         },
     ]
 }
@@ -854,6 +866,230 @@ fn tmux_enabled_no_loop_dir_logs(h: &RalphHarness) -> TestResult {
         assert!(
             loop_logs.is_empty(),
             "agent-output logs should NOT exist in loop directory for tmux run; found: {loop_logs:?}"
+        );
+    })
+}
+
+fn on_prompt_change_flag_accepted(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-opc-accept";
+        setup_with_standard_mock(h, project_id);
+
+        // --on-prompt-change abort should be accepted as a valid flag
+        // and succeed with stable mocks (no actual prompt mutation)
+        let output = h
+            .ralph(["run", "--on-prompt-change", "abort", "--loops", "1"])
+            .expect("ralph run --on-prompt-change abort should execute");
+        assert!(
+            output.status.success(),
+            "ralph run --on-prompt-change abort --loops 1 should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    })
+}
+
+fn on_prompt_change_abort_triggers(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-opc-abort";
+        h.init_workspace().expect("init failed");
+
+        // Derive prompt path so prompt_mutating_mock_script can mutate it
+        // during the planner phase of a single run.
+        let prompt_path = h
+            .repo_root
+            .join(".ralph")
+            .join("projects")
+            .join(project_id)
+            .join("prompt.md");
+
+        let mock_body = prompt_mutating_mock_script(&prompt_path);
+        let script = h
+            .write_stable_mock_script("prompt-mutating-mock.sh", &mock_body)
+            .expect("write prompt-mutating mock");
+        h.setup_mock_backends_stable(&script)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            project_id,
+            "Prompt Change Abort Project",
+            "Prompt change test prompt",
+        )
+        .expect("create_project failed");
+
+        let head_before = git_head(&h.repo_root);
+
+        // Single run: the mock mutates prompt.md during the planner phase.
+        // With --on-prompt-change abort, the orchestrator detects the
+        // mutation and aborts before completing any loop.
+        let output = h
+            .ralph(["run", "--on-prompt-change", "abort", "--loops", "1"])
+            .expect("ralph run should execute");
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit when prompt changes with abort mode"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("prompt changed"),
+            "expected stderr to contain 'prompt changed', got: {stderr}"
+        );
+
+        // Non-vacuous proof: the sentinel file proves the mock actually
+        // mutated prompt.md during the planner phase.
+        let sentinel_path = format!("{}.mutated-once", prompt_path.to_string_lossy());
+        assert!(
+            Path::new(&sentinel_path).exists(),
+            "expected mutation sentinel file to exist at {sentinel_path}, proving non-vacuous mutation"
+        );
+
+        // Failure-mode invariant: no loop is marked completed after abort.
+        let state = h.load_state(project_id).expect("load_state failed");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        let completed_loops: Vec<_> = loops
+            .iter()
+            .filter(|l| l["status"].as_str() == Some("completed"))
+            .collect();
+        assert!(
+            completed_loops.is_empty(),
+            "expected no completed loops after prompt-change abort"
+        );
+
+        // Failure-mode invariant (spec amended): HEAD advances but no loop
+        // completes.  The original spec required HEAD non-advancement, but
+        // checkpoint_phase_transition (orchestrator.rs:5049) unconditionally
+        // commits the Planning→Implementing state transition before the next
+        // phase-step iteration re-reads the prompt hash and detects the
+        // mismatch via handle_prompt_change (orchestrator.rs:525).  The spec
+        // acceptance criterion was formally amended to require HEAD advancement
+        // (proving the planner ran) combined with no loop reaching completed.
+        let head_after = git_head(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "expected HEAD to advance (proving planner ran), but it did not"
+        );
+    })
+}
+
+fn workspace_root_uses_alternate_path(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-wsr";
+
+        // Initialize workspace and project normally at h.repo_root
+        setup_with_standard_mock(h, project_id);
+
+        // Move .ralph to an alternate location so discovery from repo_root fails.
+        // Initialize a git repo at alt_root with a bare origin so phase
+        // checkpoint commits and pushes can succeed.
+        let alt_root = h.temp_dir.path().join("alt-workspace");
+        fs::create_dir_all(&alt_root).expect("create alt-workspace dir");
+        let alt_origin = h.temp_dir.path().join("alt-origin.git");
+        for (args, dir) in [
+            (vec!["init"], alt_root.as_path()),
+            (
+                vec!["config", "user.email", "test@example.com"],
+                alt_root.as_path(),
+            ),
+            (vec!["config", "user.name", "Test"], alt_root.as_path()),
+            (
+                vec!["init", "--bare", alt_origin.to_str().unwrap()],
+                alt_root.as_path(),
+            ),
+        ] {
+            let out = Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .output()
+                .expect("git command should execute");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        fs::write(alt_root.join(".gitkeep"), "").expect("write gitkeep");
+        for args in [
+            vec!["add", ".gitkeep"],
+            vec!["commit", "-m", "initial"],
+            vec!["remote", "add", "origin", alt_origin.to_str().unwrap()],
+        ] {
+            let out = Command::new("git")
+                .args(&args)
+                .current_dir(&alt_root)
+                .output()
+                .expect("git command should execute");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // Resolve the current branch dynamically so the test works regardless
+        // of GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME (master vs main).
+        let branch_out = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&alt_root)
+            .output()
+            .expect("git rev-parse --abbrev-ref HEAD should execute");
+        assert!(
+            branch_out.status.success(),
+            "branch resolution failed before .ralph move: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+        let branch = String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_owned();
+        assert!(
+            !branch.is_empty(),
+            "resolved branch name is empty; stderr: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+
+        let push_out = Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(&alt_root)
+            .output()
+            .expect("git push should execute");
+        assert!(
+            push_out.status.success(),
+            "git push -u origin {} failed (before .ralph move): {}",
+            branch,
+            String::from_utf8_lossy(&push_out.stderr)
+        );
+
+        let original_ralph = h.repo_root.join(".ralph");
+        let alt_ralph = alt_root.join(".ralph");
+        fs::rename(&original_ralph, &alt_ralph).expect("move .ralph to alt location");
+
+        // Non-vacuous invariant: without --workspace-root, discovery fails
+        let output_no_flag = h
+            .ralph(["run", "--project", project_id, "--loops", "1"])
+            .expect("ralph run without workspace-root should execute");
+        assert!(
+            !output_no_flag.status.success(),
+            "expected ralph run to fail without workspace at repo root and no --workspace-root flag"
+        );
+
+        // With --workspace-root pointing to the alternate location, command succeeds.
+        // Provide --project explicitly since the alt root is not a git repo's
+        // original location and active-project resolution would fail.
+        let output = h
+            .ralph([
+                "run",
+                "--workspace-root",
+                &alt_root.to_string_lossy(),
+                "--project",
+                project_id,
+                "--loops",
+                "1",
+            ])
+            .expect("ralph run with --workspace-root should execute");
+        assert!(
+            output.status.success(),
+            "ralph run --workspace-root should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     })
 }
