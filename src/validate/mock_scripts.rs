@@ -1434,8 +1434,8 @@ esac
 }
 
 /// Mock `ralph` script that switches the worktree to a different branch before
-/// creating a commit. Simulates how the orchestrator switches from the daemon
-/// branch (`ralph/daemon/{task_id}`) to a project branch during `ralph auto`.
+/// creating a commit. Simulates how the orchestrator switches to a project
+/// branch during `ralph auto`.
 pub fn daemon_mock_ralph_with_branch_switch_script() -> String {
     r###"#!/bin/sh
 case "$1" in

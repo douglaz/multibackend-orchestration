@@ -1356,6 +1356,10 @@ async fn dispatch_task(
 ) -> Result<ChildHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
+    let branch_name = crate::git::branch::resolve_branch_name(
+        &config.global_config.git.branch_format,
+        &project_id,
+    );
 
     bootstrap::ensure_repo_ready(&config.repo_root, Some(repo_root_lock.clone())).await?;
 
@@ -1373,9 +1377,12 @@ async fn dispatch_task(
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
+        let branch_name_clone = branch_name.clone();
         let lock = Some(repo_root_lock.clone());
-        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid, lock))
-            .await?
+        spawn_blocking_op(move || {
+            worktree::create_worktree(&repo_root, &ws_root, &tid, &branch_name_clone, lock)
+        })
+        .await?
     };
 
     // Clean worktree of any dirty files from previous runs
@@ -1499,9 +1506,6 @@ async fn dispatch_task(
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-
-    // Determine branch name for the child handle
-    let branch_name = format!("ralph/daemon/{task_id}");
 
     // Ignore stale artifacts left from prior runs.  Subtract 2 seconds to
     // tolerate filesystems that truncate mtime to whole-second granularity

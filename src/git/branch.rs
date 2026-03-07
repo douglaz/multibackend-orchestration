@@ -782,9 +782,9 @@ mod tests {
         let local_default = git_output(&work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
         let head_sha = git_output(&work_dir, &["rev-parse", "HEAD"]);
 
-        // The worktree would be checked out on a daemon branch.
+        // The worktree starts on the project branch (ralph/issue-{N}).
         // Simulate that by creating a separate branch.
-        git_ok(&work_dir, &["checkout", "-b", "ralph/daemon/test-task"]);
+        git_ok(&work_dir, &["checkout", "-b", "ralph/issue-1"]);
 
         // Call sync_project_branch with "master" as configured base.
         // The remote is empty — should create "master" locally from HEAD

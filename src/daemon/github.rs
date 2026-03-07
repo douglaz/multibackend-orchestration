@@ -920,9 +920,8 @@ pub fn is_lease_rejection(error_msg: &str) -> bool {
 
 /// Read the current branch name from a worktree.
 ///
-/// The orchestrator may switch the worktree to a project-specific branch
-/// (e.g. `ralph/{project_id}`) during `ralph auto`, so the branch may differ
-/// from the one the daemon originally created (`ralph/daemon/{task_id}`).
+/// The worktree is created on the project branch (e.g. `ralph/issue-{N}`)
+/// and `sync_project_branch` keeps it there throughout the task lifecycle.
 pub async fn current_branch(worktree_path: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
