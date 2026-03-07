@@ -235,7 +235,7 @@ impl QuickDevOrchestrator {
         max_review_iterations: u32,
         max_final_review_retries: u32,
         skip_commit: bool,
-        _repo_root: Option<&Path>,
+        repo_root: Option<&Path>,
     ) -> Result<OrchestrationResult> {
         let mut current_qd_phase = starting_phase;
         let mut review_iteration: u32 = state.quick_dev_review_iteration;
@@ -683,7 +683,7 @@ impl QuickDevOrchestrator {
                     // Each with fresh context (no session reuse)
 
                     // --- Implementer final review ---
-                    let impl_final_prompt = build_final_review_prompt(effective, &prompt_content)?;
+                    let impl_final_prompt = build_final_review_prompt(effective, &prompt_content, repo_root)?;
                     let impl_backend =
                         registry.get_or_create_for_role(implementer_spec, "implementer")?;
                     let mut impl_fr_log = LogWriter::open(
@@ -726,7 +726,7 @@ impl QuickDevOrchestrator {
                     )?;
 
                     // --- Reviewer final review (fresh context) ---
-                    let rev_final_prompt = build_final_review_prompt(effective, &prompt_content)?;
+                    let rev_final_prompt = build_final_review_prompt(effective, &prompt_content, repo_root)?;
                     let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
                     let mut rev_fr_log = LogWriter::open(
                         log_dir,
@@ -1215,13 +1215,29 @@ fn build_apply_fixes_prompt(
     build_quick_dev_apply_fixes_prompt(&effective.templates.quick_dev_apply_fixes, &vars)
 }
 
-fn build_final_review_prompt(effective: &EffectiveConfig, prompt_content: &str) -> Result<String> {
+fn build_final_review_prompt(
+    effective: &EffectiveConfig,
+    prompt_content: &str,
+    repo_root: Option<&Path>,
+) -> Result<String> {
+    use crate::workflow::orchestrator::{build_review_diff_command, compute_merge_base_sha};
+
     let mut vars = BTreeMap::new();
     vars.insert(
         "system_guardrails".to_owned(),
         QUICK_DEV_REVIEWER_GUARDRAILS.to_owned(),
     );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
+
+    let base_branch = effective.global.git.base_branch.clone();
+    vars.insert("base_branch".to_owned(), base_branch.clone());
+    let merge_base_sha = repo_root
+        .and_then(|root| compute_merge_base_sha(root, &base_branch))
+        .unwrap_or_default();
+    let review_diff_command = build_review_diff_command(&merge_base_sha);
+    vars.insert("merge_base_sha".to_owned(), merge_base_sha);
+    vars.insert("review_diff_command".to_owned(), review_diff_command);
+
     let mut prompt = render_template_with_fallback(
         &effective.templates.final_reviewer,
         &vars,

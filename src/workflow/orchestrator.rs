@@ -82,12 +82,13 @@ const REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtim
 - Return `# Review: SUGGESTIONS` only for concrete unmet criteria, regressions, or quality issues."#;
 
 const FINAL_REVIEWER_GUARDRAILS: &str = r#"- You have full access to the codebase. Use your tools to read files, run git commands, and explore the source code.
-- Run `git diff <base_branch>...HEAD -- . ':(exclude).ralph'` to see all source changes, then read key files to review them.
 - Do a broad, open-ended code review. Do not limit yourself to any specific category of issues — look for anything that is wrong, unsafe, or broken.
 - Evaluate project-wide outcomes against the master prompt.
-- Propose only concrete, high-signal amendments with clear affected files.
+- Propose only concrete, high-signal amendments with clear affected files and priority tags (`[P0]`–`[P3]`).
 - Use globally unique amendment IDs within your response.
-- If this review round follows an amendment round, read each prior amendment's acceptance criteria and verify the implementation satisfies them. Do not rely solely on the implementer's self-reported changes — trace the actual code paths to confirm correctness."#;
+- If this review round follows an amendment round, verify prior amendments via code tracing — do not rely solely on the implementer's self-reported changes.
+- Ignore trivial style unless it obscures meaning or violates documented standards.
+- One amendment per discrete, actionable issue."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct FinalReviewConfigSnapshot {
@@ -3533,6 +3534,7 @@ async fn run_final_review_phase(
                 prompt_content,
                 reviewer_backend_impl.name(),
                 &planner_backend_name,
+                repo_root_ref,
             )?;
             // Session reuse: compute bootstrap hash and resolve session
             let fr_bootstrap = compute_bootstrap_hash(
@@ -4464,6 +4466,7 @@ fn build_final_reviewer_prompt(
     prompt_content: &str,
     backend: &str,
     opposite_backend: &str,
+    repo_root: Option<&Path>,
 ) -> Result<String> {
     let template_source = load_template_source(
         &effective.templates.final_reviewer,
@@ -4485,6 +4488,15 @@ fn build_final_reviewer_prompt(
         "system_guardrails".to_owned(),
         FINAL_REVIEWER_GUARDRAILS.to_owned(),
     );
+
+    let base_branch = effective.global.git.base_branch.clone();
+    vars.insert("base_branch".to_owned(), base_branch.clone());
+    let merge_base_sha = repo_root
+        .and_then(|root| compute_merge_base_sha(root, &base_branch))
+        .unwrap_or_default();
+    let review_diff_command = build_review_diff_command(&merge_base_sha);
+    vars.insert("merge_base_sha".to_owned(), merge_base_sha);
+    vars.insert("review_diff_command".to_owned(), review_diff_command);
 
     let rendered = render_template_with_fallback(
         &effective.templates.final_reviewer,
@@ -4514,6 +4526,28 @@ fn build_final_reviewer_prompt(
         &state_summary,
     );
     Ok(prompt)
+}
+
+pub(super) fn compute_merge_base_sha(repo_root: &Path, base_branch: &str) -> Option<String> {
+    use crate::git::branch::remote_ref_exists;
+    use crate::git::commit::merge_base;
+
+    let remote_ref = format!("origin/{base_branch}");
+    if remote_ref_exists(repo_root, &remote_ref).unwrap_or(false) {
+        if let Ok(sha) = merge_base(repo_root, &remote_ref, "HEAD") {
+            return Some(sha);
+        }
+    }
+    // Fallback: try local branch name (works in local-only repos without a remote).
+    merge_base(repo_root, base_branch, "HEAD").ok()
+}
+
+pub(super) fn build_review_diff_command(merge_base_sha: &str) -> String {
+    if merge_base_sha.is_empty() {
+        "git diff HEAD -- . ':(exclude).ralph'".to_owned()
+    } else {
+        format!("git diff {merge_base_sha}...HEAD -- . ':(exclude).ralph'")
+    }
 }
 
 fn build_planner_position_prompt(
