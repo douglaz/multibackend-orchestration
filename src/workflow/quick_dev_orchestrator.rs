@@ -1363,7 +1363,7 @@ fn build_final_review_prompt(
     let mut vars = BTreeMap::new();
     vars.insert(
         "system_guardrails".to_owned(),
-        QUICK_DEV_REVIEWER_GUARDRAILS.to_owned(),
+        QUICK_DEV_FINAL_REVIEWER_GUARDRAILS.to_owned(),
     );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
 
@@ -1426,8 +1426,14 @@ const QUICK_DEV_IMPLEMENTER_GUARDRAILS: &str = r#"- Keep edits scoped to this lo
 - If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits."#;
 
 const QUICK_DEV_REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
-- Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop.
-- If criteria are already satisfied and no code change is required, return the satisfied verdict with evidence."#;
+- Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop."#;
+
+const QUICK_DEV_FINAL_REVIEWER_GUARDRAILS: &str = r#"- You have full access to the codebase. Use your tools to read files, run git commands, and explore the source code.
+- Do a broad, open-ended code review. Do not limit yourself to any specific category of issues — look for anything that is wrong, unsafe, or broken.
+- Evaluate project-wide outcomes against the master prompt.
+- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
+- Propose only concrete, high-signal amendments with clear affected files and priority tags (`[P0]`–`[P3]`).
+- One amendment per discrete, actionable issue."#;
 
 // ---------------------------------------------------------------------------
 // Tests
