@@ -683,7 +683,8 @@ impl QuickDevOrchestrator {
                     // Each with fresh context (no session reuse)
 
                     // --- Implementer final review ---
-                    let impl_final_prompt = build_final_review_prompt(effective, &prompt_content, repo_root)?;
+                    let impl_final_prompt =
+                        build_final_review_prompt(effective, &prompt_content, repo_root)?;
                     let impl_backend =
                         registry.get_or_create_for_role(implementer_spec, "implementer")?;
                     let mut impl_fr_log = LogWriter::open(
@@ -726,7 +727,8 @@ impl QuickDevOrchestrator {
                     )?;
 
                     // --- Reviewer final review (fresh context) ---
-                    let rev_final_prompt = build_final_review_prompt(effective, &prompt_content, repo_root)?;
+                    let rev_final_prompt =
+                        build_final_review_prompt(effective, &prompt_content, repo_root)?;
                     let rev_backend = registry.get_or_create_for_role(reviewer_spec, "reviewer")?;
                     let mut rev_fr_log = LogWriter::open(
                         log_dir,
