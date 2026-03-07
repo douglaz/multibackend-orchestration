@@ -99,7 +99,10 @@ fn disabled_skips_checks(h: &RalphHarness) -> TestResult {
         let project_id = "issue-172-disabled";
         h.init_workspace().expect("init failed");
         let script_path = h
-            .write_mock_script("pre-commit-disabled-test.sh", &disabled_checks_mock_script())
+            .write_mock_script(
+                "pre-commit-disabled-test.sh",
+                &disabled_checks_mock_script(),
+            )
             .expect("failed to write mock script");
         h.setup_mock_backends_stable(&script_path)
             .expect("setup_mock_backends_stable failed");
