@@ -409,7 +409,8 @@ fn build_ralph_quick_dev_run_command(
 /// Run a synchronous command with a timeout. Returns `Ok(output)` if the
 /// command completes within the deadline, or an error on timeout/failure.
 ///
-/// Stdout and stderr are piped so the caller can inspect them.
+/// Stdout and stderr are piped and drained concurrently via reader threads
+/// to prevent deadlocks when child output exceeds OS pipe buffer capacity.
 pub fn run_command_with_timeout(
     cmd: &mut std::process::Command,
     timeout: Duration,
@@ -422,21 +423,38 @@ pub fn run_command_with_timeout(
             crate::error::RalphError::Orchestration(format!("failed to spawn command: {err}"))
         })?;
 
+    // Take ownership of stdout/stderr handles and drain them in background
+    // threads. This prevents the child from blocking on a full pipe buffer.
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || -> Vec<u8> {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_handle {
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+        }
+        buf
+    });
+
+    let stderr_thread = std::thread::spawn(move || -> Vec<u8> {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_handle {
+            let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+        }
+        buf
+    });
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                let output = child.wait_with_output().map_err(|err| {
-                    crate::error::RalphError::Orchestration(format!(
-                        "failed to collect command output: {err}"
-                    ))
-                })?;
-                return Ok(output);
-            }
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Join threads to collect partial output even on timeout
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
                     return Err(crate::error::RalphError::Orchestration(
                         "command timed out".to_owned(),
                     ));
@@ -444,12 +462,25 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 return Err(crate::error::RalphError::Orchestration(format!(
                     "failed to check command status: {err}"
                 )));
             }
         }
-    }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Check if a process with the given PID exists.
@@ -948,6 +979,26 @@ mod tests {
                 OsStr::new("--workspace-root"),
                 OsStr::new("/tmp/worktree"),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_high_output_no_false_timeout() {
+        use super::run_command_with_timeout;
+
+        // Generate >128 KB of output (well above typical 64 KB pipe buffer).
+        // Without concurrent draining, the child blocks on write and is
+        // killed on timeout — a false failure.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "seq 1 50000"]);
+        let result = run_command_with_timeout(&mut cmd, Duration::from_secs(30));
+        let output = result.expect("high-output command should not time out");
+        assert!(output.status.success(), "command should exit 0");
+        assert!(
+            output.stdout.len() > 128 * 1024,
+            "expected >128KB stdout, got {} bytes",
+            output.stdout.len()
         );
     }
 

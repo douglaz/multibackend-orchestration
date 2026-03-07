@@ -93,8 +93,28 @@ fn config_get_set(h: &RalphHarness) -> TestResult {
 
 fn disabled_skips_checks(h: &RalphHarness) -> TestResult {
     run_case(|| {
+        // Use a Rust fixture (Cargo.toml + badly formatted code) so that
+        // checks *would* fail if they ran. With checks disabled, the loop
+        // must commit without reloop.
         let project_id = "issue-172-disabled";
-        setup_project(h, project_id);
+        h.init_workspace().expect("init failed");
+        let script_path = h
+            .write_mock_script("pre-commit-disabled-test.sh", &disabled_checks_mock_script())
+            .expect("failed to write mock script");
+        h.setup_mock_backends_stable(&script_path)
+            .expect("setup_mock_backends_stable failed");
+        h.create_project(
+            project_id,
+            "Disabled Pre-Commit Checks Test",
+            "Test prompt for disabled pre-commit checks with Rust fixture",
+        )
+        .expect("create_project failed");
+
+        // Disable QA and final review to keep the test simple
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("config set qa_enabled failed");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("config set final_review_enabled failed");
 
         // Disable all pre-commit checks
         h.ralph_ok(["config", "set", "workflow.pre_commit_fmt", "false"])
@@ -335,6 +355,134 @@ elif echo "$INPUT" | grep -q "You are a project completion validator."; then
 
 The project satisfies all requirements:
 - Fmt test requirement: satisfied
+EOF
+  else
+    cat <<'EOF'
+# Verdict: CONTINUE
+
+## Missing Requirements
+1. Additional feature remains.
+
+## Recommended Next Features
+1. Implement another feature.
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a prompt reviewer"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- None
+
+## Refined Prompt
+Refined prompt from mock reviewer.
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Mock script that creates a Cargo.toml + badly formatted Rust code.
+/// Used by `disabled_skips_checks` to prove that the config toggle actually
+/// matters: the same fixture would fail cargo fmt if checks were enabled.
+fn disabled_checks_mock_script() -> String {
+    r###"#!/bin/sh
+set -eu
+
+INPUT="$(cat)"
+
+if echo "$INPUT" | grep -q "You are a software architect planning features for a project."; then
+  if [ "${RALPH_COMPLETE:-no}" = "yes" ]; then
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  else
+    cat <<'EOF'
+# Feature: Bad Format Feature
+
+## Description
+Mock feature that produces badly formatted Rust code.
+
+## Acceptance Criteria
+- [ ] src/main.rs exists with valid Rust code
+
+## Files to Modify/Create
+- `src/main.rs` - main entry point
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  fi
+elif echo "$INPUT" | grep -q "You are a software developer implementing a feature specification."; then
+  if echo "$INPUT" | grep -q "## Review Feedback" && ! echo "$INPUT" | grep -q "(none)"; then
+    cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Addressed review feedback.
+
+## Could Not Address
+- None
+EOF
+  else
+    cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created a Rust project with src/main.rs.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+    # Create Cargo.toml and BADLY formatted src/main.rs
+    cat > Cargo.toml <<'TOML'
+[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+TOML
+    mkdir -p src
+    cat > src/main.rs <<'RUST'
+fn main(){println!("hello");}
+RUST
+    git add Cargo.toml src/main.rs
+  fi
+elif echo "$INPUT" | grep -q "You are a code reviewer ensuring implementations match specifications."; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] src/main.rs exists with valid Rust code
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: apply bad format implementation
+EOF
+elif echo "$INPUT" | grep -q "You are a project completion validator."; then
+  if [ "${RALPH_COMPLETE:-no}" = "yes" ]; then
+    cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Bad format requirement: satisfied
 EOF
   else
     cat <<'EOF'
