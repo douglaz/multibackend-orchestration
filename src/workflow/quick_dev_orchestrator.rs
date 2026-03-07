@@ -33,6 +33,7 @@ use crate::workflow::parser::{
     parse_codex_review_output, parse_quick_final_review_output, CodexReviewDecision,
     QuickFinalReviewDecision,
 };
+use crate::workflow::pre_commit_checks;
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -268,6 +269,7 @@ impl QuickDevOrchestrator {
             .unwrap_or_default();
 
         let mut last_review_feedback = String::new();
+        let mut pending_pre_commit_feedback: Option<String> = None;
 
         // When resuming at ApplyFixes, reconstruct reviewer feedback from the
         // latest changes-requested artifact so the apply-fixes prompt is not
@@ -307,12 +309,21 @@ impl QuickDevOrchestrator {
                     info!(loop_number, "quick-dev: PlanAndImplement phase");
 
                     let git_diff = current_git_diff(&self.workspace.root)?;
-                    let prompt = build_plan_implement_prompt(
+                    let mut prompt = build_plan_implement_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
                         &git_diff,
                     )?;
+
+                    // If re-entering after a pre-commit failure, append the
+                    // check output so the implementer knows what to fix.
+                    if let Some(feedback) = pending_pre_commit_feedback.take() {
+                        prompt.push_str("\n\n## Pre-Commit Check Failures\n\
+                             The following automated checks (fmt/clippy/build) failed after \
+                             reviewer approval. Fix these issues without changing unrelated logic:\n\n");
+                        prompt.push_str(&feedback);
+                    }
 
                     let impl_backend =
                         registry.get_or_create_for_role(implementer_spec, "implementer")?;
@@ -770,6 +781,131 @@ impl QuickDevOrchestrator {
                     )?;
 
                     if impl_complete && rev_complete {
+                        // --- Pre-commit check gate (quick-dev) ---
+                        let any_pre_commit_check_enabled = effective.workflow.pre_commit_fmt
+                            || effective.workflow.pre_commit_clippy
+                            || effective.workflow.pre_commit_nix_build;
+
+                        // Returns Some(feedback) on failure, None on pass.
+                        let pre_commit_failure = if any_pre_commit_check_enabled {
+                            if let Some(check_repo_root) = repo_root {
+                                let result = pre_commit_checks::run_pre_commit_checks(
+                                    check_repo_root,
+                                    effective.workflow.pre_commit_fmt,
+                                    effective.workflow.pre_commit_clippy,
+                                    effective.workflow.pre_commit_nix_build,
+                                    effective.workflow.pre_commit_fmt_auto_fix,
+                                );
+                                if !result.passed {
+                                    write_artifact(
+                                        project_dir,
+                                        ArtifactWriteInput {
+                                            project_id,
+                                            loop_number,
+                                            loop_slug,
+                                            backend: "pre-commit-checks",
+                                            role: "pre-commit",
+                                            kind: ArtifactKind::PreCommitCheckFailure {
+                                                iteration: final_review_attempts + 1,
+                                            },
+                                            body: &result.feedback,
+                                        },
+                                    )?;
+                                    Some(result.feedback)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None // no repo root, skip checks
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(ref failure_feedback) = pre_commit_failure {
+                            info!(
+                                loop_number,
+                                "quick-dev: pre-commit checks failed after final review approval"
+                            );
+                            // Follow the existing issues-found reloop path
+                            final_review_attempts += 1;
+                            state.quick_dev_final_review_attempts = final_review_attempts;
+                            save_state_to_disk(state, project_dir)?;
+
+                            if final_review_attempts >= max_final_review_retries {
+                                warn!(
+                                    loop_number,
+                                    final_review_attempts,
+                                    max_final_review_retries,
+                                    "quick-dev: max final review retries reached after pre-commit failure, force-completing"
+                                );
+
+                                write_project_scoped_artifact(
+                                    project_dir,
+                                    ProjectScopedArtifactWriteInput {
+                                        artifact: "quick-dev-force-complete",
+                                        file_name: "quick-dev-force-complete.md",
+                                        project_id,
+                                        backend: implementer_spec,
+                                        role: "orchestrator",
+                                        body: &format!(
+                                            "# Quick-Dev Force Complete\n\nMax final review retries ({}) reached after pre-commit check failure. Force-completing project.",
+                                            max_final_review_retries
+                                        ),
+                                    },
+                                )?;
+
+                                state.status = ProjectStatus::Completed;
+                                state.current_phase = Phase::Completing;
+                                state.quick_dev_phase = None;
+                                save_state_to_disk(state, project_dir)?;
+
+                                checkpoint_if_enabled(
+                                    &self.workspace,
+                                    project_id,
+                                    loop_number,
+                                    Phase::FinalReview,
+                                    Phase::Completing,
+                                    effective.workflow.auto_commit,
+                                    skip_commit,
+                                    effective.global.git.sign_commits,
+                                )?;
+
+                                return Ok(OrchestrationResult {
+                                    summary: format!(
+                                        "quick-dev force-completed after {} final review retries (pre-commit failure)",
+                                        max_final_review_retries
+                                    ),
+                                    loop_number: Some(loop_number),
+                                });
+                            }
+
+                            persist_destination_and_checkpoint(
+                                state,
+                                &QuickDevPhase::PlanAndImplement,
+                                1,
+                                0,
+                                final_review_attempts,
+                                project_dir,
+                                &self.workspace,
+                                project_id,
+                                loop_number,
+                                Phase::FinalReview,
+                                Phase::Implementing,
+                                effective.workflow.auto_commit,
+                                skip_commit,
+                                effective.global.git.sign_commits,
+                            )?;
+
+                            review_iteration = 0;
+                            current_qd_phase = QuickDevPhase::PlanAndImplement;
+                            // Capture the feedback so the next PlanAndImplement
+                            // prompt tells the implementer what to fix.
+                            pending_pre_commit_feedback = Some(failure_feedback.clone());
+                            continue;
+                        }
+                        // --- End pre-commit check gate ---
+
                         // Both complete -> mark project completed
                         info!(loop_number, "quick-dev: both final reviews COMPLETE");
                         state.status = ProjectStatus::Completed;
@@ -1717,6 +1853,10 @@ mod tests {
                 session_reuse_roles: vec![],
                 session_reuse_reset_on_prompt_change: false,
                 session_reuse_reset_on_rollback: false,
+                pre_commit_fmt: true,
+                pre_commit_clippy: true,
+                pre_commit_nix_build: false,
+                pre_commit_fmt_auto_fix: false,
             },
             templates: EffectiveTemplateConfig {
                 planner: PathBuf::new(),

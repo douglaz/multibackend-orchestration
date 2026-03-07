@@ -55,6 +55,7 @@ use crate::workflow::parser::{
     FinalReviewerDecision, ImplementerDecision, PlannerDecision, PlannerPositionsDecision,
     PromptReviewValidatorVerdict, QaDecision, ReviewerDecision, VoteDecision,
 };
+use crate::workflow::pre_commit_checks;
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -1091,6 +1092,173 @@ impl Orchestrator {
                         logs.push(format!(
                             "loop {loop_number}: implementer responded to QA failure iteration {parsed_iteration}"
                         ));
+                    } else if let Some(pre_commit_feedback_path) = {
+                        let loop_state = state.current_feature_loop().ok_or_else(|| {
+                            RalphError::Orchestration(
+                                "current phase is implementing but no current feature loop exists"
+                                    .to_owned(),
+                            )
+                        })?;
+                        loop_state.artifacts.pending_pre_commit_feedback.clone()
+                    } {
+                        // Handle pending pre-commit check failure feedback
+                        info!(
+                            loop = loop_number,
+                            iteration = iteration,
+                            "implementer responding to pre-commit check failure"
+                        );
+                        let feedback_content =
+                            read_project_relative_file(&project_dir, &pre_commit_feedback_path)?;
+                        let labeled_feedback = format!(
+                            "## Pre-Commit Check Failures\n\
+                             The following automated checks failed after reviewer approval. \
+                             Fix these issues without changing unrelated logic:\n\n{}",
+                            feedback_content
+                        );
+
+                        // Session reuse for implementer (pre-commit feedback response)
+                        ensure_prompt_hash_at_loop_start(&mut state);
+                        let impl_template_content = load_template_source(
+                            &effective.templates.implementer,
+                            default_implementer_template(),
+                        );
+                        let impl_bootstrap = compute_bootstrap_hash(
+                            "implementer",
+                            &implementer_backend_name,
+                            &state.prompt_hash_at_loop_start,
+                            &spec_content,
+                            &impl_template_content,
+                        );
+                        let impl_loop_dir = project_dir
+                            .join("loops")
+                            .join(format!("{loop_number:03}-{loop_slug}"));
+                        let session_id = resolve_session_for_role(
+                            &effective,
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                        );
+                        let session_id = validate_session_rewrite(
+                            &registry,
+                            &implementer_backend_name,
+                            session_id,
+                            &impl_loop_dir,
+                            "implementer",
+                        );
+
+                        let impl_prompt = build_implementer_prompt(
+                            &effective,
+                            &state,
+                            &prompt_content,
+                            &feature_name,
+                            &loop_slug,
+                            implementer_backend.name(),
+                            &planner_backend,
+                            &spec_content,
+                            &git_diff,
+                            Some(iteration),
+                            Some(&labeled_feedback),
+                            &project_dir,
+                            session_id.is_some(),
+                        )?;
+
+                        registry
+                            .set_tmux_context(TmuxExecutionContext {
+                                loop_number: Some(loop_number),
+                                role: Some("implementer".to_owned()),
+                                loop_dir: Some(impl_loop_dir),
+                                session_id: session_id.clone(),
+                            })
+                            .await;
+
+                        info!(
+                            loop = loop_number,
+                            backend = implementer_backend.name(),
+                            iteration = iteration,
+                            "invoking implementer for pre-commit check failure response..."
+                        );
+                        let mut impl_log =
+                            LogWriter::open(&log_dir, &project_id, Some(loop_number), "implementer");
+                        let mut impl_out_session_id: Option<String> = None;
+                        let retry_result = execute_with_parse_retries(
+                            implementer_backend,
+                            &registry,
+                            "implementer",
+                            "implementing",
+                            loop_number,
+                            &impl_prompt,
+                            session_id.as_deref(),
+                            |raw| parse_implementer_output(raw, Some(iteration)),
+                            &expected_format_template_for("implementer-response", Some(iteration)),
+                            registry.timeout_for_role(&implementer_backend_name, "implementer").as_secs(),
+                            &mut impl_log,
+                            Some(&mut impl_out_session_id),
+                            repo_root_ref,
+                        )
+                        .await;
+                        let effective_sid = retry_result.as_ref().ok()
+                            .and_then(|r| r.session_id.clone())
+                            .or(impl_out_session_id);
+                        upsert_session_after_execution(
+                            &mut state,
+                            "implementer",
+                            &implementer_backend_name,
+                            loop_number,
+                            &impl_bootstrap,
+                            effective_sid.as_deref(),
+                            session_id.is_some(),
+                        );
+                        let retry_result = retry_result?;
+                        let decision = retry_result.parsed;
+
+                        let ImplementerDecision::Response {
+                            iteration: parsed_iteration,
+                            body,
+                        } = decision
+                        else {
+                            return Err(RalphError::ParseError(
+                                "implementer returned impl-notes during pre-commit feedback response phase"
+                                    .to_owned(),
+                            ));
+                        };
+
+                        write_artifact(
+                            &project_dir,
+                            ArtifactWriteInput {
+                                project_id: &state.project_id,
+                                loop_number,
+                                loop_slug: &loop_slug,
+                                backend: &implementer_backend_name,
+                                role: "implementer",
+                                kind: ArtifactKind::ImplPreCommitResponse {
+                                    iteration: parsed_iteration,
+                                },
+                                body: &body,
+                            },
+                        )?;
+
+                        {
+                            let loop_state = state.current_feature_loop_mut().ok_or_else(|| {
+                                RalphError::Orchestration(
+                                    "failed to reload current loop after impl-pre-commit-response generation"
+                                        .to_owned(),
+                                )
+                            })?;
+                            loop_state.artifacts.pending_pre_commit_feedback = None;
+                            loop_state
+                                .artifacts
+                                .latest_pre_commit_response_iteration =
+                                Some(parsed_iteration);
+                        }
+
+                        stage_changes_for_review(&self.workspace.root)?;
+                        state.current_phase = Phase::Reviewing;
+                        state.phase_iteration += 1;
+                        logs.push(format!(
+                            "loop {loop_number}: implementer responded to pre-commit check failure iteration {parsed_iteration}"
+                        ));
                     } else {
                         info!(
                             loop = loop_number,
@@ -1770,19 +1938,92 @@ impl Orchestrator {
                                     loop_state.artifacts.approval = Some(approval_rel);
                                 }
 
-                                state.current_phase = Phase::Committing;
-                                state.phase_iteration = 1;
-                                logs.push(format!("loop {loop_number}: reviewer approved changes"));
+                                // --- Pre-commit check gate ---
+                                let any_pre_commit_check_enabled =
+                                    effective.workflow.pre_commit_fmt
+                                        || effective.workflow.pre_commit_clippy
+                                        || effective.workflow.pre_commit_nix_build;
 
-                                if options.until_review {
-                                    until_review_stop = Some(loop_number);
-                                }
+                                let pre_commit_passed = if any_pre_commit_check_enabled {
+                                    let check_repo_root =
+                                        self.workspace.root.parent().ok_or_else(|| {
+                                            RalphError::Orchestration(
+                                                "workspace root has no parent"
+                                                    .to_owned(),
+                                            )
+                                        })?;
+                                    let result =
+                                        pre_commit_checks::run_pre_commit_checks(
+                                            check_repo_root,
+                                            effective.workflow.pre_commit_fmt,
+                                            effective.workflow.pre_commit_clippy,
+                                            effective.workflow.pre_commit_nix_build,
+                                            effective.workflow.pre_commit_fmt_auto_fix,
+                                        );
+                                    if !result.passed {
+                                        let failure_path = write_artifact(
+                                            &project_dir,
+                                            ArtifactWriteInput {
+                                                project_id: &state.project_id,
+                                                loop_number,
+                                                loop_slug: &loop_slug,
+                                                backend: "pre-commit-checks",
+                                                role: "pre-commit",
+                                                kind: ArtifactKind::PreCommitCheckFailure {
+                                                    iteration: state.phase_iteration,
+                                                },
+                                                body: &result.feedback,
+                                            },
+                                        )?;
+                                        let failure_rel = artifact_relative_path(
+                                            &project_dir,
+                                            &failure_path,
+                                        );
 
-                                if let Some(message) = commit_message {
+                                        {
+                                            let loop_state = state
+                                                .current_feature_loop_mut()
+                                                .ok_or_else(|| {
+                                                    RalphError::Orchestration(
+                                                        "failed to reload loop after pre-commit check failure".to_owned(),
+                                                    )
+                                                })?;
+                                            loop_state
+                                                .artifacts
+                                                .pending_pre_commit_feedback =
+                                                Some(failure_rel);
+                                            loop_state.artifacts.approval = None;
+                                        }
+
+                                        state.current_phase = Phase::Implementing;
+                                        logs.push(format!(
+                                            "loop {loop_number}: pre-commit checks failed, routing back to implementer"
+                                        ));
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    true
+                                };
+
+                                if pre_commit_passed {
+                                    state.current_phase = Phase::Committing;
+                                    state.phase_iteration = 1;
                                     logs.push(format!(
-                                    "loop {loop_number}: reviewer suggested commit message '{}'",
-                                    message
-                                ));
+                                        "loop {loop_number}: reviewer approved changes"
+                                    ));
+
+                                    if options.until_review {
+                                        until_review_stop = Some(loop_number);
+                                    }
+
+                                    if let Some(message) = commit_message {
+                                        logs.push(format!(
+                                            "loop {loop_number}: reviewer suggested commit message '{}'",
+                                            message
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -5062,6 +5303,12 @@ fn response_rel_path(
     {
         return Ok(path);
     }
+    let pre_commit_suffix = format!("impl-pre-commit-response-{iteration:03}.md");
+    if let Some(path) =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &pre_commit_suffix)?
+    {
+        return Ok(path);
+    }
     let qa_suffix = format!("impl-qa-response-{iteration:03}.md");
     resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?.ok_or_else(
         || {
@@ -6026,7 +6273,8 @@ mod tests {
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
         collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
         latest_completion_feedback_context, preload_role_model_backends, resolve_tmux_settings,
-        summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
+        response_rel_path, summarize_previous_specs_for_planner, summarize_state_for_planner,
+        validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{
@@ -6451,6 +6699,8 @@ mod tests {
                 approval: None,
                 qa_results,
                 pending_qa_feedback: None,
+                pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: None,
             },
             commit: None,
             started_at: chrono::Utc::now(),
@@ -6967,6 +7217,8 @@ mod tests {
                 approval: None,
                 qa_results: vec![],
                 pending_qa_feedback: None,
+                pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: None,
             },
             commit: None,
             started_at: chrono::Utc::now(),
@@ -7990,6 +8242,31 @@ mod tests {
         assert!(
             feedback.contains("Loop 13 issue"),
             "should use loop 13 (latest), not loop 11"
+        );
+    }
+
+    #[test]
+    fn response_rel_path_prefers_pre_commit_response_over_qa_response() {
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/001-demo");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        // Both QA response and pre-commit response exist for iteration 1
+        fs::write(
+            loop_dir.join("20260301120000-impl-qa-response-001.md"),
+            "qa response content",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260301130000-impl-pre-commit-response-001.md"),
+            "pre-commit response content",
+        )
+        .unwrap();
+
+        let result = response_rel_path(dir.path(), 1, "demo", 1).unwrap();
+        assert!(
+            result.contains("impl-pre-commit-response-001.md"),
+            "should prefer pre-commit response over qa response, got: {result}"
         );
     }
 }

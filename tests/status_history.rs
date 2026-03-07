@@ -35,6 +35,8 @@ fn make_loop(loop_number: u32, qa_results: Vec<QaExchange>) -> FeatureLoopState 
             approval: None,
             qa_results,
             pending_qa_feedback: None,
+            pending_pre_commit_feedback: None,
+            latest_pre_commit_response_iteration: None,
         },
         commit: None,
         started_at: Utc::now(),

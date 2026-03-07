@@ -48,6 +48,8 @@ pub enum ArtifactKind {
     QuickDevApplyFixes { iteration: u32 },
     QuickDevFinalReview { role: String, complete: bool },
     QuickDevForceComplete,
+    PreCommitCheckFailure { iteration: u32 },
+    ImplPreCommitResponse { iteration: u32 },
 }
 
 impl ArtifactKind {
@@ -76,6 +78,8 @@ impl ArtifactKind {
             Self::QuickDevApplyFixes { .. } => "quick-dev-apply-fixes",
             Self::QuickDevFinalReview { .. } => "quick-dev-final-review",
             Self::QuickDevForceComplete => "quick-dev-force-complete",
+            Self::PreCommitCheckFailure { .. } => "pre-commit-failure",
+            Self::ImplPreCommitResponse { .. } => "impl-pre-commit-response",
         }
     }
 
@@ -127,6 +131,12 @@ impl ArtifactKind {
                 format!("quick-dev-final-review-{role}-{outcome}.md")
             }
             Self::QuickDevForceComplete => "quick-dev-force-complete.md".to_owned(),
+            Self::PreCommitCheckFailure { iteration } => {
+                format!("pre-commit-failure-{iteration:03}.md")
+            }
+            Self::ImplPreCommitResponse { iteration } => {
+                format!("impl-pre-commit-response-{iteration:03}.md")
+            }
         }
     }
 
@@ -141,7 +151,9 @@ impl ArtifactKind {
             | Self::QaPass { iteration }
             | Self::QaFail { iteration }
             | Self::ImplQaResponse { iteration }
-            | Self::QuickDevApplyFixes { iteration } => Some(*iteration),
+            | Self::QuickDevApplyFixes { iteration }
+            | Self::PreCommitCheckFailure { iteration }
+            | Self::ImplPreCommitResponse { iteration } => Some(*iteration),
             _ => None,
         }
     }

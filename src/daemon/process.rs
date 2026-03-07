@@ -409,34 +409,61 @@ fn build_ralph_quick_dev_run_command(
 /// Run a synchronous command with a timeout. Returns `Ok(output)` if the
 /// command completes within the deadline, or an error on timeout/failure.
 ///
-/// Stdout and stderr are piped so the caller can inspect them.
+/// Stdout and stderr are piped and drained concurrently via reader threads
+/// to prevent deadlocks when child output exceeds OS pipe buffer capacity.
 pub fn run_command_with_timeout(
     cmd: &mut std::process::Command,
     timeout: Duration,
 ) -> crate::Result<std::process::Output> {
+    use std::os::unix::process::CommandExt;
+
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .process_group(0) // spawn in its own process group
         .spawn()
         .map_err(|err| {
             crate::error::RalphError::Orchestration(format!("failed to spawn command: {err}"))
         })?;
 
+    let child_pid = child.id();
+
+    // Take ownership of stdout/stderr handles and drain them in background
+    // threads. This prevents the child from blocking on a full pipe buffer.
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || -> Vec<u8> {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_handle {
+            let _ = std::io::Read::read_to_end(&mut out, &mut buf);
+        }
+        buf
+    });
+
+    let stderr_thread = std::thread::spawn(move || -> Vec<u8> {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_handle {
+            let _ = std::io::Read::read_to_end(&mut err, &mut buf);
+        }
+        buf
+    });
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                let output = child.wait_with_output().map_err(|err| {
-                    crate::error::RalphError::Orchestration(format!(
-                        "failed to collect command output: {err}"
-                    ))
-                })?;
-                return Ok(output);
-            }
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    // Kill the entire process group so descendants that
+                    // inherited pipe FDs are also terminated, allowing
+                    // the reader threads to unblock promptly.
+                    kill_process_group(child_pid);
                     let _ = child.wait();
+                    // Do NOT join reader threads here — if any descendant
+                    // somehow survived the group kill, joining would block
+                    // indefinitely. The threads will be cleaned up when
+                    // their pipe handles close.
                     return Err(crate::error::RalphError::Orchestration(
                         "command timed out".to_owned(),
                     ));
@@ -444,11 +471,32 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(err) => {
+                kill_process_group(child_pid);
+                let _ = child.wait();
                 return Err(crate::error::RalphError::Orchestration(format!(
                     "failed to check command status: {err}"
                 )));
             }
         }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Send SIGKILL to an entire process group identified by the child PID.
+/// The child must have been spawned with `process_group(0)` so that its PID
+/// equals its PGID.
+fn kill_process_group(child_pid: u32) {
+    if let Ok(raw) = i32::try_from(child_pid) {
+        let pgid = Pid::from_raw(raw);
+        let _ = killpg(pgid, Signal::SIGKILL);
     }
 }
 
@@ -948,6 +996,55 @@ mod tests {
                 OsStr::new("--workspace-root"),
                 OsStr::new("/tmp/worktree"),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_high_output_no_false_timeout() {
+        use super::run_command_with_timeout;
+
+        // Generate >128 KB of output (well above typical 64 KB pipe buffer).
+        // Without concurrent draining, the child blocks on write and is
+        // killed on timeout — a false failure.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "seq 1 50000"]);
+        let result = run_command_with_timeout(&mut cmd, Duration::from_secs(30));
+        let output = result.expect("high-output command should not time out");
+        assert!(output.status.success(), "command should exit 0");
+        assert!(
+            output.stdout.len() > 128 * 1024,
+            "expected >128KB stdout, got {} bytes",
+            output.stdout.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_kills_group_on_timeout() {
+        use super::run_command_with_timeout;
+
+        // Spawn a shell that starts a long-lived background child (`sleep 60`)
+        // inheriting the pipe FDs. Without process-group kill, the reader
+        // threads would block on the still-open pipes until the sleep exits.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 60 & echo started; wait"]);
+
+        let start = Instant::now();
+        let result = run_command_with_timeout(&mut cmd, Duration::from_secs(2));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "should return timeout error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("timed out"),
+            "error should mention timeout, got: {err_msg}"
+        );
+        // The function must return promptly after the 2s timeout.
+        // Without the fix, it would block ~60s waiting for `sleep 60` to exit.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "timeout should return promptly, took {elapsed:?}"
         );
     }
 

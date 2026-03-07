@@ -638,6 +638,8 @@ fn reconstruct_feature_loop(
     let mut impl_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
     let mut qa_reports: BTreeMap<u32, (&ArtifactEntry, bool)> = BTreeMap::new();
     let mut qa_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
+    let mut pre_commit_failures: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
+    let mut pre_commit_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
 
     for artifact in &artifacts {
         if let Some(iteration) = parse_iteration(&artifact.base_name, "review-", "-feedback.md") {
@@ -662,6 +664,19 @@ fn reconstruct_feature_loop(
 
         if let Some(iteration) = parse_iteration(&artifact.base_name, "impl-qa-response-", ".md") {
             qa_responses.insert(iteration, artifact);
+            continue;
+        }
+
+        if let Some(iteration) = parse_iteration(&artifact.base_name, "pre-commit-failure-", ".md")
+        {
+            pre_commit_failures.insert(iteration, artifact);
+            continue;
+        }
+
+        if let Some(iteration) =
+            parse_iteration(&artifact.base_name, "impl-pre-commit-response-", ".md")
+        {
+            pre_commit_responses.insert(iteration, artifact);
         }
     }
 
@@ -693,6 +708,24 @@ fn reconstruct_feature_loop(
         .rev()
         .find(|result| !result.passed && result.implementer_response.is_none())
         .map(|result| result.report.clone());
+
+    let pending_pre_commit_feedback = pre_commit_failures
+        .iter()
+        .rev()
+        .find(|(iteration, _)| !pre_commit_responses.contains_key(iteration))
+        .map(|(_, artifact)| artifact.rel_path.clone());
+
+    let latest_pre_commit_response_iteration = pre_commit_responses.keys().last().copied();
+
+    // Invalidate a stale approval when a pre-commit failure is still pending.
+    // At runtime the orchestrator clears `approval` on pre-commit failure
+    // (orchestrator.rs:1991), so reconstruction must mirror that behavior to
+    // avoid resurrecting a cleared approval after crash/resume.
+    let effective_approval = if pending_pre_commit_feedback.is_some() {
+        None
+    } else {
+        approval
+    };
 
     let spec_path = spec
         .map(|artifact| artifact.rel_path.clone())
@@ -738,7 +771,7 @@ fn reconstruct_feature_loop(
         .and_then(|artifact| artifact.frontmatter.get("backend").cloned())
         .unwrap_or_default();
 
-    let completed_at = approval.map(|artifact| artifact.observed_at);
+    let completed_at = effective_approval.map(|artifact| artifact.observed_at);
     let status = if completed_at.is_some() {
         LoopStatus::Completed
     } else {
@@ -761,9 +794,11 @@ fn reconstruct_feature_loop(
             spec: spec_path,
             impl_notes: impl_notes.map(|artifact| artifact.rel_path.clone()),
             reviews,
-            approval: approval.map(|artifact| artifact.rel_path.clone()),
+            approval: effective_approval.map(|artifact| artifact.rel_path.clone()),
             qa_results,
             pending_qa_feedback,
+            pending_pre_commit_feedback,
+            latest_pre_commit_response_iteration,
         },
         commit: commit_hash,
         started_at,
@@ -977,6 +1012,19 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
                     .unwrap_or(1);
             }
 
+            if let Some(pending) = &feature_loop.artifacts.pending_pre_commit_feedback {
+                return parse_iteration_from_path(pending, "pre-commit-failure-")
+                    .map(|i| i.max(1)) // clamp to 1-based minimum
+                    .or_else(|| {
+                        feature_loop
+                            .artifacts
+                            .reviews
+                            .last()
+                            .map(|review| review.iteration + 1)
+                    })
+                    .unwrap_or(1);
+            }
+
             feature_loop
                 .artifacts
                 .reviews
@@ -990,12 +1038,20 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
             .last()
             .map(|qa| qa.iteration + 1)
             .unwrap_or(1),
-        Phase::Reviewing => feature_loop
-            .artifacts
-            .reviews
-            .last()
-            .map(|review| review.iteration + 1)
-            .unwrap_or(1),
+        Phase::Reviewing => {
+            let review_next = feature_loop
+                .artifacts
+                .reviews
+                .last()
+                .map(|review| review.iteration + 1)
+                .unwrap_or(1);
+            let pre_commit_response_next = feature_loop
+                .artifacts
+                .latest_pre_commit_response_iteration
+                .map(|iter| iter + 1)
+                .unwrap_or(1);
+            std::cmp::max(review_next, pre_commit_response_next)
+        }
         Phase::FinalReview => 1,
     }
 }
@@ -1009,6 +1065,7 @@ fn parse_iteration_from_path(path: &str, prefix: &str) -> Option<u32> {
     let file_name = Path::new(path).file_name()?.to_str()?;
     let base_name = normalize_artifact_basename(file_name);
     let rest = base_name.strip_prefix(prefix)?;
+    let rest = rest.strip_suffix(".md").unwrap_or(rest);
     rest.split('-').next()?.parse::<u32>().ok()
 }
 
@@ -1360,6 +1417,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_iteration_from_path_pre_commit_failure() {
+        // pre-commit-failure-002.md with timestamp prefix
+        assert_eq!(
+            parse_iteration_from_path(
+                "loops/001-fix/20260307064115-pre-commit-failure-002.md",
+                "pre-commit-failure-"
+            ),
+            Some(2)
+        );
+        // Without timestamp prefix
+        assert_eq!(
+            parse_iteration_from_path(
+                "loops/001-fix/pre-commit-failure-003.md",
+                "pre-commit-failure-"
+            ),
+            Some(3)
+        );
+        // qa- prefix still works
+        assert_eq!(
+            parse_iteration_from_path("loops/001-fix/20260307064115-qa-001-fail.md", "qa-"),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn load_quick_dev_phase_works_with_valid_state_json() {
         let tmp = TempDir::new().unwrap();
         let project_dir = tmp.path();
@@ -1387,5 +1469,302 @@ mod tests {
         );
         assert_eq!(state.quick_dev_review_iteration, 2);
         assert_eq!(state.quick_dev_final_review_attempts, 0);
+    }
+
+    /// Helper: write a feature loop artifact with frontmatter.
+    #[allow(clippy::too_many_arguments)]
+    fn write_loop_artifact(
+        project_dir: &Path,
+        loop_number: u32,
+        slug: &str,
+        file_name: &str,
+        artifact_type: &str,
+        backend: &str,
+        body: &str,
+        created_at: &str,
+    ) {
+        let loop_dir = project_dir
+            .join("loops")
+            .join(format!("{loop_number:03}-{slug}"));
+        fs::create_dir_all(&loop_dir).unwrap();
+        let content = format!(
+            "---\nartifact: {artifact_type}\nloop: {loop_number}\nproject: test\nbackend: {backend}\nrole: implementer\ncreated_at: {created_at}\n---\n\n{body}\n"
+        );
+        fs::write(loop_dir.join(file_name), content).unwrap();
+    }
+
+    #[test]
+    fn infer_reviewing_iteration_accounts_for_pre_commit_response() {
+        // Scenario: approve -> pre-commit fail -> implementer responds -> crash
+        // On resume, Phase::Reviewing iteration should use
+        // max(review_next, pre_commit_response_next).
+        //
+        // Setup: 1 review exchange (iteration 1) + pre-commit response (iteration 1)
+        // Expected: Phase::Reviewing iteration = max(1+1, 1+1) = 2
+        let mut state = ProjectState::new("test", "Test", "abc", None);
+        state.current_loop = 1;
+        state.current_phase = Phase::Reviewing;
+        state.loops.push(FeatureLoopState {
+            loop_number: 1,
+            slug: "fix".to_owned(),
+            feature_name: "Fix".to_owned(),
+            loop_type: LoopType::Feature,
+            status: LoopStatus::InProgress,
+            backends: FeatureLoopBackends {
+                planner: "claude".to_owned(),
+                implementer: "claude".to_owned(),
+                reviewer: "claude".to_owned(),
+                qa: String::new(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: "loops/001-fix/spec.md".to_owned(),
+                impl_notes: Some("loops/001-fix/impl-notes.md".to_owned()),
+                reviews: vec![ReviewExchange {
+                    iteration: 1,
+                    feedback: "loops/001-fix/review-001-feedback.md".to_owned(),
+                    response: "loops/001-fix/impl-response-001.md".to_owned(),
+                }],
+                approval: None,
+                qa_results: vec![],
+                pending_qa_feedback: None,
+                pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: Some(1),
+            },
+            commit: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        });
+
+        let iter = infer_phase_iteration(&state);
+        assert_eq!(
+            iter, 2,
+            "Phase::Reviewing should be max(review_next=2, pre_commit_response_next=2) = 2"
+        );
+
+        // Now test with pre-commit response iteration higher than reviews:
+        // No review exchanges but pre-commit response at iteration 2
+        // Expected: max(1, 2+1) = 3
+        state.loops[0].artifacts.reviews.clear();
+        state.loops[0]
+            .artifacts
+            .latest_pre_commit_response_iteration = Some(2);
+
+        let iter = infer_phase_iteration(&state);
+        assert_eq!(
+            iter, 3,
+            "Phase::Reviewing should be max(1, 2+1) = 3 when pre-commit response iteration exceeds reviews"
+        );
+    }
+
+    #[test]
+    fn reconstruction_invalidates_stale_approval_on_pending_pre_commit_failure() {
+        // Scenario: reviewer approved, then pre-commit checks failed.
+        // On reconstruction, the approval should be cleared because the
+        // pre-commit failure has no matching response.
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("projects").join("test-stale-approval");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
+        fs::write(
+            project_dir.join("project.toml"),
+            "name = \"test-stale-approval\"\n",
+        )
+        .unwrap();
+
+        // Write loop artifacts: spec, impl-notes, approval, pre-commit-failure
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature: Fix",
+            "2026-01-01T00:00:00Z",
+        );
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000001-impl-notes.md",
+            "impl-notes",
+            "claude",
+            "impl notes",
+            "2026-01-01T00:00:01Z",
+        );
+        // Approval artifact (review-approved.md)
+        let loop_dir = project_dir.join("loops").join("001-fix");
+        fs::write(
+            loop_dir.join("20260101000002-review-approved.md"),
+            "---\nartifact: review-approved\nloop: 1\nproject: test-stale-approval\nbackend: claude\nrole: reviewer\ncreated_at: 2026-01-01T00:00:02Z\n---\n\n# Approved\n",
+        ).unwrap();
+        // Pre-commit failure AFTER approval (no matching response)
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000003-pre-commit-failure-001.md",
+            "pre-commit-failure",
+            "pre-commit",
+            "## cargo fmt\nfailed",
+            "2026-01-01T00:00:03Z",
+        );
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-stale-approval",
+            None,
+            None,
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        let feature = &state.loops[0];
+        assert!(
+            feature.artifacts.approval.is_none(),
+            "approval must be invalidated when a pre-commit failure is pending"
+        );
+        assert!(
+            feature.artifacts.pending_pre_commit_feedback.is_some(),
+            "pending_pre_commit_feedback must be set for unanswered pre-commit failure"
+        );
+        assert_eq!(
+            feature.status,
+            LoopStatus::InProgress,
+            "loop status must be InProgress when approval is invalidated"
+        );
+        assert!(
+            feature.completed_at.is_none(),
+            "completed_at must be None when approval is invalidated"
+        );
+    }
+
+    #[test]
+    fn reconstruction_preserves_approval_when_pre_commit_failure_is_responded() {
+        // Scenario: reviewer approved, pre-commit failed, implementer responded.
+        // The pre-commit failure IS matched by a response, so approval should
+        // be preserved and latest_pre_commit_response_iteration set.
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("projects").join("test-responded");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
+        fs::write(
+            project_dir.join("project.toml"),
+            "name = \"test-responded\"\n",
+        )
+        .unwrap();
+
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature: Fix",
+            "2026-01-01T00:00:00Z",
+        );
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000001-impl-notes.md",
+            "impl-notes",
+            "claude",
+            "impl notes",
+            "2026-01-01T00:00:01Z",
+        );
+
+        let loop_dir = project_dir.join("loops").join("001-fix");
+        fs::write(
+            loop_dir.join("20260101000002-review-approved.md"),
+            "---\nartifact: review-approved\nloop: 1\nproject: test-responded\nbackend: claude\nrole: reviewer\ncreated_at: 2026-01-01T00:00:02Z\n---\n\n# Approved\n",
+        ).unwrap();
+        // Pre-commit failure
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000003-pre-commit-failure-001.md",
+            "pre-commit-failure",
+            "pre-commit",
+            "## cargo fmt\nfailed",
+            "2026-01-01T00:00:03Z",
+        );
+        // Matching response
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000004-impl-pre-commit-response-001.md",
+            "impl-pre-commit-response",
+            "claude",
+            "fixed fmt",
+            "2026-01-01T00:00:04Z",
+        );
+
+        let state =
+            reconstruct_project_state_internal(&project_dir, "test-responded", None, None, None)
+                .expect("reconstruction should succeed");
+
+        let feature = &state.loops[0];
+        assert!(
+            feature.artifacts.approval.is_some(),
+            "approval must be preserved when pre-commit failure has a matching response"
+        );
+        assert!(
+            feature.artifacts.pending_pre_commit_feedback.is_none(),
+            "pending_pre_commit_feedback must be None when failure is responded to"
+        );
+        assert_eq!(
+            feature.artifacts.latest_pre_commit_response_iteration,
+            Some(1),
+            "latest_pre_commit_response_iteration must reflect the response"
+        );
+    }
+
+    #[test]
+    fn infer_phase_iteration_clamps_zero_based_pre_commit_failure() {
+        // Regression: quick-dev used to write pre-commit-failure-000.md (0-based).
+        // Even if such an artifact exists, infer_phase_iteration must return >= 1.
+        let mut state = ProjectState::new("test", "Test", "abc", None);
+        state.current_loop = 1;
+        state.current_phase = Phase::Implementing;
+        state.loops.push(FeatureLoopState {
+            loop_number: 1,
+            slug: "fix".to_owned(),
+            feature_name: "Fix".to_owned(),
+            loop_type: LoopType::Feature,
+            status: LoopStatus::InProgress,
+            backends: FeatureLoopBackends {
+                planner: "claude".to_owned(),
+                implementer: "claude".to_owned(),
+                reviewer: "claude".to_owned(),
+                qa: String::new(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: "loops/001-fix/spec.md".to_owned(),
+                impl_notes: Some("loops/001-fix/impl-notes.md".to_owned()),
+                reviews: vec![],
+                approval: None,
+                qa_results: vec![],
+                pending_qa_feedback: None,
+                pending_pre_commit_feedback: Some(
+                    "loops/001-fix/20260101000003-pre-commit-failure-000.md".to_owned(),
+                ),
+                latest_pre_commit_response_iteration: None,
+            },
+            commit: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        });
+
+        let iter = infer_phase_iteration(&state);
+        assert!(
+            iter >= 1,
+            "infer_phase_iteration must return >= 1 even for pre-commit-failure-000.md, got {iter}"
+        );
     }
 }
