@@ -55,7 +55,7 @@ fn test_next_loop_number_with_loops() {
         qa_results: vec![],
         pending_qa_feedback: None,
         pending_pre_commit_feedback: None,
-            latest_pre_commit_response_iteration: None,
+        latest_pre_commit_response_iteration: None,
     };
 
     state.loops.push(FeatureLoopState {

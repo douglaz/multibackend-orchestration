@@ -1471,6 +1471,7 @@ mod tests {
     }
 
     /// Helper: write a feature loop artifact with frontmatter.
+    #[allow(clippy::too_many_arguments)]
     fn write_loop_artifact(
         project_dir: &Path,
         loop_number: u32,
@@ -1572,12 +1573,24 @@ mod tests {
 
         // Write loop artifacts: spec, impl-notes, approval, pre-commit-failure
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000000-spec.md",
-            "spec", "claude", "# Feature: Fix", "2026-01-01T00:00:00Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature: Fix",
+            "2026-01-01T00:00:00Z",
         );
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000001-impl-notes.md",
-            "impl-notes", "claude", "impl notes", "2026-01-01T00:00:01Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000001-impl-notes.md",
+            "impl-notes",
+            "claude",
+            "impl notes",
+            "2026-01-01T00:00:01Z",
         );
         // Approval artifact (review-approved.md)
         let loop_dir = project_dir.join("loops").join("001-fix");
@@ -1587,8 +1600,14 @@ mod tests {
         ).unwrap();
         // Pre-commit failure AFTER approval (no matching response)
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000003-pre-commit-failure-001.md",
-            "pre-commit-failure", "pre-commit", "## cargo fmt\nfailed", "2026-01-01T00:00:03Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000003-pre-commit-failure-001.md",
+            "pre-commit-failure",
+            "pre-commit",
+            "## cargo fmt\nfailed",
+            "2026-01-01T00:00:03Z",
         );
 
         let state = reconstruct_project_state_internal(
@@ -1637,12 +1656,24 @@ mod tests {
         .unwrap();
 
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000000-spec.md",
-            "spec", "claude", "# Feature: Fix", "2026-01-01T00:00:00Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature: Fix",
+            "2026-01-01T00:00:00Z",
         );
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000001-impl-notes.md",
-            "impl-notes", "claude", "impl notes", "2026-01-01T00:00:01Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000001-impl-notes.md",
+            "impl-notes",
+            "claude",
+            "impl notes",
+            "2026-01-01T00:00:01Z",
         );
 
         let loop_dir = project_dir.join("loops").join("001-fix");
@@ -1652,23 +1683,30 @@ mod tests {
         ).unwrap();
         // Pre-commit failure
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000003-pre-commit-failure-001.md",
-            "pre-commit-failure", "pre-commit", "## cargo fmt\nfailed", "2026-01-01T00:00:03Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000003-pre-commit-failure-001.md",
+            "pre-commit-failure",
+            "pre-commit",
+            "## cargo fmt\nfailed",
+            "2026-01-01T00:00:03Z",
         );
         // Matching response
         write_loop_artifact(
-            &project_dir, 1, "fix", "20260101000004-impl-pre-commit-response-001.md",
-            "impl-pre-commit-response", "claude", "fixed fmt", "2026-01-01T00:00:04Z",
+            &project_dir,
+            1,
+            "fix",
+            "20260101000004-impl-pre-commit-response-001.md",
+            "impl-pre-commit-response",
+            "claude",
+            "fixed fmt",
+            "2026-01-01T00:00:04Z",
         );
 
-        let state = reconstruct_project_state_internal(
-            &project_dir,
-            "test-responded",
-            None,
-            None,
-            None,
-        )
-        .expect("reconstruction should succeed");
+        let state =
+            reconstruct_project_state_internal(&project_dir, "test-responded", None, None, None)
+                .expect("reconstruction should succeed");
 
         let feature = &state.loops[0];
         assert!(
