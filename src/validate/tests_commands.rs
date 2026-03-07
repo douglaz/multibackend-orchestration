@@ -400,6 +400,17 @@ fn rollback_dry_run(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "dry-run");
 
+        // Soft dry-run should NOT mention git reset --hard
+        let soft_stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !soft_stdout.contains("git reset --hard"),
+            "soft dry-run should not contain 'git reset --hard', got:\n{soft_stdout}"
+        );
+        assert!(
+            soft_stdout.contains("soft rollback"),
+            "soft dry-run should mention 'soft rollback', got:\n{soft_stdout}"
+        );
+
         let head_after = git_head_commit(&h.repo_root);
         assert_eq!(
             head_before, head_after,
@@ -458,8 +469,8 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
 
         let head_before = git_head_commit(&h.repo_root);
         let dry_run = h
-            .ralph(["rollback", "--dry-run", "1"])
-            .expect("rollback --dry-run 1 should execute");
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
         assert_exit_code(&dry_run, 0);
         let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
         let reset_ref = dry_stdout
@@ -471,8 +482,8 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
             .expect("dry-run output should include reset reference");
         let target_commit = git_rev_parse(&h.repo_root, reset_ref);
 
-        h.ralph_ok(["rollback", "1"])
-            .expect("ralph rollback 1 should succeed");
+        h.ralph_ok(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should succeed");
 
         let head_after = git_head_commit(&h.repo_root);
         assert_ne!(
@@ -525,8 +536,8 @@ fn rollback_force_push(h: &RalphHarness) -> TestResult {
 
         // Capture the exact reset target from dry-run output.
         let dry_run = h
-            .ralph(["rollback", "--dry-run", "1"])
-            .expect("rollback --dry-run should execute");
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run should execute");
         assert_exit_code(&dry_run, 0);
         let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
         let reset_ref = dry_stdout

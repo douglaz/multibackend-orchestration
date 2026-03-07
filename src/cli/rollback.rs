@@ -47,11 +47,9 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .filter(|num| *num > args.loop_number)
         .collect();
 
-    // Always compute a reset ref so checkpoint-derived state reconstruction
-    // sees the correct position after rollback.  Without a git reset the
-    // checkpoint commits would remain on the branch and the next
-    // `reconstruct_project_state()` call would undo the rollback.
-    let hard_ref = {
+    // Only compute a git reset ref when --hard is requested.  Soft rollback
+    // relies on a `.rollback-ceiling` marker instead of git reset.
+    let hard_ref = if args.hard {
         let repo_root = workspace.root.parent().ok_or_else(|| {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
@@ -66,22 +64,26 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         } else {
             None
         }
+    } else {
+        None
     };
 
     if args.dry_run {
-        if let Some(reference) = hard_ref {
+        if let Some(reference) = &hard_ref {
             println!(
-                "dry-run: would remove loops {:?}, set current loop to {}, and git reset --hard {}",
+                "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
                 to_remove, args.loop_number, reference
             );
         } else {
             println!(
-                "dry-run: would remove loops {:?} and set current loop to {}",
+                "dry-run (soft rollback): would remove loops {:?} and set current loop to {} (no git reset)",
                 to_remove, args.loop_number
             );
         }
         return Ok(());
     }
+
+    let mut push_failed = false;
 
     if let Some(reference) = hard_ref.as_deref() {
         let repo_root = workspace.root.parent().ok_or_else(|| {
@@ -95,7 +97,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             checkout_branch(repo_root, &branch)?;
         }
 
-        // Always reset the local branch so that checkpoint-derived state
+        // Reset the local branch so that checkpoint-derived state
         // reconstruction sees the rolled-back position.
         reset_hard(repo_root, reference)?;
         restore_workspace_files(
@@ -111,10 +113,13 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         // stale checkpoint commits and reconstruction would undo the rollback.
         let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
         if branch_exists(repo_root, &branch)? {
-            run_git(
+            if let Err(e) = run_git(
                 repo_root,
                 &["push", "--force", "origin", &format!("{branch}:{branch}")],
-            )?;
+            ) {
+                eprintln!("warning: force-push failed: {e}");
+                push_failed = true;
+            }
         }
     }
 
@@ -169,14 +174,31 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         state.status = ProjectStatus::InProgress;
     }
 
-    if let Some(reference) = hard_ref {
-        println!(
-            "rolled back project {} to loop {} and reset git to {}",
-            project_id, args.loop_number, reference
-        );
+    // Manage the .rollback-ceiling marker.
+    let ceiling_path = project_dir.join(".rollback-ceiling");
+    if let Some(reference) = &hard_ref {
+        if push_failed {
+            // Retain (or write) the ceiling marker to guard against checkpoint
+            // resurrection from the remote on next reconstruction.
+            fs::write(&ceiling_path, args.loop_number.to_string())?;
+            println!(
+                "rolled back project {} to loop {} and reset git to {} (warning: force-push failed; .rollback-ceiling marker retained)",
+                project_id, args.loop_number, reference
+            );
+        } else {
+            // Hard rollback succeeded fully — remove any stale ceiling marker.
+            let _ = fs::remove_file(&ceiling_path);
+            println!(
+                "rolled back project {} to loop {} and reset git to {}",
+                project_id, args.loop_number, reference
+            );
+        }
     } else {
+        // Soft rollback — write the ceiling marker so that
+        // reconstruct_project_state caps checkpoint-derived position.
+        fs::write(&ceiling_path, args.loop_number.to_string())?;
         println!(
-            "rolled back project {} to loop {}",
+            "soft-rolled back project {} to loop {} (no git reset)",
             project_id, args.loop_number
         );
     }

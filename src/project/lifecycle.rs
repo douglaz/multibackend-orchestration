@@ -257,14 +257,15 @@ fn reconstruct_project_state_internal(
     state.prompt_hash = baseline_prompt_hash.clone();
     state.prompt_hash_at_loop_start = baseline_prompt_hash;
 
-    let (checkpoint_loop, checkpoint_phase, checkpoint_commits) = match (repo_root, branch) {
-        (Some(root), Some(branch_name)) if is_git_repo(root) => {
-            let (loop_number, phase) = derive_position(root, branch_name)?;
-            let commits = list_ralph_commits(root, branch_name)?;
-            (loop_number, phase, commits)
-        }
-        _ => (1, Phase::Planning, Vec::new()),
-    };
+    let (mut checkpoint_loop, mut checkpoint_phase, checkpoint_commits) =
+        match (repo_root, branch) {
+            (Some(root), Some(branch_name)) if is_git_repo(root) => {
+                let (loop_number, phase) = derive_position(root, branch_name)?;
+                let commits = list_ralph_commits(root, branch_name)?;
+                (loop_number, phase, commits)
+            }
+            _ => (1, Phase::Planning, Vec::new()),
+        };
 
     let mut commit_by_loop: HashMap<u32, String> = HashMap::new();
     for commit in &checkpoint_commits {
@@ -277,6 +278,41 @@ fn reconstruct_project_state_internal(
 
     let mut loop_dirs = collect_loop_directories(project_dir)?;
     loop_dirs.sort_by_key(|(number, _, _)| *number);
+
+    // Rollback ceiling: if a soft rollback wrote a `.rollback-ceiling` marker,
+    // cap checkpoint-derived position so that stale checkpoint commits on the
+    // branch do not resurrect the pre-rollback position.
+    if let Some(ceiling) = read_rollback_ceiling(project_dir) {
+        let max_artifact_loop = loop_dirs
+            .iter()
+            .map(|(n, _, _)| *n)
+            .max()
+            .unwrap_or(0);
+        // Staleness check: the marker is inert when checkpoint position is at
+        // or below the ceiling AND all artifact loop numbers are at or below
+        // the ceiling — the project hasn't advanced past the rollback point.
+        let stale =
+            checkpoint_loop <= ceiling && max_artifact_loop <= ceiling;
+        if !stale && checkpoint_loop > ceiling {
+            // Cap position: re-derive from filtered checkpoint commits.
+            let capped = checkpoint_commits
+                .iter()
+                .filter(|c| c.loop_number <= ceiling)
+                .collect::<Vec<_>>();
+            if let Some(first) = capped.first() {
+                checkpoint_loop = first.loop_number;
+                checkpoint_phase = first.phase.clone();
+            } else {
+                // Ceiling is 0 or no commits at or below ceiling.
+                checkpoint_loop = 1;
+                checkpoint_phase = Phase::Planning;
+            }
+            // Filter commit_by_loop to ceiling.
+            commit_by_loop.retain(|k, _| *k <= ceiling);
+            // Filter loop directories to ceiling.
+            loop_dirs.retain(|(n, _, _)| *n <= ceiling);
+        }
+    }
 
     // Compute effective completion consensus parameters by merging global
     // workflow defaults with optional project overrides — matching the same
@@ -365,6 +401,13 @@ fn reconstruct_project_state_internal(
     }
 
     Ok(state)
+}
+
+fn read_rollback_ceiling(project_dir: &Path) -> Option<u32> {
+    let path = project_dir.join(".rollback-ceiling");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 fn maybe_create_project_branch(
