@@ -58,6 +58,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: rollback_force_push,
         },
         ConformanceTest {
+            name: "commands::rollback_hard_missing_branch",
+            func: rollback_hard_missing_branch,
+        },
+        ConformanceTest {
             name: "commands::config_get",
             func: config_get,
         },
@@ -579,6 +583,66 @@ fn rollback_force_push(h: &RalphHarness) -> TestResult {
         assert_ne!(
             remote_head_before, remote_head_after,
             "remote HEAD should change after force-push rollback"
+        );
+    })
+}
+
+fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-506-missing-branch";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let branch = git_current_branch(&h.repo_root);
+
+        // Switch to a detached HEAD so we can delete the project branch.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed");
+
+        // Delete the local project branch.
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed");
+
+        // Also remove the remote tracking ref so the branch cannot be
+        // recreated from origin.
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch}")])
+            .current_dir(&h.repo_root)
+            .status();
+
+        let head_detached = git_head_commit(&h.repo_root);
+
+        // Hard rollback should fail because the project branch is missing.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard should fail when project branch is missing"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not exist"),
+            "error should mention missing branch, got:\n{stderr}"
+        );
+
+        // HEAD should not have moved — the detached commit must be untouched.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_detached, head_after,
+            "HEAD must not change when rollback --hard fails due to missing branch"
         );
     })
 }

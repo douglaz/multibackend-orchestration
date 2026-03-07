@@ -257,15 +257,15 @@ fn reconstruct_project_state_internal(
     state.prompt_hash = baseline_prompt_hash.clone();
     state.prompt_hash_at_loop_start = baseline_prompt_hash;
 
-    let (mut checkpoint_loop, mut checkpoint_phase, checkpoint_commits) =
-        match (repo_root, branch) {
-            (Some(root), Some(branch_name)) if is_git_repo(root) => {
-                let (loop_number, phase) = derive_position(root, branch_name)?;
-                let commits = list_ralph_commits(root, branch_name)?;
-                (loop_number, phase, commits)
-            }
-            _ => (1, Phase::Planning, Vec::new()),
-        };
+    let (mut checkpoint_loop, mut checkpoint_phase, checkpoint_commits) = match (repo_root, branch)
+    {
+        (Some(root), Some(branch_name)) if is_git_repo(root) => {
+            let (loop_number, phase) = derive_position(root, branch_name)?;
+            let commits = list_ralph_commits(root, branch_name)?;
+            (loop_number, phase, commits)
+        }
+        _ => (1, Phase::Planning, Vec::new()),
+    };
 
     let mut commit_by_loop: HashMap<u32, String> = HashMap::new();
     for commit in &checkpoint_commits {
@@ -283,11 +283,7 @@ fn reconstruct_project_state_internal(
     // cap checkpoint-derived position so that stale checkpoint commits on the
     // branch do not resurrect the pre-rollback position.
     if let Some(ceiling) = read_rollback_ceiling(project_dir) {
-        let max_artifact_loop = loop_dirs
-            .iter()
-            .map(|(n, _, _)| *n)
-            .max()
-            .unwrap_or(0);
+        let max_artifact_loop = loop_dirs.iter().map(|(n, _, _)| *n).max().unwrap_or(0);
         // Enforce capping only when checkpoint-derived position has advanced
         // past the ceiling (stale checkpoint commits) AND no new artifact
         // directories exist beyond the ceiling (no successful forward

@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::RollbackArgs;
-use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
+use crate::git::branch::{
+    branch_exists, checkout_branch, create_branch, remote_ref_exists, resolve_branch_name,
+};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::ralph_commit::list_ralph_commits;
 use crate::git::{is_git_repo, run_git};
@@ -99,9 +101,19 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         // Ensure we reset on the project's branch (not an unrelated branch
         // that happens to be checked out).
         let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if branch_exists(repo_root, &branch)? {
-            checkout_branch(repo_root, &branch)?;
+        if !branch_exists(repo_root, &branch)? {
+            // Try to recreate from origin/<branch> before giving up.
+            let remote_ref = format!("origin/{branch}");
+            if remote_ref_exists(repo_root, &remote_ref)? {
+                create_branch(repo_root, &branch, &remote_ref)?;
+            } else {
+                return Err(RalphError::Validation(format!(
+                    "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
+                    branch
+                )));
+            }
         }
+        checkout_branch(repo_root, &branch)?;
 
         // Reset the local branch so that checkpoint-derived state
         // reconstruction sees the rolled-back position.
@@ -129,7 +141,10 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
                 push_outcome = PushOutcome::Succeeded;
             }
         } else {
-            eprintln!("warning: force-push skipped — branch '{}' does not exist", branch);
+            eprintln!(
+                "warning: force-push skipped — branch '{}' does not exist",
+                branch
+            );
         }
     }
 
