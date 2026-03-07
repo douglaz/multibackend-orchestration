@@ -156,18 +156,23 @@ mod tests {
     #[test]
     fn error_converted_to_feedback_not_panic() {
         let tmp = TempDir::new().unwrap();
-        // Create a Cargo.toml so cargo checks attempt to run
-        std::fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[package]\nname = \"test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        // cargo fmt --check will likely fail in a bare project with no src, but it shouldn't panic
-        let result = run_pre_commit_checks(tmp.path(), true, false, false, false);
-        // The result may pass or fail depending on cargo availability, but it should never panic
-        // and should always return a valid result
-        let _ = result.passed;
-        let _ = result.feedback;
+        // Force a spawn error by invoking a non-existent command
+        let feedback = run_check(
+            tmp.path(),
+            "test-check",
+            &["/nonexistent/command-that-does-not-exist"],
+            Duration::from_secs(5),
+        );
+        // Spawn error must produce feedback (Some), not be swallowed
+        let feedback = feedback.expect("spawn error should produce Some(feedback)");
+        assert!(
+            feedback.starts_with("## test-check"),
+            "feedback should start with section header, got: {feedback}"
+        );
+        assert!(
+            feedback.contains("Error:"),
+            "feedback should contain 'Error:' for spawn failures, got: {feedback}"
+        );
     }
 
     #[test]

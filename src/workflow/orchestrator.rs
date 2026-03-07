@@ -1966,7 +1966,7 @@ impl Orchestrator {
                                                 backend: "pre-commit-checks",
                                                 role: "pre-commit",
                                                 kind: ArtifactKind::PreCommitCheckFailure {
-                                                    iteration: review_count,
+                                                    iteration: state.phase_iteration,
                                                 },
                                                 body: &result.feedback,
                                             },
@@ -1992,7 +1992,6 @@ impl Orchestrator {
                                         }
 
                                         state.current_phase = Phase::Implementing;
-                                        state.phase_iteration = review_count;
                                         logs.push(format!(
                                             "loop {loop_number}: pre-commit checks failed, routing back to implementer"
                                         ));

@@ -999,12 +999,15 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
                     .unwrap_or(1);
             }
 
-            if feature_loop.artifacts.pending_pre_commit_feedback.is_some() {
-                return feature_loop
-                    .artifacts
-                    .reviews
-                    .last()
-                    .map(|review| review.iteration + 1)
+            if let Some(pending) = &feature_loop.artifacts.pending_pre_commit_feedback {
+                return parse_iteration_from_path(pending, "pre-commit-failure-")
+                    .or_else(|| {
+                        feature_loop
+                            .artifacts
+                            .reviews
+                            .last()
+                            .map(|review| review.iteration + 1)
+                    })
                     .unwrap_or(1);
             }
 
