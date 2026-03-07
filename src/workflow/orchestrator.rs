@@ -5299,14 +5299,14 @@ fn response_rel_path(
     {
         return Ok(path);
     }
-    let qa_suffix = format!("impl-qa-response-{iteration:03}.md");
+    let pre_commit_suffix = format!("impl-pre-commit-response-{iteration:03}.md");
     if let Some(path) =
-        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &pre_commit_suffix)?
     {
         return Ok(path);
     }
-    let pre_commit_suffix = format!("impl-pre-commit-response-{iteration:03}.md");
-    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &pre_commit_suffix)?
+    let qa_suffix = format!("impl-qa-response-{iteration:03}.md");
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?
         .ok_or_else(|| {
             RalphError::Orchestration(format!(
                 "missing implementer response artifact for loop {loop_number} iteration {iteration}"
@@ -6268,7 +6268,8 @@ mod tests {
         build_planner_prompt, collect_qa_history, collect_qa_history_for_prompt,
         collect_review_history, collect_review_history_for_prompt, execute_with_parse_retries,
         latest_completion_feedback_context, preload_role_model_backends, resolve_tmux_settings,
-        summarize_previous_specs_for_planner, summarize_state_for_planner, validate_tmux_preflight,
+        response_rel_path, summarize_previous_specs_for_planner, summarize_state_for_planner,
+        validate_tmux_preflight,
     };
     use crate::backend::{Backend, BackendRegistry, BackendRegistryTmuxConfig};
     use crate::config::global::{
@@ -8234,6 +8235,31 @@ mod tests {
         assert!(
             feedback.contains("Loop 13 issue"),
             "should use loop 13 (latest), not loop 11"
+        );
+    }
+
+    #[test]
+    fn response_rel_path_prefers_pre_commit_response_over_qa_response() {
+        let dir = tempdir().unwrap();
+        let loop_dir = dir.path().join("loops/001-demo");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        // Both QA response and pre-commit response exist for iteration 1
+        fs::write(
+            loop_dir.join("20260301120000-impl-qa-response-001.md"),
+            "qa response content",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260301130000-impl-pre-commit-response-001.md"),
+            "pre-commit response content",
+        )
+        .unwrap();
+
+        let result = response_rel_path(dir.path(), 1, "demo", 1).unwrap();
+        assert!(
+            result.contains("impl-pre-commit-response-001.md"),
+            "should prefer pre-commit response over qa response, got: {result}"
         );
     }
 }
