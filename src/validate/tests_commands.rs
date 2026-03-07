@@ -1151,6 +1151,23 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
             "expected .rollback-ceiling marker retained after push failure"
         );
 
+        // Session invalidation: sessions for loops above the rollback target
+        // (loop 1) should have been cleared despite the push failure.
+        let state = h.load_state(project_id).expect("load_state after rollback");
+        let session_store = &state["session_store"];
+        if session_store.is_object() {
+            let empty = Vec::new();
+            let records = session_store["records"].as_array().unwrap_or(&empty);
+            for record in records {
+                let loop_num = record["loop_number"].as_u64().unwrap_or(0) as u32;
+                assert!(
+                    loop_num <= 1,
+                    "expected no session records for loops > 1 after rollback to 1, found loop {}",
+                    loop_num
+                );
+            }
+        }
+
         // Re-add the origin remote so teardown can clean up.
         let _ = Command::new("git")
             .args(["remote", "add", "origin", "."])

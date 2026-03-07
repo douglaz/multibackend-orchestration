@@ -83,7 +83,13 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut push_failed = false;
+    #[derive(PartialEq)]
+    enum PushOutcome {
+        Succeeded,
+        Failed,
+        Skipped,
+    }
+    let mut push_outcome = PushOutcome::Skipped;
 
     if let Some(reference) = hard_ref.as_deref() {
         let repo_root = workspace.root.parent().ok_or_else(|| {
@@ -118,8 +124,12 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
                 &["push", "--force", "origin", &format!("{branch}:{branch}")],
             ) {
                 eprintln!("warning: force-push failed: {e}");
-                push_failed = true;
+                push_outcome = PushOutcome::Failed;
+            } else {
+                push_outcome = PushOutcome::Succeeded;
             }
+        } else {
+            eprintln!("warning: force-push skipped — branch '{}' does not exist", branch);
         }
     }
 
@@ -177,20 +187,26 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     // Manage the .rollback-ceiling marker.
     let ceiling_path = project_dir.join(".rollback-ceiling");
     if let Some(reference) = &hard_ref {
-        if push_failed {
-            // Retain (or write) the ceiling marker to guard against checkpoint
-            // resurrection from the remote on next reconstruction.
-            fs::write(&ceiling_path, args.loop_number.to_string())?;
-            println!(
-                "rolled back project {} to loop {} and reset git to {} (warning: force-push failed; .rollback-ceiling marker retained)",
-                project_id, args.loop_number, reference
-            );
-        } else {
+        if push_outcome == PushOutcome::Succeeded {
             // Hard rollback succeeded fully — remove any stale ceiling marker.
             let _ = fs::remove_file(&ceiling_path);
             println!(
                 "rolled back project {} to loop {} and reset git to {}",
                 project_id, args.loop_number, reference
+            );
+        } else {
+            // Push failed or was skipped — retain (or write) the ceiling marker
+            // to guard against checkpoint resurrection from the remote on next
+            // reconstruction.
+            let reason = if push_outcome == PushOutcome::Failed {
+                "force-push failed"
+            } else {
+                "force-push skipped"
+            };
+            fs::write(&ceiling_path, args.loop_number.to_string())?;
+            println!(
+                "rolled back project {} to loop {} and reset git to {} (warning: {}; .rollback-ceiling marker retained)",
+                project_id, args.loop_number, reference, reason
             );
         }
     } else {
