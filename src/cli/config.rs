@@ -163,6 +163,10 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "session_reuse_roles": effective.workflow.session_reuse_roles,
                     "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
                     "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
+                    "pre_commit_fmt": effective.workflow.pre_commit_fmt,
+                    "pre_commit_clippy": effective.workflow.pre_commit_clippy,
+                    "pre_commit_nix_build": effective.workflow.pre_commit_nix_build,
+                    "pre_commit_fmt_auto_fix": effective.workflow.pre_commit_fmt_auto_fix,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -265,6 +269,10 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "session_reuse_roles": effective.workflow.session_reuse_roles,
                     "session_reuse_reset_on_prompt_change": effective.workflow.session_reuse_reset_on_prompt_change,
                     "session_reuse_reset_on_rollback": effective.workflow.session_reuse_reset_on_rollback,
+                    "pre_commit_fmt": effective.workflow.pre_commit_fmt,
+                    "pre_commit_clippy": effective.workflow.pre_commit_clippy,
+                    "pre_commit_nix_build": effective.workflow.pre_commit_nix_build,
+                    "pre_commit_fmt_auto_fix": effective.workflow.pre_commit_fmt_auto_fix,
                 },
                 "daemon": {
                     "poll_seconds": effective.daemon.poll_seconds,
@@ -516,6 +524,18 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "workflow.session_reuse_reset_on_rollback" => {
             config.workflow.session_reuse_reset_on_rollback = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_fmt" => {
+            config.workflow.pre_commit_fmt = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_clippy" => {
+            config.workflow.pre_commit_clippy = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_nix_build" => {
+            config.workflow.pre_commit_nix_build = parse_optional_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_fmt_auto_fix" => {
+            config.workflow.pre_commit_fmt_auto_fix = parse_optional_bool(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = parse_optional_string(raw_value),
         "templates.implementer" => config.templates.implementer = parse_optional_string(raw_value),

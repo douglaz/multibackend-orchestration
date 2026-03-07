@@ -638,6 +638,8 @@ fn reconstruct_feature_loop(
     let mut impl_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
     let mut qa_reports: BTreeMap<u32, (&ArtifactEntry, bool)> = BTreeMap::new();
     let mut qa_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
+    let mut pre_commit_failures: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
+    let mut pre_commit_responses: BTreeMap<u32, &ArtifactEntry> = BTreeMap::new();
 
     for artifact in &artifacts {
         if let Some(iteration) = parse_iteration(&artifact.base_name, "review-", "-feedback.md") {
@@ -662,6 +664,19 @@ fn reconstruct_feature_loop(
 
         if let Some(iteration) = parse_iteration(&artifact.base_name, "impl-qa-response-", ".md") {
             qa_responses.insert(iteration, artifact);
+            continue;
+        }
+
+        if let Some(iteration) = parse_iteration(&artifact.base_name, "pre-commit-failure-", ".md")
+        {
+            pre_commit_failures.insert(iteration, artifact);
+            continue;
+        }
+
+        if let Some(iteration) =
+            parse_iteration(&artifact.base_name, "impl-pre-commit-response-", ".md")
+        {
+            pre_commit_responses.insert(iteration, artifact);
         }
     }
 
@@ -693,6 +708,12 @@ fn reconstruct_feature_loop(
         .rev()
         .find(|result| !result.passed && result.implementer_response.is_none())
         .map(|result| result.report.clone());
+
+    let pending_pre_commit_feedback = pre_commit_failures
+        .iter()
+        .rev()
+        .find(|(iteration, _)| !pre_commit_responses.contains_key(iteration))
+        .map(|(_, artifact)| artifact.rel_path.clone());
 
     let spec_path = spec
         .map(|artifact| artifact.rel_path.clone())
@@ -764,6 +785,7 @@ fn reconstruct_feature_loop(
             approval: approval.map(|artifact| artifact.rel_path.clone()),
             qa_results,
             pending_qa_feedback,
+            pending_pre_commit_feedback,
         },
         commit: commit_hash,
         started_at,
@@ -974,6 +996,15 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
                             .last()
                             .map(|qa| qa.iteration)
                     })
+                    .unwrap_or(1);
+            }
+
+            if feature_loop.artifacts.pending_pre_commit_feedback.is_some() {
+                return feature_loop
+                    .artifacts
+                    .reviews
+                    .last()
+                    .map(|review| review.iteration + 1)
                     .unwrap_or(1);
             }
 

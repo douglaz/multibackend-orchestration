@@ -166,6 +166,8 @@ pub struct FeatureLoopArtifacts {
     pub qa_results: Vec<QaExchange>,
     #[serde(default)]
     pub pending_qa_feedback: Option<String>,
+    #[serde(default)]
+    pub pending_pre_commit_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,6 +357,7 @@ impl ProjectState {
                 approval: None,
                 qa_results: Vec::new(),
                 pending_qa_feedback: None,
+                pending_pre_commit_feedback: None,
             },
             commit: None,
             started_at,

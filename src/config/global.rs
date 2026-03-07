@@ -393,6 +393,14 @@ pub struct WorkflowConfig {
     pub session_reuse_reset_on_prompt_change: bool,
     #[serde(default = "default_session_reuse_reset_on_rollback")]
     pub session_reuse_reset_on_rollback: bool,
+    #[serde(default = "default_pre_commit_fmt")]
+    pub pre_commit_fmt: bool,
+    #[serde(default = "default_pre_commit_clippy")]
+    pub pre_commit_clippy: bool,
+    #[serde(default)]
+    pub pre_commit_nix_build: bool,
+    #[serde(default)]
+    pub pre_commit_fmt_auto_fix: bool,
 }
 
 impl Eq for WorkflowConfig {}
@@ -653,6 +661,10 @@ impl Default for WorkflowConfig {
             session_reuse_roles: default_session_reuse_roles(),
             session_reuse_reset_on_prompt_change: default_session_reuse_reset_on_prompt_change(),
             session_reuse_reset_on_rollback: default_session_reuse_reset_on_rollback(),
+            pre_commit_fmt: default_pre_commit_fmt(),
+            pre_commit_clippy: default_pre_commit_clippy(),
+            pre_commit_nix_build: false,
+            pre_commit_fmt_auto_fix: false,
         }
     }
 }
@@ -951,6 +963,14 @@ fn default_session_reuse_reset_on_prompt_change() -> bool {
 }
 
 fn default_session_reuse_reset_on_rollback() -> bool {
+    true
+}
+
+fn default_pre_commit_fmt() -> bool {
+    true
+}
+
+fn default_pre_commit_clippy() -> bool {
     true
 }
 
@@ -1495,6 +1515,18 @@ pub(crate) fn set_global_config_value(
         }
         "workflow.session_reuse_reset_on_rollback" => {
             config.workflow.session_reuse_reset_on_rollback = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_fmt" => {
+            config.workflow.pre_commit_fmt = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_clippy" => {
+            config.workflow.pre_commit_clippy = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_nix_build" => {
+            config.workflow.pre_commit_nix_build = cfg_parse_bool(raw_value, key)?;
+        }
+        "workflow.pre_commit_fmt_auto_fix" => {
+            config.workflow.pre_commit_fmt_auto_fix = cfg_parse_bool(raw_value, key)?;
         }
         "templates.planner" => config.templates.planner = raw_value.to_owned(),
         "templates.implementer" => config.templates.implementer = raw_value.to_owned(),

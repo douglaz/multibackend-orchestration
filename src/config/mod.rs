@@ -68,6 +68,10 @@ pub struct EffectiveWorkflowConfig {
     pub session_reuse_roles: Vec<String>,
     pub session_reuse_reset_on_prompt_change: bool,
     pub session_reuse_reset_on_rollback: bool,
+    pub pre_commit_fmt: bool,
+    pub pre_commit_clippy: bool,
+    pub pre_commit_nix_build: bool,
+    pub pre_commit_fmt_auto_fix: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -333,6 +337,18 @@ pub fn resolve_effective_config(
         session_reuse_reset_on_rollback: project_ref
             .and_then(|p| p.workflow.session_reuse_reset_on_rollback)
             .unwrap_or(global.workflow.session_reuse_reset_on_rollback),
+        pre_commit_fmt: project_ref
+            .and_then(|p| p.workflow.pre_commit_fmt)
+            .unwrap_or(global.workflow.pre_commit_fmt),
+        pre_commit_clippy: project_ref
+            .and_then(|p| p.workflow.pre_commit_clippy)
+            .unwrap_or(global.workflow.pre_commit_clippy),
+        pre_commit_nix_build: project_ref
+            .and_then(|p| p.workflow.pre_commit_nix_build)
+            .unwrap_or(global.workflow.pre_commit_nix_build),
+        pre_commit_fmt_auto_fix: project_ref
+            .and_then(|p| p.workflow.pre_commit_fmt_auto_fix)
+            .unwrap_or(global.workflow.pre_commit_fmt_auto_fix),
     };
     let final_review_validation = validate_final_review_config(&global, &workflow)?;
     if workflow.final_review_enabled && final_review_validation.arbiter_overlaps_reviewer_family {

@@ -27,6 +27,7 @@ mod tests_openrouter;
 mod tests_pr_lifecycle;
 mod tests_pr_runtime;
 mod tests_prd;
+mod tests_pre_commit_checks;
 mod tests_project;
 mod tests_prompt_review;
 mod tests_prompt_review_panel;
@@ -138,6 +139,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_openrouter::tests());
     tests.extend(tests_validate_flags::tests());
     tests.extend(tests_quick_prd::tests());
+    tests.extend(tests_pre_commit_checks::tests());
     tests
 }
 

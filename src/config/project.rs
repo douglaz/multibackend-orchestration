@@ -66,6 +66,14 @@ pub struct ProjectWorkflowOverrides {
     pub session_reuse_reset_on_prompt_change: Option<bool>,
     #[serde(default)]
     pub session_reuse_reset_on_rollback: Option<bool>,
+    #[serde(default)]
+    pub pre_commit_fmt: Option<bool>,
+    #[serde(default)]
+    pub pre_commit_clippy: Option<bool>,
+    #[serde(default)]
+    pub pre_commit_nix_build: Option<bool>,
+    #[serde(default)]
+    pub pre_commit_fmt_auto_fix: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
