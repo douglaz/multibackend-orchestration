@@ -398,13 +398,54 @@ pub fn default_final_reviewer_template() -> &'static str {
 
 You have full access to the project codebase via your tools (file reading, search, shell commands). The specification and plan are already committed to git — do NOT rely on a separate spec document. Instead, read the actual source code.
 
-Your job is to:
-1. Run `git diff <base>...HEAD -- . ':(exclude).ralph'` to see all source changes, then read key files to review them
-2. **Prioritize correctness and safety over spec conformance**: Look for bugs, race conditions, resource leaks, incomplete error/panic handling, shared mutable state, and missing synchronization
-3. For concurrent/parallel code: verify each worker has properly isolated resources (working directories, file handles, state). Check whether panic/error paths persist failure state or silently drop it
-4. For tests: verify assertions actually prove what test names claim. Look for tests that pass for the wrong reason or miss asserting on the component that fails
-5. Check for stray files, dead code, or unintended changes outside scope
-6. Propose specific amendments if changes are required — you are NOT limited to the original spec scope; any real bug or safety issue is valid
+## WHEN TO FLAG AN ISSUE
+
+Only flag an issue as an amendment when ALL of the following are true:
+
+1. It meaningfully impacts correctness, performance, security, or maintainability — not a style preference.
+2. It is discrete and actionable: a developer can read the amendment and know exactly what to change.
+3. The required level of rigor matches the norms already established in this codebase (do not impose stricter standards than the project uses).
+4. It was introduced or exposed by the project's changes, not a pre-existing issue in upstream or vendored code.
+5. It does not rely on unstated assumptions about the runtime environment, deployment target, or usage patterns.
+6. The affected code paths can be provably identified via source reading or tool execution — not speculative.
+7. It is not an intentional, documented design choice (check comments, commit messages, or spec before flagging).
+
+## HOW TO WRITE AMENDMENT BODIES
+
+- Cite specific files, line numbers, and function names.
+- Assign an accurate severity using a priority tag (`[P0]`–`[P3]`) at the start of the Problem section.
+- Keep the Problem section to 1–2 paragraphs maximum.
+- Do not include code blocks longer than 3 lines; reference files instead.
+- State the required reproduction scenario or failing condition.
+- Use matter-of-fact tone — no hedging, no rhetorical questions.
+- Each amendment must be immediately graspable by a developer unfamiliar with the review history.
+
+## HOW MANY AMENDMENTS
+
+Output all findings that pass the qualification rules above. If nothing would definitely be fixed by a competent developer reviewing this code, prefer NO AMENDMENTS — do not manufacture findings.
+
+## PRIORITY LEVELS
+
+- `[P0]` — Blocking: breaks correctness or safety in a way that cannot ship. Must be fixed before merge.
+- `[P1]` — Urgent: significant bug, data-loss risk, or security concern that should be fixed promptly.
+- `[P2]` — Normal: real issue that should be addressed but does not block merge.
+- `[P3]` — Low: minor improvement, edge-case hardening, or cleanup worth noting.
+
+## ADDITIONAL GUIDELINES
+
+- Style issues: only flag if they obscure meaning or violate documented project standards.
+- One amendment per discrete issue — do not bundle unrelated problems.
+- For concurrent/parallel code: verify each worker has properly isolated resources (working directories, file handles, state). Check whether panic/error paths persist failure state or silently drop it.
+- For tests: verify assertions actually prove what test names claim. Look for tests that pass for the wrong reason or miss asserting on the component that fails.
+- Check for stray files, dead code, or unintended changes outside scope.
+- You are NOT limited to the original spec scope; any real bug or safety issue is valid.
+
+## YOUR WORKFLOW
+
+1. Run `{{review_diff_command}}` to see all source changes relative to `{{base_branch}}`, then read key files to review them.
+2. Read key implementation files and tests end-to-end — do not rely only on the diff.
+3. Apply the qualification rules above to each potential finding.
+4. Produce your output in the format below.
 
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)
@@ -428,7 +469,7 @@ If changes are needed:
 ## Amendment: <ID>
 
 ### Problem
-<what is wrong or missing — cite source files and line numbers>
+<[P0]–[P3] priority tag> <what is wrong or missing — cite source files and line numbers>
 
 ### Proposed Change
 <what should be changed>
