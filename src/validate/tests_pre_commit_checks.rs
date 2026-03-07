@@ -211,14 +211,13 @@ fn fmt_failure_triggers_reloop(h: &RalphHarness) -> TestResult {
             "expected loop to commit after fmt fix, but no commit found"
         );
 
-        // Verify approval was cleared and re-reviewed (at least 2 review artifacts)
-        let review_artifacts: Vec<_> = artifact_names
-            .iter()
-            .filter(|name| name.starts_with("review-") || name.contains("-review-"))
-            .collect();
+        // Verify pending_pre_commit_feedback is cleared in state after the fix
+        let pending = loop_state
+            .get("artifacts")
+            .and_then(|a| a.get("pending_pre_commit_feedback"));
         assert!(
-            review_artifacts.len() >= 2,
-            "expected at least 2 review artifacts (initial + post-fix), got: {review_artifacts:?}"
+            pending.is_none() || pending.unwrap().is_null(),
+            "expected pending_pre_commit_feedback to be cleared after fix, got: {pending:?}"
         );
     })
 }
