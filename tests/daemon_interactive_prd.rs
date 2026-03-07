@@ -2034,6 +2034,14 @@ esac; exit 0
         label_raw.contains("ralph:prd-failed"),
         "ralph:prd-failed label should be added: {label_raw}"
     );
+
+    // waiting-feedback must NOT be *added* when bot-login fails before questions
+    // are posted (the label should only appear after questions are successfully
+    // posted to the issue). The --remove-label variant is fine (cleanup on failure).
+    assert!(
+        !label_raw.contains("--add-label ralph:waiting-feedback"),
+        "ralph:waiting-feedback must not be added before questions are posted: {label_raw}"
+    );
 }
 
 // ---------------------------------------------------------------------------

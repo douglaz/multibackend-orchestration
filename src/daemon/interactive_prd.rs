@@ -991,8 +991,6 @@ fn transition_pending_to_awaiting_answers(
 
     eprintln!("prd: attempting Pending->AwaitingAnswers for {owner}/{repo}#{issue_number}");
 
-    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
-
     let result = get_or_fetch_bot_login(config, bot_login_cache)
         .and_then(|bot_login| do_pending_to_awaiting(config, issue, state, &bot_login));
     finish_transition(config, state, result, bot_login_cache)
@@ -1118,7 +1116,10 @@ fn do_pending_to_awaiting(
         }
     };
 
-    // 5. Update and persist state
+    // 5. Add waiting-feedback label only after questions are posted
+    ensure_waiting_feedback_label(config, issue_number, &issue.labels);
+
+    // 6. Update and persist state
     state.state = PrdWorkflowState::AwaitingAnswers;
     state.question_revision = next_revision;
     state.questions_comment_id = comment_id;
