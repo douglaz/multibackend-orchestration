@@ -795,7 +795,7 @@ impl QuickDevOrchestrator {
                                             backend: "pre-commit-checks",
                                             role: "pre-commit",
                                             kind: ArtifactKind::PreCommitCheckFailure {
-                                                iteration: final_review_attempts,
+                                                iteration: final_review_attempts + 1,
                                             },
                                             body: &result.feedback,
                                         },

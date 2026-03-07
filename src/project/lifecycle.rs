@@ -1014,6 +1014,7 @@ fn infer_phase_iteration(state: &ProjectState) -> u32 {
 
             if let Some(pending) = &feature_loop.artifacts.pending_pre_commit_feedback {
                 return parse_iteration_from_path(pending, "pre-commit-failure-")
+                    .map(|i| i.max(1)) // clamp to 1-based minimum
                     .or_else(|| {
                         feature_loop
                             .artifacts
@@ -1721,6 +1722,49 @@ mod tests {
             feature.artifacts.latest_pre_commit_response_iteration,
             Some(1),
             "latest_pre_commit_response_iteration must reflect the response"
+        );
+    }
+
+    #[test]
+    fn infer_phase_iteration_clamps_zero_based_pre_commit_failure() {
+        // Regression: quick-dev used to write pre-commit-failure-000.md (0-based).
+        // Even if such an artifact exists, infer_phase_iteration must return >= 1.
+        let mut state = ProjectState::new("test", "Test", "abc", None);
+        state.current_loop = 1;
+        state.current_phase = Phase::Implementing;
+        state.loops.push(FeatureLoopState {
+            loop_number: 1,
+            slug: "fix".to_owned(),
+            feature_name: "Fix".to_owned(),
+            loop_type: LoopType::Feature,
+            status: LoopStatus::InProgress,
+            backends: FeatureLoopBackends {
+                planner: "claude".to_owned(),
+                implementer: "claude".to_owned(),
+                reviewer: "claude".to_owned(),
+                qa: String::new(),
+            },
+            artifacts: FeatureLoopArtifacts {
+                spec: "loops/001-fix/spec.md".to_owned(),
+                impl_notes: Some("loops/001-fix/impl-notes.md".to_owned()),
+                reviews: vec![],
+                approval: None,
+                qa_results: vec![],
+                pending_qa_feedback: None,
+                pending_pre_commit_feedback: Some(
+                    "loops/001-fix/20260101000003-pre-commit-failure-000.md".to_owned(),
+                ),
+                latest_pre_commit_response_iteration: None,
+            },
+            commit: None,
+            started_at: Utc::now(),
+            completed_at: None,
+        });
+
+        let iter = infer_phase_iteration(&state);
+        assert!(
+            iter >= 1,
+            "infer_phase_iteration must return >= 1 even for pre-commit-failure-000.md, got {iter}"
         );
     }
 }

@@ -27,6 +27,8 @@
 
           nativeCheckInputs = [
             pkgs.bash
+            pkgs.rustfmt
+            pkgs.clippy
           ];
 
           # Tests generate mock backend scripts at runtime with
