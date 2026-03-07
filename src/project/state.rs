@@ -168,6 +168,11 @@ pub struct FeatureLoopArtifacts {
     pub pending_qa_feedback: Option<String>,
     #[serde(default)]
     pub pending_pre_commit_feedback: Option<String>,
+    /// Highest iteration number among `impl-pre-commit-response-NNN.md` artifacts.
+    /// Used by `infer_phase_iteration` to correctly reconstruct `Phase::Reviewing`
+    /// iteration after a pre-commit fix cycle.
+    #[serde(default)]
+    pub latest_pre_commit_response_iteration: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +363,7 @@ impl ProjectState {
                 qa_results: Vec::new(),
                 pending_qa_feedback: None,
                 pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: None,
             },
             commit: None,
             started_at,

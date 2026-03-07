@@ -1247,6 +1247,10 @@ impl Orchestrator {
                                 )
                             })?;
                             loop_state.artifacts.pending_pre_commit_feedback = None;
+                            loop_state
+                                .artifacts
+                                .latest_pre_commit_response_iteration =
+                                Some(parsed_iteration);
                         }
 
                         stage_changes_for_review(&self.workspace.root)?;
@@ -6696,6 +6700,7 @@ mod tests {
                 qa_results,
                 pending_qa_feedback: None,
                 pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: None,
             },
             commit: None,
             started_at: chrono::Utc::now(),
@@ -7213,6 +7218,7 @@ mod tests {
                 qa_results: vec![],
                 pending_qa_feedback: None,
                 pending_pre_commit_feedback: None,
+                latest_pre_commit_response_iteration: None,
             },
             commit: None,
             started_at: chrono::Utc::now(),
