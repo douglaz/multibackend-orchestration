@@ -186,6 +186,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::daemon_branch_format_incompatible_blocks_dispatch",
             func: daemon_branch_format_incompatible_blocks_dispatch,
         },
+        ConformanceTest {
+            name: "daemon::daemon_branch_format_constant_blocks_dispatch",
+            func: daemon_branch_format_constant_blocks_dispatch,
+        },
         // --- Loop 2 Remote-First Branch Sync Tests ---
         ConformanceTest {
             name: "daemon::sync_project_branch_resets_to_remote",
@@ -2956,6 +2960,55 @@ exit 0
         assert!(
             combined.contains("git.branch_format") && combined.contains("ralph/issue-1"),
             "expected branch-format validation failure, got:\n{combined}"
+        );
+        assert!(
+            !args_log.exists(),
+            "daemon should block before dispatch and never invoke ralph child command"
+        );
+    })
+}
+
+fn daemon_branch_format_constant_blocks_dispatch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok(["config", "set", "git.branch_format", "ralph/issue-1"])
+            .expect("set constant branch format");
+
+        let issues = r#"[{"number":601,"title":"Blocked by constant format","labels":[{"name":"ralph:ready"}],"body":"should never dispatch"}]"#;
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+        let args_log = dh.temp_dir.path().join("constant_dispatch_args.log");
+        let args_log_str = args_log.to_string_lossy().into_owned();
+        let ralph_script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{args_log_str}"
+exit 0
+"#
+        );
+        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("RALPH_DAEMON_BIN", &ralph_path),
+                    ("MOCK_GH_ISSUES", issues),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 2);
+
+        let combined = combined_output(&output);
+        assert!(
+            combined.contains("git.branch_format") && combined.contains("ralph/issue-2"),
+            "expected branch-format validation failure for constant format, got:\n{combined}"
         );
         assert!(
             !args_log.exists(),
