@@ -133,6 +133,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "commands::config_set_global_inline_table_clear",
             func: config_set_global_inline_table_clear,
         },
+        ConformanceTest {
+            name: "commands::rollback_ceiling_inert_after_forward_progress",
+            func: rollback_ceiling_inert_after_forward_progress,
+        },
+        ConformanceTest {
+            name: "commands::rollback_push_failure_continues",
+            func: rollback_push_failure_continues,
+        },
     ]
 }
 
@@ -1045,6 +1053,109 @@ fn config_set_global_inline_table_clear(h: &RalphHarness) -> TestResult {
             raw.contains("auto_commit"),
             "other keys should be preserved after clear, got:\n{raw}"
         );
+    })
+}
+
+/// Soft rollback writes a `.rollback-ceiling` marker.  After a successful run
+/// advances past that ceiling (new loop artifacts exist beyond it), the marker
+/// must become inert — reconstruction should see the full, uncapped state.
+fn rollback_ceiling_inert_after_forward_progress(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "ceiling-inert";
+        setup_with_standard_mock(h, project_id);
+
+        // Run two loops, then soft-rollback to loop 1.
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+        h.ralph_ok(["rollback", "1"])
+            .expect("ralph rollback 1 should succeed");
+
+        // The .rollback-ceiling marker should exist.
+        let ceiling_path = h.project_dir(project_id).join(".rollback-ceiling");
+        assert!(
+            ceiling_path.exists(),
+            "expected .rollback-ceiling marker after soft rollback"
+        );
+
+        // State should show only loop 1 (ceiling is enforced).
+        let state = h.load_state(project_id).expect("load_state after rollback");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(loops.len(), 1, "expected one loop after soft rollback");
+
+        // Now run again — this creates new loop artifacts past the ceiling.
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 (second) should succeed");
+
+        // The marker file still exists on disk (not cleaned up by orchestrator
+        // in this scope), but reconstruction should ignore it because artifacts
+        // have advanced past the ceiling.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after forward progress");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert!(
+            loops.len() >= 2,
+            "expected at least two loops after forward progress past ceiling, got {}",
+            loops.len()
+        );
+    })
+}
+
+/// Hard rollback with a push failure should still succeed (exit 0), clean up
+/// artifacts and sessions, and retain the `.rollback-ceiling` marker.
+fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "push-fail";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        // Remove the origin remote so that force-push will fail.
+        let remove_status = Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git remote remove should execute");
+        assert!(
+            remove_status.success(),
+            "expected git remote remove origin to succeed"
+        );
+
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("rollback --hard 1 should execute");
+        assert_exit_code(&output, 0);
+
+        // Stderr should contain a push-failure warning.
+        assert_stderr_contains(&output, "force-push failed");
+
+        // Artifacts for loop 2 should be removed despite push failure.
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_none(),
+            "expected loop-2 artifacts removed after hard rollback with push failure"
+        );
+
+        // Loop 1 artifacts should remain.
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
+        assert!(
+            loop1_dir.is_some(),
+            "expected loop-1 artifacts to remain after hard rollback"
+        );
+
+        // The .rollback-ceiling marker should be retained (push failed).
+        let ceiling_path = h.project_dir(project_id).join(".rollback-ceiling");
+        assert!(
+            ceiling_path.exists(),
+            "expected .rollback-ceiling marker retained after push failure"
+        );
+
+        // Re-add the origin remote so teardown can clean up.
+        let _ = Command::new("git")
+            .args(["remote", "add", "origin", "."])
+            .current_dir(&h.repo_root)
+            .status();
     })
 }
 

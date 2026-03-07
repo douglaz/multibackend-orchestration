@@ -288,12 +288,12 @@ fn reconstruct_project_state_internal(
             .map(|(n, _, _)| *n)
             .max()
             .unwrap_or(0);
-        // Staleness check: the marker is inert when checkpoint position is at
-        // or below the ceiling AND all artifact loop numbers are at or below
-        // the ceiling — the project hasn't advanced past the rollback point.
-        let stale =
-            checkpoint_loop <= ceiling && max_artifact_loop <= ceiling;
-        if !stale && checkpoint_loop > ceiling {
+        // Enforce capping only when checkpoint-derived position has advanced
+        // past the ceiling (stale checkpoint commits) AND no new artifact
+        // directories exist beyond the ceiling (no successful forward
+        // progress).  When artifacts have advanced past the ceiling the
+        // marker is inert — the project naturally moved on.
+        if checkpoint_loop > ceiling && max_artifact_loop <= ceiling {
             // Cap position: re-derive from filtered checkpoint commits.
             let capped = checkpoint_commits
                 .iter()
