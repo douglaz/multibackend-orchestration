@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -287,8 +287,26 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
         actual_branch
     );
 
+    // If the expected branch already exists, plain checkout preserves its
+    // commit pointer.  Only use `-B` (create-or-reset) for the migration
+    // case where the branch does not exist yet.
+    let branch_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{expected_branch}")])
+        .current_dir(wt_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let mut args = vec!["checkout", "--force"];
+    if !branch_exists {
+        args.push("-B");
+    }
+    args.push(expected_branch);
+
     let checkout = Command::new("git")
-        .args(["checkout", "--force", "-B", expected_branch])
+        .args(&args)
         .current_dir(wt_path)
         .output()
         .map_err(|err| {

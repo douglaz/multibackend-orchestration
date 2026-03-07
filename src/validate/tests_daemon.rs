@@ -2341,6 +2341,9 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
         .expect("initial create_worktree should succeed");
         assert!(wt.exists(), "worktree should exist");
 
+        // Capture the SHA of expected_branch before switching away.
+        let sha_before = git_stdout(&wt, &["rev-parse", expected_branch]);
+
         git(&wt, &["checkout", "-b", mismatched_branch]);
         let before = git_stdout(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
         assert_eq!(
@@ -2362,6 +2365,13 @@ fn runtime_reuse_worktree_corrects_branch_mismatch(h: &RalphHarness) -> TestResu
         assert_eq!(
             after, expected_branch,
             "reuse path should force-checkout expected branch"
+        );
+
+        // The branch pointer must not have been rewritten to the mismatch HEAD.
+        let sha_after = git_stdout(&wt, &["rev-parse", expected_branch]);
+        assert_eq!(
+            sha_after, sha_before,
+            "branch correction must not rewrite the commit pointer of an existing branch"
         );
     })
 }
