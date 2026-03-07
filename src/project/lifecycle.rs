@@ -1414,10 +1414,7 @@ mod tests {
         );
         // qa- prefix still works
         assert_eq!(
-            parse_iteration_from_path(
-                "loops/001-fix/20260307064115-qa-001-fail.md",
-                "qa-"
-            ),
+            parse_iteration_from_path("loops/001-fix/20260307064115-qa-001-fail.md", "qa-"),
             Some(1)
         );
     }
