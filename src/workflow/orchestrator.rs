@@ -5300,13 +5300,18 @@ fn response_rel_path(
         return Ok(path);
     }
     let qa_suffix = format!("impl-qa-response-{iteration:03}.md");
-    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?.ok_or_else(
-        || {
+    if let Some(path) =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &qa_suffix)?
+    {
+        return Ok(path);
+    }
+    let pre_commit_suffix = format!("impl-pre-commit-response-{iteration:03}.md");
+    resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &pre_commit_suffix)?
+        .ok_or_else(|| {
             RalphError::Orchestration(format!(
                 "missing implementer response artifact for loop {loop_number} iteration {iteration}"
             ))
-        },
-    )
+        })
 }
 
 fn read_project_relative_file(project_dir: &Path, relative: &str) -> Result<String> {

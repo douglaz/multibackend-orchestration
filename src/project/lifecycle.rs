@@ -1043,6 +1043,7 @@ fn parse_iteration_from_path(path: &str, prefix: &str) -> Option<u32> {
     let file_name = Path::new(path).file_name()?.to_str()?;
     let base_name = normalize_artifact_basename(file_name);
     let rest = base_name.strip_prefix(prefix)?;
+    let rest = rest.strip_suffix(".md").unwrap_or(rest);
     rest.split('-').next()?.parse::<u32>().ok()
 }
 
@@ -1390,6 +1391,34 @@ mod tests {
         assert_eq!(
             state.quick_dev_final_review_attempts, 1,
             "final_review_attempts must be unchanged after malformed state.json"
+        );
+    }
+
+    #[test]
+    fn parse_iteration_from_path_pre_commit_failure() {
+        // pre-commit-failure-002.md with timestamp prefix
+        assert_eq!(
+            parse_iteration_from_path(
+                "loops/001-fix/20260307064115-pre-commit-failure-002.md",
+                "pre-commit-failure-"
+            ),
+            Some(2)
+        );
+        // Without timestamp prefix
+        assert_eq!(
+            parse_iteration_from_path(
+                "loops/001-fix/pre-commit-failure-003.md",
+                "pre-commit-failure-"
+            ),
+            Some(3)
+        );
+        // qa- prefix still works
+        assert_eq!(
+            parse_iteration_from_path(
+                "loops/001-fix/20260307064115-qa-001-fail.md",
+                "qa-"
+            ),
+            Some(1)
         );
     }
 

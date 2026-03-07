@@ -181,8 +181,13 @@ mod tests {
         // No Cargo.toml, but nix build enabled — should attempt nix build
         // This will fail (no flake.nix) but should not panic
         let result = run_pre_commit_checks(tmp.path(), false, false, true, false);
-        // nix build should fail with an error since there's no flake.nix
-        assert!(!result.passed || result.feedback.is_empty());
+        // nix build should fail since there's no flake.nix
+        assert!(!result.passed, "nix build in empty dir should fail");
+        assert!(
+            result.feedback.contains("## nix build"),
+            "feedback should include '## nix build' section header, got: {}",
+            result.feedback
+        );
     }
 
     #[test]
