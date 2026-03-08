@@ -124,6 +124,12 @@ pub struct QuickDevRunTaskParams {
 ///
 /// Shared entry point for both CLI (`ralph auto`) and daemon dispatch.
 pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult> {
+    tracing::info!(
+        variant = "auto",
+        project_id = params.project_id.as_deref().unwrap_or("none"),
+        workspace = %params.workspace_root.display(),
+        "RALPH_TASK_STARTED"
+    );
     let workspace = load_workspace(&params.workspace_root)?;
     let repo_root = workspace
         .root
@@ -270,6 +276,12 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
 ///
 /// Shared entry point for both CLI (`ralph run`) and daemon dispatch.
 pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> {
+    tracing::info!(
+        variant = "run",
+        project = params.project.as_deref().unwrap_or("none"),
+        workspace = %params.workspace_root.display(),
+        "RALPH_TASK_STARTED"
+    );
     let workspace = load_workspace(&params.workspace_root)?;
 
     let mut orchestrator = Orchestrator::new(workspace);
@@ -301,6 +313,12 @@ pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> 
 ///
 /// Shared entry point for both CLI (`ralph quick-dev-auto`) and daemon dispatch.
 pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<OrchestrationResult> {
+    tracing::info!(
+        variant = "quick-dev-auto",
+        project_id = params.project_id.as_deref().unwrap_or("none"),
+        workspace = %params.workspace_root.display(),
+        "RALPH_TASK_STARTED"
+    );
     let workspace = load_workspace(&params.workspace_root)?;
     let repo_root = workspace
         .root
@@ -445,6 +463,12 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
 ///
 /// Shared entry point for both CLI (`ralph quick-dev-run`) and daemon dispatch.
 pub async fn run_quick_dev_run_task(params: QuickDevRunTaskParams) -> Result<OrchestrationResult> {
+    tracing::info!(
+        variant = "quick-dev-run",
+        project = params.project.as_deref().unwrap_or("none"),
+        workspace = %params.workspace_root.display(),
+        "RALPH_TASK_STARTED"
+    );
     let workspace = load_workspace(&params.workspace_root)?;
 
     let mut orchestrator = QuickDevOrchestrator::new(workspace);

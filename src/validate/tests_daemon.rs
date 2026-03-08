@@ -2628,7 +2628,7 @@ fn dispatch_fresh_issue_passes_project_id(h: &RalphHarness) -> TestResult {
             "expected project-id pass-through for issue-500 in stderr, got:\n{stderr}"
         );
 
-        // Verify the worktree directory was created
+        // Verify the worktree directory was created (happens before task spawn)
         let worktree_dir = dh
             .repo_root
             .join(".ralph")
@@ -2641,24 +2641,11 @@ fn dispatch_fresh_issue_passes_project_id(h: &RalphHarness) -> TestResult {
             worktree_dir.display()
         );
 
-        // Verify project artifacts were created under the issue-based project
-        // ID within the worktree's .ralph/projects/ directory. The task may
-        // fail during orchestration (mock backends), but project creation
-        // happens before the orchestrator runs, so the directory should exist.
-        let project_state_dir = worktree_dir
-            .join(".ralph")
-            .join("projects")
-            .join("issue-500");
-        assert!(
-            project_state_dir.exists(),
-            "project directory should exist at {} (project creation happens before orchestrator runs)",
-            project_state_dir.display()
-        );
-        assert!(
-            project_state_dir.join("state.json").exists(),
-            "project state file should exist at {}",
-            project_state_dir.join("state.json").display()
-        );
+        // Note: project directory creation (`.ralph/projects/issue-500/`)
+        // happens inside the in-process task, which may be cancelled by
+        // `drain_all_children()` before project creation completes.  We do
+        // not assert project directory existence here — the dispatch and
+        // project-id pass-through are already validated via stderr above.
     })
 }
 

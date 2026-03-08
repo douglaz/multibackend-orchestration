@@ -1189,43 +1189,30 @@ fn mixed_outcome_claim_isolation(h: &RalphHarness) -> TestResult {
 
 /// Validates per-task log isolation for concurrent in-process daemon tasks.
 ///
-/// Dispatches two issues concurrently, each using a backend script that emits
-/// a unique marker (keyed by issue number) to stdout.  The per-task tracing
-/// subscriber routes each task's output to its own log file.
+/// Dispatches two issues concurrently.  Each in-process task emits a
+/// deterministic `RALPH_TASK_STARTED` tracing marker (with its unique
+/// project_id) at the very start of the entry point, before any async work
+/// or cancellation checks.  The per-task tracing subscriber routes each
+/// task's output to its own log file.
 ///
 /// Asserts:
 /// - Both task log files exist
-/// - Each log file contains ONLY its own task's marker
-/// - No cross-task contamination occurs
+/// - Each log file contains the deterministic `RALPH_TASK_STARTED` marker
+///   with its own task's project_id
+/// - No cross-task contamination occurs (no other task's project_id appears)
 fn per_task_log_isolation(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
 
-        // Backend script that emits a unique marker based on a per-invocation
-        // counter file.  Each invocation increments the counter and uses it as
-        // a unique task discriminator embedded in the tracing output.
-        let marker_dir = dh.temp_dir.path().join("log_isolation_markers");
-        let marker_dir_str = marker_dir.to_string_lossy().into_owned();
-
-        let script_body = format!(
-            r#"#!/bin/sh
-MARKER_DIR="{marker_dir}"
-mkdir -p "$MARKER_DIR"
-# Use PID as unique marker — each backend subprocess has a distinct PID
-MARKER="TASK_MARKER_$$"
-echo "$MARKER" > "$MARKER_DIR/marker_$$.txt"
-# Emit the marker as part of the refinement output so it gets captured
-# by the per-task tracing subscriber into the task's log file
-printf 'TITLE: %s\n' "$MARKER"
-printf '---\n'
-printf 'Refined task body for %s.\n' "$MARKER"
-"#,
-            marker_dir = marker_dir_str
-        );
-
+        // A simple no-op backend — we don't rely on backend output for markers.
+        // The deterministic RALPH_TASK_STARTED tracing markers emitted by the
+        // task entry points (before any backend invocation) are sufficient.
+        let script_body = r#"#!/bin/sh
+printf 'TITLE: noop\n---\nnoop refinement\n'
+"#;
         let refine_script = dh
-            .write_mock_script("mock_log_isolation.sh", &script_body)
+            .write_mock_script("mock_log_isolation.sh", script_body)
             .expect("write mock log-isolation script");
         let refine_script_str = refine_script.to_string_lossy().into_owned();
         dh.ralph_ok([
@@ -1306,62 +1293,36 @@ printf 'Refined task body for %s.\n' "$MARKER"
         let content_800 = fs::read_to_string(&log_800).expect("read log 800");
         let content_801 = fs::read_to_string(&log_801).expect("read log 801");
 
-        // Collect all markers written by backend invocations
-        let marker_files: Vec<_> = if marker_dir.exists() {
-            fs::read_dir(&marker_dir)
-                .expect("read marker dir")
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("txt")
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        // We should have at least 2 marker files (one per backend invocation
-        // across the two tasks — each task invokes the backend at least once)
+        // Each log file must contain the deterministic RALPH_TASK_STARTED
+        // marker emitted at the very start of the task entry point.
         assert!(
-            marker_files.len() >= 2,
-            "expected at least 2 marker files, found {}: {combined}",
-            marker_files.len()
-        );
-
-        // Read all markers and partition them by which log file contains them
-        let mut markers_in_800 = Vec::new();
-        let mut markers_in_801 = Vec::new();
-        for entry in &marker_files {
-            let marker = fs::read_to_string(entry.path())
-                .expect("read marker file")
-                .trim()
-                .to_owned();
-            if content_800.contains(&marker) {
-                markers_in_800.push(marker.clone());
-            }
-            if content_801.contains(&marker) {
-                markers_in_801.push(marker.clone());
-            }
-        }
-
-        // Each log file must contain at least one marker (its own task ran)
-        assert!(
-            !markers_in_800.is_empty(),
-            "log 800 should contain at least one task marker; content:\n{content_800}"
+            content_800.contains("RALPH_TASK_STARTED"),
+            "log 800 should contain RALPH_TASK_STARTED marker; content:\n{content_800}"
         );
         assert!(
-            !markers_in_801.is_empty(),
-            "log 801 should contain at least one task marker; content:\n{content_801}"
+            content_801.contains("RALPH_TASK_STARTED"),
+            "log 801 should contain RALPH_TASK_STARTED marker; content:\n{content_801}"
         );
 
-        // Cross-contamination check: no marker should appear in BOTH log files
-        for m800 in &markers_in_800 {
-            assert!(
-                !markers_in_801.contains(m800),
-                "cross-contamination: marker {m800} found in both log files.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
-            );
-        }
+        // Each log must contain its own project_id (issue-800 / issue-801).
+        assert!(
+            content_800.contains("issue-800"),
+            "log 800 should contain its own project_id (issue-800); content:\n{content_800}"
+        );
+        assert!(
+            content_801.contains("issue-801"),
+            "log 801 should contain its own project_id (issue-801); content:\n{content_801}"
+        );
+
+        // Cross-contamination check: neither log should contain the
+        // other task's project_id.
+        assert!(
+            !content_800.contains("issue-801"),
+            "cross-contamination: issue-801 found in log 800.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
+        );
+        assert!(
+            !content_801.contains("issue-800"),
+            "cross-contamination: issue-800 found in log 801.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
+        );
     })
 }
