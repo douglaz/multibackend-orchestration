@@ -967,11 +967,11 @@ fn default_session_reuse_reset_on_rollback() -> bool {
 }
 
 fn default_pre_commit_fmt() -> bool {
-    true
+    false
 }
 
 fn default_pre_commit_clippy() -> bool {
-    true
+    false
 }
 
 fn default_qa_enabled() -> bool {
