@@ -4,6 +4,17 @@ use crate::error::RalphError;
 use crate::git::{ensure_git_repo, run_git, run_git_status};
 use crate::Result;
 
+/// Result of probing the remote server for a branch via `git ls-remote`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteBranchProbeResult {
+    /// Branch exists on the remote.
+    Exists,
+    /// Branch does not exist on the remote (ls-remote exit code 2).
+    Missing,
+    /// Probe failed due to connectivity, authentication, or other error.
+    ProbeFailed(String),
+}
+
 pub fn resolve_branch_name(format: &str, project_id: &str) -> String {
     format.replace("{project_id}", project_id)
 }
@@ -70,6 +81,40 @@ pub fn current_branch(workdir: &Path) -> Result<String> {
 pub fn remote_ref_exists(workdir: &Path, remote_ref: &str) -> Result<bool> {
     let status = run_git_status(workdir, &["rev-parse", "--verify", remote_ref])?;
     Ok(status.success())
+}
+
+/// Check whether a branch exists on the actual remote server (not just the
+/// local remote-tracking ref).  Uses `git ls-remote --exit-code` which queries
+/// the remote directly, so it works even when `refs/remotes/origin/<branch>`
+/// has been pruned locally.
+///
+/// Returns a tri-state result distinguishing "branch missing" (exit code 2)
+/// from connectivity/auth failures (other non-zero exit codes).
+pub fn remote_branch_exists_on_remote(
+    workdir: &Path,
+    branch: &str,
+) -> Result<RemoteBranchProbeResult> {
+    let output = std::process::Command::new("git")
+        .args([
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(workdir)
+        .output()
+        .map_err(|err| {
+            RalphError::Orchestration(format!("failed to execute git ls-remote: {err}"))
+        })?;
+
+    match output.status.code() {
+        Some(0) => Ok(RemoteBranchProbeResult::Exists),
+        Some(2) => Ok(RemoteBranchProbeResult::Missing),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Ok(RemoteBranchProbeResult::ProbeFailed(stderr))
+        }
+    }
 }
 
 /// Detect the remote's default branch when the configured base branch is missing.

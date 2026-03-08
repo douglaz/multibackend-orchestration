@@ -58,6 +58,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: rollback_force_push,
         },
         ConformanceTest {
+            name: "commands::rollback_hard_missing_branch",
+            func: rollback_hard_missing_branch,
+        },
+        ConformanceTest {
             name: "commands::config_get",
             func: config_get,
         },
@@ -132,6 +136,22 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "commands::config_set_global_inline_table_clear",
             func: config_set_global_inline_table_clear,
+        },
+        ConformanceTest {
+            name: "commands::rollback_ceiling_inert_after_forward_progress",
+            func: rollback_ceiling_inert_after_forward_progress,
+        },
+        ConformanceTest {
+            name: "commands::rollback_push_failure_continues",
+            func: rollback_push_failure_continues,
+        },
+        ConformanceTest {
+            name: "commands::rollback_hard_stale_tracking_ref",
+            func: rollback_hard_stale_tracking_ref,
+        },
+        ConformanceTest {
+            name: "commands::rollback_removes_ceiling_hidden_loops",
+            func: rollback_removes_ceiling_hidden_loops,
         },
     ]
 }
@@ -400,6 +420,17 @@ fn rollback_dry_run(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
         assert_stdout_contains(&output, "dry-run");
 
+        // Soft dry-run should NOT mention git reset --hard
+        let soft_stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !soft_stdout.contains("git reset --hard"),
+            "soft dry-run should not contain 'git reset --hard', got:\n{soft_stdout}"
+        );
+        assert!(
+            soft_stdout.contains("soft rollback"),
+            "soft dry-run should mention 'soft rollback', got:\n{soft_stdout}"
+        );
+
         let head_after = git_head_commit(&h.repo_root);
         assert_eq!(
             head_before, head_after,
@@ -418,6 +449,28 @@ fn rollback_dry_run(h: &RalphHarness) -> TestResult {
             loops.len(),
             2,
             "rollback --dry-run should not mutate loop state"
+        );
+
+        // Hard dry-run should mention git reset --hard.
+        let hard_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_exit_code(&hard_output, 0);
+        let hard_stdout = String::from_utf8_lossy(&hard_output.stdout);
+        assert!(
+            hard_stdout.contains("git reset --hard"),
+            "hard dry-run should contain 'git reset --hard', got:\n{hard_stdout}"
+        );
+        assert!(
+            hard_stdout.contains("hard rollback"),
+            "hard dry-run should mention 'hard rollback', got:\n{hard_stdout}"
+        );
+
+        // Hard dry-run must also be non-destructive.
+        let head_after_hard_dry = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_before, head_after_hard_dry,
+            "expected HEAD unchanged after rollback --hard --dry-run"
         );
     })
 }
@@ -458,8 +511,8 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
 
         let head_before = git_head_commit(&h.repo_root);
         let dry_run = h
-            .ralph(["rollback", "--dry-run", "1"])
-            .expect("rollback --dry-run 1 should execute");
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
         assert_exit_code(&dry_run, 0);
         let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
         let reset_ref = dry_stdout
@@ -471,8 +524,8 @@ fn rollback_with_completion_attempts(h: &RalphHarness) -> TestResult {
             .expect("dry-run output should include reset reference");
         let target_commit = git_rev_parse(&h.repo_root, reset_ref);
 
-        h.ralph_ok(["rollback", "1"])
-            .expect("ralph rollback 1 should succeed");
+        h.ralph_ok(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should succeed");
 
         let head_after = git_head_commit(&h.repo_root);
         assert_ne!(
@@ -525,8 +578,8 @@ fn rollback_force_push(h: &RalphHarness) -> TestResult {
 
         // Capture the exact reset target from dry-run output.
         let dry_run = h
-            .ralph(["rollback", "--dry-run", "1"])
-            .expect("rollback --dry-run should execute");
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run should execute");
         assert_exit_code(&dry_run, 0);
         let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
         let reset_ref = dry_stdout
@@ -560,6 +613,149 @@ fn rollback_force_push(h: &RalphHarness) -> TestResult {
         assert_ne!(
             remote_head_before, remote_head_after,
             "remote HEAD should change after force-push rollback"
+        );
+    })
+}
+
+fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "issue-506-missing-branch";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let branch = git_current_branch(&h.repo_root);
+        let head_before = git_head_commit(&h.repo_root);
+
+        // Switch to a detached HEAD so we can delete the project branch.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed");
+
+        // Delete the local project branch.
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed");
+
+        // Remove the local remote-tracking ref — but the branch still exists
+        // on the actual bare remote, so ls-remote can recover it.
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch}")])
+            .current_dir(&h.repo_root)
+            .status();
+
+        // Hard rollback should SUCCEED by fetching the branch from the remote.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify state rolled back and HEAD moved.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(
+            loops.len(),
+            1,
+            "expected one loop after hard rollback with remote recovery"
+        );
+
+        let head_after = git_head_commit(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "HEAD should have moved after hard rollback with remote branch recovery"
+        );
+
+        // --- Now test the truly-missing case: remove the branch from the ---
+        // --- bare remote as well. ---
+
+        // Run another loop to get back to 2 loops.
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed after recovery");
+
+        let branch2 = git_current_branch(&h.repo_root);
+
+        // Detach, delete local branch, delete local tracking ref, AND delete
+        // the branch from the bare remote.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed (2)");
+
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch2])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed (2)");
+
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch2}")])
+            .current_dir(&h.repo_root)
+            .status();
+
+        // Delete the branch from the bare remote itself.
+        let origin_path_output = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git remote get-url should execute");
+        let origin_path = String::from_utf8_lossy(&origin_path_output.stdout)
+            .trim()
+            .to_owned();
+        let _ = Command::new("git")
+            .args(["branch", "-D", &branch2])
+            .current_dir(Path::new(&origin_path))
+            .status();
+
+        let head_detached = git_head_commit(&h.repo_root);
+
+        // Hard dry-run should ALSO FAIL when branch is truly gone.
+        let dry_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_ne!(
+            dry_output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard --dry-run should fail when branch is truly missing"
+        );
+        let dry_stderr = String::from_utf8_lossy(&dry_output.stderr);
+        assert!(
+            dry_stderr.contains("does not exist"),
+            "hard dry-run error should mention missing branch, got:\n{dry_stderr}"
+        );
+
+        // Hard rollback should FAIL — branch is truly gone.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard should fail when project branch is missing locally and on remote"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not exist"),
+            "error should mention missing branch, got:\n{stderr}"
+        );
+
+        // HEAD should not have moved.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_detached, head_after,
+            "HEAD must not change when rollback --hard fails due to truly missing branch"
         );
     })
 }
@@ -1037,6 +1233,275 @@ fn config_set_global_inline_table_clear(h: &RalphHarness) -> TestResult {
     })
 }
 
+/// Soft rollback writes a `.rollback-ceiling` marker.  After a successful run
+/// advances past that ceiling (new loop artifacts exist beyond it), the marker
+/// must become inert — reconstruction should see the full, uncapped state.
+fn rollback_ceiling_inert_after_forward_progress(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "ceiling-inert";
+        setup_with_standard_mock(h, project_id);
+
+        // Run two loops, then soft-rollback to loop 1.
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+        h.ralph_ok(["rollback", "1"])
+            .expect("ralph rollback 1 should succeed");
+
+        // The .rollback-ceiling marker should exist.
+        let ceiling_path = h.project_dir(project_id).join(".rollback-ceiling");
+        assert!(
+            ceiling_path.exists(),
+            "expected .rollback-ceiling marker after soft rollback"
+        );
+
+        // State should show only loop 1 (ceiling is enforced).
+        let state = h.load_state(project_id).expect("load_state after rollback");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(loops.len(), 1, "expected one loop after soft rollback");
+
+        // Now run again — this creates new loop artifacts past the ceiling.
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 (second) should succeed");
+
+        // The marker file still exists on disk (not cleaned up by orchestrator
+        // in this scope), but reconstruction should ignore it because artifacts
+        // have advanced past the ceiling.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after forward progress");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert!(
+            loops.len() >= 2,
+            "expected at least two loops after forward progress past ceiling, got {}",
+            loops.len()
+        );
+    })
+}
+
+/// Hard rollback with a push failure should still succeed (exit 0), clean up
+/// artifacts and sessions, and retain the `.rollback-ceiling` marker.
+fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "push-fail";
+        setup_with_standard_mock(h, project_id);
+
+        // Enable session reuse so that the session invalidation code path
+        // in rollback is exercised.  Note: the standard mock does not emit
+        // session_id values, so no SessionRecords are actually created —
+        // the assertion below verifies structural correctness but not real
+        // invalidation.  This is a known limitation: CliBackend.execute_streaming
+        // normalizes output and discards session_id (mod.rs line ~710), so even
+        // a mock emitting NDJSON with session_id would not produce records.
+        // Real session invalidation is unit-tested in
+        // state.rs::remove_loop_clears_session_records.  Making this test
+        // non-vacuous requires preserving session_id through the CliBackend
+        // normalization layer, which is out of scope for the rollback feature.
+        h.ralph_ok(["config", "set", "workflow.session_reuse_enabled", "true"])
+            .expect("config set session_reuse_enabled failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.session_reuse_roles",
+            "implementer,reviewer",
+        ])
+        .expect("config set session_reuse_roles failed");
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        // Capture the rollback target from dry-run BEFORE removing the remote
+        // (branch exists locally, so dry-run resolves correctly).
+        let dry_run = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_exit_code(&dry_run, 0);
+        let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
+        let reset_ref = dry_stdout
+            .split("git reset --hard ")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .expect("dry-run output should include reset reference");
+        let target_commit = git_rev_parse(&h.repo_root, reset_ref);
+
+        let head_before = git_head_commit(&h.repo_root);
+
+        // Remove the origin remote so that force-push will fail.
+        let remove_status = Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git remote remove should execute");
+        assert!(
+            remove_status.success(),
+            "expected git remote remove origin to succeed"
+        );
+
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("rollback --hard 1 should execute");
+        assert_exit_code(&output, 0);
+
+        // Stderr should contain a push-failure warning.
+        assert_stderr_contains(&output, "force-push failed");
+
+        // Verify git reset --hard still happened despite push failure.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "expected HEAD to change after hard rollback (even with push failure)"
+        );
+        assert_eq!(
+            head_after, target_commit,
+            "expected HEAD to match rollback target after hard rollback with push failure"
+        );
+
+        // Artifacts for loop 2 should be removed despite push failure.
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_none(),
+            "expected loop-2 artifacts removed after hard rollback with push failure"
+        );
+
+        // Loop 1 artifacts should remain.
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
+        assert!(
+            loop1_dir.is_some(),
+            "expected loop-1 artifacts to remain after hard rollback"
+        );
+
+        // The .rollback-ceiling marker should be retained (push failed).
+        let ceiling_path = h.project_dir(project_id).join(".rollback-ceiling");
+        assert!(
+            ceiling_path.exists(),
+            "expected .rollback-ceiling marker retained after push failure"
+        );
+
+        // Session invalidation: sessions for loops above the rollback target
+        // (loop 1) should have been cleared despite the push failure.
+        let state = h.load_state(project_id).expect("load_state after rollback");
+        let session_store = &state["session_store"];
+        assert!(
+            session_store.is_object(),
+            "expected session_store to be an object in state"
+        );
+        let empty = Vec::new();
+        let records = session_store["records"].as_array().unwrap_or(&empty);
+        for record in records {
+            let loop_num = record["loop_number"].as_u64().unwrap_or(0) as u32;
+            assert!(
+                loop_num <= 1,
+                "expected no session records for loops > 1 after rollback to 1, found loop {}",
+                loop_num
+            );
+        }
+
+        // Re-add the origin remote so teardown can clean up.
+        let _ = Command::new("git")
+            .args(["remote", "add", "origin", "."])
+            .current_dir(&h.repo_root)
+            .status();
+    })
+}
+
+/// Verify that hard rollback fails when the local branch is missing, a stale
+/// local tracking ref (`origin/<branch>`) still exists, but the branch has
+/// been deleted from the actual remote.  The rollback must NOT recreate the
+/// branch from the stale tracking ref.
+fn rollback_hard_stale_tracking_ref(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "stale-ref";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let branch = git_current_branch(&h.repo_root);
+        let head_before = git_head_commit(&h.repo_root);
+
+        // Switch to detached HEAD so we can delete the project branch.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed");
+
+        // Delete the local project branch.
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed");
+
+        // Verify the local tracking ref still exists (stale).
+        let tracking_check = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("origin/{branch}")])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git rev-parse should execute");
+        assert!(
+            tracking_check.status.success(),
+            "expected stale local tracking ref origin/{branch} to exist"
+        );
+
+        // Delete the branch from the bare remote.
+        let origin_path_output = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git remote get-url should execute");
+        let origin_path = String::from_utf8_lossy(&origin_path_output.stdout)
+            .trim()
+            .to_owned();
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(Path::new(&origin_path))
+            .status()
+            .expect("git branch -D on bare remote should execute");
+        assert!(
+            status.success(),
+            "expected to delete branch from bare remote"
+        );
+
+        // Hard rollback should FAIL because the branch is gone from the
+        // actual remote, even though a stale tracking ref exists locally.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard should fail when branch is deleted on remote despite stale tracking ref"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not exist"),
+            "error should mention missing branch, got:\n{stderr}"
+        );
+
+        // HEAD should not have moved.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_before, head_after,
+            "HEAD must not change when rollback --hard fails due to stale tracking ref"
+        );
+
+        // Hard dry-run should also fail.
+        let dry_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run should execute");
+        assert_ne!(
+            dry_output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard --dry-run should fail when branch is deleted on remote despite stale tracking ref"
+        );
+    })
+}
+
 fn git_current_branch(repo_root: &Path) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -1083,6 +1548,87 @@ fn git_rev_parse(repo_root: &Path, reference: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Verify that `rollback 0` removes all loop artifact directories even when
+/// ceiling-capped reconstruction hides some of them from the reconstructed
+/// state.  This exercises the disk-scan union in `to_remove` computation.
+fn rollback_removes_ceiling_hidden_loops(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "ceiling-hidden";
+        setup_with_standard_mock(h, project_id);
+
+        // Run 2 loops → creates artifacts for loops 1 & 2 and checkpoint
+        // commits up to loop 2.
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let project_dir = h.project_dir(project_id);
+
+        // Verify both loop dirs exist before manipulation.
+        assert!(
+            h.loop_dir(project_id, 1)
+                .expect("loop_dir")
+                .is_some(),
+            "loop-1 dir should exist after run"
+        );
+        assert!(
+            h.loop_dir(project_id, 2)
+                .expect("loop_dir")
+                .is_some(),
+            "loop-2 dir should exist after run"
+        );
+
+        // Manually remove loop-2 artifacts so that max_artifact_loop = 1.
+        // This ensures checkpoint_loop (2) > max_artifact_loop (1), which
+        // triggers ceiling enforcement when the ceiling is below checkpoint.
+        let loops_dir = project_dir.join("loops");
+        for entry in std::fs::read_dir(&loops_dir).expect("read loops dir") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("002-") {
+                std::fs::remove_dir_all(entry.path()).expect("remove loop-2 dir");
+            }
+        }
+
+        // Write a .rollback-ceiling = 0 marker to simulate a prior soft
+        // rollback to 0 that left loop-1 artifacts behind (the bug scenario).
+        std::fs::write(project_dir.join(".rollback-ceiling"), "0")
+            .expect("write .rollback-ceiling");
+
+        // Now rollback 0.  Reconstruction will cap state to ceiling=0
+        // (checkpoint 2 > ceiling 0, checkpoint 2 > max_artifact 1), hiding
+        // loop-1 from the reconstructed state.  Without the disk-scan fix,
+        // to_remove would be empty and loop-1 dir would survive.
+        h.ralph_ok(["rollback", "0"])
+            .expect("ralph rollback 0 should succeed");
+
+        // Assert ALL loop artifact directories are removed.
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
+        assert!(
+            loop1_dir.is_none(),
+            "expected loop-1 directory to be removed after rollback 0 (was hidden by ceiling)"
+        );
+
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_none(),
+            "expected loop-2 directory to be removed after rollback 0"
+        );
+
+        // State should show no loops and default position.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback failed");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert!(
+            loops.is_empty(),
+            "expected no loops after rollback 0, got {}",
+            loops.len()
+        );
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
+    })
 }
 
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
