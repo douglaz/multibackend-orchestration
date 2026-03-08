@@ -40,9 +40,10 @@ pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
 /// `execute_streaming` to ensure backend processes are terminated when
 /// the future is cancelled (e.g. via `tokio::select!`).
 ///
-/// On drop, sends SIGKILL to the process group and spawns a detached
-/// reaper thread that blocks on `waitpid` to avoid zombies. The drop
-/// itself is non-blocking so it never stalls an async executor thread.
+/// On drop, sends SIGTERM to the process group for cooperative shutdown,
+/// then spawns a detached reaper thread that escalates to SIGKILL after
+/// a 5-second grace period if the group is still alive. The drop itself
+/// is non-blocking so it never stalls an async executor thread.
 struct KillOnDrop(Option<u32>);
 
 impl KillOnDrop {

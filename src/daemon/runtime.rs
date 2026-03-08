@@ -1978,13 +1978,17 @@ async fn kill_aborted_children(
     }
 
     // Cancel aborted tasks — cooperative cancellation via token.
-    // Don't remove from children map; let collect_children() observe
-    // the JoinHandle completion on the next cycle.
+    // Also cancel watchers immediately so they stop acting while the
+    // task winds down.  Don't remove from children map; let
+    // collect_children() observe the JoinHandle completion on the next
+    // cycle.
     for issue_number in to_kill {
         if let Some(handle) = children.get(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
             handle.aborted_externally.store(true, std::sync::atomic::Ordering::SeqCst);
             handle.cancel_token.cancel();
+            handle.watcher_cancel.cancel();
+            handle.draft_pr_cancel.cancel();
             eprintln!("abort-check: cancelled task {task_id} (externally aborted)");
         }
     }
@@ -2027,7 +2031,10 @@ async fn drain_all_children_with_deadline(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Force-abort remaining tasks
+    // Force-abort remaining tasks.  We abort the JoinHandle, then await
+    // it with a bounded timeout so we only mark the task as failed after
+    // the task has actually stopped executing.  This prevents labelling a
+    // task as terminal while it is still mutating git state.
     if !children.is_empty() {
         let remaining: Vec<u32> = children.keys().cloned().collect();
         for issue_number in remaining {
@@ -2037,6 +2044,23 @@ async fn drain_all_children_with_deadline(
                     "warning: force-aborting task {task_id} (drain timeout)"
                 );
                 handle.join_handle.abort();
+                // Wait for the aborted task to actually resolve (up to 10s).
+                // abort() is cooperative — it only takes effect at .await
+                // points.  This bounded wait ensures we don't label the task
+                // as failed while it is still running blocking code.
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    &mut handle.join_handle,
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(_) => {
+                        eprintln!(
+                            "warning: task {task_id} did not resolve within 10s after abort"
+                        );
+                    }
+                }
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
                     await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
@@ -4051,9 +4075,11 @@ mod tests {
     }
 
     /// Verifies the force-abort path in `drain_all_children_with_deadline`.
-    /// Spawns a non-cooperative task that ignores cancellation. With a short
-    /// drain deadline, the function must escalate to `join_handle.abort()`
-    /// and remove the task from the map.
+    /// Spawns a genuinely non-cooperative task that blocks a thread (not
+    /// just an async sleep) and ignores cancellation.  With a short drain
+    /// deadline, the function must escalate to `join_handle.abort()` and
+    /// remove the task from the map.  We also assert that no post-drain
+    /// side-effects occur (the task does not continue writing after abort).
     #[tokio::test]
     async fn drain_all_children_force_aborts_non_cooperative_task() {
         use super::{drain_all_children_with_deadline, DaemonRuntimeConfig};
@@ -4093,12 +4119,23 @@ mod tests {
             max_backend_retries: None,
         };
 
-        // Spawn a non-cooperative task that ignores cancellation entirely.
-        // It will only stop when its JoinHandle is aborted.
-        let handle = tokio::spawn(async {
-            // Busy-loop — never checks any CancellationToken.
+        // Counter that the task increments; if it continues running after
+        // drain completes, the counter will keep growing.
+        let side_effect_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter_clone = side_effect_counter.clone();
+
+        // Spawn a non-cooperative task: alternates between a blocking
+        // thread sleep (genuinely non-cooperative — abort cannot preempt
+        // it) and an .await point where abort can take effect.
+        let handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Genuine blocking sleep — not abort-cooperative.
+                tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(Duration::from_millis(50));
+                })
+                .await
+                .ok();
             }
             // Unreachable but satisfies the return type.
             #[allow(unreachable_code)]
@@ -4135,7 +4172,7 @@ mod tests {
         // Use a very short drain deadline so the non-cooperative task hits
         // the force-abort path (deadline expires, then join_handle.abort()).
         let result = tokio::time::timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(30),
             drain_all_children_with_deadline(
                 &config,
                 &mut children,
@@ -4152,6 +4189,16 @@ mod tests {
         assert!(
             children.is_empty(),
             "all children should be drained (force-aborted) after drain deadline"
+        );
+
+        // Snapshot the counter, wait, and verify it does not advance —
+        // proving the task is truly stopped, not just removed from the map.
+        let snapshot = side_effect_counter.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = side_effect_counter.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            snapshot, after,
+            "task should not produce side effects after force-abort (counter advanced from {snapshot} to {after})"
         );
     }
 }
