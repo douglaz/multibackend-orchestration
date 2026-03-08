@@ -801,11 +801,12 @@ impl CliBackend {
                         Vec::new()
                     }
                 };
-                // All async cleanup done — safe to disarm with no further
-                // .await between here and return.
-                kill_guard.disarm();
-
                 if !status.success() {
+                    // Backend exited non-zero — kill the process group to
+                    // clean up any detached descendants before disarming.
+                    self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                    kill_guard.disarm();
+
                     let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
                     // Some backends (e.g. codex) report errors via stdout JSON
                     // rather than stderr. When stderr is empty, include stdout
@@ -820,6 +821,10 @@ impl CliBackend {
                         details,
                     });
                 }
+
+                // Success path — all async cleanup done, safe to disarm
+                // with no further .await between here and return.
+                kill_guard.disarm();
 
                 let raw = String::from_utf8_lossy(&captured_stdout).to_string();
                 // Normalize structured output (stream-json NDJSON, single-object JSON)
@@ -2758,6 +2763,66 @@ while true; do sleep 0.1; done
             elapsed < Duration::from_secs(10),
             "kill_and_reap_child took too long ({elapsed:?})"
         );
+    }
+
+    /// Regression: when a backend exits non-zero after spawning a detached
+    /// descendant that closes stdio quickly, the descendant process group must
+    /// still be killed.  Previously `kill_guard.disarm()` was called before
+    /// checking `status.success()`, so the guard couldn't clean up.
+    #[tokio::test]
+    async fn nonzero_exit_with_detached_child_kills_process_group() {
+        let temp = tempdir().expect("tempdir");
+        let child_pid_file = temp.path().join("detached-child-pid");
+        // Backend script: spawns a detached child that writes its PID and
+        // busy-waits forever, then the parent immediately exits 1.
+        let script_path = write_executable_script(
+            temp.path(),
+            "nonzero-detached.sh",
+            &format!(
+                r#"#!/bin/sh
+# Read and discard stdin to satisfy the protocol
+cat >/dev/null &
+# Spawn a detached child that outlives the parent
+(
+    echo $$ > "{child_pid}"
+    trap '' TERM
+    while true; do sleep 0.1; done
+) &
+# Brief wait for the child to write its PID
+sleep 0.2
+exit 1
+"#,
+                child_pid = child_pid_file.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "nonzero-detached-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+
+        let result = Backend::execute_with_log(&backend, "ignored", None).await;
+        assert!(result.is_err(), "backend should fail with non-zero exit");
+
+        // Give the child a moment to write its PID if it hasn't yet
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        if child_pid_file.exists() {
+            let pid_str = std::fs::read_to_string(&child_pid_file)
+                .expect("read child pid file");
+            if let Ok(descendant_pid) = pid_str.trim().parse::<i32>() {
+                // The descendant must be dead — killed via process group
+                // cleanup on the non-zero exit path.
+                let alive = unsafe { libc::kill(descendant_pid, 0) } == 0;
+                assert!(
+                    !alive,
+                    "detached descendant {descendant_pid} should be dead after non-zero backend exit"
+                );
+            }
+        }
     }
 
     /// Verifies that `kill_and_reap_child` uses the `spawned_pgid` parameter

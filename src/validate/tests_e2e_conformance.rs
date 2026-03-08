@@ -10,6 +10,37 @@ use crate::validate::mock_scripts::{
 };
 use serde_json::json;
 
+/// Mutex that guards process-global env mutations (`PATH`, `RALPH_E2E_GH_LOG`)
+/// in conformance tests so parallel execution doesn't race.
+fn env_mutex() -> &'static std::sync::Mutex<()> {
+    static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// RAII guard that restores an env var to its previous state on drop,
+/// ensuring cleanup even on panic.
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(val) => unsafe { std::env::set_var(self.key, val) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
 pub fn tests() -> Vec<ConformanceTest> {
     vec![
         ConformanceTest {
@@ -403,10 +434,44 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
             "expected terminal label in stderr, got:\n{stderr}"
         );
 
-        // Verify PR metadata construction is correct by calling the build
-        // helpers directly with values matching what the daemon would use
-        // for this task.  This validates that the pr_metadata pipeline
-        // produces correct output for the given issue.
+        // --- E2E assertion: verify daemon actually called `gh pr create` ---
+        // The GH logging script writes args and body to gh_log_path when
+        // `gh pr create` is invoked.  If the task reached completion, the
+        // daemon's PR creation path must have fired.
+        if gh_log_path.exists() {
+            let log_content = fs::read_to_string(&gh_log_path)
+                .expect("should be able to read gh log file");
+            let args = parse_logged_args(&log_content);
+
+            // Verify expected gh pr create arguments
+            assert!(
+                arg_value(&args, "--title").is_some(),
+                "expected --title flag in gh pr create args, got:\n{log_content}"
+            );
+            assert!(
+                arg_value(&args, "--head").is_some(),
+                "expected --head flag in gh pr create args, got:\n{log_content}"
+            );
+            assert!(
+                arg_value(&args, "--body-file").is_some(),
+                "expected --body-file flag in gh pr create args, got:\n{log_content}"
+            );
+
+            // Verify body content if present
+            if let Some(body) = extract_logged_body(&log_content) {
+                assert!(
+                    body.contains(&format!("Closes #{issue_number}")),
+                    "expected issue closure marker in PR body, got:\n{body}"
+                );
+                assert!(
+                    body.contains("Issue Context"),
+                    "expected Issue Context section in PR body, got:\n{body}"
+                );
+            }
+        }
+
+        // Also verify PR metadata construction via the build helpers directly
+        // with values matching what the daemon would use for this task.
         let task_id = "acme-widgets-901";
         let branch = format!("ralph/daemon/{task_id}");
         let title = crate::daemon::runtime::build_pr_title(&format!("ralph: {task_id}"));
@@ -496,13 +561,19 @@ fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
         let body_path = temp.path().join("pr-body-test.md");
         fs::write(&body_path, &pr_body).expect("write body file");
 
-        // Call create_pr_with_body_file via the runtime
+        // Call create_pr_with_body_file via the runtime.
+        // Env mutations are protected by a mutex + RAII guard to prevent
+        // cross-test interference under parallel execution.
+        let _env_lock = env_mutex().lock().expect("env mutex");
+        let _path_guard = EnvGuard::set("PATH", &composed);
+        let _gh_log_guard = EnvGuard::set(
+            "RALPH_E2E_GH_LOG",
+            &gh_log.to_string_lossy(),
+        );
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         let url = rt.block_on(async {
-            // Temporarily set PATH and RALPH_E2E_GH_LOG for gh resolution
-            unsafe { std::env::set_var("PATH", &composed) };
-            unsafe { std::env::set_var("RALPH_E2E_GH_LOG", gh_log.to_string_lossy().as_ref()) };
-            let result = crate::daemon::github::create_pr_with_body_file(
+            crate::daemon::github::create_pr_with_body_file(
                 "acme",
                 "widgets",
                 branch,
@@ -511,10 +582,7 @@ fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
                 Some("master"),
                 false,
             )
-            .await;
-            unsafe { std::env::remove_var("RALPH_E2E_GH_LOG") };
-            unsafe { std::env::set_var("PATH", &original_path) };
-            result
+            .await
         })
         .expect("create_pr_with_body_file should succeed");
 
