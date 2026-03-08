@@ -145,6 +145,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "commands::rollback_push_failure_continues",
             func: rollback_push_failure_continues,
         },
+        ConformanceTest {
+            name: "commands::rollback_hard_stale_tracking_ref",
+            func: rollback_hard_stale_tracking_ref,
+        },
     ]
 }
 
@@ -1277,6 +1281,22 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
         let project_id = "push-fail";
         setup_with_standard_mock(h, project_id);
 
+        // Enable session reuse so that the session invalidation code path
+        // in rollback is exercised.  Note: the standard mock does not emit
+        // session_id values, so no SessionRecords are actually created —
+        // the assertion below verifies structural correctness but not real
+        // invalidation.  Real session invalidation is unit-tested in
+        // state.rs::remove_loop_clears_session_records.
+        h.ralph_ok(["config", "set", "workflow.session_reuse_enabled", "true"])
+            .expect("config set session_reuse_enabled failed");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.session_reuse_roles",
+            "implementer,reviewer",
+        ])
+        .expect("config set session_reuse_roles failed");
+
         h.ralph_ok(["run", "--loops", "2"])
             .expect("ralph run --loops 2 should succeed");
 
@@ -1373,6 +1393,103 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
             .args(["remote", "add", "origin", "."])
             .current_dir(&h.repo_root)
             .status();
+    })
+}
+
+/// Verify that hard rollback fails when the local branch is missing, a stale
+/// local tracking ref (`origin/<branch>`) still exists, but the branch has
+/// been deleted from the actual remote.  The rollback must NOT recreate the
+/// branch from the stale tracking ref.
+fn rollback_hard_stale_tracking_ref(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "stale-ref";
+        setup_with_standard_mock(h, project_id);
+
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let branch = git_current_branch(&h.repo_root);
+        let head_before = git_head_commit(&h.repo_root);
+
+        // Switch to detached HEAD so we can delete the project branch.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed");
+
+        // Delete the local project branch.
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed");
+
+        // Verify the local tracking ref still exists (stale).
+        let tracking_check = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("origin/{branch}")])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git rev-parse should execute");
+        assert!(
+            tracking_check.status.success(),
+            "expected stale local tracking ref origin/{branch} to exist"
+        );
+
+        // Delete the branch from the bare remote.
+        let origin_path_output = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git remote get-url should execute");
+        let origin_path = String::from_utf8_lossy(&origin_path_output.stdout)
+            .trim()
+            .to_owned();
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch])
+            .current_dir(Path::new(&origin_path))
+            .status()
+            .expect("git branch -D on bare remote should execute");
+        assert!(
+            status.success(),
+            "expected to delete branch from bare remote"
+        );
+
+        // Hard rollback should FAIL because the branch is gone from the
+        // actual remote, even though a stale tracking ref exists locally.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_ne!(
+            output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard should fail when branch is deleted on remote despite stale tracking ref"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("does not exist"),
+            "error should mention missing branch, got:\n{stderr}"
+        );
+
+        // HEAD should not have moved.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_before, head_after,
+            "HEAD must not change when rollback --hard fails due to stale tracking ref"
+        );
+
+        // Hard dry-run should also fail.
+        let dry_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run should execute");
+        assert_ne!(
+            dry_output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard --dry-run should fail when branch is deleted on remote despite stale tracking ref"
+        );
     })
 }
 

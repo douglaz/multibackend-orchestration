@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::cli::RollbackArgs;
 use crate::git::branch::{
     branch_exists, checkout_branch, create_branch, remote_branch_exists_on_remote,
-    remote_ref_exists, resolve_branch_name,
+    resolve_branch_name,
 };
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::ralph_commit::list_ralph_commits;
@@ -76,9 +76,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
                         "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
                         to_remove, args.loop_number, reference
                     );
-                } else if remote_ref_exists(repo_root, &format!("origin/{branch}"))?
-                    || remote_branch_exists_on_remote(repo_root, &branch)?
-                {
+                } else if remote_branch_exists_on_remote(repo_root, &branch)? {
                     // Branch can be recovered from remote — exact ref
                     // unavailable without side effects.
                     println!(
@@ -126,14 +124,9 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
             // that happens to be checked out).
             let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
             if !branch_exists(repo_root, &branch)? {
-                // Try to recreate from the local remote-tracking ref first.
-                let remote_ref = format!("origin/{branch}");
-                if remote_ref_exists(repo_root, &remote_ref)? {
-                    create_branch(repo_root, &branch, &remote_ref)?;
-                } else if remote_branch_exists_on_remote(repo_root, &branch)? {
-                    // Local tracking ref is stale/pruned but the branch exists on
-                    // the actual remote.  Fetch it so the tracking ref is restored,
-                    // then create the local branch.
+                // Always check the actual remote (authoritative) — local
+                // tracking refs can be stale if the branch was deleted upstream.
+                if remote_branch_exists_on_remote(repo_root, &branch)? {
                     run_git(repo_root, &["fetch", "origin", &branch])?;
                     create_branch(repo_root, &branch, &format!("origin/{branch}"))?;
                 } else {
