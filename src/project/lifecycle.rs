@@ -1806,4 +1806,279 @@ mod tests {
             "infer_phase_iteration must return >= 1 even for pre-commit-failure-000.md, got {iter}"
         );
     }
+
+    // ---- Rollback ceiling unit tests ----
+
+    fn init_test_repo_with_remote_for_ceiling() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let remote = root.join("remote.git");
+        let work = root.join("work");
+
+        git_ok(
+            root,
+            &["init", "--bare", remote.to_string_lossy().as_ref()],
+        );
+        git_ok(
+            root,
+            &["clone", remote.to_string_lossy().as_ref(), "work"],
+        );
+        git_ok(&work, &["config", "user.email", "test@example.com"]);
+        git_ok(&work, &["config", "user.name", "Test User"]);
+
+        fs::write(work.join("README.md"), "# test\n").unwrap();
+        git_ok(&work, &["add", "-A"]);
+        git_ok(&work, &["commit", "-m", "initial"]);
+        git_ok(&work, &["push", "origin", "HEAD:master"]);
+        git_ok(&work, &["checkout", "-b", "ralph/test-proj"]);
+        git_ok(&work, &["push", "-u", "origin", "ralph/test-proj"]);
+
+        (temp, work)
+    }
+
+    fn commit_empty_with_msg(repo: &Path, message: &str) {
+        let message_file = repo.join(".git").join("RALPH_TEST_MSG");
+        fs::write(&message_file, message).unwrap();
+        git_ok(
+            repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "--file",
+                message_file.to_string_lossy().as_ref(),
+            ],
+        );
+        fs::remove_file(message_file).unwrap();
+    }
+
+    fn make_project_dir(base: &Path, project_id: &str) -> PathBuf {
+        let project_dir = base.join("projects").join(project_id);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("prompt.md"), "test prompt").unwrap();
+        fs::write(
+            project_dir.join("project.toml"),
+            format!("name = \"{project_id}\"\n"),
+        )
+        .unwrap();
+        project_dir
+    }
+
+    #[test]
+    fn reconstruct_respects_rollback_ceiling() {
+        // Git context has checkpoint at loop 3.  After soft rollback to loop 1,
+        // only loop-1 artifacts remain and .rollback-ceiling = 1.  Reconstruction
+        // should cap the checkpoint-derived position to <= 1.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // Loop 1 artifact only (loops 2-3 removed by rollback).
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature",
+            "2026-01-01T00:00:00Z",
+        );
+
+        // Checkpoint commits for loops 1, 2, 3.
+        for (num, from, to) in [
+            (1, Phase::Planning, Phase::Implementing),
+            (2, Phase::Implementing, Phase::Reviewing),
+            (3, Phase::Planning, Phase::Implementing),
+        ] {
+            let msg = build_ralph_commit_message("test-proj", num, from, to);
+            commit_empty_with_msg(&repo, &msg);
+            git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+        }
+
+        // Rollback ceiling at loop 1.
+        fs::write(project_dir.join(".rollback-ceiling"), "1").unwrap();
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(
+            state.current_loop, 1,
+            "current_loop should be capped to 1 by rollback ceiling, got {}",
+            state.current_loop
+        );
+        // Only loop 1 should be present — loop_dirs are filtered to <= ceiling.
+        assert_eq!(
+            state.loops.len(),
+            1,
+            "only loop 1 should survive ceiling enforcement"
+        );
+    }
+
+    #[test]
+    fn reconstruct_ignores_absent_ceiling() {
+        // Without a .rollback-ceiling file, reconstruction uses the full
+        // checkpoint-derived position — no capping.
+        let project_dir_tmp = TempDir::new().unwrap();
+        let project_dir = make_project_dir(project_dir_tmp.path(), "test-no-ceiling");
+
+        // Two loop artifacts.
+        write_loop_artifact(
+            &project_dir,
+            1,
+            "fix",
+            "20260101000000-spec.md",
+            "spec",
+            "claude",
+            "# Feature 1",
+            "2026-01-01T00:00:00Z",
+        );
+        write_loop_artifact(
+            &project_dir,
+            2,
+            "enhance",
+            "20260101000001-spec.md",
+            "spec",
+            "claude",
+            "# Feature 2",
+            "2026-01-01T00:00:01Z",
+        );
+
+        // No git context — checkpoint defaults to (1, Planning).
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-no-ceiling",
+            None,
+            None,
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        // Both loops should be present.
+        assert_eq!(
+            state.loops.len(),
+            2,
+            "both loop artifacts should be reconstructed without ceiling"
+        );
+    }
+
+    #[test]
+    fn reconstruct_stale_ceiling_ignored() {
+        // When artifacts have advanced past the ceiling, the marker is inert.
+        // Git checkpoint at loop 3, artifacts for loops 1-3, ceiling=1.
+        // max_artifact_loop=3 > ceiling=1 => marker inert, ceiling skipped.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // Artifacts for loops 1, 2, 3.
+        for num in 1u32..=3 {
+            write_loop_artifact(
+                &project_dir,
+                num,
+                "fix",
+                &format!("2026010100000{num}-spec.md"),
+                "spec",
+                "claude",
+                &format!("# Feature {num}"),
+                &format!("2026-01-01T00:00:0{num}Z"),
+            );
+        }
+
+        // Git checkpoints for all 3 loops.
+        for (num, from, to) in [
+            (1, Phase::Planning, Phase::Implementing),
+            (2, Phase::Implementing, Phase::Reviewing),
+            (3, Phase::Planning, Phase::Implementing),
+        ] {
+            let msg = build_ralph_commit_message("test-proj", num, from, to);
+            commit_empty_with_msg(&repo, &msg);
+            git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+        }
+
+        // Stale ceiling: ceiling=1, but max_artifact_loop=3 > 1.
+        fs::write(project_dir.join(".rollback-ceiling"), "1").unwrap();
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        // Marker is inert — position should NOT be capped.
+        assert_eq!(
+            state.current_loop, 3,
+            "stale ceiling should not cap current_loop, got {}",
+            state.current_loop
+        );
+        assert_eq!(
+            state.loops.len(),
+            3,
+            "stale ceiling should not filter loop artifacts"
+        );
+    }
+
+    #[test]
+    fn reconstruct_ceiling_zero() {
+        // Ceiling = 0 with git checkpoint at loop 2.  All checkpoint commits
+        // are filtered out, defaulting to (1, Planning).
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // No loop artifacts (removed by rollback 0).
+
+        // Git checkpoint at loop 2.
+        let msg1 =
+            build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_msg(&repo, &msg1);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+
+        let msg2 =
+            build_ralph_commit_message("test-proj", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_msg(&repo, &msg2);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+
+        // Ceiling = 0.
+        fs::write(project_dir.join(".rollback-ceiling"), "0").unwrap();
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        assert_eq!(
+            state.current_loop, 1,
+            "ceiling=0 should default current_loop to 1, got {}",
+            state.current_loop
+        );
+        assert_eq!(
+            state.current_phase,
+            Phase::Planning,
+            "ceiling=0 should default current_phase to Planning"
+        );
+        assert_eq!(
+            state.status,
+            ProjectStatus::Pending,
+            "ceiling=0 with no loops should set status to Pending"
+        );
+    }
 }

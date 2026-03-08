@@ -442,6 +442,28 @@ fn rollback_dry_run(h: &RalphHarness) -> TestResult {
             2,
             "rollback --dry-run should not mutate loop state"
         );
+
+        // Hard dry-run should mention git reset --hard.
+        let hard_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_exit_code(&hard_output, 0);
+        let hard_stdout = String::from_utf8_lossy(&hard_output.stdout);
+        assert!(
+            hard_stdout.contains("git reset --hard"),
+            "hard dry-run should contain 'git reset --hard', got:\n{hard_stdout}"
+        );
+        assert!(
+            hard_stdout.contains("hard rollback"),
+            "hard dry-run should mention 'hard rollback', got:\n{hard_stdout}"
+        );
+
+        // Hard dry-run must also be non-destructive.
+        let head_after_hard_dry = git_head_commit(&h.repo_root);
+        assert_eq!(
+            head_before, head_after_hard_dry,
+            "expected HEAD unchanged after rollback --hard --dry-run"
+        );
     })
 }
 
