@@ -864,9 +864,9 @@ exit 1
     })
 }
 
-/// Adopt an orphan whose PID refers to a process that has already exited.
-/// Run poll_adopted_orphans. Assert: complete_task side effects fire
-/// (completion comment posted, label swapped to terminal state).
+/// Spawn a live orphan so reconciliation adopts it, then kill the process
+/// before poll_adopted_orphans runs. Assert: complete_task side effects fire
+/// (completion comment posted, label swapped to terminal state, PID/PGID cleared).
 fn orphan_terminalization_routes_through_complete_task(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -879,12 +879,24 @@ fn orphan_terminalization_routes_through_complete_task(h: &RalphHarness) -> Test
         ])
         .expect("disable daemon refinement");
 
-        // Use a dead PID so the orphan is immediately terminalized
-        let dead_pid = u32::MAX - 30;
+        // Spawn a real session-leader child via shell so that init becomes its
+        // parent. This avoids zombie-process issues: when the mock GH script
+        // kills the process, init reaps it immediately, so pid_exists returns
+        // false by the time poll_adopted_orphans checks liveness.
+        let spawn_out = std::process::Command::new("sh")
+            .args(["-c", "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!"])
+            .output()
+            .expect("spawn session-leader sleep via shell");
+        let pid: u32 = String::from_utf8_lossy(&spawn_out.stdout)
+            .trim()
+            .parse()
+            .expect("parse spawned PID");
+        let pgid = pid; // setsid makes pid == pgid
+
         let meta = TaskMetadata {
             pr_url: None,
-            pid: Some(dead_pid),
-            pgid: Some(dead_pid),
+            pid: Some(pid),
+            pgid: Some(pgid),
         };
         write_task_metadata(&dh, "acme", "widgets", "acme-widgets-90", &meta);
 
@@ -894,7 +906,9 @@ fn orphan_terminalization_routes_through_complete_task(h: &RalphHarness) -> Test
         let comment_log_str = comment_log.to_string_lossy().into_owned();
 
         // Mock GH: issue 90 in-progress for reconciliation.
-        // When orphan dies, complete_task posts a comment and swaps labels.
+        // The `issue view` handler kills the orphan process group so that by the
+        // time poll_adopted_orphans checks liveness the process is dead.
+        // kill_aborted_children calls `gh issue view` before poll_adopted_orphans.
         let gh_script = format!(
             r#"#!/bin/sh
 case "$1" in
@@ -925,6 +939,10 @@ case "$1" in
         exit 0
         ;;
       view)
+        # Kill the orphan process group so it is dead by poll_adopted_orphans.
+        # Use SIGKILL for immediate effect; wait briefly for kernel cleanup.
+        kill -9 -{pid} 2>/dev/null
+        sleep 0.05
         printf '{{"labels":[{{"name":"ralph:in-progress"}}]}}'
         exit 0
         ;;
@@ -934,7 +952,7 @@ case "$1" in
   repo) printf 'acme/widgets\n' ; exit 0 ;;
   pr)
     case "$2" in
-      list) printf '[]' ; exit 0 ;;
+      list) printf '' ; exit 0 ;;
       *) exit 0 ;;
     esac
     ;;
@@ -962,11 +980,12 @@ exit 1
         let combined = combined_output(&output);
         assert_exit_code(&output, 0);
 
-        // Orphan should be adopted then terminalized (dead PID)
+        // Orphan should be adopted during reconciliation (process was alive)
         assert!(
             combined.contains("reconcile: adopting orphan for issue #90"),
             "expected orphan adoption for issue #90:\n{combined}"
         );
+        // Then terminalized during poll_adopted_orphans (process killed by mock gh)
         assert!(
             combined.contains("orphan-poll: process dead for issue #90"),
             "expected orphan terminalization message for issue #90:\n{combined}"
@@ -990,6 +1009,9 @@ exit 1
         let meta = read_task_metadata(&dh, "acme", "widgets", "acme-widgets-90");
         assert_eq!(meta.pid, None, "PID should be cleared after terminalization");
         assert_eq!(meta.pgid, None, "PGID should be cleared after terminalization");
+
+        // Clean up child in case kill didn't reach it
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     })
 }
 
