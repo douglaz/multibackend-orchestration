@@ -418,6 +418,10 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
 
     tracing::info!(project_id = %project_id, "project created");
 
+    // Reload workspace after project creation so the orchestrator sees the
+    // newly created project state (matches run_auto_task behaviour).
+    let workspace = load_workspace(&params.workspace_root)?;
+
     // Orchestrate via quick-dev
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
     let result = orchestrator
@@ -532,18 +536,20 @@ pub fn open_log_file_append(log_file: &Path) -> Result<std::fs::File> {
                     format_retrigger_separator(&timestamp, Some(ends_with_newline))
                 }
                 Err(err) => {
-                    eprintln!(
-                        "warning: failed to inspect trailing newline for log file {}: {err}",
-                        log_file.display()
+                    tracing::warn!(
+                        path = %log_file.display(),
+                        error = %err,
+                        "failed to inspect trailing newline for log file"
                     );
                     format_retrigger_separator(&timestamp, None)
                 }
             }
         };
         if let Err(err) = file.write_all(separator.as_bytes()) {
-            eprintln!(
-                "warning: failed to write retrigger separator to {}: {err}",
-                log_file.display()
+            tracing::warn!(
+                path = %log_file.display(),
+                error = %err,
+                "failed to write retrigger separator"
             );
         }
     }
@@ -555,9 +561,10 @@ fn has_content_for_separator(log_file: &Path, metadata_len: std::io::Result<u64>
     match metadata_len {
         Ok(len) => (len > 0, false),
         Err(err) => {
-            eprintln!(
-                "warning: failed to inspect log file {} metadata: {err}",
-                log_file.display()
+            tracing::warn!(
+                path = %log_file.display(),
+                error = %err,
+                "failed to inspect log file metadata"
             );
             (true, true)
         }

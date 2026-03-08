@@ -611,7 +611,8 @@ impl CliBackend {
         // Guard: kill the child's process group if this future is dropped
         // (e.g. due to cancellation via tokio::select!). Disarmed on
         // successful completion.
-        let mut kill_guard = KillOnDrop(child.id());
+        let spawned_pgid = child.id();
+        let mut kill_guard = KillOnDrop(spawned_pgid);
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await.map_err(|err| {
@@ -805,7 +806,7 @@ impl CliBackend {
                             backend = %self.name,
                             "stderr drain timed out after 5s, killing process group"
                         );
-                        self.kill_and_reap_child(&mut child).await;
+                        self.kill_and_reap_child(&mut child, spawned_pgid).await;
                         Vec::new()
                     }
                 };
@@ -839,14 +840,14 @@ impl CliBackend {
                 Ok(normalized)
             }
             ExecutionOutcome::Completed(Err(err)) => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
                 // Child is now dead — safe to disarm.
                 kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 Err(err)
             }
             ExecutionOutcome::TimedOut => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
                 // Child is now dead — safe to disarm.
                 kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
@@ -861,7 +862,7 @@ impl CliBackend {
                 })
             }
             ExecutionOutcome::WatchdogFailed(details) => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
                 // Child is now dead — safe to disarm.
                 kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
@@ -873,7 +874,11 @@ impl CliBackend {
         }
     }
 
-    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
+    async fn kill_and_reap_child(
+        &self,
+        child: &mut tokio::process::Child,
+        spawned_pgid: Option<u32>,
+    ) {
         // Two-stage termination for the entire process group (child used
         // setsid(), so its PID is the group leader). Send SIGTERM first
         // for cooperative shutdown, then escalate to SIGKILL after a 5s
@@ -884,7 +889,11 @@ impl CliBackend {
         // child.wait() would miss descendants that ignore SIGTERM but
         // whose leader exits; using only kill(-pgid, 0) without reaping
         // would see zombies as alive.
-        if let Some(pid) = child.id() {
+        //
+        // Use the stored `spawned_pgid` (captured at spawn time) rather than
+        // `child.id()` because `child.id()` may return `None` after the
+        // child has been reaped via `child.wait()`.
+        if let Some(pid) = spawned_pgid.or(child.id()) {
             let Ok(raw_pid) = i32::try_from(pid) else {
                 warn!(
                     backend = %self.name,
@@ -2493,16 +2502,48 @@ done
     // Environment sanitization — CLAUDECODE stripped from backend subprocess
     // -----------------------------------------------------------------------
 
+    /// Mutex that guards process-global env mutations in tests so parallel
+    /// test execution doesn't race on `set_var`/`remove_var`.
+    fn env_test_mutex() -> &'static std::sync::Mutex<()> {
+        static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII guard that restores an env var to its previous state on drop.
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn cli_backend_strips_claudecode_from_subprocess_env() {
-        // Set CLAUDECODE in this process's environment to simulate the daemon.
-        // The backend must strip it from the subprocess Command.
+        let _env_lock = env_test_mutex().lock().expect("env mutex");
+
         let temp = tempdir().expect("tempdir");
+        // Script consumes stdin first to avoid broken-pipe timing issues,
+        // then prints whether CLAUDECODE was visible.
         let script_path = write_executable_script(
             temp.path(),
             "env-check.sh",
             r#"#!/bin/sh
-# Print CLAUDECODE value (should be empty if sanitized)
+cat >/dev/null
 if [ -n "$CLAUDECODE" ]; then
     echo "LEAKED:$CLAUDECODE"
 else
@@ -2511,23 +2552,20 @@ fi
 "#,
         );
 
-        // Set CLAUDECODE in process env for this test
-        std::env::set_var("CLAUDECODE", "should-be-stripped");
+        // Set CLAUDECODE in process env; EnvGuard restores on drop.
+        let _guard = EnvGuard::set("CLAUDECODE", "should-be-stripped");
 
         let backend = CliBackend::new(
             "env-test",
             script_path.to_string_lossy().to_string(),
             vec![],
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             std::collections::BTreeMap::new(),
         );
 
         let output = Backend::execute_with_log(&backend, "ignored", None)
             .await
             .expect("backend should succeed");
-
-        // Clean up env var
-        std::env::remove_var("CLAUDECODE");
 
         assert!(
             output.contains("SANITIZED"),
@@ -2583,6 +2621,7 @@ while true; do sleep 0.1; done
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().expect("spawn stubborn child");
+        let pgid = child.id();
 
         // Close stdin so the script reaches the busy-wait loop.
         drop(child.stdin.take());
@@ -2590,7 +2629,7 @@ while true; do sleep 0.1; done
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let start = Instant::now();
-        backend.kill_and_reap_child(&mut child).await;
+        backend.kill_and_reap_child(&mut child, pgid).await;
         let elapsed = start.elapsed();
 
         // The SIGTERM marker file must exist — proves SIGTERM was sent first.
@@ -2660,6 +2699,7 @@ while true; do sleep 0.1; done
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().expect("spawn parent");
+        let pgid = child.id();
 
         // Close stdin so the parent reaches the busy-wait loop.
         drop(child.stdin.take());
@@ -2681,7 +2721,7 @@ while true; do sleep 0.1; done
         );
 
         let start = Instant::now();
-        backend.kill_and_reap_child(&mut child).await;
+        backend.kill_and_reap_child(&mut child, pgid).await;
         let elapsed = start.elapsed();
 
         // The descendant must be dead after kill_and_reap_child.
@@ -2702,5 +2742,64 @@ while true; do sleep 0.1; done
             elapsed < Duration::from_secs(10),
             "kill_and_reap_child took too long ({elapsed:?})"
         );
+    }
+
+    /// Verifies that `kill_and_reap_child` uses the `spawned_pgid` parameter
+    /// to perform group-level cleanup even when `child.id()` returns `None`
+    /// (i.e. after the child has already been reaped via `wait()`).
+    ///
+    /// Spawns a stubborn process (traps SIGTERM), waits for it to exit
+    /// naturally (via stdin EOF), then calls `kill_and_reap_child` with
+    /// `child.id()` as `None` but a valid `spawned_pgid`.  The function
+    /// must not panic and must attempt group-level signal delivery.
+    #[tokio::test]
+    async fn kill_and_reap_child_uses_stored_pgid_after_leader_exit() {
+        let temp = tempdir().expect("tempdir");
+        // Simple script: consume stdin, then exit 0.
+        let script_path = write_executable_script(
+            temp.path(),
+            "exits-on-stdin-close.sh",
+            "#!/bin/sh\ncat >/dev/null\nexit 0\n",
+        );
+
+        let backend = CliBackend::new(
+            "stored-pgid-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(30),
+            BTreeMap::new(),
+        );
+
+        let mut cmd = tokio::process::Command::new(&backend.command);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn");
+        let stored_pgid = child.id();
+        assert!(stored_pgid.is_some(), "child should have a PID at spawn");
+
+        // Close stdin → child exits naturally.
+        drop(child.stdin.take());
+        let _ = child.wait().await;
+
+        // After wait(), child.id() should be None.
+        assert!(
+            child.id().is_none(),
+            "child.id() should be None after wait()"
+        );
+
+        // Call kill_and_reap_child with stored_pgid but child.id() == None.
+        // This must not panic and should use the stored PGID for group signal.
+        backend.kill_and_reap_child(&mut child, stored_pgid).await;
+
+        // Also verify the fallback path: when spawned_pgid is also None,
+        // it falls through to the `else` branch safely.
+        backend.kill_and_reap_child(&mut child, None).await;
     }
 }

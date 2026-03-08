@@ -1996,12 +1996,28 @@ async fn drain_all_children(
     children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
+    drain_all_children_with_deadline(
+        config,
+        children,
+        repo_root_lock,
+        Duration::from_secs(7200),
+    )
+    .await;
+}
+
+/// Inner implementation with a configurable drain deadline (testable).
+async fn drain_all_children_with_deadline(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, TaskHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+    drain_timeout: Duration,
+) {
     // Cancel all tasks to initiate cooperative shutdown.
     for handle in children.values() {
         handle.cancel_token.cancel();
     }
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
+    let deadline = tokio::time::Instant::now() + drain_timeout;
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
         collect_children(config, children, repo_root_lock).await;
@@ -4031,6 +4047,111 @@ mod tests {
         assert!(
             children.is_empty(),
             "all children should be drained after drain_all_children"
+        );
+    }
+
+    /// Verifies the force-abort path in `drain_all_children_with_deadline`.
+    /// Spawns a non-cooperative task that ignores cancellation. With a short
+    /// drain deadline, the function must escalate to `join_handle.abort()`
+    /// and remove the task from the map.
+    #[tokio::test]
+    async fn drain_all_children_force_aborts_non_cooperative_task() {
+        use super::{drain_all_children_with_deadline, DaemonRuntimeConfig};
+        use crate::daemon::TaskHandle;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let config = DaemonRuntimeConfig {
+            owner: "test".to_owned(),
+            repo: "repo".to_owned(),
+            base_branch: "main".to_owned(),
+            poll_seconds: 1,
+            max_concurrent: 1,
+            labels: vec![],
+            single_iteration: true,
+            verbose: false,
+            repo_root: PathBuf::from("/tmp/test-drain-abort"),
+            refinement_enabled: false,
+            refinement_backend: "claude".to_owned(),
+            global_config: crate::config::GlobalConfig::default(),
+            auto_rebase_enabled: false,
+            rebase_interval_seconds: 300,
+            max_rebases_per_cycle: 0,
+            rebase_timeout_seconds: 60,
+            rebase_agent_backend: "none".to_owned(),
+            workspace_root: PathBuf::from("/tmp/test-drain-abort/.ralph"),
+            prd_enabled: false,
+            prd_question_backends: vec![],
+            prd_writer_backend: "claude".to_owned(),
+            prd_reviewer_backend: "claude".to_owned(),
+            prd_max_revisions: 1,
+            prd_backend_timeout_secs: 60,
+            prd_shutdown_timeout_secs: 10,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
+            max_backend_retries: None,
+        };
+
+        // Spawn a non-cooperative task that ignores cancellation entirely.
+        // It will only stop when its JoinHandle is aborted.
+        let handle = tokio::spawn(async {
+            // Busy-loop — never checks any CancellationToken.
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // Unreachable but satisfies the return type.
+            #[allow(unreachable_code)]
+            Ok::<crate::workflow::orchestrator::OrchestrationResult, _>(
+                crate::workflow::orchestrator::OrchestrationResult {
+                    summary: String::new(),
+                    loop_number: None,
+                },
+            )
+        });
+
+        let cancel = CancellationToken::new();
+        let mut children: HashMap<u32, TaskHandle> = HashMap::new();
+        children.insert(
+            888,
+            TaskHandle {
+                join_handle: handle,
+                cancel_token: cancel,
+                aborted_externally: Arc::new(AtomicBool::new(false)),
+                watcher_cancel: CancellationToken::new(),
+                watcher_handle: None,
+                draft_pr_cancel: CancellationToken::new(),
+                draft_pr_handle: None,
+                branch: "ralph/test-abort".to_owned(),
+                log_file: PathBuf::from("/tmp/test-drain-abort.log"),
+                last_rebase_at: None,
+                last_rebase_failure_sha: None,
+                pr_url: None,
+            },
+        );
+
+        let repo_root_lock = Arc::new(Semaphore::new(1));
+
+        // Use a very short drain deadline so the non-cooperative task hits
+        // the force-abort path (deadline expires, then join_handle.abort()).
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            drain_all_children_with_deadline(
+                &config,
+                &mut children,
+                &repo_root_lock,
+                Duration::from_millis(500), // short deadline forces abort path
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "drain_all_children_with_deadline should complete within outer timeout"
+        );
+        assert!(
+            children.is_empty(),
+            "all children should be drained (force-aborted) after drain deadline"
         );
     }
 }
