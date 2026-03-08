@@ -654,6 +654,16 @@ fn pid_lifecycle_dispatch_to_collect(h: &RalphHarness) -> TestResult {
         let label_log = dh.temp_dir.path().join("pid_lifecycle_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
+        // Compute the metadata file and snapshot paths.
+        // The daemon's workspace_root is <data_dir>/<owner>/<repo>/.ralph,
+        // and task metadata lives at <workspace_root>/daemon/tasks/<task_id>.json.
+        let workspace_root = dh.data_dir().join("acme").join("widgets").join(".ralph");
+        let meta_path = workspace_root
+            .join("daemon")
+            .join("tasks")
+            .join("acme-widgets-70.json");
+        let snapshot_path = dh.temp_dir.path().join("meta_snapshot_70.json");
+
         // Mock GH: one ready issue that gets dispatched
         let gh_script = format!(
             r#"#!/bin/sh
@@ -706,7 +716,14 @@ exit 1
         );
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        // Use a mock ralph that snapshots the metadata file mid-dispatch
+        // (after dispatch_task writes PID/PGID, before collect_children clears them).
+        let ralph_path = write_mock_ralph(
+            &dh,
+            &mock_scripts::daemon_mock_ralph_meta_snapshot_script(&meta_path, &snapshot_path),
+        )
+        .expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -731,7 +748,27 @@ exit 1
             "issue 70 should be dispatched:\n{combined}"
         );
 
-        // After completion, PID/PGID should be cleared
+        // Phase 1: Assert PID/PGID were set during dispatch (intermediate state).
+        // The mock ralph snapshots the metadata file while it is still alive,
+        // after dispatch_task has written PID/PGID.
+        assert!(
+            snapshot_path.exists(),
+            "metadata snapshot should have been created by mock ralph"
+        );
+        let snapshot_content = fs::read_to_string(&snapshot_path)
+            .expect("read snapshot");
+        let snapshot_meta: TaskMetadata = serde_json::from_str(&snapshot_content)
+            .expect("parse snapshot metadata");
+        assert!(
+            snapshot_meta.pid.is_some(),
+            "PID should be set in metadata during dispatch (snapshot: {snapshot_content})"
+        );
+        assert!(
+            snapshot_meta.pgid.is_some(),
+            "PGID should be set in metadata during dispatch (snapshot: {snapshot_content})"
+        );
+
+        // Phase 2: After completion, PID/PGID should be cleared
         let meta = read_task_metadata(&dh, "acme", "widgets", "acme-widgets-70");
         assert_eq!(
             meta.pid, None,
@@ -1015,10 +1052,22 @@ exit 1
     })
 }
 
-/// Simulate the critical crash window: spawn a live child, persist PID/PGID
-/// to metadata (as dispatch_task would), but do NOT insert into children
-/// (simulating a crash before Stage 3). Run reconciliation. Assert: the live
-/// child is detected via metadata and adopted into adopted_orphans.
+/// Simulate the critical crash window: dispatch_task has spawned a child and
+/// written PID/PGID to metadata, but the daemon crashes before Stage 3
+/// inserts the ChildHandle into `children`.  On restart, reconciliation should
+/// detect the live child via persisted PID/PGID and adopt it as an orphan
+/// rather than resetting the label.
+///
+/// This test uses manual spawn + metadata write (not real `dispatch_task`)
+/// because simulating a mid-dispatch crash is not possible through the daemon
+/// binary.  The `pid_lifecycle_dispatch_to_collect` test validates that the
+/// real `dispatch_task` path correctly persists PID/PGID.  This test focuses
+/// on the reconciliation logic: given a live process with matching metadata,
+/// the daemon should adopt it rather than resetting labels.
+///
+/// The metadata is written via the same `TaskMetadata` struct and
+/// `save_task_metadata` function that `dispatch_task` uses, ensuring format
+/// compatibility between the two tests.
 fn crash_after_spawn_before_stage3(h: &RalphHarness) -> TestResult {
     run_case(|| {
         use std::os::unix::process::CommandExt;
@@ -1033,7 +1082,8 @@ fn crash_after_spawn_before_stage3(h: &RalphHarness) -> TestResult {
         ])
         .expect("disable daemon refinement");
 
-        // Spawn a session-leader child (simulates the child spawned by dispatch_task)
+        // Spawn a session-leader child (simulates the child spawned by dispatch_task).
+        // Uses process_group(0) to mirror the setsid() behavior in dispatch_task.
         let mut child = std::process::Command::new("sleep")
             .arg("300")
             .process_group(0)
@@ -1042,8 +1092,8 @@ fn crash_after_spawn_before_stage3(h: &RalphHarness) -> TestResult {
         let pid = child.id();
         let pgid = pid; // session leader: pid == pgid
 
-        // Persist PID/PGID (dispatch_task writes this immediately after spawn)
-        // but we do NOT insert into children (simulating crash before Stage 3)
+        // Persist PID/PGID using the same struct/function as dispatch_task.
+        // We do NOT insert into children (simulating crash before Stage 3).
         let meta = TaskMetadata {
             pr_url: None,
             pid: Some(pid),

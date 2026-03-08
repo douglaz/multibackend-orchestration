@@ -1374,6 +1374,37 @@ esac
     .to_owned()
 }
 
+/// Mock `ralph` script for daemon tests that snapshots the task metadata file
+/// to a capture file before exiting.  This allows the caller to assert that
+/// PID/PGID were set in the metadata while the child was still running.
+///
+/// A small sleep is inserted to let the parent process (`dispatch_task`) write
+/// PID/PGID to the metadata file before the snapshot is taken.
+pub fn daemon_mock_ralph_meta_snapshot_script(
+    metadata_path: &Path,
+    snapshot_path: &Path,
+) -> String {
+    let quoted_meta = shell_single_quote(&metadata_path.to_string_lossy());
+    let quoted_snap = shell_single_quote(&snapshot_path.to_string_lossy());
+    format!(
+        r###"#!/bin/sh
+case "$1" in
+  auto)
+    # Wait for parent to write PID/PGID to metadata (synchronous I/O,
+    # but we sleep briefly to avoid any scheduling race).
+    sleep 0.3
+    cp {quoted_meta} {quoted_snap} 2>/dev/null || true
+    exit 0
+    ;;
+  *)
+    echo "mock ralph: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    )
+}
+
 /// Mock `ralph` script for daemon tests that captures the `--idea` argument
 /// to a caller-provided file, then exits successfully.
 pub fn daemon_mock_ralph_capturing_script(idea_output_path: &Path) -> String {
