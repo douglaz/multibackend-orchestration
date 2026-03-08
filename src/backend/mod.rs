@@ -773,13 +773,13 @@ impl CliBackend {
             execution_outcome
         };
 
-        // Disarm the kill guard immediately: the child has exited or will be
-        // reaped explicitly in each outcome branch below. Must happen before
-        // any early return to avoid an accidental SIGKILL on an already-exited
-        // process group (or a recycled PID).
-        kill_guard.disarm();
+        // NOTE: kill_guard remains armed here. It is disarmed in each
+        // outcome branch below only after the child is confirmed dead or
+        // explicitly reaped. This ensures that if cancellation drops this
+        // future mid-cleanup, the guard's Drop fires SIGKILL as a fallback.
 
         if let Some(details) = watchdog_cancel_error {
+            // Guard stays armed — drop will kill the child.
             return Err(RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
                 details,
@@ -788,6 +788,10 @@ impl CliBackend {
 
         match execution_outcome {
             ExecutionOutcome::Completed(Ok((status, captured_stdout))) => {
+                // Child exited normally — disarm immediately to avoid
+                // sending SIGKILL to an already-exited (or recycled) PID.
+                kill_guard.disarm();
+
                 let stderr_bytes = self.collect_stderr(stderr_handle).await?;
 
                 if !status.success() {
@@ -817,11 +821,15 @@ impl CliBackend {
             }
             ExecutionOutcome::Completed(Err(err)) => {
                 self.kill_and_reap_child(&mut child).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 Err(err)
             }
             ExecutionOutcome::TimedOut => {
                 self.kill_and_reap_child(&mut child).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 if let Some(writer) = log_writer.as_mut() {
                     writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
@@ -835,6 +843,8 @@ impl CliBackend {
             }
             ExecutionOutcome::WatchdogFailed(details) => {
                 self.kill_and_reap_child(&mut child).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 Err(RalphError::BackendCommandFailed {
                     backend: self.name.clone(),
@@ -856,9 +866,20 @@ impl CliBackend {
         // whose leader exits; using only kill(-pgid, 0) without reaping
         // would see zombies as alive.
         if let Some(pid) = child.id() {
+            let Ok(raw_pid) = i32::try_from(pid) else {
+                warn!(
+                    backend = %self.name,
+                    pid = pid,
+                    "pid overflows i32, cannot send signal to process group"
+                );
+                // Fall through to best-effort reap below.
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return;
+            };
             // Stage 1: SIGTERM the entire process group.
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGTERM);
+                libc::kill(-raw_pid, libc::SIGTERM);
             }
             // Poll group liveness over the grace period.
             let grace = Duration::from_secs(KILL_GRACE_SECONDS);
@@ -866,7 +887,7 @@ impl CliBackend {
             let group_dead = loop {
                 // Reap leader zombie via tokio so kill(-pgid, 0) is accurate.
                 let _ = child.try_wait();
-                let group_alive = unsafe { libc::kill(-(pid as i32), 0) } == 0;
+                let group_alive = unsafe { libc::kill(-raw_pid, 0) } == 0;
                 if !group_alive {
                     break true;
                 }
@@ -878,7 +899,7 @@ impl CliBackend {
             if !group_dead {
                 // Stage 2: Grace period expired — hard kill the entire group.
                 unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(-raw_pid, libc::SIGKILL);
                 }
             }
         } else if let Err(err) = child.kill().await {

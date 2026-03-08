@@ -3298,6 +3298,35 @@ mod tests {
     }
 
     #[test]
+    fn build_pr_body_full_metadata_assembly() {
+        // Verify the full PR metadata assembly with all fields populated,
+        // matching the format that would be submitted to GitHub.
+        // Branch format is "ralph/{project_ref}" for project ref extraction.
+        let body = build_pr_body(
+            "ralph/issue-901",
+            Some(" src/main.rs | 10 +++++-----\n 1 file changed, 5 insertions(+), 5 deletions(-)"),
+            Some("E2E PR metadata verification issue."),
+            "acme-widgets-901",
+            901,
+        );
+        assert!(body.contains("Automated PR for task `acme-widgets-901`."));
+        assert!(body.contains("Closes #901"));
+        assert!(body.contains("src/main.rs | 10 +++++-----"));
+        assert!(body.contains("1 file changed, 5 insertions(+), 5 deletions(-)"));
+        assert!(body.contains("E2E PR metadata verification issue."));
+        assert!(body.contains("Project Ref: `issue-901`"));
+        // Verify the body does NOT contain raw error messages
+        assert!(!body.contains("unavailable"));
+    }
+
+    #[test]
+    fn build_pr_title_daemon_task_format() {
+        // The daemon assembles the title as "ralph: {task_id}".
+        let title = build_pr_title("ralph: acme-widgets-901");
+        assert_eq!(title, "ralph: acme-widgets-901");
+    }
+
+    #[test]
     fn should_retry_complete_task_retries_only_transient_errors_under_cap() {
         let transient =
             RalphError::Orchestration("network timeout while posting comment".to_owned());

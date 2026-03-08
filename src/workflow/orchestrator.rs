@@ -2187,6 +2187,10 @@ impl Orchestrator {
                     let mut last_verdict_rel: Option<String> = None;
 
                     for completer_backend_name in &effective_completers {
+                        if self.cancel.is_cancelled() {
+                            return Err(RalphError::Cancelled);
+                        }
+
                         let completer_backend =
                             registry.get_or_create_for_role(completer_backend_name, "completer")?;
 
@@ -3751,6 +3755,10 @@ async fn run_final_review_phase(
     cancel: &CancellationToken,
     max_backend_retries: Option<u8>,
 ) -> Result<Option<(Phase, Phase)>> {
+    if cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
+    }
+
     info!(
         loop = state.current_loop,
         "starting final review orchestration phase"

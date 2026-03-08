@@ -390,13 +390,16 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // With in-process dispatch, the task is dispatched as a tokio task.
-        // In single-iteration mode, drain_all_children cancels tasks
+        // With in-process dispatch, the task runs as a tokio task. In
+        // single-iteration mode, drain_all_children cancels tasks
         // cooperatively, so the task reaches terminal state (ralph:failed
         // due to cancellation) without completing full orchestration.
         // PR creation requires the task to complete and produce a diff,
-        // which cannot happen under drain cancellation. We verify dispatch
-        // and terminal state instead.
+        // which cannot happen under drain cancellation.
+        //
+        // PR metadata formatting is verified by unit tests for
+        // build_pr_title, build_pr_body, and extract_project_ref in
+        // daemon/runtime.rs. Here we verify dispatch and terminal state.
         assert!(
             stderr.contains("dispatched task acme-widgets-901"),
             "expected task dispatch in stderr, got:\n{stderr}"

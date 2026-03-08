@@ -217,6 +217,13 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             tmux::create_window_with_retry(&self.runner, &self.session_name, &label, &shell_cmd)
                 .await?;
 
+        // Guard: kill the window if this future is dropped (e.g. due to
+        // cancellation). Disarmed in normal cleanup paths below.
+        let mut window_guard = TmuxWindowGuard::new(
+            self.session_name.clone(),
+            window_id.clone(),
+        );
+
         // 3b. Enable remain-on-exit so the window stays visible after the command
         // process exits. Without this, the window closes immediately on exit and
         // users cannot inspect it during the retention period.
@@ -261,6 +268,8 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
                 // Best-effort cleanup after classification
                 tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+                // Window cleaned up explicitly — disarm the drop guard.
+                window_guard.disarm();
 
                 if window_alive {
                     // Window still alive — this is a genuine idle timeout.
@@ -311,6 +320,8 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         // 7. Best-effort window cleanup
         tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+        // Window cleaned up explicitly — disarm the drop guard.
+        window_guard.disarm();
 
         // 8. Read captured stdout before interpreting exit code so we can
         // persist artifacts even for non-zero exits.
@@ -369,6 +380,47 @@ struct TmuxRawOutput {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+/// RAII guard that kills a tmux window on drop. Used inside `execute_raw()`
+/// to ensure windows are cleaned up when the future is cancelled (e.g. via
+/// `tokio::select!`). Spawns a background thread for the blocking kill-window
+/// command so that the Drop impl is non-blocking.
+struct TmuxWindowGuard {
+    session_name: String,
+    window_id: Option<String>,
+}
+
+impl TmuxWindowGuard {
+    fn new(session_name: String, window_id: String) -> Self {
+        Self {
+            session_name,
+            window_id: Some(window_id),
+        }
+    }
+
+    /// Disarm the guard so Drop becomes a no-op (normal cleanup already handled).
+    fn disarm(&mut self) {
+        self.window_id = None;
+    }
+}
+
+impl Drop for TmuxWindowGuard {
+    fn drop(&mut self) {
+        if let Some(window_id) = self.window_id.take() {
+            let session = self.session_name.clone();
+            // Spawn a background thread to kill the window. We cannot call
+            // async functions from Drop, so we use a synchronous tmux command.
+            std::thread::spawn(move || {
+                let target = format!("{session}:{window_id}");
+                let _ = std::process::Command::new(tmux::tmux_bin())
+                    .args(["kill-window", "-t", &target])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            });
+        }
+    }
 }
 
 /// RAII guard that removes a list of temp files on drop.
