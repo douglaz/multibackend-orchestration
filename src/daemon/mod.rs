@@ -9,6 +9,8 @@ pub mod tasks;
 pub mod worktree;
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::task::JoinHandle;
@@ -26,6 +28,11 @@ pub struct TaskHandle {
     pub join_handle: JoinHandle<crate::Result<crate::workflow::orchestrator::OrchestrationResult>>,
     /// Cancellation token for cooperative task shutdown.
     pub cancel_token: CancellationToken,
+    /// Flag set by `kill_aborted_children` when the issue was externally
+    /// aborted (e.g. label removed from GitHub).  When set, `collect_children`
+    /// forces the terminal label to `ralph:failed` and skips PR flow, even if
+    /// the task's `JoinHandle` resolved `Ok`.
+    pub aborted_externally: Arc<AtomicBool>,
     pub watcher_cancel: CancellationToken,
     pub watcher_handle: Option<JoinHandle<()>>,
     /// Cancellation token for the draft-PR watcher task.

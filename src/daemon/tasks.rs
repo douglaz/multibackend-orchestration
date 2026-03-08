@@ -442,11 +442,11 @@ fn format_retrigger_separator(timestamp: &str, ends_with_newline: Option<bool>) 
 
 fn load_workspace(workspace_root: &Path) -> Result<Workspace> {
     let ralph_dir = workspace_root.join(".ralph");
-    if ralph_dir.join("ralph.toml").is_file() {
-        Workspace::load(ralph_dir)
-    } else {
-        crate::cli::init::create_workspace(&ralph_dir)
-    }
+    // Daemon dispatch must always use strict load — the workspace must
+    // already be initialized (the worktree setup copies `.ralph/`).
+    // Auto-initializing here would silently run with default config if
+    // the worktree config copy failed, violating the spec.
+    Workspace::load(ralph_dir)
 }
 
 #[cfg(test)]

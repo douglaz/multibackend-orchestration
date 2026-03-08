@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1656,6 +1657,7 @@ async fn dispatch_task(
     Ok(TaskHandle {
         join_handle,
         cancel_token,
+        aborted_externally: Arc::new(AtomicBool::new(false)),
         watcher_cancel,
         watcher_handle,
         draft_pr_cancel,
@@ -1760,7 +1762,7 @@ async fn collect_children(
 
     // Stage 2: Per-task teardown — resolve JoinHandle result to determine
     // terminal label, then tear down watchers.
-    let mut completion_tasks: Vec<(u32, String, &'static str)> = Vec::new();
+    let mut completion_tasks: Vec<(u32, String, &'static str, bool)> = Vec::new();
     for (issue_number, _) in finished {
         let task_id = format_task_id(&config.owner, &config.repo, issue_number);
         let Some(mut handle) = children.remove(&issue_number) else {
@@ -1769,7 +1771,13 @@ async fn collect_children(
 
         // Resolve the task result from the JoinHandle.
         let join_result = (&mut handle.join_handle).await;
-        let terminal_label = derive_terminal_label(&join_result);
+        let was_externally_aborted = handle.aborted_externally.load(std::sync::atomic::Ordering::SeqCst);
+        let terminal_label = if was_externally_aborted {
+            eprintln!("collect: task {task_id} was externally aborted, forcing ralph:failed");
+            "ralph:failed"
+        } else {
+            derive_terminal_label(&join_result)
+        };
         match &join_result {
             Ok(Err(ref err)) => {
                 if matches!(err, RalphError::Cancelled) {
@@ -1795,7 +1803,7 @@ async fn collect_children(
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
-        completion_tasks.push((issue_number, task_id, terminal_label));
+        completion_tasks.push((issue_number, task_id, terminal_label, was_externally_aborted));
     }
 
     // Stage 3: Run complete_task concurrently across finished children via JoinSet.
@@ -1808,14 +1816,14 @@ async fn collect_children(
     }
 
     let mut complete_set: JoinSet<CompletionOutcome> = JoinSet::new();
-    for (issue_number, task_id, terminal_label) in completion_tasks {
+    for (issue_number, task_id, terminal_label, externally_aborted) in completion_tasks {
         let config = config.clone();
         let repo_root_lock = repo_root_lock.clone();
         let tid = task_id.clone();
         complete_set.spawn(async move {
             // Inner spawn isolates panics so issue_number is preserved.
             let inner = tokio::spawn(async move {
-                complete_task(&config, issue_number, &tid, terminal_label, &repo_root_lock).await;
+                complete_task(&config, issue_number, &tid, terminal_label, externally_aborted, &repo_root_lock).await;
             });
             match inner.await {
                 Ok(()) => CompletionOutcome::Done {
@@ -1941,8 +1949,9 @@ async fn kill_aborted_children(
     for issue_number in to_kill {
         if let Some(handle) = children.get(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+            handle.aborted_externally.store(true, std::sync::atomic::Ordering::SeqCst);
             handle.cancel_token.cancel();
-            eprintln!("abort-check: cancelled task {task_id}");
+            eprintln!("abort-check: cancelled task {task_id} (externally aborted)");
         }
     }
 }
@@ -1992,6 +2001,7 @@ async fn drain_all_children(
                 issue_number,
                 &task_id,
                 "ralph:failed",
+                false, // drain timeout is not an external abort
                 repo_root_lock,
             )
             .await;
@@ -2043,6 +2053,7 @@ async fn complete_task(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    externally_aborted: bool,
     repo_root_lock: &Arc<Semaphore>,
 ) {
     for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
@@ -2051,6 +2062,7 @@ async fn complete_task(
             issue_number,
             task_id,
             terminal_label,
+            externally_aborted,
             repo_root_lock,
         )
         .await
@@ -2079,11 +2091,16 @@ async fn complete_task_attempt(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    externally_aborted: bool,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
-        let phase = terminal_label.trim_start_matches("ralph:");
+        let phase = if externally_aborted {
+            "aborted"
+        } else {
+            terminal_label.trim_start_matches("ralph:")
+        };
         let comment_body = format!("Task `{task_id}` finished with status: **{phase}**.");
         github::post_idempotent_comment(
             &config.owner,
@@ -2096,8 +2113,8 @@ async fn complete_task_attempt(
         .await?;
     }
 
-    // PR flow (only on success)
-    if terminal_label == "ralph:completed" {
+    // PR flow (only on success, never for externally aborted tasks)
+    if terminal_label == "ralph:completed" && !externally_aborted {
         // Resolve actual worktree branch for PR creation
         let workspace_root = config.workspace_root.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
@@ -2108,15 +2125,35 @@ async fn complete_task_attempt(
         }
     }
 
-    // Swap lifecycle label: in-progress -> terminal (required)
-    github::swap_lifecycle_label(
-        &config.owner,
-        &config.repo,
-        issue_number,
-        "ralph:in-progress",
-        terminal_label,
-    )
-    .await?;
+    // Swap lifecycle label: in-progress -> terminal.
+    // When externally aborted, the label was already changed outside the
+    // daemon (e.g. `ralph:in-progress` removed).  Skip the swap to avoid
+    // error-looping on a label that no longer exists.
+    if externally_aborted {
+        // Best-effort: ensure terminal label is present even if external
+        // actor only removed in-progress without adding failed.
+        if let Err(err) = github::add_label_with_retry(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            terminal_label,
+        )
+        .await
+        {
+            eprintln!(
+                "warning: failed to ensure {terminal_label} for externally aborted {task_id}: {err}"
+            );
+        }
+    } else {
+        github::swap_lifecycle_label(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            "ralph:in-progress",
+            terminal_label,
+        )
+        .await?;
+    }
 
     // Worktree cleanup
     cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
@@ -3114,7 +3151,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
@@ -3895,6 +3932,7 @@ mod tests {
             TaskHandle {
                 join_handle: handle,
                 cancel_token: cancel,
+                aborted_externally: Arc::new(AtomicBool::new(false)),
                 watcher_cancel: CancellationToken::new(),
                 watcher_handle: None,
                 draft_pr_cancel: CancellationToken::new(),
