@@ -206,6 +206,8 @@ fn no_diff_draft_pr_closed_transition(h: &RalphHarness) -> TestResult {
             task_id,
             &crate::daemon::runtime::TaskMetadata {
                 pr_url: Some("https://github.com/acme/widgets/pull/654".to_owned()),
+                pid: None,
+                pgid: None,
             },
         );
 

@@ -286,12 +286,10 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
                     Ok(url) => {
                         eprintln!("draft-pr-watcher: created draft PR for {task_id}: {url}");
                         pr_created = true;
-                        // Persist PR URL to durable storage for daemon restart recovery.
-                        save_task_metadata(
-                            &workspace_root,
-                            &task_id,
-                            &TaskMetadata { pr_url: Some(url) },
-                        );
+                        // Persist PR URL via load-modify-save to preserve pid/pgid.
+                        let mut meta = load_task_metadata(&workspace_root, &task_id);
+                        meta.pr_url = Some(url);
+                        save_task_metadata(&workspace_root, &task_id, &meta);
                     }
                     Err(err) => {
                         eprintln!(
@@ -303,11 +301,9 @@ async fn draft_pr_watcher_with_sleep<S, SFut>(
                         {
                             eprintln!("draft-pr-watcher: found existing PR for {task_id}: {url}");
                             pr_created = true;
-                            save_task_metadata(
-                                &workspace_root,
-                                &task_id,
-                                &TaskMetadata { pr_url: Some(url) },
-                            );
+                            let mut meta = load_task_metadata(&workspace_root, &task_id);
+                            meta.pr_url = Some(url);
+                            save_task_metadata(&workspace_root, &task_id, &meta);
                         }
                     }
                 }
@@ -710,6 +706,10 @@ fn task_metadata_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 pub struct TaskMetadata {
     #[serde(default)]
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub pgid: Option<u32>,
 }
 
 /// Load task metadata from disk.  Returns `Default` if the file does not exist.
@@ -737,6 +737,13 @@ pub fn save_task_metadata(workspace_root: &Path, task_id: &str, meta: &TaskMetad
             eprintln!("warning: failed to serialize task metadata for {task_id}: {err}");
         }
     }
+}
+
+/// Metadata for an orphaned child process adopted after daemon restart.
+struct OrphanInfo {
+    pid: u32,
+    pgid: u32,
+    task_id: String,
 }
 
 /// Print the last 50 lines of a task's log file to stderr for diagnostics.
@@ -785,9 +792,10 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
 
     let repo_root_lock = Arc::new(Semaphore::new(1));
 
-    // Phase 1: Startup reconciliation — reset all `ralph:in-progress` to `ralph:ready`.
-    // Always queries `ralph:in-progress` regardless of configured poll labels.
-    reconcile_in_progress_labels(&config.owner, &config.repo, config.verbose).await?;
+    // Phase 1: Startup reconciliation — reset stale `ralph:in-progress` to `ralph:ready`,
+    // adopting surviving orphan processes instead of resetting their labels.
+    let mut adopted_orphans: HashMap<u32, OrphanInfo> = HashMap::new();
+    reconcile_in_progress_labels(config, &mut adopted_orphans).await?;
 
     // Phase 2: PRD background task lifecycle
     let prd_cancel = CancellationToken::new();
@@ -830,10 +838,13 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         // from ralph:in-progress to ralph:failed via CLI `daemon abort`).
         // Runs before collect_children so that a fast-finishing aborted task
         // is not mistakenly treated as a normal success.
-        kill_aborted_children(config, &mut children, &repo_root_lock).await;
+        kill_aborted_children(config, &mut children, &mut adopted_orphans, &repo_root_lock).await;
 
         // Collect finished children
         collect_children(config, &mut children, &repo_root_lock).await;
+
+        // Poll adopted orphans for liveness; terminalize dead ones
+        poll_adopted_orphans(config, &mut adopted_orphans, &repo_root_lock).await;
 
         // Auto-rebase phase: rebase eligible PR-backed child branches
         auto_rebase_phase(config, &mut children, &repo_root_lock).await;
@@ -848,7 +859,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         // Poll for new issues
-        let active_count = children.len() as u32;
+        let active_count = (children.len() + adopted_orphans.len()) as u32;
         let slots = config.max_concurrent.saturating_sub(active_count);
         if config.verbose {
             let planned_sleep_seconds = if config.single_iteration {
@@ -862,7 +873,15 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         }
 
         if slots > 0 {
-            if let Err(err) = poll_and_claim(config, &mut children, slots, &repo_root_lock).await {
+            if let Err(err) = poll_and_claim(
+                config,
+                &mut children,
+                &adopted_orphans,
+                slots,
+                &repo_root_lock,
+            )
+            .await
+            {
                 eprintln!("warning: poll/claim cycle failed: {err}");
             }
         }
@@ -955,23 +974,55 @@ async fn run_prd_phase(
     spawn_blocking_op(move || interactive_prd::poll_and_advance_prd(&prd_config)).await
 }
 
-/// Startup reconciliation: every issue currently labeled `ralph:in-progress`
-/// is reset to `ralph:ready` (children map is empty on fresh daemon start).
+/// Startup reconciliation: for each `ralph:in-progress` issue, check whether
+/// its previously-spawned child process is still alive (via persisted PID/PGID).
+/// Surviving orphans are adopted into `adopted_orphans`; dead processes cause
+/// the label to be reset to `ralph:ready`.
 ///
 /// Always queries `ralph:in-progress` directly rather than using configured
 /// poll labels, ensuring stale issues are caught regardless of label config.
-async fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) -> Result<()> {
-    // Always query ralph:in-progress explicitly to catch all stale issues
+async fn reconcile_in_progress_labels(
+    config: &DaemonRuntimeConfig,
+    adopted_orphans: &mut HashMap<u32, OrphanInfo>,
+) -> Result<()> {
     let reconcile_labels = vec!["ralph:in-progress".to_owned()];
-    let (issues, _overflow) = github::poll_issues(owner, repo, &reconcile_labels).await?;
+    let (issues, _overflow) =
+        github::poll_issues(&config.owner, &config.repo, &reconcile_labels).await?;
 
     let mut reconciled = 0u32;
+    let mut adopted = 0u32;
     for issue in &issues {
         let lifecycle = github::classify_lifecycle_labels(&issue.labels);
-        if lifecycle.iter().any(|l| l == "ralph:in-progress") {
+        if !lifecycle.iter().any(|l| l == "ralph:in-progress") {
+            continue;
+        }
+
+        let task_id = format_task_id(&config.owner, &config.repo, issue.number);
+        let meta = load_task_metadata(&config.workspace_root, &task_id);
+
+        // Check if the previously-spawned child is still alive.
+        // Require both PID and PGID present, matching (session-leader invariant),
+        // and both alive to mitigate PID-reuse false positives.
+        let is_alive = matches!(
+            (meta.pid, meta.pgid),
+            (Some(pid), Some(pgid))
+                if pid == pgid && process::pid_exists(pid) && process::pgid_exists(pgid)
+        );
+
+        if is_alive {
+            let pid = meta.pid.unwrap();
+            let pgid = meta.pgid.unwrap();
+            eprintln!(
+                "reconcile: adopting orphan for issue #{} (pid={pid}, pgid={pgid})",
+                issue.number
+            );
+            adopted_orphans.insert(issue.number, OrphanInfo { pid, pgid, task_id });
+            adopted += 1;
+        } else {
+            // Dead or no PID recorded — reset to ralph:ready
             if let Err(err) = github::swap_lifecycle_label(
-                owner,
-                repo,
+                &config.owner,
+                &config.repo,
                 issue.number,
                 "ralph:in-progress",
                 "ralph:ready",
@@ -984,8 +1035,15 @@ async fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) ->
                 );
                 continue;
             }
+            // Clear stale PID/PGID from metadata if present
+            if meta.pid.is_some() || meta.pgid.is_some() {
+                let mut cleared = load_task_metadata(&config.workspace_root, &task_id);
+                cleared.pid = None;
+                cleared.pgid = None;
+                save_task_metadata(&config.workspace_root, &task_id, &cleared);
+            }
             reconciled += 1;
-            if verbose {
+            if config.verbose {
                 eprintln!(
                     "verbose: reconcile reset issue #{} in-progress->ready",
                     issue.number
@@ -996,7 +1054,57 @@ async fn reconcile_in_progress_labels(owner: &str, repo: &str, verbose: bool) ->
     if reconciled > 0 {
         eprintln!("reconcile: reset {reconciled} in-progress issue(s) to ready");
     }
+    if adopted > 0 {
+        eprintln!("reconcile: adopted {adopted} surviving orphan(s)");
+    }
     Ok(())
+}
+
+/// Poll adopted orphans for liveness and terminalize dead ones through `complete_task`.
+async fn poll_adopted_orphans(
+    config: &DaemonRuntimeConfig,
+    adopted_orphans: &mut HashMap<u32, OrphanInfo>,
+    repo_root_lock: &Arc<Semaphore>,
+) {
+    let dead: Vec<u32> = adopted_orphans
+        .iter()
+        .filter(|(_, info)| !process::pid_exists(info.pid) || !process::pgid_exists(info.pgid))
+        .map(|(issue_number, _)| *issue_number)
+        .collect();
+
+    for issue_number in dead {
+        let Some(orphan) = adopted_orphans.remove(&issue_number) else {
+            continue;
+        };
+
+        // Determine terminal label heuristic: merged PR → completed, otherwise → failed.
+        let branch = format!("ralph/daemon/{}", orphan.task_id);
+        let terminal_label = if github::is_pr_merged(&config.owner, &config.repo, &branch).await {
+            "ralph:completed"
+        } else {
+            "ralph:failed"
+        };
+
+        eprintln!(
+            "orphan-poll: process dead for issue #{issue_number} (pid={}, pgid={}), terminalizing as {terminal_label}",
+            orphan.pid, orphan.pgid
+        );
+
+        complete_task(
+            config,
+            issue_number,
+            &orphan.task_id,
+            terminal_label,
+            repo_root_lock,
+        )
+        .await;
+
+        // Clear PID/PGID from metadata
+        let mut meta = load_task_metadata(&config.workspace_root, &orphan.task_id);
+        meta.pid = None;
+        meta.pgid = None;
+        save_task_metadata(&config.workspace_root, &orphan.task_id, &meta);
+    }
 }
 
 /// A claimed issue ready for concurrent dispatch.
@@ -1039,6 +1147,7 @@ enum CompletionOutcome {
 async fn poll_and_claim(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, ChildHandle>,
+    adopted_orphans: &HashMap<u32, OrphanInfo>,
     slots: u32,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
@@ -1103,8 +1212,11 @@ async fn poll_and_claim(
             continue;
         }
 
-        // Skip if we already have a child for this issue
+        // Skip if we already have a child or adopted orphan for this issue
         if children.contains_key(&issue.number) {
+            continue;
+        }
+        if adopted_orphans.contains_key(&issue.number) {
             continue;
         }
 
@@ -1238,6 +1350,16 @@ async fn poll_and_claim(
                 detail,
             } => {
                 eprintln!("warning: failed to dispatch issue #{issue_number}: {detail}");
+                // Defensively clear PID/PGID (child may or may not have spawned)
+                {
+                    let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+                    let mut meta = load_task_metadata(&config.workspace_root, &task_id);
+                    if meta.pid.is_some() || meta.pgid.is_some() {
+                        meta.pid = None;
+                        meta.pgid = None;
+                        save_task_metadata(&config.workspace_root, &task_id, &meta);
+                    }
+                }
                 // Per-issue rollback: swap ralph:in-progress -> ralph:failed
                 if let Err(rollback_err) = github::swap_lifecycle_label(
                     &config.owner,
@@ -1258,6 +1380,16 @@ async fn poll_and_claim(
                 detail,
             } => {
                 eprintln!("warning: dispatch worker panicked for issue #{issue_number}: {detail}");
+                // Defensively clear PID/PGID (child may or may not have spawned)
+                {
+                    let task_id = format_task_id(&config.owner, &config.repo, issue_number);
+                    let mut meta = load_task_metadata(&config.workspace_root, &task_id);
+                    if meta.pid.is_some() || meta.pgid.is_some() {
+                        meta.pid = None;
+                        meta.pgid = None;
+                        save_task_metadata(&config.workspace_root, &task_id, &meta);
+                    }
+                }
                 // Per-issue rollback: same path as Err — swap ralph:in-progress -> ralph:failed
                 if let Err(rollback_err) = github::swap_lifecycle_label(
                     &config.owner,
@@ -1594,6 +1726,15 @@ async fn dispatch_task(
         }
     };
 
+    // Persist PID/PGID immediately so a crash between here and
+    // ChildHandle insertion is recoverable on next startup.
+    {
+        let mut meta = load_task_metadata(&workspace_root, &task_id);
+        meta.pid = Some(spawned.pid);
+        meta.pgid = Some(spawned.pgid);
+        save_task_metadata(&workspace_root, &task_id, &meta);
+    }
+
     let watcher_cancel = CancellationToken::new();
     let watcher_handle = if !config.owner.is_empty() && !config.repo.is_empty() {
         let owner = config.owner.clone();
@@ -1772,6 +1913,13 @@ async fn collect_children(
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
+        // Clear PID/PGID from metadata now that the child has exited
+        {
+            let mut meta = load_task_metadata(&config.workspace_root, &task_id);
+            meta.pid = None;
+            meta.pgid = None;
+            save_task_metadata(&config.workspace_root, &task_id, &meta);
+        }
         completion_tasks.push((issue_number, task_id, terminal_label));
     }
 
@@ -1850,14 +1998,23 @@ async fn collect_children(
 /// Kill running children whose issues have been externally aborted (e.g. via
 /// `ralph daemon abort`).  The CLI abort swaps the issue label to
 /// `ralph:failed` but cannot kill the process (no PID access).  This function
-/// queries labels for each running child and terminates any that are no longer
-/// `ralph:in-progress`.
+/// queries labels for each running child (and adopted orphan) and terminates
+/// any that are no longer `ralph:in-progress`.
 async fn kill_aborted_children(
     config: &DaemonRuntimeConfig,
     children: &mut HashMap<u32, ChildHandle>,
+    adopted_orphans: &mut HashMap<u32, OrphanInfo>,
     _repo_root_lock: &Arc<Semaphore>,
 ) {
-    let issue_numbers: Vec<u32> = children.keys().cloned().collect();
+    // Collect all issue numbers from both children and adopted orphans
+    let child_issues: Vec<u32> = children.keys().cloned().collect();
+    let orphan_issues: Vec<u32> = adopted_orphans.keys().cloned().collect();
+    let all_issues: Vec<u32> = child_issues
+        .iter()
+        .chain(orphan_issues.iter())
+        .cloned()
+        .collect();
+
     let mut to_kill = Vec::new();
 
     // Query labels concurrently via JoinSet, capped at max(1, config.max_concurrent)
@@ -1865,7 +2022,7 @@ async fn kill_aborted_children(
     let mut join_set: JoinSet<(u32, String, std::result::Result<Vec<String>, RalphError>)> =
         JoinSet::new();
 
-    let mut pending = issue_numbers.into_iter();
+    let mut pending = all_issues.into_iter();
     let mut in_flight = 0usize;
 
     loop {
@@ -1912,7 +2069,7 @@ async fn kill_aborted_children(
         }
     }
 
-    // Apply kill decisions sequentially against children
+    // Apply kill decisions sequentially against children and adopted orphans
     for issue_number in to_kill {
         if let Some(mut handle) = children.remove(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
@@ -1929,6 +2086,17 @@ async fn kill_aborted_children(
             eprintln!(
                 "abort-check: killed {task_id} (pid={} pgid={})",
                 handle.pid, handle.pgid
+            );
+        } else if let Some(orphan) = adopted_orphans.remove(&issue_number) {
+            process::terminate_process_group(orphan.pgid, Duration::from_secs(10)).await;
+            // Clear metadata
+            let mut meta = load_task_metadata(&config.workspace_root, &orphan.task_id);
+            meta.pid = None;
+            meta.pgid = None;
+            save_task_metadata(&config.workspace_root, &orphan.task_id, &meta);
+            eprintln!(
+                "abort-check: killed adopted orphan {} (pid={}, pgid={})",
+                orphan.task_id, orphan.pid, orphan.pgid
             );
         }
     }
@@ -2895,12 +3063,10 @@ pub(crate) async fn handle_pr_flow(
                 {
                     github::close_pr(&config.owner, &config.repo, pr_number).await?;
 
-                    // Clear persisted PR URL so future flows do not reuse closed draft PRs.
-                    save_task_metadata(
-                        &config.workspace_root,
-                        task_id,
-                        &TaskMetadata { pr_url: None },
-                    );
+                    // Clear persisted PR URL via load-modify-save to preserve pid/pgid.
+                    let mut meta = load_task_metadata(&config.workspace_root, task_id);
+                    meta.pr_url = None;
+                    save_task_metadata(&config.workspace_root, task_id, &meta);
                 }
             } else {
                 eprintln!(
@@ -3019,13 +3185,9 @@ pub(crate) async fn handle_pr_flow(
             }
 
             if let Some(pr_number) = github::extract_pr_number(&url) {
-                save_task_metadata(
-                    &config.workspace_root,
-                    task_id,
-                    &TaskMetadata {
-                        pr_url: Some(url.clone()),
-                    },
-                );
+                let mut meta = load_task_metadata(&config.workspace_root, task_id);
+                meta.pr_url = Some(url.clone());
+                save_task_metadata(&config.workspace_root, task_id, &meta);
                 let pr_is_draft =
                     github::is_pr_draft(&config.owner, &config.repo, pr_number).await?;
 
@@ -3051,13 +3213,9 @@ pub(crate) async fn handle_pr_flow(
             {
                 Ok(url) => {
                     eprintln!("created PR for {task_id}: {url}");
-                    save_task_metadata(
-                        &config.workspace_root,
-                        task_id,
-                        &TaskMetadata {
-                            pr_url: Some(url.clone()),
-                        },
-                    );
+                    let mut meta = load_task_metadata(&config.workspace_root, task_id);
+                    meta.pr_url = Some(url.clone());
+                    save_task_metadata(&config.workspace_root, task_id, &meta);
                 }
                 Err(err) => {
                     eprintln!(

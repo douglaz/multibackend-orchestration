@@ -576,6 +576,22 @@ pub async fn find_existing_pr(owner: &str, repo: &str, branch: &str) -> Result<O
     }
 }
 
+/// Check if a merged PR exists for the given branch.
+pub async fn is_pr_merged(owner: &str, repo: &str, branch: &str) -> bool {
+    let full_repo = format!("{owner}/{repo}");
+    let output = Command::new("gh")
+        .args([
+            "pr", "list", "--repo", &full_repo, "--head", branch, "--state", "merged", "--json",
+            "url", "-q", ".[0].url",
+        ])
+        .output()
+        .await;
+    match output {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        _ => false,
+    }
+}
+
 /// Create a pull request. Returns the PR URL on success, or an error.
 pub async fn create_pr(
     owner: &str,

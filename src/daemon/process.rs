@@ -518,6 +518,23 @@ pub fn pid_exists(pid: u32) -> bool {
     }
 }
 
+/// Check if a process group with the given PGID exists.
+pub fn pgid_exists(pgid: u32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    let Ok(raw_pgid) = i32::try_from(pgid) else {
+        return false;
+    };
+    // Sending signal 0 to -pgid checks the entire process group.
+    match kill(Pid::from_raw(-raw_pgid), None) {
+        Ok(_) => true,
+        Err(Errno::EPERM) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => false,
+    }
+}
+
 /// Terminate a process group gracefully (SIGTERM), escalating to SIGKILL
 /// after the given timeout.
 pub async fn terminate_process_group(pgid: u32, timeout: Duration) {
