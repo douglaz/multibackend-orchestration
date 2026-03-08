@@ -269,6 +269,11 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon::quick_label_is_non_lifecycle",
             func: quick_label_is_non_lifecycle,
         },
+        // --- Loop 15 In-Process Dispatch Conformance Tests ---
+        ConformanceTest {
+            name: "daemon::inprocess_env_sanitization",
+            func: inprocess_env_sanitization,
+        },
     ]
 }
 
@@ -4235,6 +4240,108 @@ fn quick_label_is_non_lifecycle(h: &RalphHarness) -> TestResult {
 
         // Unused harness reference to silence warning
         let _ = h;
+    })
+}
+
+/// Validates env sanitization through the in-process daemon task dispatch path.
+///
+/// Sets `CLAUDECODE` in the daemon process environment, dispatches an
+/// in-process task, and verifies via a backend script that reports its env
+/// that the variable is absent in the backend subprocess execution.
+///
+/// This complements the unit-level test in `src/backend/mod.rs` by exercising
+/// the full daemon dispatch → workspace load → orchestrator → backend chain.
+fn inprocess_env_sanitization(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Backend script that checks for CLAUDECODE and writes result to a
+        // marker file.  The marker file path is passed via ENV_REPORT_FILE.
+        let report_file = dh.temp_dir.path().join("env_sanitization_report.txt");
+        let report_file_str = report_file.to_string_lossy().into_owned();
+
+        let script_body = format!(
+            r#"#!/bin/sh
+REPORT="{report}"
+if [ -n "$CLAUDECODE" ]; then
+    echo "LEAKED:$CLAUDECODE" >> "$REPORT"
+else
+    echo "SANITIZED" >> "$REPORT"
+fi
+printf 'TITLE: Refined task execution\n'
+printf '---\n'
+printf 'Refined task body with explicit steps.\n'
+"#,
+            report = report_file_str
+        );
+
+        let refine_script = dh
+            .write_mock_script("mock_env_check.sh", &script_body)
+            .expect("write mock env-check script");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set backend args");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "true",
+        ])
+        .expect("enable daemon refinement");
+
+        let label_log = dh.temp_dir.path().join("env_sanitize_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":700,"title":"env test","labels":[{"name":"ralph:ready"}],"body":"env sanitization test"}]"#;
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+
+        // Run daemon with CLAUDECODE set — it should NOT leak to backend subprocess
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                    ("CLAUDECODE", "should-not-leak"),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        // The backend script should have written to the report file
+        assert!(
+            report_file.exists(),
+            "env report file should exist at {}: stdout={} stderr={}",
+            report_file.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let report = fs::read_to_string(&report_file).expect("read env report");
+        assert!(
+            report.contains("SANITIZED"),
+            "CLAUDECODE should be stripped from backend subprocess in daemon dispatch path, got: {report}"
+        );
+        assert!(
+            !report.contains("LEAKED"),
+            "CLAUDECODE was leaked to backend subprocess via daemon dispatch: {report}"
+        );
     })
 }
 

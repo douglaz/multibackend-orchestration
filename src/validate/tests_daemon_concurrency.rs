@@ -45,6 +45,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon_concurrency::mixed_outcome_claim_isolation",
             func: mixed_outcome_claim_isolation,
         },
+        ConformanceTest {
+            name: "daemon_concurrency::per_task_log_isolation",
+            func: per_task_log_isolation,
+        },
     ]
 }
 
@@ -1180,5 +1184,184 @@ fn mixed_outcome_claim_isolation(h: &RalphHarness) -> TestResult {
                 || combined.contains("claim failure"),
             "claim failure for 901 should be logged: {combined}"
         );
+    })
+}
+
+/// Validates per-task log isolation for concurrent in-process daemon tasks.
+///
+/// Dispatches two issues concurrently, each using a backend script that emits
+/// a unique marker (keyed by issue number) to stdout.  The per-task tracing
+/// subscriber routes each task's output to its own log file.
+///
+/// Asserts:
+/// - Both task log files exist
+/// - Each log file contains ONLY its own task's marker
+/// - No cross-task contamination occurs
+fn per_task_log_isolation(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Backend script that emits a unique marker based on a per-invocation
+        // counter file.  Each invocation increments the counter and uses it as
+        // a unique task discriminator embedded in the tracing output.
+        let marker_dir = dh.temp_dir.path().join("log_isolation_markers");
+        let marker_dir_str = marker_dir.to_string_lossy().into_owned();
+
+        let script_body = format!(
+            r#"#!/bin/sh
+MARKER_DIR="{marker_dir}"
+mkdir -p "$MARKER_DIR"
+# Use PID as unique marker — each backend subprocess has a distinct PID
+MARKER="TASK_MARKER_$$"
+echo "$MARKER" > "$MARKER_DIR/marker_$$.txt"
+# Emit the marker as part of the refinement output so it gets captured
+# by the per-task tracing subscriber into the task's log file
+printf 'TITLE: %s\n' "$MARKER"
+printf '---\n'
+printf 'Refined task body for %s.\n' "$MARKER"
+"#,
+            marker_dir = marker_dir_str
+        );
+
+        let refine_script = dh
+            .write_mock_script("mock_log_isolation.sh", &script_body)
+            .expect("write mock log-isolation script");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set backend args");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "true",
+        ])
+        .expect("enable daemon refinement");
+
+        let label_log = dh.temp_dir.path().join("log_isolation_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // Two concurrent issues
+        let issues = r#"[{"number":800,"title":"log test A","labels":[{"name":"ralph:ready"}],"body":"log isolation A"},{"number":801,"title":"log test B","labels":[{"name":"ralph:ready"}],"body":"log isolation B"}]"#;
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                    "--max-concurrent",
+                    "4",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let combined = combined_output(&output);
+
+        // Both issues should be dispatched
+        assert!(
+            combined.contains("dispatched task acme-widgets-800")
+                || combined.contains("dispatch: task acme-widgets-800"),
+            "issue 800 should be dispatched: {combined}"
+        );
+        assert!(
+            combined.contains("dispatched task acme-widgets-801")
+                || combined.contains("dispatch: task acme-widgets-801"),
+            "issue 801 should be dispatched: {combined}"
+        );
+
+        // Locate task log files: <repo_root>/.ralph/tmp/logs/<task_id>.log
+        let log_dir = dh.repo_root.join(".ralph").join("tmp").join("logs");
+        let log_800 = log_dir.join("acme-widgets-800.log");
+        let log_801 = log_dir.join("acme-widgets-801.log");
+
+        assert!(
+            log_800.exists(),
+            "task log for issue 800 should exist at {}: {combined}",
+            log_800.display()
+        );
+        assert!(
+            log_801.exists(),
+            "task log for issue 801 should exist at {}: {combined}",
+            log_801.display()
+        );
+
+        let content_800 = fs::read_to_string(&log_800).expect("read log 800");
+        let content_801 = fs::read_to_string(&log_801).expect("read log 801");
+
+        // Collect all markers written by backend invocations
+        let marker_files: Vec<_> = if marker_dir.exists() {
+            fs::read_dir(&marker_dir)
+                .expect("read marker dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("txt")
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // We should have at least 2 marker files (one per backend invocation
+        // across the two tasks — each task invokes the backend at least once)
+        assert!(
+            marker_files.len() >= 2,
+            "expected at least 2 marker files, found {}: {combined}",
+            marker_files.len()
+        );
+
+        // Read all markers and partition them by which log file contains them
+        let mut markers_in_800 = Vec::new();
+        let mut markers_in_801 = Vec::new();
+        for entry in &marker_files {
+            let marker = fs::read_to_string(entry.path())
+                .expect("read marker file")
+                .trim()
+                .to_owned();
+            if content_800.contains(&marker) {
+                markers_in_800.push(marker.clone());
+            }
+            if content_801.contains(&marker) {
+                markers_in_801.push(marker.clone());
+            }
+        }
+
+        // Each log file must contain at least one marker (its own task ran)
+        assert!(
+            !markers_in_800.is_empty(),
+            "log 800 should contain at least one task marker; content:\n{content_800}"
+        );
+        assert!(
+            !markers_in_801.is_empty(),
+            "log 801 should contain at least one task marker; content:\n{content_801}"
+        );
+
+        // Cross-contamination check: no marker should appear in BOTH log files
+        for m800 in &markers_in_800 {
+            assert!(
+                !markers_in_801.contains(m800),
+                "cross-contamination: marker {m800} found in both log files.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
+            );
+        }
     })
 }
