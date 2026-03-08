@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::fs;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -39,6 +41,10 @@ pub struct TmuxBackend<R: TmuxCommandRunner = tmux::RealTmuxRunner> {
     runner: R,
     window_keep_seconds: u64,
     shared_context: SharedTmuxContext,
+    /// Tracks the currently active tmux window ID so that `execute_with_cancel`
+    /// can perform explicit synchronous cleanup instead of relying solely on
+    /// the fire-and-forget `TmuxWindowGuard::drop()`.
+    active_window: Arc<Mutex<Option<String>>>,
 }
 
 impl<R: TmuxCommandRunner> TmuxBackend<R> {
@@ -55,6 +61,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             runner,
             window_keep_seconds,
             shared_context,
+            active_window: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -163,6 +170,35 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
         parts.join(" ")
     }
 
+    /// Explicitly kill the active tmux window and poll `has_window` for up to
+    /// 5 seconds to confirm termination. Called by `execute_with_cancel` on
+    /// cancellation so the caller can rely on the window being gone when
+    /// `Cancelled` is returned. The `TmuxWindowGuard::drop()` remains as a
+    /// fallback in case this method is never reached.
+    async fn cancel_active_window(&self) {
+        let window_id = self.active_window.lock().await.take();
+        let Some(window_id) = window_id else { return };
+
+        tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+
+        // Poll until the window is confirmed gone, up to 5s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tmux::has_window(&self.runner, &self.session_name, &window_id).await {
+                Ok(false) => break,
+                _ if tokio::time::Instant::now() >= deadline => {
+                    debug!(
+                        session = %self.session_name,
+                        window = %window_id,
+                        "tmux cancel cleanup: window still exists after 5s deadline"
+                    );
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
     /// Execute the tmux-backed command and return raw stdout, stderr, and exit
     /// code without interpreting the exit code. Both `execute()` and
     /// `execute_with_log()` delegate here so that log writes can happen
@@ -230,6 +266,10 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             window_id.clone(),
         );
 
+        // Publish the active window ID so execute_with_cancel can perform
+        // explicit synchronous cleanup on cancellation.
+        *self.active_window.lock().await = Some(window_id.clone());
+
         // 3b. Enable remain-on-exit so the window stays visible after the command
         // process exits. Without this, the window closes immediately on exit and
         // users cannot inspect it during the retention period.
@@ -274,8 +314,9 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
                 // Best-effort cleanup after classification
                 tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
-                // Window cleaned up explicitly — disarm the drop guard.
+                // Window cleaned up explicitly — disarm the drop guard and clear active window.
                 window_guard.disarm();
+                *self.active_window.lock().await = None;
 
                 if window_alive {
                     // Window still alive — this is a genuine idle timeout.
@@ -326,8 +367,9 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         // 7. Best-effort window cleanup
         tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
-        // Window cleaned up explicitly — disarm the drop guard.
+        // Window cleaned up explicitly — disarm the drop guard and clear active window.
         window_guard.disarm();
+        *self.active_window.lock().await = None;
 
         // 8. Read captured stdout before interpreting exit code so we can
         // persist artifacts even for non-zero exits.
@@ -526,10 +568,10 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
     /// Cancel-aware execution for tmux backends.
     ///
     /// When the cancellation token fires, the `execute_with_log` future is
-    /// dropped. The `TmuxWindowGuard` inside `execute_raw()` detects the drop
-    /// and spawns a background `tmux kill-window` command, ensuring the tmux
-    /// window (and the backend process running inside it) is terminated rather
-    /// than left orphaned.
+    /// dropped. The `TmuxWindowGuard` inside `execute_raw()` fires as a
+    /// fallback, but we explicitly kill the window and wait (bounded) for
+    /// confirmation before returning, so the caller can rely on the tmux
+    /// window being gone when this method returns.
     async fn execute_with_cancel(
         &self,
         prompt: &str,
@@ -540,7 +582,10 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
             result = self.execute_with_log(prompt, log_writer) => result,
             _ = cancel.cancelled() => {
                 // Dropping the execute_with_log future triggers
-                // TmuxWindowGuard::drop() which kills the tmux window.
+                // TmuxWindowGuard::drop() as a fallback. Perform explicit
+                // synchronous cleanup so the window is confirmed gone before
+                // we return.
+                self.cancel_active_window().await;
                 Err(RalphError::Cancelled)
             }
         }
@@ -1255,5 +1300,110 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[2][0], "kill-window");
         assert!(calls[2].contains(&"test-killwin:5".to_owned()));
+    }
+
+    // --- Cancellation cleanup test ---
+
+    #[tokio::test]
+    async fn cancel_kills_window_synchronously_before_returning() {
+        // Responses:
+        // 1. has-session (ensure_session)
+        // 2. create stderr file (no tmux call)
+        // 3. new-window (create_window_with_retry → create_window)
+        // 4. kill-window (cancel_active_window → kill_window_best_effort)
+        // 5. list-windows (cancel_active_window → has_window → returns missing)
+        let runner = MockTmuxRunner::with_responses(vec![
+            Ok(String::new()),    // has-session
+            Ok("7\n".to_owned()), // create_window returns window id
+            Ok(String::new()),    // kill-window (from cancel_active_window)
+            // has_window (list-windows) → window gone
+            Err(RalphError::BackendCommandFailed {
+                backend: "tmux".to_owned(),
+                details: "can't find window: 7".to_owned(),
+            }),
+        ]);
+
+        let cli = CliBackend::new(
+            "cancel-test",
+            "sleep".to_owned(),
+            vec!["9999".to_owned()],
+            Duration::from_secs(300), // long timeout so it doesn't time out
+            BTreeMap::new(),
+        );
+        let backend = TmuxBackend::new(
+            cli,
+            "test-cancel".to_owned(),
+            runner.clone(),
+            0,
+            test_shared_ctx(),
+        );
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        // Spawn a task that cancels shortly after the prompt file appears
+        // (meaning execute_raw has started and created the window).
+        let canceller = tokio::spawn(async move {
+            let tmp_dir = std::env::temp_dir();
+            loop {
+                if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with("ralph-test-cancel-")
+                            && name.ends_with("-prompt.txt")
+                        {
+                            // Small delay to let execute_raw reach wait_for_exit
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            cancel_clone.cancel();
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let result = backend
+            .execute_with_cancel("test prompt", None, &cancel)
+            .await;
+        canceller.await.unwrap();
+
+        // Must return Cancelled
+        assert!(
+            matches!(&result, Err(RalphError::Cancelled)),
+            "expected Cancelled, got: {result:?}"
+        );
+
+        // Verify kill-window was called with the correct target
+        let calls = runner.calls().await;
+        let kill_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.first().map(|s| s.as_str()) == Some("kill-window"))
+            .collect();
+        assert!(
+            !kill_calls.is_empty(),
+            "kill-window should have been called on cancel; calls: {calls:?}"
+        );
+        assert!(
+            kill_calls[0].contains(&"test-cancel:7".to_owned()),
+            "kill-window target mismatch: {:?}",
+            kill_calls[0]
+        );
+
+        // Verify has_window poll was called (list-windows)
+        let list_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.first().map(|s| s.as_str()) == Some("list-windows"))
+            .collect();
+        assert!(
+            !list_calls.is_empty(),
+            "has_window poll should have been called; calls: {calls:?}"
+        );
+
+        // active_window should be cleared
+        assert!(
+            backend.active_window.lock().await.is_none(),
+            "active_window should be None after cancellation"
+        );
     }
 }

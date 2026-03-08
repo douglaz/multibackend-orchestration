@@ -124,7 +124,9 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>, fallback_cwd: &Path) -> Re
         return Ok(workspace);
     }
 
-    match Workspace::discover() {
+    // Discover from fallback_cwd (not ambient CWD) so this function is
+    // hermetic with respect to the caller's chosen root.
+    match Workspace::discover_from(fallback_cwd) {
         Ok(workspace) => Ok(workspace),
         Err(RalphError::WorkspaceNotFound) => {
             let workspace = init::create_workspace(&fallback_cwd.join(".ralph"))?;

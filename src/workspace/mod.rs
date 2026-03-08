@@ -27,6 +27,12 @@ impl Workspace {
         Self::load(root)
     }
 
+    /// Discover a workspace by walking up from `start` instead of ambient CWD.
+    pub fn discover_from(start: &Path) -> Result<Self> {
+        let root = discovery::discover_workspace_root(Some(start))?;
+        Self::load(root)
+    }
+
     pub fn load(root: PathBuf) -> Result<Self> {
         let config_path = root.join("ralph.toml");
         let config = GlobalConfig::load(&config_path)?;
