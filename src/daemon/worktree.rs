@@ -128,7 +128,13 @@ pub fn create_worktree(
     let output = if branch_exists {
         // Reuse existing branch
         Command::new("git")
-            .args(["worktree", "add", &wt_path.to_string_lossy(), &branch_name])
+            .args([
+                "worktree",
+                "add",
+                "-f",
+                &wt_path.to_string_lossy(),
+                &branch_name,
+            ])
             .current_dir(repo_root)
             .output()
     } else {
