@@ -2270,12 +2270,21 @@ async fn auto_rebase_phase(
     for issue_number in &issue_numbers {
         let (branch, last_rebase_at, last_failure_sha, cached_pr_url) =
             match children.get(issue_number) {
-                Some(h) => (
-                    h.branch.clone(),
-                    h.last_rebase_at,
-                    h.last_rebase_failure_sha.clone(),
-                    h.pr_url.clone(),
-                ),
+                Some(h) => {
+                    // Skip tasks that are externally aborted or already cancelling —
+                    // they should not trigger rebase activity.
+                    if h.aborted_externally.load(std::sync::atomic::Ordering::SeqCst)
+                        || h.cancel_token.is_cancelled()
+                    {
+                        continue;
+                    }
+                    (
+                        h.branch.clone(),
+                        h.last_rebase_at,
+                        h.last_rebase_failure_sha.clone(),
+                        h.pr_url.clone(),
+                    )
+                }
                 None => continue,
             };
 
