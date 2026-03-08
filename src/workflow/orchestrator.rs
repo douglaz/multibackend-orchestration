@@ -2959,8 +2959,8 @@ fn preload_bare_default_backends(registry: &mut BackendRegistry) -> Result<()> {
 fn check_parent_project_consistency(workspace: &Workspace, state: &ProjectState) -> Result<()> {
     if let Some(ref parent_id) = state.parent_project {
         if !workspace.project_exists(parent_id) {
-            eprintln!(
-                "warning: parent project '{}' referenced by '{}' does not exist",
+            warn!(
+                "parent project '{}' referenced by '{}' does not exist",
                 parent_id, state.project_id
             );
         }

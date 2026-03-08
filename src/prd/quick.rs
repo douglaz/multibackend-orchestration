@@ -8,6 +8,8 @@ use std::time::Instant;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use tracing::warn;
+
 use crate::backend::Backend;
 use crate::error::RalphError;
 use crate::prd::gaps::extract_fenced_json;
@@ -374,7 +376,7 @@ impl QuickPrdPipeline {
             fs::write(cache_dir.join(format!("revision-{n}.md")), &cleaned)?;
 
             if missing.len() >= REQUIRED_SECTIONS.len() {
-                eprintln!("warning: revision {n} has no valid sections, keeping previous spec");
+                warn!("revision {n} has no valid sections, keeping previous spec");
             } else {
                 current_spec = cleaned;
             }

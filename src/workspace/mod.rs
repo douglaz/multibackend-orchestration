@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tracing::{info, warn};
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
@@ -73,7 +74,7 @@ impl Workspace {
                 return;
             }
             if active::write_active_project(&self.root, &legacy_id).is_ok() {
-                eprintln!(
+                info!(
                     "migrated active project '{}' from index.json to worktree-local storage",
                     legacy_id
                 );
@@ -124,7 +125,7 @@ impl Workspace {
             let state = match reconstruct_project_state(self, &project_id) {
                 Ok(state) => state,
                 Err(err) => {
-                    eprintln!(
+                    warn!(
                         "warning: skipping project directory '{}' because state derivation failed: {}",
                         path.display(),
                         err

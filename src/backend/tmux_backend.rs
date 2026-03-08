@@ -126,8 +126,13 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             parts.push(format!("unset {};", shell_escape(var)));
         }
 
-        // Prepend env var exports
+        // Prepend env var exports, skipping any that were just sanitized
+        // so a configured CLAUDECODE (or future sanitized var) cannot be
+        // re-introduced after the unset above.
         for (key, val) in self.inner.env() {
+            if super::SANITIZED_ENV_VARS.contains(&key.as_str()) {
+                continue;
+            }
             parts.push(format!(
                 "export {}={};",
                 shell_escape(key),
@@ -607,6 +612,48 @@ mod tests {
         assert!(
             cmd.contains("export 'MY_VAR'='hello world'"),
             "missing env export: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_shell_command_filters_sanitized_env_vars() {
+        // A backend configured with CLAUDECODE in its env must NOT export it,
+        // because the unset at the top of the command would be undone.
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDECODE".to_owned(), "1".to_owned());
+        env.insert("SAFE_VAR".to_owned(), "ok".to_owned());
+        let cli = CliBackend::new(
+            "test-backend",
+            "mycommand".to_owned(),
+            vec![],
+            Duration::from_secs(60),
+            env,
+        );
+        let runner = MockTmuxRunner::default();
+        let backend = make_backend(cli, "ralph", runner);
+
+        let cmd = backend.build_shell_command(
+            Path::new("/tmp/p.txt"),
+            Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
+            Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
+        );
+
+        // The unset must be present
+        assert!(
+            cmd.contains("unset 'CLAUDECODE'"),
+            "missing unset for sanitized var: {cmd}"
+        );
+        // The sanitized var must NOT be re-exported
+        assert!(
+            !cmd.contains("export 'CLAUDECODE'"),
+            "sanitized var CLAUDECODE was re-exported: {cmd}"
+        );
+        // Non-sanitized vars should still be exported
+        assert!(
+            cmd.contains("export 'SAFE_VAR'='ok'"),
+            "missing export for non-sanitized var: {cmd}"
         );
     }
 
