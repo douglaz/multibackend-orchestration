@@ -62,6 +62,9 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
+                if raw == 0 {
+                    return; // Never kill our own process group
+                }
                 // Emergency path: SIGKILL immediately. The normal cancellation
                 // path already performed cooperative SIGTERM → wait → SIGKILL
                 // via `kill_and_reap_child` before disarming this guard.

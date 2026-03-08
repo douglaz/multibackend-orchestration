@@ -14,8 +14,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: concurrent_dispatch_two_issues,
         },
         ConformanceTest {
-            name: "daemon_concurrency::partial_dispatch_rollback",
-            func: partial_dispatch_rollback,
+            name: "daemon_concurrency::drain_terminates_all_tasks_uniformly",
+            func: drain_terminates_all_tasks_uniformly,
         },
         ConformanceTest {
             name: "daemon_concurrency::single_iteration_prd_inline_only",
@@ -26,8 +26,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: concurrent_rebase_dispatch_no_lock_contention,
         },
         ConformanceTest {
-            name: "daemon_concurrency::dispatch_failure_explicit_markers",
-            func: dispatch_failure_explicit_markers,
+            name: "daemon_concurrency::drain_marks_all_tasks_failed",
+            func: drain_marks_all_tasks_failed,
         },
         ConformanceTest {
             name: "daemon_concurrency::concurrent_dispatch_evidence",
@@ -234,23 +234,24 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verifies that drain-induced cancellation independently terminalizes
-/// all dispatched tasks (label isolation).
+/// Verifies that drain-induced cancellation uniformly terminalizes all
+/// dispatched tasks with independent label transitions.
 ///
 /// Two issues are claimed and dispatched as concurrent in-process tasks.
 /// In single-iteration mode, drain_all_children cancels all tasks and each
 /// reaches terminal state independently with its own label transitions.
 ///
 /// NOTE: Both tasks receive the same cancellation treatment (both fail),
-/// so this test proves independent lifecycle management but not mixed
-/// outcomes. See `execution_failure_terminalization` for execution-error
-/// failures and `mixed_outcome_claim_isolation` for claim-level isolation.
+/// so this test proves uniform drain behavior, not partial rollback or
+/// sibling isolation. See `execution_failure_terminalization` for
+/// execution-error failures and `mixed_outcome_claim_isolation` for
+/// claim-level isolation.
 ///
 /// Asserts:
 /// - Both issues are dispatched (in-process)
 /// - Both issues reach terminal state with independent label transitions
 /// - Each issue's label transitions reference only its own issue number
-fn partial_dispatch_rollback(h: &RalphHarness) -> TestResult {
+fn drain_terminates_all_tasks_uniformly(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
@@ -587,8 +588,8 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
     })
 }
 
-/// Verifies deterministic dispatch-failure markers via the dispatch-failure
-/// mock GH script when in-process tasks reach terminal state.
+/// Verifies that drain marks all cancelled tasks as failed with
+/// deterministic per-task failure markers.
 ///
 /// Two issues are claimed and dispatched as in-process tasks. In
 /// single-iteration mode, drain_all_children cancels all tasks and each
@@ -604,7 +605,7 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
 /// Asserts:
 /// - Both issues were dispatched (in-process)
 /// - Each issue produced its own dispatch-failure marker in the failure log
-fn dispatch_failure_explicit_markers(h: &RalphHarness) -> TestResult {
+fn drain_marks_all_tasks_failed(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");

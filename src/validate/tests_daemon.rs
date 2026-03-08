@@ -1808,23 +1808,33 @@ exit 1
             "pr create should not be called when there is no diff"
         );
 
-        // In-process dispatch: the task runs through PRD/implementation phases
-        // and reaches terminal state without producing a diff. Verify the
-        // posted comments include either a no-diff marker or a terminal-state
-        // (failed) marker — both indicate the no-PR invariant held.
+        // In-process dispatch: the task runs through PRD/implementation phases.
+        // The mock backend does not produce git commits, so there is no diff.
+        // The no-PR invariant is verified above (pr_create_log must not exist).
+        //
+        // TODO: To fully verify the no-diff comment path, the test needs a
+        // mock backend that completes orchestration successfully (producing
+        // OrchestrationResult) without creating commits. Currently the
+        // in-process task may fail during orchestration (e.g. backend
+        // unavailable), reaching terminal state via the error path rather
+        // than the no-diff detection path. The pr_create_log assertion above
+        // remains the primary invariant guard.
         if comment_log.exists() {
             let log_content = fs::read_to_string(&comment_log).expect("read comment log");
+            // Accept no-diff marker (ideal path) or failed marker (error path).
+            // Both paths correctly skip PR creation, which is the invariant
+            // under test.
             assert!(
                 log_content.contains("no-diff") || log_content.contains("failed"),
                 "expected no-diff or terminal-state marker comment, got:\n{log_content}"
             );
         }
 
-        // Label log should show terminal label transition (completed)
+        // Label log should show a terminal label transition
         let log = fs::read_to_string(&label_log).unwrap_or_default();
         assert!(
-            log.contains("ralph:completed") || log.contains("--add-label"),
-            "expected label transition in label log:\n{log}"
+            log.contains("ralph:completed") || log.contains("ralph:failed"),
+            "expected terminal label (ralph:completed or ralph:failed) in label log:\n{log}"
         );
     })
 }
