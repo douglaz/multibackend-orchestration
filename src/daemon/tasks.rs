@@ -17,12 +17,14 @@ use tracing_subscriber::fmt;
 
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
-use crate::config::PromptChangeAction;
+use crate::config::{validate_required_backend_spec, PromptChangeAction};
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
 use crate::workflow::orchestrator::{Orchestrator, OrchestrationResult, RunOptions};
-use crate::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunOptions};
+use crate::workflow::quick_dev_orchestrator::{
+    self, QuickDevOrchestrator, QuickDevRunOptions,
+};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -306,6 +308,40 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
         .parent()
         .map(|p| p.to_owned())
         .unwrap_or_else(|| params.workspace_root.clone());
+
+    // --- Quick-dev backend preflight validation (fail-fast before side effects) ---
+    // Mirror the orchestrator's resolution chain: CLI -> workflow config -> starting_backend.
+    // Since the project doesn't exist yet, project-level overrides don't apply.
+    let preflight_implementer = params
+        .implementer_backend
+        .as_deref()
+        .or(workspace.config.workflow.implementer_backend.as_deref())
+        .unwrap_or(&workspace.config.workspace.default_backend);
+    let preflight_reviewer = params
+        .reviewer_backend
+        .as_deref()
+        .or(workspace.config.workflow.reviewer_backend.as_deref());
+
+    match preflight_reviewer {
+        None => {
+            return Err(RalphError::Validation(
+                "quick-dev requires a second backend for review".to_owned(),
+            ));
+        }
+        Some(rev) => {
+            quick_dev_orchestrator::validate_distinct_backends(preflight_implementer, rev)?;
+            validate_required_backend_spec(
+                &workspace.config,
+                preflight_implementer,
+                "quick-dev implementer backend",
+            )?;
+            validate_required_backend_spec(
+                &workspace.config,
+                rev,
+                "quick-dev reviewer backend",
+            )?;
+        }
+    }
 
     // Quick-prd phase
     let writer_spec = workspace.config.workspace.daemon_prd_writer_backend.clone();
