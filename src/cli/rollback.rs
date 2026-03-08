@@ -42,13 +42,38 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         )));
     }
 
-    let to_remove: Vec<u32> = state
+    // Compute removal targets from BOTH state-derived loop numbers AND on-disk
+    // loop directories.  Reconstruction may hide loops above the rollback
+    // ceiling (via `loop_dirs.retain`), so relying solely on state would miss
+    // artifact directories that exist on disk but are invisible to the capped
+    // state.  The union ensures `rollback 0` removes all loop artifacts.
+    let mut removal_set: std::collections::HashSet<u32> = state
         .loops
         .iter()
         .map(|l| l.loop_number)
         .chain(state.completion_attempts.iter().map(|l| l.loop_number))
         .filter(|num| *num > args.loop_number)
         .collect();
+    let loops_dir = project_dir.join("loops");
+    if loops_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&loops_dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some((num_str, _)) = name.split_once('-') {
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        if n > args.loop_number {
+                            removal_set.insert(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut to_remove: Vec<u32> = removal_set.into_iter().collect();
+    to_remove.sort();
 
     // Dry-run: resolve ref early for display (read-only, no branch mutations).
     if args.dry_run {

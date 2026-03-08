@@ -149,6 +149,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "commands::rollback_hard_stale_tracking_ref",
             func: rollback_hard_stale_tracking_ref,
         },
+        ConformanceTest {
+            name: "commands::rollback_removes_ceiling_hidden_loops",
+            func: rollback_removes_ceiling_hidden_loops,
+        },
     ]
 }
 
@@ -1539,6 +1543,87 @@ fn git_rev_parse(repo_root: &Path, reference: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Verify that `rollback 0` removes all loop artifact directories even when
+/// ceiling-capped reconstruction hides some of them from the reconstructed
+/// state.  This exercises the disk-scan union in `to_remove` computation.
+fn rollback_removes_ceiling_hidden_loops(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "ceiling-hidden";
+        setup_with_standard_mock(h, project_id);
+
+        // Run 2 loops → creates artifacts for loops 1 & 2 and checkpoint
+        // commits up to loop 2.
+        h.ralph_ok(["run", "--loops", "2"])
+            .expect("ralph run --loops 2 should succeed");
+
+        let project_dir = h.project_dir(project_id);
+
+        // Verify both loop dirs exist before manipulation.
+        assert!(
+            h.loop_dir(project_id, 1)
+                .expect("loop_dir")
+                .is_some(),
+            "loop-1 dir should exist after run"
+        );
+        assert!(
+            h.loop_dir(project_id, 2)
+                .expect("loop_dir")
+                .is_some(),
+            "loop-2 dir should exist after run"
+        );
+
+        // Manually remove loop-2 artifacts so that max_artifact_loop = 1.
+        // This ensures checkpoint_loop (2) > max_artifact_loop (1), which
+        // triggers ceiling enforcement when the ceiling is below checkpoint.
+        let loops_dir = project_dir.join("loops");
+        for entry in std::fs::read_dir(&loops_dir).expect("read loops dir") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("002-") {
+                std::fs::remove_dir_all(entry.path()).expect("remove loop-2 dir");
+            }
+        }
+
+        // Write a .rollback-ceiling = 0 marker to simulate a prior soft
+        // rollback to 0 that left loop-1 artifacts behind (the bug scenario).
+        std::fs::write(project_dir.join(".rollback-ceiling"), "0")
+            .expect("write .rollback-ceiling");
+
+        // Now rollback 0.  Reconstruction will cap state to ceiling=0
+        // (checkpoint 2 > ceiling 0, checkpoint 2 > max_artifact 1), hiding
+        // loop-1 from the reconstructed state.  Without the disk-scan fix,
+        // to_remove would be empty and loop-1 dir would survive.
+        h.ralph_ok(["rollback", "0"])
+            .expect("ralph rollback 0 should succeed");
+
+        // Assert ALL loop artifact directories are removed.
+        let loop1_dir = h.loop_dir(project_id, 1).expect("loop_dir should succeed");
+        assert!(
+            loop1_dir.is_none(),
+            "expected loop-1 directory to be removed after rollback 0 (was hidden by ceiling)"
+        );
+
+        let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
+        assert!(
+            loop2_dir.is_none(),
+            "expected loop-2 directory to be removed after rollback 0"
+        );
+
+        // State should show no loops and default position.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback failed");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert!(
+            loops.is_empty(),
+            "expected no loops after rollback 0, got {}",
+            loops.len()
+        );
+        assert_json_field(&state, "current_loop", &json!(1));
+        assert_json_field(&state, "current_phase", &json!("planning"));
+    })
 }
 
 fn setup_with_standard_mock(h: &RalphHarness, project_id: &str) {
