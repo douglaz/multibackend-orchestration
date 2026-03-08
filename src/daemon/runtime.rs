@@ -2082,7 +2082,7 @@ async fn drain_all_children_with_deadline(
                 let tid = task_id.clone();
                 let externally_aborted = handle
                     .aborted_externally
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let inner = tokio::spawn(async move {
                     complete_task(
                         &config_clone,

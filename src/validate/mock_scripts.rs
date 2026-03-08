@@ -1354,26 +1354,6 @@ esac
     .to_owned()
 }
 
-/// Mock `ralph` script for daemon tests that simulates `ralph auto` execution.
-/// It simply exits successfully immediately.
-pub fn daemon_mock_ralph_script() -> String {
-    r###"#!/bin/sh
-# Mock ralph for daemon child process tests.
-# When called as `ralph auto <idea>`, just succeed immediately.
-case "$1" in
-  auto)
-    exit 0
-    ;;
-  *)
-    # Pass through other commands to real ralph
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
 /// Mock `gh` script that returns an existing PR URL from `pr list --head`,
 /// succeeds on `pr edit`, and logs `pr edit` and `pr create` calls via files.
 ///

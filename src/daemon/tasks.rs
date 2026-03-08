@@ -175,10 +175,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         },
         params.cancel.clone(),
     );
-    let quick_prd_result = tokio::select! {
-        result = quick_prd.run(repo_root) => result?,
-        _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
-    };
+    let quick_prd_result = quick_prd.run(repo_root).await?;
 
     if params.cancel.is_cancelled() {
         return Err(RalphError::Cancelled);
@@ -383,10 +380,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
         },
         params.cancel.clone(),
     );
-    let quick_prd_result = tokio::select! {
-        result = quick_prd.run(repo_root) => result?,
-        _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
-    };
+    let quick_prd_result = quick_prd.run(repo_root).await?;
 
     if params.cancel.is_cancelled() {
         return Err(RalphError::Cancelled);

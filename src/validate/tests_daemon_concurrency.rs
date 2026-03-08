@@ -69,6 +69,47 @@ fn write_daemon_mock_gh_concurrency(h: &RalphHarness) -> crate::Result<String> {
 }
 
 
+/// Like `enable_fast_daemon_refinement` but uses a backend that writes
+/// per-invocation start/end nanosecond timestamps to `barrier_dir`, enabling
+/// callers to assert temporal overlap across concurrent task executions.
+fn enable_timed_daemon_refinement(
+    h: &RalphHarness,
+    barrier_dir: &std::path::Path,
+) -> crate::Result<()> {
+    let barrier_dir_str = barrier_dir.to_string_lossy();
+    let script_body = format!(
+        r#"#!/bin/sh
+BARRIER_DIR="{barrier_dir_str}"
+mkdir -p "$BARRIER_DIR"
+START=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+echo "$START" > "$BARRIER_DIR/task_$$.start"
+# Sleep briefly so concurrent tasks have an overlap window
+sleep 0.3
+END=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+echo "$END" > "$BARRIER_DIR/task_$$.end"
+printf 'TITLE: Refined task execution\n'
+printf '---\n'
+printf 'Refined task body with explicit steps.\n'
+"#
+    );
+    let refine_script = h.write_mock_script("mock_refine_timed.sh", &script_body)?;
+    let refine_script_str = refine_script.to_string_lossy().into_owned();
+    h.ralph_ok([
+        "config",
+        "set",
+        "backends.claude.command",
+        &refine_script_str,
+    ])?;
+    h.ralph_ok(["config", "set", "backends.claude.args", "[]"])?;
+    h.ralph_ok([
+        "config",
+        "set",
+        "workspace.daemon_refinement_enabled",
+        "true",
+    ])?;
+    Ok(())
+}
+
 fn enable_fast_daemon_refinement(h: &RalphHarness) -> crate::Result<()> {
     let refine_script = h.write_mock_script(
         "mock_refine_fast.sh",
@@ -152,6 +193,9 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
             )
             .expect("daemon start should execute");
 
+        // Daemon must exit successfully in single-iteration mode
+        assert_exit_code(&output, 0);
+
         let combined = combined_output(&output);
 
         // Both issues should have been dispatched (in-process)
@@ -166,19 +210,23 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
             "issue 201 should be dispatched: {combined}"
         );
 
-        // Check label log for claim operations on both issues
-        if label_log.exists() {
-            let log_content = fs::read_to_string(&label_log).expect("read label log");
-            // Both issues should have in-progress claims
-            assert!(
-                log_content.contains("200"),
-                "issue 200 should appear in label operations: {log_content}"
-            );
-            assert!(
-                log_content.contains("201"),
-                "issue 201 should appear in label operations: {log_content}"
-            );
-        }
+        // Label log must exist — if it doesn't, label transitions never happened
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display(),
+        );
+
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        // Both issues should have in-progress claims
+        assert!(
+            log_content.contains("200"),
+            "issue 200 should appear in label operations: {log_content}"
+        );
+        assert!(
+            log_content.contains("201"),
+            "issue 201 should appear in label operations: {log_content}"
+        );
     })
 }
 
@@ -625,15 +673,19 @@ fn dispatch_failure_explicit_markers(h: &RalphHarness) -> TestResult {
 /// Verifies concurrent in-process dispatch of multiple issues.
 ///
 /// Two issues are dispatched as concurrent tokio tasks. Concurrency is
-/// proven by verifying that BOTH dispatch messages appear in the output
-/// BEFORE any terminal-state messages (collect/complete). Under sequential
-/// execution, one task would complete before the second is dispatched,
-/// making this ordering impossible.
+/// proven by asserting temporal overlap: the timed mock backend records
+/// per-invocation start/end nanosecond timestamps, and the test verifies
+/// that at least two backend invocations were alive at the same time
+/// (i.e., one started before the other ended).
 fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
-        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
+
+        let barrier_dir = dh.temp_dir.path().join("concurrency_barrier");
+        fs::create_dir_all(&barrier_dir).expect("create barrier dir");
+        enable_timed_daemon_refinement(&dh, &barrier_dir)
+            .expect("configure timed refinement backend for test");
 
         let issues = r#"[{"number":600,"title":"concurrent A","labels":[{"name":"ralph:ready"}],"body":"body A"},{"number":601,"title":"concurrent B","labels":[{"name":"ralph:ready"}],"body":"body B"}]"#;
 
@@ -683,11 +735,69 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
             "issue 601 should reach terminal state: {combined}"
         );
 
-        // --- Concurrency evidence: ordering constraint ---
-        // Both "dispatched task" messages must appear BEFORE any terminal
-        // lifecycle messages ("collect: task"). Under sequential dispatch,
-        // the first task would be collected before the second is even
-        // dispatched, violating this ordering.
+        // --- Concurrency evidence: timestamp overlap ---
+        // Collect (start, end) intervals from the timed mock backend.
+        // Each backend invocation writes task_<pid>.start and task_<pid>.end
+        // files with nanosecond timestamps. True concurrency requires that
+        // at least two intervals overlap (A.start < B.end AND B.start < A.end).
+        let mut intervals: Vec<(u128, u128)> = Vec::new();
+        for entry in fs::read_dir(&barrier_dir).expect("read barrier dir") {
+            let entry = entry.expect("read dir entry");
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".start") {
+                let pid = name_str.trim_end_matches(".start");
+                let end_file = barrier_dir.join(format!("{pid}.end"));
+                if end_file.exists() {
+                    let start_ns: u128 = fs::read_to_string(entry.path())
+                        .expect("read start timestamp")
+                        .trim()
+                        .parse()
+                        .expect("parse start timestamp");
+                    let end_ns: u128 = fs::read_to_string(&end_file)
+                        .expect("read end timestamp")
+                        .trim()
+                        .parse()
+                        .expect("parse end timestamp");
+                    intervals.push((start_ns, end_ns));
+                }
+            }
+        }
+
+        assert!(
+            intervals.len() >= 2,
+            "expected at least 2 timed backend invocations, got {}; \
+             barrier_dir contents: {:?}\n{combined}",
+            intervals.len(),
+            fs::read_dir(&barrier_dir)
+                .map(|rd| rd
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+
+        // Check for at least one pair with temporal overlap
+        let mut found_overlap = false;
+        'outer: for i in 0..intervals.len() {
+            for j in (i + 1)..intervals.len() {
+                let (a_start, a_end) = intervals[i];
+                let (b_start, b_end) = intervals[j];
+                // Overlap: A started before B ended AND B started before A ended
+                if a_start < b_end && b_start < a_end {
+                    found_overlap = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(
+            found_overlap,
+            "no temporal overlap detected among {} backend invocations; \
+             intervals (start_ns, end_ns): {intervals:?}\n\
+             This indicates tasks ran sequentially, not concurrently.\n{combined}",
+            intervals.len(),
+        );
+
+        // Secondary sanity: log ordering (both dispatches before any terminal)
         let last_dispatch_pos = ["acme-widgets-600", "acme-widgets-601"]
             .iter()
             .filter_map(|id| {
@@ -711,24 +821,16 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
             })
             .min();
 
-        let last_dispatch = last_dispatch_pos.expect(
-            &format!(
-                "both dispatch messages must be found to verify ordering; \
-                 missing dispatch position in output:\n{combined}"
-            ),
-        );
-        let first_terminal = first_terminal_pos.expect(
-            &format!(
-                "at least one terminal message must be found to verify ordering; \
-                 missing terminal position in output:\n{combined}"
-            ),
-        );
-        assert!(
-            last_dispatch < first_terminal,
-            "concurrency ordering violated: last dispatch at byte {last_dispatch} \
-             but first terminal at byte {first_terminal} — \
-             both dispatches must precede any terminal event.\n{combined}"
-        );
+        if let (Some(last_dispatch), Some(first_terminal)) =
+            (last_dispatch_pos, first_terminal_pos)
+        {
+            assert!(
+                last_dispatch < first_terminal,
+                "concurrency ordering violated: last dispatch at byte {last_dispatch} \
+                 but first terminal at byte {first_terminal} — \
+                 both dispatches must precede any terminal event.\n{combined}"
+            );
+        }
     })
 }
 
