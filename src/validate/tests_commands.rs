@@ -618,6 +618,7 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
             .expect("ralph run --loops 2 should succeed");
 
         let branch = git_current_branch(&h.repo_root);
+        let head_before = git_head_commit(&h.repo_root);
 
         // Switch to a detached HEAD so we can delete the project branch.
         let status = Command::new("git")
@@ -635,23 +636,90 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
             .expect("git branch -D should execute");
         assert!(status.success(), "git branch -D failed");
 
-        // Also remove the remote tracking ref so the branch cannot be
-        // recreated from origin.
+        // Remove the local remote-tracking ref — but the branch still exists
+        // on the actual bare remote, so ls-remote can recover it.
         let _ = Command::new("git")
             .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch}")])
             .current_dir(&h.repo_root)
             .status();
 
+        // Hard rollback should SUCCEED by fetching the branch from the remote.
+        let output = h
+            .ralph(["rollback", "--hard", "1"])
+            .expect("ralph rollback --hard 1 should execute");
+        assert_exit_code(&output, 0);
+
+        // Verify state rolled back and HEAD moved.
+        let state = h
+            .load_state(project_id)
+            .expect("load_state after rollback");
+        let loops = state["loops"].as_array().expect("loops should be an array");
+        assert_eq!(
+            loops.len(),
+            1,
+            "expected one loop after hard rollback with remote recovery"
+        );
+
+        let head_after = git_head_commit(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "HEAD should have moved after hard rollback with remote branch recovery"
+        );
+
+        // --- Now test the truly-missing case: remove the branch from the ---
+        // --- bare remote as well. ---
+
+        // Run another loop to get back to 2 loops.
+        h.ralph_ok(["run", "--loops", "1"])
+            .expect("ralph run --loops 1 should succeed after recovery");
+
+        let branch2 = git_current_branch(&h.repo_root);
+
+        // Detach, delete local branch, delete local tracking ref, AND delete
+        // the branch from the bare remote.
+        let status = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git checkout --detach should execute");
+        assert!(status.success(), "git checkout --detach failed (2)");
+
+        let status = Command::new("git")
+            .args(["branch", "-D", &branch2])
+            .current_dir(&h.repo_root)
+            .status()
+            .expect("git branch -D should execute");
+        assert!(status.success(), "git branch -D failed (2)");
+
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch2}")])
+            .current_dir(&h.repo_root)
+            .status();
+
+        // Delete the branch from the bare remote itself.
+        let origin_path_output = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&h.repo_root)
+            .output()
+            .expect("git remote get-url should execute");
+        let origin_path = String::from_utf8_lossy(&origin_path_output.stdout)
+            .trim()
+            .to_owned();
+        let _ = Command::new("git")
+            .args(["branch", "-D", &branch2])
+            .current_dir(Path::new(&origin_path))
+            .status();
+
         let head_detached = git_head_commit(&h.repo_root);
 
-        // Hard rollback should fail because the project branch is missing.
+        // Hard rollback should FAIL — branch is truly gone.
         let output = h
             .ralph(["rollback", "--hard", "1"])
             .expect("ralph rollback --hard 1 should execute");
         assert_ne!(
             output.status.code().unwrap_or(-1),
             0,
-            "rollback --hard should fail when project branch is missing"
+            "rollback --hard should fail when project branch is missing locally and on remote"
         );
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -660,11 +728,11 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
             "error should mention missing branch, got:\n{stderr}"
         );
 
-        // HEAD should not have moved — the detached commit must be untouched.
+        // HEAD should not have moved.
         let head_after = git_head_commit(&h.repo_root);
         assert_eq!(
             head_detached, head_after,
-            "HEAD must not change when rollback --hard fails due to missing branch"
+            "HEAD must not change when rollback --hard fails due to truly missing branch"
         );
     })
 }

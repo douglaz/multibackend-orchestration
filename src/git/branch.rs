@@ -72,6 +72,23 @@ pub fn remote_ref_exists(workdir: &Path, remote_ref: &str) -> Result<bool> {
     Ok(status.success())
 }
 
+/// Check whether a branch exists on the actual remote server (not just the
+/// local remote-tracking ref).  Uses `git ls-remote --exit-code` which queries
+/// the remote directly, so it works even when `refs/remotes/origin/<branch>`
+/// has been pruned locally.
+pub fn remote_branch_exists_on_remote(workdir: &Path, branch: &str) -> Result<bool> {
+    let status = run_git_status(
+        workdir,
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    Ok(status.success())
+}
+
 /// Detect the remote's default branch when the configured base branch is missing.
 ///
 /// Tries `origin/HEAD` symbolic-ref first, then falls back to common names.

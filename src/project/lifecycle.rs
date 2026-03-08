@@ -1919,9 +1919,13 @@ mod tests {
     #[test]
     fn reconstruct_ignores_absent_ceiling() {
         // Without a .rollback-ceiling file, reconstruction uses the full
-        // checkpoint-derived position — no capping.
-        let project_dir_tmp = TempDir::new().unwrap();
-        let project_dir = make_project_dir(project_dir_tmp.path(), "test-no-ceiling");
+        // checkpoint-derived position — no capping.  Uses git context to
+        // verify that the checkpoint-derived position is preserved.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-no-ceiling");
 
         // Two loop artifacts.
         write_loop_artifact(
@@ -1945,16 +1949,46 @@ mod tests {
             "2026-01-01T00:00:01Z",
         );
 
-        // No git context — checkpoint defaults to (1, Planning).
-        let state =
-            reconstruct_project_state_internal(&project_dir, "test-no-ceiling", None, None, None)
-                .expect("reconstruction should succeed");
+        // Git checkpoints for loops 1 and 2.
+        for (num, from, to) in [
+            (1, Phase::Planning, Phase::Implementing),
+            (2, Phase::Implementing, Phase::Reviewing),
+        ] {
+            let msg = build_ralph_commit_message("test-no-ceiling", num, from, to);
+            commit_empty_with_msg(&repo, &msg);
+            git_ok(&repo, &["push", "origin", "HEAD:ralph/test-no-ceiling"]);
+        }
+
+        // No .rollback-ceiling file — checkpoint-derived position should be
+        // used as-is.
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-no-ceiling",
+            Some(&repo),
+            Some("ralph/test-no-ceiling"),
+            None,
+        )
+        .expect("reconstruction should succeed");
 
         // Both loops should be present.
         assert_eq!(
             state.loops.len(),
             2,
             "both loop artifacts should be reconstructed without ceiling"
+        );
+
+        // Checkpoint-derived position should reflect the latest checkpoint
+        // (loop 2, Reviewing) — not capped.
+        assert_eq!(
+            state.current_loop, 2,
+            "current_loop should come from checkpoint (2), got {}",
+            state.current_loop
+        );
+        assert_eq!(
+            state.current_phase,
+            Phase::Reviewing,
+            "current_phase should come from checkpoint (Reviewing), got {:?}",
+            state.current_phase
         );
     }
 
