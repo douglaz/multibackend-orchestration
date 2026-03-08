@@ -658,9 +658,7 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
         assert_exit_code(&output, 0);
 
         // Verify state rolled back and HEAD moved.
-        let state = h
-            .load_state(project_id)
-            .expect("load_state after rollback");
+        let state = h.load_state(project_id).expect("load_state after rollback");
         let loops = state["loops"].as_array().expect("loops should be an array");
         assert_eq!(
             loops.len(),
@@ -700,7 +698,11 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
         assert!(status.success(), "git branch -D failed (2)");
 
         let _ = Command::new("git")
-            .args(["update-ref", "-d", &format!("refs/remotes/origin/{branch2}")])
+            .args([
+                "update-ref",
+                "-d",
+                &format!("refs/remotes/origin/{branch2}"),
+            ])
             .current_dir(&h.repo_root)
             .status();
 
@@ -1567,15 +1569,11 @@ fn rollback_removes_ceiling_hidden_loops(h: &RalphHarness) -> TestResult {
 
         // Verify both loop dirs exist before manipulation.
         assert!(
-            h.loop_dir(project_id, 1)
-                .expect("loop_dir")
-                .is_some(),
+            h.loop_dir(project_id, 1).expect("loop_dir").is_some(),
             "loop-1 dir should exist after run"
         );
         assert!(
-            h.loop_dir(project_id, 2)
-                .expect("loop_dir")
-                .is_some(),
+            h.loop_dir(project_id, 2).expect("loop_dir").is_some(),
             "loop-2 dir should exist after run"
         );
 

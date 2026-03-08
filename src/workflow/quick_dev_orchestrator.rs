@@ -52,7 +52,7 @@ pub struct QuickDevRunOptions {
     pub max_final_review_retries: Option<u32>,
 }
 
-const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 5;
+const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 30;
 const DEFAULT_MAX_FINAL_REVIEW_RETRIES: u32 = 15;
 
 #[derive(Debug, Clone)]
@@ -1660,7 +1660,7 @@ mod tests {
 
     #[test]
     fn default_max_values() {
-        assert_eq!(DEFAULT_MAX_REVIEW_ITERATIONS, 5);
+        assert_eq!(DEFAULT_MAX_REVIEW_ITERATIONS, 30);
         assert_eq!(DEFAULT_MAX_FINAL_REVIEW_RETRIES, 15);
     }
 

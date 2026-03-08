@@ -2324,8 +2324,7 @@ mod tests {
         }
 
         // Original checkpoint commits (from before rollback).
-        let msg1 =
-            build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
+        let msg1 = build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
         commit_empty_with_msg(&repo, &msg1);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
 
