@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::fs;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
@@ -520,6 +521,29 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         }
 
         Ok(String::from_utf8_lossy(&raw.stdout).to_string())
+    }
+
+    /// Cancel-aware execution for tmux backends.
+    ///
+    /// When the cancellation token fires, the `execute_with_log` future is
+    /// dropped. The `TmuxWindowGuard` inside `execute_raw()` detects the drop
+    /// and spawns a background `tmux kill-window` command, ensuring the tmux
+    /// window (and the backend process running inside it) is terminated rather
+    /// than left orphaned.
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        tokio::select! {
+            result = self.execute_with_log(prompt, log_writer) => result,
+            _ = cancel.cancelled() => {
+                // Dropping the execute_with_log future triggers
+                // TmuxWindowGuard::drop() which kills the tmux window.
+                Err(RalphError::Cancelled)
+            }
+        }
     }
 
     async fn health_check(&self) -> Result<()> {

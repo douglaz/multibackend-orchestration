@@ -503,6 +503,15 @@ pub fn cli_stderr_dispatch() -> tracing::dispatcher::Dispatch {
 ///
 /// The `CancellationToken` is created by the caller and shared with the
 /// task params, so the caller can cancel the task cooperatively.
+///
+/// # Log writer safety
+///
+/// The subscriber writes through `Mutex<std::fs::File>`. `std::fs::File`
+/// is unbuffered — each `write()` call goes directly to the OS — so no
+/// data is lost when the subscriber is dropped at task completion. If
+/// `tracing_subscriber::fmt` were to internally buffer, wrapping in
+/// `BufWriter` with explicit flush would be needed, but the current
+/// `File`-based writer is safe.
 pub fn spawn_inprocess_task<F, Fut>(
     task_fn: F,
     log_path: &Path,

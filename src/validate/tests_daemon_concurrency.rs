@@ -34,8 +34,12 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: concurrent_dispatch_evidence,
         },
         ConformanceTest {
-            name: "daemon_concurrency::completion_failure_terminalization",
-            func: completion_failure_terminalization,
+            name: "daemon_concurrency::drain_cancellation_terminalization",
+            func: drain_cancellation_terminalization,
+        },
+        ConformanceTest {
+            name: "daemon_concurrency::execution_failure_terminalization",
+            func: execution_failure_terminalization,
         },
         ConformanceTest {
             name: "daemon_concurrency::mixed_outcome_claim_isolation",
@@ -709,18 +713,21 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verifies that when a child process exits with failure, the issue is
-/// terminalized to `ralph:failed` and does not remain stuck as
-/// `ralph:in-progress`.
+/// Verifies that drain-induced cancellation in single-iteration mode
+/// correctly terminalizes in-progress tasks to `ralph:failed`.
 ///
 /// Strategy:
-/// - Dispatch one issue with `MOCK_RALPH_EXIT_CODE=1` so the child fails
-///   immediately.
-/// - In single-iteration mode, `collect_children` discovers the exit status,
-///   calls `complete_task`, and swaps `ralph:in-progress` -> `ralph:failed`.
-/// - Assert the label log contains the `ralph:failed` terminal transition
-///   for this specific issue.
-fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
+/// - Dispatch one issue as an in-process task.
+/// - In single-iteration mode, `drain_all_children` cancels all active
+///   tasks' `CancellationToken`s, causing them to return `Err(Cancelled)`.
+/// - `collect_children` picks up the cancelled task and transitions
+///   `ralph:in-progress` -> `ralph:failed`.
+/// - Assert the label log contains the `ralph:failed` terminal transition.
+///
+/// NOTE: This test exercises the *cancellation* failure path (via drain),
+/// not a true backend execution failure. See
+/// `execution_failure_terminalization` for the execution failure path.
+fn drain_cancellation_terminalization(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
@@ -792,6 +799,158 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("ralph:failed"),
             "daemon output should indicate terminal failed state: {combined}"
+        );
+    })
+}
+
+/// Verifies that a genuine backend execution failure (non-zero exit)
+/// causes the issue to be terminalized to `ralph:failed` through the
+/// normal `collect_children` path — not via drain-induced cancellation.
+///
+/// Strategy:
+/// - Configure the `claude` backend to a script that always exits 1.
+/// - Run the daemon in continuous mode so `collect_children` naturally
+///   discovers the failed task without `drain_all_children` masking the
+///   failure signal.
+/// - The in-process task fails during quick-prd (BackendCommandFailed)
+///   because the backend exits non-zero.
+/// - Assert `"collect: task ... failed:"` appears in output (the execution
+///   failure path, not the `"cancelled"` path).
+/// - Assert the label log contains `ralph:failed` for the issue.
+fn execution_failure_terminalization(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Configure claude backend to always fail (exit 1).
+        // Health check (which::which) still passes because the script exists.
+        let fail_script = dh
+            .write_mock_script("fail_backend.sh", "#!/bin/sh\nexit 1\n")
+            .expect("write fail script");
+        let fail_script_str = fail_script.to_string_lossy().into_owned();
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &fail_script_str,
+        ])
+        .expect("set failing backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set backend args");
+        // Refinement will fail gracefully (non-fatal), falling back to raw idea.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "true",
+        ])
+        .expect("enable refinement");
+
+        // Disable PRD to keep the test focused on execution failure.
+        {
+            let config_path = dh.repo_root.join(".ralph").join("ralph.toml");
+            let mut toml_content = fs::read_to_string(&config_path).unwrap_or_default();
+            if let Some(pos) = toml_content.find("[workspace]") {
+                let insert_pos = toml_content[pos..]
+                    .find('\n')
+                    .map(|p| pos + p + 1)
+                    .unwrap_or(toml_content.len());
+                toml_content.insert_str(insert_pos, "daemon_prd_enabled = false\n");
+            } else {
+                toml_content.push_str("\n[workspace]\ndaemon_prd_enabled = false\n");
+            }
+            fs::write(&config_path, toml_content).expect("write config to disable PRD");
+        }
+
+        let label_log = dh.temp_dir.path().join("exec_fail_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issue_counter = dh.temp_dir.path().join("exec_fail_counter");
+        let issue_counter_str = issue_counter.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":750,"title":"will fail from execution","labels":[{"name":"ralph:ready"}],"body":"fail body"}]"#;
+
+        let gh_path = write_mock_gh(
+            &dh,
+            &mock_scripts::daemon_mock_gh_bounded_concurrency_script(),
+        )
+        .expect("write mock gh");
+
+        let data_dir_str = dh.data_dir().to_string_lossy().into_owned();
+
+        // Continuous mode: collect_children discovers the failed task
+        // naturally, without drain_all_children cancellation.
+        let child = Command::new(&dh.ralph_bin)
+            .args([
+                "daemon",
+                "start",
+                "--data-dir",
+                &data_dir_str,
+                "--repo",
+                "acme/widgets",
+                "--max-concurrent",
+                "1",
+                "--poll-seconds",
+                "1",
+            ])
+            .current_dir(dh.data_dir())
+            .env("PATH", &gh_path)
+            .env("MOCK_GH_ISSUES", issues)
+            .env("MOCK_GH_LABEL_LOG", &label_log_str)
+            .env("MOCK_GH_ISSUE_LIST_COUNTER", &issue_counter_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn daemon in continuous mode");
+
+        // Wait for: dispatch (iteration 1) + task failure + collection
+        // (iteration 2). 8 seconds is generous for poll_seconds=1.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+
+        // SIGTERM to stop the daemon gracefully
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+        let output = child.wait_with_output().expect("wait for daemon output");
+        let combined = combined_output(&output);
+
+        // 1. Issue 750 should have been dispatched
+        assert!(
+            combined.contains("dispatched task acme-widgets-750")
+                || combined.contains("dispatch: task acme-widgets-750"),
+            "issue 750 should be dispatched: {combined}"
+        );
+
+        // 2. Task should fail from execution error (not cancellation).
+        // collect_children logs "collect: task ... failed: {err}" for
+        // execution errors and "collect: task ... cancelled" for
+        // CancellationToken-induced failures.
+        assert!(
+            combined.contains("collect: task acme-widgets-750 failed:"),
+            "issue 750 should fail from execution error path \
+             (\"collect: task ... failed:\"), not cancellation: {combined}"
+        );
+
+        // 3. Should NOT show "cancelled" for this task (it was a real failure)
+        assert!(
+            !combined.contains("collect: task acme-widgets-750 cancelled"),
+            "issue 750 failure should NOT be from cancellation: {combined}"
+        );
+
+        // 4. Label log should have ralph:failed for issue 750
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display()
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content
+                .lines()
+                .any(|l| l.contains("750")
+                    && l.contains("--add-label")
+                    && l.contains("ralph:failed")),
+            "issue 750 should have terminal ralph:failed label: {log_content}"
         );
     })
 }
