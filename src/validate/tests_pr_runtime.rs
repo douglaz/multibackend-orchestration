@@ -26,10 +26,11 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_runtime::pr_url_plumbed_through_child_args",
             func: pr_url_plumbed_through_child_args,
         },
-        ConformanceTest {
-            name: "pr_runtime::e2e_draft_create_via_binary",
-            func: e2e_draft_create_via_binary,
-        },
+        // e2e_draft_create_via_binary removed: it relied on RALPH_DAEMON_BIN
+        // subprocess dispatch which was replaced by in-process tokio tasks.
+        // The draft-PR watcher lifecycle is covered by
+        // draft_watcher_creates_draft_when_branch_ahead and
+        // draft_watcher_pushes_before_create.
         ConformanceTest {
             name: "pr_runtime::create_pr_honors_draft_true",
             func: create_pr_honors_draft_true,
@@ -243,10 +244,10 @@ fn draft_watcher_exits_cleanly_on_cancellation(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verify runtime PR URL resolution and forwarding order:
+/// Verify runtime PR URL resolution and forwarding to in-process task:
 /// 1) `gh pr list --head <daemon-branch>` exact-match lookup is used,
-/// 2) resolved PR URL is forwarded into spawned child args,
-/// 3) PR URL resolution happens before child spawn.
+/// 2) resolved PR URL appears in dispatch diagnostics and task params,
+/// 3) PR URL resolution happens before task dispatch.
 fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -271,14 +272,7 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
         );
         let gh_path = write_mock_gh_path(&dh, &gh_script).expect("write mock gh");
 
-        let ralph_script = format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  auto|run)\n    pr_url='none'\n    prev=''\n    for arg in \"$@\"; do\n      if [ \"$prev\" = \"--pr-url\" ]; then\n        pr_url=\"$arg\"\n      fi\n      prev=\"$arg\"\n    done\n    printf 'spawn-pr-url %s\\n' \"$pr_url\" >> '{ordering_log}'\n    exit 0\n    ;;\n  *)\n    echo \"mock ralph: unhandled command: $1\" >&2\n    exit 1\n    ;;\nesac\n",
-            ordering_log = ordering_log.display(),
-        );
-        let ralph_path = dh
-            .write_mock_script("mock-daemon-ralph-pr-url", &ralph_script)
-            .expect("write mock daemon ralph");
-        let ralph_path_str = ralph_path.to_string_lossy().into_owned();
+        // No mock ralph script needed — tasks dispatch in-process now.
 
         let issues = format!(
             "[{{\"number\":{issue_number},\"title\":\"PR URL dispatch\",\"labels\":[{{\"name\":\"ralph:ready\"}}],\"body\":\"runtime check\"}}]"
@@ -295,13 +289,13 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path_str),
                     ("MOCK_GH_ISSUES", &issues),
                 ],
             )
             .expect("daemon start should execute");
         crate::validate::assertions::assert_exit_code(&output, 0);
 
+        // Verify the mock gh received the exact --head branch lookup
         let ordering = fs::read_to_string(&ordering_log).expect("read ordering log");
         assert!(
             ordering.contains(&format!("--head {expected_branch}")),
@@ -311,30 +305,14 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
             ordering.contains(&format!("resolved {expected_pr_url}")),
             "expected resolved PR URL marker in ordering log, got: {ordering}"
         );
-        assert!(
-            ordering.contains(&format!("spawn-pr-url {expected_pr_url}")),
-            "expected spawned child to receive --pr-url value, got: {ordering}"
-        );
 
-        let resolved_line = format!("resolved {expected_pr_url}");
-        let spawned_line = format!("spawn-pr-url {expected_pr_url}");
-        let lines: Vec<&str> = ordering.lines().collect();
-        let resolved_pos = lines.iter().position(|line| *line == resolved_line);
-        let spawned_pos = lines.iter().position(|line| *line == spawned_line);
-        assert!(
-            resolved_pos.is_some(),
-            "missing resolved marker: {ordering}"
-        );
-        assert!(spawned_pos.is_some(), "missing spawn marker: {ordering}");
-        assert!(
-            resolved_pos.expect("resolved pos") < spawned_pos.expect("spawn pos"),
-            "expected resolution before child spawn marker, got: {ordering}"
-        );
-
+        // Verify via stderr diagnostics that the PR URL was resolved and
+        // forwarded to the in-process task dispatch (replaces the former
+        // child-process --pr-url arg capture).
         let stderr = String::from_utf8_lossy(&output.stderr);
         let resolved_log = format!("dispatch: resolved PR URL for {task_id}: {expected_pr_url}");
         let spawn_log = format!(
-            "dispatch: task {task_id} starting fresh with ralph auto --project-id issue-{issue_number} pr_url={expected_pr_url}"
+            "dispatch: task {task_id} starting fresh with auto --project-id issue-{issue_number} pr_url={expected_pr_url}"
         );
         let resolved_idx = stderr.find(&resolved_log);
         let spawn_idx = stderr.find(&spawn_log);
@@ -344,11 +322,11 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
         );
         assert!(
             spawn_idx.is_some(),
-            "expected runtime child-spawn log line in stderr, got:\n{stderr}"
+            "expected in-process dispatch log line with pr_url in stderr, got:\n{stderr}"
         );
         assert!(
             resolved_idx.expect("resolved idx") < spawn_idx.expect("spawn idx"),
-            "expected runtime resolution log to precede child-spawn log, got:\n{stderr}"
+            "expected runtime resolution log to precede dispatch log, got:\n{stderr}"
         );
 
         let unexpected_create = fs::read_to_string(&gh_log).unwrap_or_default();
@@ -359,92 +337,10 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
     })
 }
 
-fn e2e_draft_create_via_binary(h: &RalphHarness) -> TestResult {
-    run_case(|| {
-        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
-        dh.init_workspace().expect("init workspace");
-
-        let _guard = env_lock().lock().expect("env lock");
-        let gh_log = dh.temp_dir.path().join("gh-e2e.log");
-        let pr_state = dh.temp_dir.path().join("pr-created.state");
-
-        let gh_script = format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  issue)\n    case \"${{2:-}}\" in\n      list)\n        printf '%s' \"${{MOCK_GH_ISSUES:-[]}}\"\n        exit 0\n        ;;\n      edit|comment)\n        exit 0\n        ;;\n      view)\n        if [ \"${{6:-}}\" = \"title,body\" ] || [ \"${{7:-}}\" = \"title,body\" ]; then\n          printf '{{\"title\":\"E2E issue\",\"body\":\"body\"}}'\n          exit 0\n        fi\n        printf ''\n        exit 0\n        ;;\n    esac\n    ;;\n  label)\n    [ \"${{2:-}}\" = \"create\" ] && exit 0\n    ;;\n  pr)\n    case \"${{2:-}}\" in\n      list)\n        if [ -f '{pr_state_a}' ]; then cat '{pr_state_b}'; fi\n        exit 0\n        ;;\n      create)\n        printf 'create %s\\n' \"$*\" >> '{gh_log_a}'\n        url='https://github.com/acme/widgets/pull/901'\n        printf '%s' \"$url\" > '{pr_state_c}'\n        printf '%s\\n' \"$url\"\n        exit 0\n        ;;\n      edit)\n        printf 'edit %s\\n' \"$*\" >> '{gh_log_b}'\n        exit 0\n        ;;\n      view)\n        printf '{{\"isDraft\":true}}'\n        exit 0\n        ;;\n      ready)\n        printf 'ready %s\\n' \"$*\" >> '{gh_log_c}'\n        exit 0\n        ;;\n      close)\n        printf 'close %s\\n' \"$*\" >> '{gh_log_d}'\n        exit 0\n        ;;\n    esac\n    ;;\n  api)\n    [ \"${{2:-}}\" = \"user\" ] && printf 'ralph-bot\\n' && exit 0\n    ;;\n  repo)\n    [ \"${{2:-}}\" = \"view\" ] && printf 'acme/widgets\\n' && exit 0\n    ;;\nesac\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
-            pr_state_a = pr_state.display(),
-            pr_state_b = pr_state.display(),
-            gh_log_a = gh_log.display(),
-            pr_state_c = pr_state.display(),
-            gh_log_b = gh_log.display(),
-            gh_log_c = gh_log.display(),
-            gh_log_d = gh_log.display(),
-        );
-        let gh_path = write_mock_gh_path(&dh, &gh_script).expect("write mock gh");
-
-        let ralph_script = r#"#!/bin/sh
-set -eu
-case "${1:-}" in
-  auto|run)
-    git config user.email "mock@test"
-    git config user.name "Mock"
-    echo "work" >> e2e-draft.txt
-    git add e2e-draft.txt
-    git commit -m "mock impl" >/dev/null 2>&1 || true
-    # Sleep long enough for the draft-PR watcher (poll_secs=1) to detect the
-    # commit, push, and create the draft PR before this child exits.
-    sleep 10
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"#;
-        let ralph_path = dh
-            .write_mock_script("mock-daemon-ralph", ralph_script)
-            .expect("write mock daemon ralph");
-        let ralph_path_str = ralph_path.to_string_lossy().into_owned();
-
-        let issues = r#"[{"number":901,"title":"Draft lifecycle","labels":[{"name":"ralph:ready"}],"body":"run flow"}]"#;
-        let output = dh
-            .daemon_env(
-                [
-                    "daemon",
-                    "start",
-                    "--repo",
-                    "acme/widgets",
-                    "--single-iteration",
-                ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path_str),
-                    ("MOCK_GH_ISSUES", issues),
-                    // Short poll interval so the draft-PR watcher detects the
-                    // child commit and creates the draft PR before the child
-                    // exits, making the lifecycle ordering deterministic.
-                    ("RALPH_DRAFT_PR_WATCH_POLL_SECS", "1"),
-                ],
-            )
-            .expect("daemon start should execute");
-        crate::validate::assertions::assert_exit_code(&output, 0);
-
-        let log = fs::read_to_string(&gh_log).expect("read gh e2e log");
-        let create_pos = log.find("create");
-        let ready_pos = log.find("ready");
-        assert!(
-            create_pos.is_some(),
-            "expected draft PR creation in log, got: {log}"
-        );
-        assert!(
-            ready_pos.is_some(),
-            "expected draft PR ready transition in log, got: {log}"
-        );
-        assert!(
-            create_pos.expect("create") < ready_pos.expect("ready"),
-            "expected create before ready, got: {log}"
-        );
-    })
-}
+// e2e_draft_create_via_binary removed: it relied on RALPH_DAEMON_BIN
+// subprocess dispatch which was replaced by in-process tokio tasks.
+// The draft-PR watcher lifecycle is covered by the dedicated watcher tests
+// (draft_watcher_creates_draft_when_branch_ahead, draft_watcher_pushes_before_create).
 
 fn create_pr_honors_draft_true(_h: &RalphHarness) -> TestResult {
     run_case(|| {

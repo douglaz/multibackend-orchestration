@@ -10,6 +10,7 @@ use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use super::max_backend_retries;
 use crate::backend::tmux_backend::TmuxExecutionContext;
 use crate::backend::{tmux, Backend, BackendRegistry, BackendRegistryTmuxConfig, RoleOverrides};
 use crate::config::{
@@ -6129,7 +6130,10 @@ async fn execute_with_timeout_retries(
                     backoff_secs = backoff,
                     "backend timeout, retrying..."
                 );
-                sleep(Duration::from_secs(backoff)).await;
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(backoff)) => {},
+                    _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+                }
             }
             Err(other) => return Err(other),
         }
@@ -6138,16 +6142,6 @@ async fn execute_with_timeout_retries(
     Err(RalphError::Orchestration(
         "unexpected timeout retry control-flow error".to_owned(),
     ))
-}
-
-fn max_backend_retries(configured: Option<u8>) -> u8 {
-    const DEFAULT_RETRIES: u8 = 3;
-    const MAX_RETRIES: u8 = 10;
-
-    match configured {
-        Some(0) | None => DEFAULT_RETRIES,
-        Some(v) => v.min(MAX_RETRIES),
-    }
 }
 
 /// Evaluate whether a completion panel has reached consensus.

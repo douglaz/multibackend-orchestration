@@ -78,6 +78,9 @@ pub struct DaemonRuntimeConfig {
     pub git_bin: String,
     /// Executable used for GitHub CLI invocations in interactive PRD.
     pub gh_bin: String,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Threaded through to task params so orchestrators use a consistent value.
+    pub max_backend_retries: Option<u8>,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -1549,6 +1552,7 @@ async fn dispatch_task(
                     project_id: project_id.clone(),
                     pr_url: pr_url.clone(),
                     cancel,
+                    max_backend_retries: config.max_backend_retries,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_run_task(params), &log_path)?
             }
@@ -1564,6 +1568,7 @@ async fn dispatch_task(
                     pr_url: pr_url.clone(),
                     global_config,
                     cancel,
+                    max_backend_retries: config.max_backend_retries,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_auto_task(params), &log_path)?
             }
@@ -1577,6 +1582,7 @@ async fn dispatch_task(
                     project_id: project_id.clone(),
                     pr_url: pr_url.clone(),
                     cancel,
+                    max_backend_retries: config.max_backend_retries,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_run_task(params), &log_path)?
             }
@@ -1592,6 +1598,7 @@ async fn dispatch_task(
                     pr_url: pr_url.clone(),
                     global_config,
                     cancel,
+                    max_backend_retries: config.max_backend_retries,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_auto_task(params), &log_path)?
             }
@@ -3870,6 +3877,7 @@ mod tests {
             prd_shutdown_timeout_secs: 10,
             git_bin: "git".to_owned(),
             gh_bin: "gh".to_owned(),
+            max_backend_retries: None,
         };
 
         let cancel = CancellationToken::new();

@@ -163,12 +163,12 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
             let log_content = fs::read_to_string(&label_log).expect("read label log");
             // Both issues should have in-progress claims
             assert!(
-                log_content.contains("200") || combined.contains("200"),
-                "issue 200 should appear in label operations or output: {log_content}"
+                log_content.contains("200"),
+                "issue 200 should appear in label operations: {log_content}"
             );
             assert!(
-                log_content.contains("201") || combined.contains("201"),
-                "issue 201 should appear in label operations or output: {log_content}"
+                log_content.contains("201"),
+                "issue 201 should appear in label operations: {log_content}"
             );
         }
     })
@@ -653,11 +653,11 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
 
         // Both tasks should reach terminal state
         assert!(
-            combined.contains("acme-widgets-600 completed") || combined.contains("acme-widgets-600"),
+            combined.contains("acme-widgets-600 completed"),
             "issue 600 should complete: {combined}"
         );
         assert!(
-            combined.contains("acme-widgets-601 completed") || combined.contains("acme-widgets-601"),
+            combined.contains("acme-widgets-601 completed"),
             "issue 601 should complete: {combined}"
         );
     })

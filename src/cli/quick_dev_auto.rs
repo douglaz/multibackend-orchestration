@@ -209,7 +209,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
             dry_run: false,
         },
     );
-    let quick_prd_result = quick_prd.run_in(repo_root).await?;
+    let quick_prd_result = quick_prd.run(repo_root).await?;
 
     println!("Quick-prd completed.");
     println!("  spec: {}", quick_prd_result.spec_path.display());

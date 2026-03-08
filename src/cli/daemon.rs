@@ -257,6 +257,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             prd_shutdown_timeout_secs: daemon_cfg.prd_shutdown_timeout_secs,
             git_bin,
             gh_bin,
+            max_backend_retries: daemon_cfg.max_backend_retries,
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;

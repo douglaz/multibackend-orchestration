@@ -113,7 +113,7 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
         .unwrap_or_else(|| workspace.root.clone());
 
     let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
-    let result = pipeline.run_in(repo_root).await?;
+    let result = pipeline.run(repo_root).await?;
 
     if !non_interactive {
         println!("Quick PRD pipeline completed!");

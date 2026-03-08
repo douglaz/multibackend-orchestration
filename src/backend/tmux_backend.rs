@@ -120,6 +120,12 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         let mut parts: Vec<String> = Vec::new();
 
+        // Strip daemon-only env vars so tmux backend subprocesses
+        // don't inherit them (mirrors CliBackend::execute_streaming).
+        for var in super::SANITIZED_ENV_VARS {
+            parts.push(format!("unset {};", shell_escape(var)));
+        }
+
         // Prepend env var exports
         for (key, val) in self.inner.env() {
             parts.push(format!(

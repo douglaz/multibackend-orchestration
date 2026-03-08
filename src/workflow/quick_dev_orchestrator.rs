@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverrides};
+use super::max_backend_retries;
 use crate::error::RalphError;
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition,
@@ -1468,7 +1469,10 @@ async fn execute_backend(
                     backoff_secs = backoff,
                     "backend timeout, retrying..."
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {},
+                    _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+                }
             }
             Ok(Err(other)) => return Err(other),
             Err(_) => {
@@ -1486,7 +1490,10 @@ async fn execute_backend(
                     backoff_secs = backoff,
                     "walltime timeout, retrying..."
                 );
-                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {},
+                    _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+                }
             }
         }
     }
@@ -1496,16 +1503,6 @@ async fn execute_backend(
         idle_seconds: timeout_secs,
         timeout_kind: crate::error::TimeoutKind::Walltime,
     })
-}
-
-fn max_backend_retries(configured: Option<u8>) -> u8 {
-    const DEFAULT_RETRIES: u8 = 3;
-    const MAX_RETRIES: u8 = 10;
-
-    match configured {
-        Some(0) | None => DEFAULT_RETRIES,
-        Some(v) => v.min(MAX_RETRIES),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2002,6 +1999,7 @@ mod tests {
                 prd_max_revisions: 0,
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
+                max_backend_retries: None,
             },
             global: GlobalConfig::default(),
             project: None,

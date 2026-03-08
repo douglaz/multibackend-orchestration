@@ -40,8 +40,9 @@ pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
 /// `execute_streaming` to ensure backend processes are terminated when
 /// the future is cancelled (e.g. via `tokio::select!`).
 ///
-/// Drop is immediate (SIGKILL only, non-blocking waitpid) so it never
-/// blocks an async executor thread.
+/// On drop, sends SIGKILL to the process group and spawns a detached
+/// reaper thread that blocks on `waitpid` to avoid zombies. The drop
+/// itself is non-blocking so it never stalls an async executor thread.
 struct KillOnDrop(Option<u32>);
 
 impl KillOnDrop {
@@ -55,15 +56,32 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
-                // Immediate hard kill — no blocking wait. The async
-                // cleanup paths (timeout branch, normal completion)
+                // Immediate hard kill — no blocking wait in the drop path.
+                // The async cleanup paths (timeout branch, normal completion)
                 // handle graceful shutdown; this guard is a last-resort
                 // safety net when the future is dropped unexpectedly.
                 // SAFETY: Sending signals to a process group is safe.
                 unsafe {
                     libc::kill(-(raw), libc::SIGKILL);
-                    // Non-blocking reap to avoid zombies when possible.
-                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
+                }
+                // Spawn a detached thread to block on waitpid and reap the
+                // child, preventing zombies. The non-blocking attempt here
+                // catches the common case where the child has already exited;
+                // the thread handles the rest.
+                //
+                // NOTE: Because this child was spawned by
+                // `tokio::process::Command`, tokio's internal signal handler
+                // also monitors the PID. The `waitpid` call here may race
+                // with tokio's reaper, causing one of them to get `ECHILD`.
+                // Both ignore the result, so this is harmless.
+                let reap_result = unsafe {
+                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG)
+                };
+                if reap_result == 0 {
+                    // Child not yet exited — spawn a reaper thread.
+                    std::thread::spawn(move || unsafe {
+                        libc::waitpid(raw, std::ptr::null_mut(), 0);
+                    });
                 }
             }
         }

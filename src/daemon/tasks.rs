@@ -37,6 +37,7 @@ pub struct AutoTaskParams {
     pub pr_url: Option<String>,
     pub global_config: GlobalConfig,
     pub cancel: CancellationToken,
+    pub max_backend_retries: Option<u8>,
 }
 
 /// Parameters for the `run` dispatch variant (resume existing project).
@@ -45,6 +46,7 @@ pub struct RunTaskParams {
     pub project_id: String,
     pub pr_url: Option<String>,
     pub cancel: CancellationToken,
+    pub max_backend_retries: Option<u8>,
 }
 
 /// Parameters for the `quick-dev-auto` dispatch variant.
@@ -55,6 +57,7 @@ pub struct QuickDevAutoTaskParams {
     pub pr_url: Option<String>,
     pub global_config: GlobalConfig,
     pub cancel: CancellationToken,
+    pub max_backend_retries: Option<u8>,
 }
 
 /// Parameters for the `quick-dev-run` dispatch variant.
@@ -63,6 +66,7 @@ pub struct QuickDevRunTaskParams {
     pub project_id: String,
     pub pr_url: Option<String>,
     pub cancel: CancellationToken,
+    pub max_backend_retries: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +117,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         },
     );
     let quick_prd_result = tokio::select! {
-        result = quick_prd.run_in(repo_root) => result?,
+        result = quick_prd.run(repo_root) => result?,
         _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
     };
 
@@ -169,7 +173,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         skip_prompt_review: false,
         pr_url: params.pr_url,
         cancel: params.cancel,
-        max_backend_retries: None,
+        max_backend_retries: params.max_backend_retries,
     })
     .await
 }
@@ -197,7 +201,7 @@ pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> 
         skip_prompt_review: false,
         pr_url: params.pr_url,
         cancel: params.cancel,
-        max_backend_retries: None,
+        max_backend_retries: params.max_backend_retries,
     })
     .await
 }
@@ -246,7 +250,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
         },
     );
     let quick_prd_result = tokio::select! {
-        result = quick_prd.run_in(repo_root) => result?,
+        result = quick_prd.run(repo_root) => result?,
         _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
     };
 
@@ -293,7 +297,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
             max_review_iterations: None,
             max_final_review_retries: None,
             cancel: params.cancel,
-            max_backend_retries: None,
+            max_backend_retries: params.max_backend_retries,
         })
         .await?;
 
@@ -318,7 +322,7 @@ pub async fn run_quick_dev_run_task(params: QuickDevRunTaskParams) -> Result<Orc
             max_review_iterations: None,
             max_final_review_retries: None,
             cancel: params.cancel,
-            max_backend_retries: None,
+            max_backend_retries: params.max_backend_retries,
         })
         .await?;
 

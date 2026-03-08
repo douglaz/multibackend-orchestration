@@ -298,7 +298,7 @@ impl QuickPrdPipeline {
 
     /// Run the quick-prd pipeline in the given working directory.
     /// The `working_dir` should be the repo root (parent of `.ralph/`).
-    pub async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
+    pub async fn run(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
         let started_at = now_iso8601();
         let idea_hash = sha256_hex(&self.options.idea)[..12].to_owned();
 
@@ -619,7 +619,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed");
 
@@ -657,7 +657,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed");
 
@@ -702,7 +702,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer.clone(), reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed with best-effort");
 
@@ -747,7 +747,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(temp.path().to_path_buf())
+            .run(temp.path().to_path_buf())
             .await
             .expect("pipeline should succeed");
 
