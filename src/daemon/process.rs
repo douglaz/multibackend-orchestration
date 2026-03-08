@@ -846,7 +846,14 @@ mod tests {
     fn test_pgid_exists_current_process() {
         // The current process's PGID should exist.
         let pgid = nix::unistd::getpgrp();
-        assert!(pgid_exists(pgid.as_raw() as u32));
+        let raw = pgid.as_raw() as u32;
+        if raw <= 1 {
+            // In sandboxed environments (e.g. Nix build), the process may
+            // run in PGID 0 or 1. pgid_exists intentionally returns false
+            // for these values, so skip the assertion.
+            return;
+        }
+        assert!(pgid_exists(raw));
     }
 
     #[cfg(unix)]
