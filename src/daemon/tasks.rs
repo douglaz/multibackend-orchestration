@@ -112,7 +112,14 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
             dry_run: false,
         },
     );
-    let quick_prd_result = quick_prd.run_in(repo_root).await?;
+    let quick_prd_result = tokio::select! {
+        result = quick_prd.run_in(repo_root) => result?,
+        _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
+    };
+
+    if params.cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
+    }
 
     tracing::info!(
         spec = %quick_prd_result.spec_path.display(),
@@ -159,7 +166,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         tmux: Some(false),
         on_prompt_change: None,
         skip_commit: false,
-        skip_prompt_review: true,
+        skip_prompt_review: false,
         pr_url: params.pr_url,
         cancel: params.cancel,
         max_backend_retries: None,
@@ -187,7 +194,7 @@ pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> 
         tmux: Some(false),
         on_prompt_change: None,
         skip_commit: false,
-        skip_prompt_review: true,
+        skip_prompt_review: false,
         pr_url: params.pr_url,
         cancel: params.cancel,
         max_backend_retries: None,
@@ -238,7 +245,14 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
             dry_run: false,
         },
     );
-    let quick_prd_result = quick_prd.run_in(repo_root).await?;
+    let quick_prd_result = tokio::select! {
+        result = quick_prd.run_in(repo_root) => result?,
+        _ = params.cancel.cancelled() => return Err(RalphError::Cancelled),
+    };
+
+    if params.cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
+    }
 
     tracing::info!(
         spec = %quick_prd_result.spec_path.display(),

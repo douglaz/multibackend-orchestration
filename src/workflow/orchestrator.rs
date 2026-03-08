@@ -2948,7 +2948,7 @@ fn preload_role_model_backends(registry: &mut BackendRegistry) -> Result<()> {
 /// would not be found in the cache and the reformatter would silently fall
 /// back to the original backend, exhausting parse retries.
 fn preload_bare_default_backends(registry: &mut BackendRegistry) -> Result<()> {
-    for name in ["claude", "codex"] {
+    for name in ["claude", "codex", "openrouter"] {
         // Ignore errors — the backend may not be configured/available.
         let _ = registry.get_or_create_for_spec(name);
     }
