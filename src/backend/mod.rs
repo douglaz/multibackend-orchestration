@@ -788,11 +788,30 @@ impl CliBackend {
 
         match execution_outcome {
             ExecutionOutcome::Completed(Ok((status, captured_stdout))) => {
-                // Child exited normally — disarm immediately to avoid
-                // sending SIGKILL to an already-exited (or recycled) PID.
+                // Guard stays armed while we drain stderr. If cancellation
+                // drops this future mid-drain, KillOnDrop fires SIGKILL on
+                // the process group, cleaning up any surviving descendants.
+                let stderr_bytes = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.collect_stderr(stderr_handle),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_elapsed) => {
+                        // Stderr drain timed out — descendants may be holding
+                        // the pipe open. Kill the process group to unblock.
+                        warn!(
+                            backend = %self.name,
+                            "stderr drain timed out after 5s, killing process group"
+                        );
+                        self.kill_and_reap_child(&mut child).await;
+                        Vec::new()
+                    }
+                };
+                // All async cleanup done — safe to disarm with no further
+                // .await between here and return.
                 kill_guard.disarm();
-
-                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
 
                 if !status.success() {
                     let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();

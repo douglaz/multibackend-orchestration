@@ -97,8 +97,9 @@ fn retry_override_unset_defaults_to_three(h: &RalphHarness) -> TestResult {
         let project_id = "issue-804";
         setup_timeout_failure_project(h, project_id);
 
+        // No --max-backend-retries arg → defaults to 3.
         let output = h
-            .ralph_env_with_removals(["run", "--loops", "1"], &[], &["RALPH_MAX_BACKEND_RETRIES"])
+            .ralph(["run", "--loops", "1"])
             .expect("ralph run should execute");
         assert_ne!(
             output.status.code().unwrap_or(-1),
@@ -116,10 +117,7 @@ fn retry_override_set_to_one(h: &RalphHarness) -> TestResult {
         setup_timeout_failure_project(h, project_id);
 
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "1"])
             .expect("ralph run should execute");
         assert_ne!(
             output.status.code().unwrap_or(-1),
@@ -136,11 +134,9 @@ fn retry_override_zero_defaults_to_three(h: &RalphHarness) -> TestResult {
         let project_id = "issue-806";
         setup_timeout_failure_project(h, project_id);
 
+        // --max-backend-retries 0 is treated as unset → defaults to 3.
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "0")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "0"])
             .expect("ralph run should execute");
         assert_ne!(
             output.status.code().unwrap_or(-1),
@@ -157,19 +153,22 @@ fn retry_override_invalid_string_defaults_to_three(h: &RalphHarness) -> TestResu
         let project_id = "issue-807";
         setup_timeout_failure_project(h, project_id);
 
+        // Invalid value for --max-backend-retries: clap rejects non-numeric
+        // input, so the command fails with a non-zero exit code.
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "abc")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "abc"])
             .expect("ralph run should execute");
         assert_ne!(
             output.status.code().unwrap_or(-1),
             0,
-            "expected non-zero exit when backend times out"
+            "expected non-zero exit for invalid --max-backend-retries value"
         );
 
-        assert_planner_attempt_count(h, project_id, 3);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("invalid value") || stderr.contains("error"),
+            "expected clap parse error in stderr, got:\n{stderr}"
+        );
     })
 }
 

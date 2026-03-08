@@ -10,13 +10,6 @@ use crate::error::RalphError;
 use crate::workspace::Workspace;
 use crate::Result;
 
-fn parse_max_backend_retries_env() -> Option<u8> {
-    std::env::var("RALPH_MAX_BACKEND_RETRIES")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .filter(|&v| v > 0)
-}
-
 #[derive(Debug, Args)]
 pub struct QuickDevAutoArgs {
     #[arg(long, value_parser = parse_non_empty_idea)]
@@ -40,6 +33,10 @@ pub struct QuickDevAutoArgs {
     pub max_review_iterations: Option<u32>,
     #[arg(long, value_parser = parse_positive_u32)]
     pub max_final_review_retries: Option<u32>,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Defaults to 3 when omitted.
+    #[arg(long = "max-backend-retries")]
+    pub max_backend_retries: Option<u8>,
 }
 
 fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
@@ -96,7 +93,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
         project_id: args.project_id,
         pr_url: args.pr_url,
         cancel: CancellationToken::new(),
-        max_backend_retries: parse_max_backend_retries_env(),
+        max_backend_retries: args.max_backend_retries,
         implementer_backend: args.implementer_backend,
         reviewer_backend: args.reviewer_backend,
         skip_commit: args.skip_commit,
