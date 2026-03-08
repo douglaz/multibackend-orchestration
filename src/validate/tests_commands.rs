@@ -1265,6 +1265,24 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
         h.ralph_ok(["run", "--loops", "2"])
             .expect("ralph run --loops 2 should succeed");
 
+        // Capture the rollback target from dry-run BEFORE removing the remote
+        // (branch exists locally, so dry-run resolves correctly).
+        let dry_run = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_exit_code(&dry_run, 0);
+        let dry_stdout = String::from_utf8_lossy(&dry_run.stdout);
+        let reset_ref = dry_stdout
+            .split("git reset --hard ")
+            .nth(1)
+            .and_then(|tail| tail.lines().next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .expect("dry-run output should include reset reference");
+        let target_commit = git_rev_parse(&h.repo_root, reset_ref);
+
+        let head_before = git_head_commit(&h.repo_root);
+
         // Remove the origin remote so that force-push will fail.
         let remove_status = Command::new("git")
             .args(["remote", "remove", "origin"])
@@ -1283,6 +1301,17 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
 
         // Stderr should contain a push-failure warning.
         assert_stderr_contains(&output, "force-push failed");
+
+        // Verify git reset --hard still happened despite push failure.
+        let head_after = git_head_commit(&h.repo_root);
+        assert_ne!(
+            head_before, head_after,
+            "expected HEAD to change after hard rollback (even with push failure)"
+        );
+        assert_eq!(
+            head_after, target_commit,
+            "expected HEAD to match rollback target after hard rollback with push failure"
+        );
 
         // Artifacts for loop 2 should be removed despite push failure.
         let loop2_dir = h.loop_dir(project_id, 2).expect("loop_dir should succeed");
@@ -1309,17 +1338,19 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
         // (loop 1) should have been cleared despite the push failure.
         let state = h.load_state(project_id).expect("load_state after rollback");
         let session_store = &state["session_store"];
-        if session_store.is_object() {
-            let empty = Vec::new();
-            let records = session_store["records"].as_array().unwrap_or(&empty);
-            for record in records {
-                let loop_num = record["loop_number"].as_u64().unwrap_or(0) as u32;
-                assert!(
-                    loop_num <= 1,
-                    "expected no session records for loops > 1 after rollback to 1, found loop {}",
-                    loop_num
-                );
-            }
+        assert!(
+            session_store.is_object(),
+            "expected session_store to be an object in state"
+        );
+        let empty = Vec::new();
+        let records = session_store["records"].as_array().unwrap_or(&empty);
+        for record in records {
+            let loop_num = record["loop_number"].as_u64().unwrap_or(0) as u32;
+            assert!(
+                loop_num <= 1,
+                "expected no session records for loops > 1 after rollback to 1, found loop {}",
+                loop_num
+            );
         }
 
         // Re-add the origin remote so teardown can clean up.

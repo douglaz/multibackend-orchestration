@@ -52,30 +52,42 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
 
     // Dry-run: resolve ref early for display (read-only, no branch mutations).
     if args.dry_run {
-        let hard_ref = if args.hard {
+        if args.hard {
             let repo_root = workspace.root.parent().ok_or_else(|| {
                 RalphError::Orchestration("workspace root has no parent path".to_owned())
             })?;
             if is_git_repo(repo_root) {
-                Some(resolve_hard_reset_ref(
-                    &workspace,
-                    &original_state,
-                    &project_id,
-                    args.loop_number,
-                    repo_root,
-                )?)
+                // Mirror the execution path's branch-visibility check: only
+                // resolve the reset ref when the project branch already exists
+                // locally.  If it would need recovery (create from remote-
+                // tracking / fetch) we cannot determine the ref without side
+                // effects, so print a placeholder instead of a wrong value.
+                let branch =
+                    resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+                if branch_exists(repo_root, &branch)? {
+                    let reference = resolve_hard_reset_ref(
+                        &workspace,
+                        &original_state,
+                        &project_id,
+                        args.loop_number,
+                        repo_root,
+                    )?;
+                    println!(
+                        "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
+                        to_remove, args.loop_number, reference
+                    );
+                } else {
+                    println!(
+                        "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard <ref> (branch '{}' requires recovery; exact ref unavailable in dry-run)",
+                        to_remove, args.loop_number, branch
+                    );
+                }
             } else {
-                None
+                println!(
+                    "dry-run (hard rollback): would remove loops {:?} and set current loop to {} (no git repo)",
+                    to_remove, args.loop_number
+                );
             }
-        } else {
-            None
-        };
-
-        if let Some(reference) = &hard_ref {
-            println!(
-                "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
-                to_remove, args.loop_number, reference
-            );
         } else {
             println!(
                 "dry-run (soft rollback): would remove loops {:?} and set current loop to {} (no git reset)",
