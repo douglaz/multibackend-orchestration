@@ -254,7 +254,7 @@ fn pr_url_plumbed_through_child_args(h: &RalphHarness) -> TestResult {
 
         let issue_number = 77_u32;
         let task_id = crate::daemon::format_task_id("acme", "widgets", issue_number);
-        let expected_branch = format!("ralph/daemon/{task_id}");
+        let expected_branch = format!("ralph/issue-{issue_number}");
         let expected_pr_url = "https://github.com/acme/widgets/pull/777";
 
         let ordering_log = dh.temp_dir.path().join("pr-url-ordering.log");

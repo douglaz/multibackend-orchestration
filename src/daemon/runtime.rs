@@ -1333,17 +1333,19 @@ fn detect_legacy_slug_branch(worktree_path: &Path) -> Result<Option<String>> {
 }
 
 fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
-    let project_id = "issue-1";
-    let rendered = crate::git::branch::resolve_branch_name(branch_format, project_id);
-    if rendered == "ralph/issue-1" {
-        return Ok(());
+    // Validate two distinct project IDs to reject constant formats (e.g. "ralph/issue-1")
+    // that accidentally pass a single-ID check.
+    for (project_id, expected) in [("issue-1", "ralph/issue-1"), ("issue-2", "ralph/issue-2")] {
+        let rendered = crate::git::branch::resolve_branch_name(branch_format, project_id);
+        if rendered != expected {
+            return Err(RalphError::Validation(format!(
+                "incompatible git.branch_format for daemon-managed issue dispatch: \
+                 formatting project_id '{project_id}' must produce '{expected}', \
+                 but '{branch_format}' produced '{rendered}'"
+            )));
+        }
     }
-
-    Err(RalphError::Validation(format!(
-        "incompatible git.branch_format for daemon-managed issue dispatch: \
-         formatting project_id '{project_id}' must produce 'ralph/issue-1', \
-         but '{branch_format}' produced '{rendered}'"
-    )))
+    Ok(())
 }
 
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
@@ -1356,6 +1358,10 @@ async fn dispatch_task(
 ) -> Result<ChildHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
+    let branch_name = crate::git::branch::resolve_branch_name(
+        &config.global_config.git.branch_format,
+        &project_id,
+    );
 
     bootstrap::ensure_repo_ready(&config.repo_root, Some(repo_root_lock.clone())).await?;
 
@@ -1373,9 +1379,12 @@ async fn dispatch_task(
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
+        let branch_name_clone = branch_name.clone();
         let lock = Some(repo_root_lock.clone());
-        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid, lock))
-            .await?
+        spawn_blocking_op(move || {
+            worktree::create_worktree(&repo_root, &ws_root, &tid, &branch_name_clone, lock)
+        })
+        .await?
     };
 
     // Clean worktree of any dirty files from previous runs
@@ -1499,9 +1508,6 @@ async fn dispatch_task(
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-
-    // Determine branch name for the child handle
-    let branch_name = format!("ralph/daemon/{task_id}");
 
     // Ignore stale artifacts left from prior runs.  Subtract 2 seconds to
     // tolerate filesystems that truncate mtime to whole-second granularity
@@ -3311,6 +3317,21 @@ mod tests {
         assert!(
             msg.contains("ralph/issue-1"),
             "expected expected-branch hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn daemon_branch_format_validation_rejects_constant_format() {
+        let err = validate_daemon_branch_format("ralph/issue-1")
+            .expect_err("constant branch format should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("git.branch_format"),
+            "expected branch format validation message, got: {msg}"
+        );
+        assert!(
+            msg.contains("ralph/issue-2"),
+            "expected second project_id hint, got: {msg}"
         );
     }
 

@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -34,20 +34,20 @@ pub fn task_worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
 
 /// Create a git worktree for the given task.
 ///
-/// Creates a new branch `ralph/daemon/<task_id>` in a worktree at
+/// Creates a new branch `branch_name` in a worktree at
 /// `.ralph/daemon/worktrees/<task_id>/`. If the branch already exists
 /// (e.g. from a previous failed run), reuses it instead of passing `-b`.
 pub fn create_worktree(
     repo_root: &Path,
     workspace_root: &Path,
     task_id: &str,
+    branch_name: &str,
     _repo_root_lock: Option<Arc<Semaphore>>,
 ) -> Result<PathBuf> {
     let wt_path = task_worktree_path(workspace_root, task_id);
-    let branch_name = format!("ralph/daemon/{task_id}");
 
     if wt_path.exists() {
-        verify_worktree_branch(&wt_path, &branch_name)?;
+        verify_worktree_branch(&wt_path, branch_name)?;
         // Ensure config is present even for reused worktrees (may have been
         // created before the config-copy logic, or by quick-prd which doesn't
         // copy config).
@@ -133,7 +133,7 @@ pub fn create_worktree(
                 "add",
                 "-f",
                 &wt_path.to_string_lossy(),
-                &branch_name,
+                branch_name,
             ])
             .current_dir(repo_root)
             .output()
@@ -144,7 +144,7 @@ pub fn create_worktree(
                 "worktree",
                 "add",
                 "-b",
-                &branch_name,
+                branch_name,
                 &wt_path.to_string_lossy(),
                 &base_ref,
             ])
@@ -287,8 +287,30 @@ fn verify_worktree_branch(wt_path: &Path, expected_branch: &str) -> Result<()> {
         actual_branch
     );
 
+    // If the expected branch already exists, plain checkout preserves its
+    // commit pointer.  Only use `-B` (create-or-reset) for the migration
+    // case where the branch does not exist yet.
+    let branch_exists = Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{expected_branch}"),
+        ])
+        .current_dir(wt_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let mut args = vec!["checkout", "--force"];
+    if !branch_exists {
+        args.push("-B");
+    }
+    args.push(expected_branch);
+
     let checkout = Command::new("git")
-        .args(["checkout", "--force", expected_branch])
+        .args(&args)
         .current_dir(wt_path)
         .output()
         .map_err(|err| {
@@ -687,10 +709,12 @@ mod tests {
     fn create_worktree_returns_expected_worktree_path() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-123";
+        let branch_name = "ralph/issue-123";
         let expected_path = task_worktree_path(&workspace_root, task_id);
 
         let wt_path: PathBuf =
-            create_worktree(&repo_root, &workspace_root, task_id, None).expect("create worktree");
+            create_worktree(&repo_root, &workspace_root, task_id, branch_name, None)
+                .expect("create worktree");
 
         assert_eq!(wt_path, expected_path);
         assert!(wt_path.is_dir(), "worktree directory should exist");
@@ -700,30 +724,35 @@ mod tests {
     fn verify_worktree_branch_returns_ok_for_matching_branch() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-124";
-        let wt_path =
-            create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
-        let expected_branch = format!("ralph/daemon/{task_id}");
+        let branch_name = "ralph/issue-124";
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, branch_name, None)
+            .expect("worktree");
 
-        let result: crate::Result<()> = verify_worktree_branch(&wt_path, &expected_branch);
+        let result: crate::Result<()> = verify_worktree_branch(&wt_path, branch_name);
         assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
 
         let actual_branch = git_stdout(&wt_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        assert_eq!(actual_branch, expected_branch);
+        assert_eq!(actual_branch, branch_name);
     }
 
     #[test]
-    fn verify_worktree_branch_returns_error_for_missing_expected_branch() {
+    fn verify_worktree_branch_creates_missing_branch_via_migration() {
         let (_tmp, repo_root, workspace_root) = init_test_repo();
         let task_id = "acme-widgets-125";
-        let wt_path =
-            create_worktree(&repo_root, &workspace_root, task_id, None).expect("worktree");
+        let branch_name = "ralph/issue-125";
+        let wt_path = create_worktree(&repo_root, &workspace_root, task_id, branch_name, None)
+            .expect("worktree");
 
-        let err = verify_worktree_branch(&wt_path, "ralph/daemon/does-not-exist")
-            .expect_err("missing expected branch should fail");
-        let message = err.to_string();
+        // The `-B` flag in verify_worktree_branch creates the branch at HEAD
+        // if it doesn't exist, enabling migration from old branch formats.
+        let new_branch = "ralph/issue-999";
+        let result = verify_worktree_branch(&wt_path, new_branch);
         assert!(
-            message.contains("does not match expected"),
-            "expected mismatch error, got: {message}"
+            result.is_ok(),
+            "migration fallback should create and checkout missing branch: {result:?}"
         );
+
+        let actual = git_stdout(&wt_path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(actual, new_branch, "worktree should be on the new branch");
     }
 }
