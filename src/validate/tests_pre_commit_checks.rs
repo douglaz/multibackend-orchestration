@@ -31,15 +31,19 @@ fn config_get_set(h: &RalphHarness) -> TestResult {
         let fmt = h
             .ralph_ok(["config", "get", "workflow.pre_commit_fmt"])
             .expect("config get workflow.pre_commit_fmt failed");
-        assert_eq!(fmt.trim(), "true", "pre_commit_fmt should default to true");
+        assert_eq!(
+            fmt.trim(),
+            "false",
+            "pre_commit_fmt should default to false"
+        );
 
         let clippy = h
             .ralph_ok(["config", "get", "workflow.pre_commit_clippy"])
             .expect("config get workflow.pre_commit_clippy failed");
         assert_eq!(
             clippy.trim(),
-            "true",
-            "pre_commit_clippy should default to true"
+            "false",
+            "pre_commit_clippy should default to false"
         );
 
         let nix_build = h
@@ -61,12 +65,12 @@ fn config_get_set(h: &RalphHarness) -> TestResult {
         );
 
         // Set and verify round-trip
-        h.ralph_ok(["config", "set", "workflow.pre_commit_fmt", "false"])
+        h.ralph_ok(["config", "set", "workflow.pre_commit_fmt", "true"])
             .expect("config set pre_commit_fmt failed");
         let fmt_after = h
             .ralph_ok(["config", "get", "workflow.pre_commit_fmt"])
             .expect("config get pre_commit_fmt after set failed");
-        assert_eq!(fmt_after.trim(), "false");
+        assert_eq!(fmt_after.trim(), "true");
 
         h.ralph_ok(["config", "set", "workflow.pre_commit_nix_build", "true"])
             .expect("config set pre_commit_nix_build failed");
@@ -75,12 +79,12 @@ fn config_get_set(h: &RalphHarness) -> TestResult {
             .expect("config get pre_commit_nix_build after set failed");
         assert_eq!(nix_after.trim(), "true");
 
-        h.ralph_ok(["config", "set", "workflow.pre_commit_clippy", "false"])
+        h.ralph_ok(["config", "set", "workflow.pre_commit_clippy", "true"])
             .expect("config set pre_commit_clippy failed");
         let clippy_after = h
             .ralph_ok(["config", "get", "workflow.pre_commit_clippy"])
             .expect("config get pre_commit_clippy after set failed");
-        assert_eq!(clippy_after.trim(), "false");
+        assert_eq!(clippy_after.trim(), "true");
 
         h.ralph_ok(["config", "set", "workflow.pre_commit_fmt_auto_fix", "true"])
             .expect("config set pre_commit_fmt_auto_fix failed");
@@ -157,9 +161,13 @@ fn enabled_no_cargo_toml_passes(h: &RalphHarness) -> TestResult {
         let project_id = "issue-172-no-cargo";
         setup_project(h, project_id);
 
-        // Enable pre-commit checks (fmt and clippy are already default true)
-        // The test worktree has no Cargo.toml, so cargo checks should be skipped
+        // Enable pre-commit checks explicitly (defaults are false)
+        h.ralph_ok(["config", "set", "workflow.pre_commit_fmt", "true"])
+            .expect("config set pre_commit_fmt failed");
+        h.ralph_ok(["config", "set", "workflow.pre_commit_clippy", "true"])
+            .expect("config set pre_commit_clippy failed");
 
+        // The test worktree has no Cargo.toml, so cargo checks should be skipped
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed with no Cargo.toml");
 
@@ -192,13 +200,13 @@ fn fmt_failure_triggers_reloop(h: &RalphHarness) -> TestResult {
         )
         .expect("create_project failed");
 
-        // Disable QA, final review, and clippy to isolate fmt check behavior
+        // Disable QA and final review; enable fmt and disable clippy to isolate fmt check behavior
         h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
             .expect("config set qa_enabled failed");
         h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
             .expect("config set final_review_enabled failed");
-        h.ralph_ok(["config", "set", "workflow.pre_commit_clippy", "false"])
-            .expect("config set pre_commit_clippy failed");
+        h.ralph_ok(["config", "set", "workflow.pre_commit_fmt", "true"])
+            .expect("config set pre_commit_fmt failed");
 
         h.ralph_ok(["run", "--loops", "1"])
             .expect("ralph run --loops 1 should succeed after fmt fix reloop");
