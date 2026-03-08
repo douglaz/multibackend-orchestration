@@ -163,7 +163,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         reviewer_backend: None,
         qa_backend: None,
         completer_backend: None,
-        tmux: Some(false),
+        tmux: None,
         on_prompt_change: None,
         skip_commit: false,
         skip_prompt_review: false,
@@ -191,7 +191,7 @@ pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> 
         reviewer_backend: None,
         qa_backend: None,
         completer_backend: None,
-        tmux: Some(false),
+        tmux: None,
         on_prompt_change: None,
         skip_commit: false,
         skip_prompt_review: false,
@@ -442,5 +442,103 @@ fn load_workspace(workspace_root: &Path) -> Result<Workspace> {
         Workspace::load(ralph_dir)
     } else {
         crate::cli::init::create_workspace(&ralph_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::RalphError;
+    use crate::workflow::orchestrator::OrchestrationResult;
+    use std::fs;
+    use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // Per-task log isolation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_inprocess_task_log_isolation_no_cross_contamination() {
+        let tmp = tempdir().expect("tempdir");
+        let log1 = tmp.path().join("task-1.log");
+        let log2 = tmp.path().join("task-2.log");
+
+        let handle1 = spawn_inprocess_task(
+            || async {
+                tracing::info!("TASK_ONE_MARKER");
+                Ok(OrchestrationResult {
+                    summary: "task1".to_owned(),
+                    loop_number: Some(1),
+                })
+            },
+            &log1,
+        )
+        .expect("spawn task 1");
+
+        let handle2 = spawn_inprocess_task(
+            || async {
+                tracing::info!("TASK_TWO_MARKER");
+                Ok(OrchestrationResult {
+                    summary: "task2".to_owned(),
+                    loop_number: Some(1),
+                })
+            },
+            &log2,
+        )
+        .expect("spawn task 2");
+
+        handle1.await.expect("task 1 join").expect("task 1 result");
+        handle2.await.expect("task 2 join").expect("task 2 result");
+
+        let content1 = fs::read_to_string(&log1).expect("read log1");
+        let content2 = fs::read_to_string(&log2).expect("read log2");
+
+        assert!(
+            content1.contains("TASK_ONE_MARKER"),
+            "log1 should contain TASK_ONE_MARKER, got: {content1}"
+        );
+        assert!(
+            !content1.contains("TASK_TWO_MARKER"),
+            "log1 should NOT contain TASK_TWO_MARKER (cross-contamination), got: {content1}"
+        );
+        assert!(
+            content2.contains("TASK_TWO_MARKER"),
+            "log2 should contain TASK_TWO_MARKER, got: {content2}"
+        );
+        assert!(
+            !content2.contains("TASK_ONE_MARKER"),
+            "log2 should NOT contain TASK_ONE_MARKER (cross-contamination), got: {content2}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation behavior — Err(Cancelled) path
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_inprocess_task_returns_cancelled_on_token_cancel() {
+        let tmp = tempdir().expect("tempdir");
+        let log_path = tmp.path().join("cancel-test.log");
+        let cancel = CancellationToken::new();
+        let cancel_inner = cancel.clone();
+
+        let handle = spawn_inprocess_task(
+            move || async move {
+                // Wait until cancelled
+                cancel_inner.cancelled().await;
+                Err(RalphError::Cancelled)
+            },
+            &log_path,
+        )
+        .expect("spawn task");
+
+        // Cancel after a short delay
+        cancel.cancel();
+
+        let result = handle.await.expect("join should succeed");
+        assert!(
+            matches!(result, Err(RalphError::Cancelled)),
+            "expected Err(Cancelled), got: {result:?}"
+        );
     }
 }

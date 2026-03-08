@@ -1707,6 +1707,22 @@ async fn await_watcher_with_timeout_impl(
     }
 }
 
+/// Derive a terminal label from the result of awaiting a task's `JoinHandle`.
+///
+/// - `Ok(Ok(_))` → `"ralph:completed"` (task succeeded)
+/// - `Ok(Err(Cancelled))` → `"ralph:failed"` (cooperative cancellation)
+/// - `Ok(Err(_))` → `"ralph:failed"` (task error)
+/// - `Err(JoinError)` → `"ralph:failed"` (task panicked)
+fn derive_terminal_label(
+    result: &std::result::Result<crate::Result<crate::workflow::orchestrator::OrchestrationResult>, tokio::task::JoinError>,
+) -> &'static str {
+    match result {
+        Ok(Ok(_)) => "ralph:completed",
+        Ok(Err(_)) => "ralph:failed",
+        Err(_) => "ralph:failed",
+    }
+}
+
 /// Collect finished children and transition them to terminal states via labels.
 async fn collect_children(
     config: &DaemonRuntimeConfig,
@@ -1745,21 +1761,21 @@ async fn collect_children(
         };
 
         // Resolve the task result from the JoinHandle.
-        let terminal_label = match (&mut handle.join_handle).await {
-            Ok(Ok(_result)) => "ralph:completed",
+        let join_result = (&mut handle.join_handle).await;
+        let terminal_label = derive_terminal_label(&join_result);
+        match &join_result {
             Ok(Err(ref err)) => {
                 if matches!(err, RalphError::Cancelled) {
                     eprintln!("collect: task {task_id} cancelled");
                 } else {
                     eprintln!("collect: task {task_id} failed: {err}");
                 }
-                "ralph:failed"
             }
             Err(join_err) => {
                 eprintln!("collect: task {task_id} panicked: {join_err}");
-                "ralph:failed"
             }
-        };
+            _ => {}
+        }
 
         handle.watcher_cancel.cancel();
         if let Some(join_handle) = handle.watcher_handle.take() {
@@ -3079,8 +3095,8 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 mod tests {
     use super::{
         await_watcher_with_timeout_impl, build_pr_body, build_pr_title,
-        detect_final_prompt_artifact, detect_quick_prd_artifact, extract_issue_body,
-        extract_original_title, extract_project_ref, newest_by_mtime,
+        derive_terminal_label, detect_final_prompt_artifact, detect_quick_prd_artifact,
+        extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
         post_artifact_comments_with_client, should_close_no_diff_draft_pr,
         should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
         sweep_artifact_comments, truncate_for_github, validate_daemon_branch_format,
@@ -3756,6 +3772,147 @@ mod tests {
                 .filter(|c| c.phase == "final-prompt")
                 .count(),
             1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // collect_children result mapping via derive_terminal_label
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_terminal_label_ok_result_is_completed() {
+        use crate::workflow::orchestrator::OrchestrationResult;
+        let result: std::result::Result<
+            crate::Result<OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Ok(OrchestrationResult {
+            summary: "done".to_owned(),
+            loop_number: Some(1),
+        }));
+        assert_eq!(derive_terminal_label(&result), "ralph:completed");
+    }
+
+    #[test]
+    fn derive_terminal_label_cancelled_is_failed() {
+        let result: std::result::Result<
+            crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Err(RalphError::Cancelled));
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    #[test]
+    fn derive_terminal_label_error_is_failed() {
+        let result: std::result::Result<
+            crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Err(RalphError::Orchestration("boom".to_owned())));
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    #[tokio::test]
+    async fn derive_terminal_label_panic_join_error_is_failed() {
+        // Spawn a task that panics, then check the JoinError maps to failed.
+        let handle = tokio::spawn(async {
+            panic!("simulated task panic");
+            #[allow(unreachable_code)]
+            Ok::<crate::workflow::orchestrator::OrchestrationResult, crate::error::RalphError>(
+                crate::workflow::orchestrator::OrchestrationResult {
+                    summary: String::new(),
+                    loop_number: None,
+                },
+            )
+        });
+        let result = handle.await;
+        assert!(result.is_err(), "should be JoinError from panic");
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    // -----------------------------------------------------------------------
+    // drain_all_children timeout-abort behavior
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drain_all_children_aborts_stuck_tasks_after_timeout() {
+        use super::{drain_all_children, DaemonRuntimeConfig};
+        use crate::daemon::TaskHandle;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        // Create a config with short poll interval (drain uses 7200s by default;
+        // we'll test that stuck tasks are eventually aborted).
+        let config = DaemonRuntimeConfig {
+            owner: "test".to_owned(),
+            repo: "repo".to_owned(),
+            base_branch: "main".to_owned(),
+            poll_seconds: 1,
+            max_concurrent: 1,
+            labels: vec![],
+            single_iteration: true,
+            verbose: false,
+            repo_root: PathBuf::from("/tmp/test-drain"),
+            refinement_enabled: false,
+            refinement_backend: "claude".to_owned(),
+            global_config: crate::config::GlobalConfig::default(),
+            auto_rebase_enabled: false,
+            rebase_interval_seconds: 300,
+            max_rebases_per_cycle: 0,
+            rebase_timeout_seconds: 60,
+            rebase_agent_backend: "none".to_owned(),
+            workspace_root: PathBuf::from("/tmp/test-drain/.ralph"),
+            prd_enabled: false,
+            prd_question_backends: vec![],
+            prd_writer_backend: "claude".to_owned(),
+            prd_reviewer_backend: "claude".to_owned(),
+            prd_max_revisions: 1,
+            prd_backend_timeout_secs: 60,
+            prd_shutdown_timeout_secs: 10,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
+        };
+
+        let cancel = CancellationToken::new();
+        let cancel_inner = cancel.clone();
+
+        // Spawn a task that blocks until cancelled (simulating a stuck task).
+        let handle = tokio::spawn(async move {
+            cancel_inner.cancelled().await;
+            Err::<crate::workflow::orchestrator::OrchestrationResult, _>(RalphError::Cancelled)
+        });
+
+        let mut children: HashMap<u32, TaskHandle> = HashMap::new();
+        children.insert(
+            999,
+            TaskHandle {
+                join_handle: handle,
+                cancel_token: cancel,
+                watcher_cancel: CancellationToken::new(),
+                watcher_handle: None,
+                draft_pr_cancel: CancellationToken::new(),
+                draft_pr_handle: None,
+                branch: "ralph/test".to_owned(),
+                log_file: PathBuf::from("/tmp/test-drain.log"),
+                last_rebase_at: None,
+                last_rebase_failure_sha: None,
+                pr_url: None,
+            },
+        );
+
+        let repo_root_lock = Arc::new(Semaphore::new(1));
+
+        // drain_all_children should cancel the token and then collect the task.
+        // We use a timeout to ensure this test doesn't hang.
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            drain_all_children(&config, &mut children, &repo_root_lock),
+        )
+        .await;
+
+        assert!(result.is_ok(), "drain_all_children should complete");
+        assert!(
+            children.is_empty(),
+            "all children should be drained after drain_all_children"
         );
     }
 }

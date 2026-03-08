@@ -39,39 +39,31 @@ pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
 /// Guard that kills a child process group on drop. Used inside
 /// `execute_streaming` to ensure backend processes are terminated when
 /// the future is cancelled (e.g. via `tokio::select!`).
+///
+/// Drop is immediate (SIGKILL only, non-blocking waitpid) so it never
+/// blocks an async executor thread.
 struct KillOnDrop(Option<u32>);
+
+impl KillOnDrop {
+    /// Disarm the guard so Drop becomes a no-op.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
-                // Graceful: send SIGTERM to process group first.
+                // Immediate hard kill — no blocking wait. The async
+                // cleanup paths (timeout branch, normal completion)
+                // handle graceful shutdown; this guard is a last-resort
+                // safety net when the future is dropped unexpectedly.
                 // SAFETY: Sending signals to a process group is safe.
                 unsafe {
-                    libc::kill(-raw, libc::SIGTERM);
-                }
-
-                // Wait up to 5 seconds for the process to exit.
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(5);
-                loop {
-                    let ret = unsafe {
-                        libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG)
-                    };
-                    if ret > 0 || ret == -1 {
-                        // Reaped or no such process — done.
-                        return;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-
-                // Hard kill: SIGKILL + reap.
-                unsafe {
-                    libc::kill(-raw, libc::SIGKILL);
-                    libc::waitpid(raw, std::ptr::null_mut(), 0);
+                    libc::kill(-(raw), libc::SIGKILL);
+                    // Non-blocking reap to avoid zombies when possible.
+                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
                 }
             }
         }
@@ -733,16 +725,18 @@ impl CliBackend {
             execution_outcome
         };
 
+        // Disarm the kill guard immediately: the child has exited or will be
+        // reaped explicitly in each outcome branch below. Must happen before
+        // any early return to avoid an accidental SIGKILL on an already-exited
+        // process group (or a recycled PID).
+        kill_guard.disarm();
+
         if let Some(details) = watchdog_cancel_error {
             return Err(RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
                 details,
             });
         }
-
-        // Disarm the kill guard: the child has exited or will be reaped
-        // explicitly in each outcome branch below.
-        kill_guard.0 = None;
 
         match execution_outcome {
             ExecutionOutcome::Completed(Ok((status, captured_stdout))) => {
@@ -2375,5 +2369,55 @@ done
             .assign_feature_backends(5, "claude", &no_overrides)
             .expect("should recalculate");
         assert!(registry.is_backend_available(&recalc.implementer));
+    }
+
+    // -----------------------------------------------------------------------
+    // Environment sanitization — CLAUDECODE stripped from backend subprocess
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cli_backend_strips_claudecode_from_subprocess_env() {
+        // Set CLAUDECODE in this process's environment to simulate the daemon.
+        // The backend must strip it from the subprocess Command.
+        let temp = tempdir().expect("tempdir");
+        let script_path = write_executable_script(
+            temp.path(),
+            "env-check.sh",
+            r#"#!/bin/sh
+# Print CLAUDECODE value (should be empty if sanitized)
+if [ -n "$CLAUDECODE" ]; then
+    echo "LEAKED:$CLAUDECODE"
+else
+    echo "SANITIZED"
+fi
+"#,
+        );
+
+        // Set CLAUDECODE in process env for this test
+        std::env::set_var("CLAUDECODE", "should-be-stripped");
+
+        let backend = CliBackend::new(
+            "env-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(2),
+            std::collections::BTreeMap::new(),
+        );
+
+        let output = Backend::execute_with_log(&backend, "ignored", None)
+            .await
+            .expect("backend should succeed");
+
+        // Clean up env var
+        std::env::remove_var("CLAUDECODE");
+
+        assert!(
+            output.contains("SANITIZED"),
+            "CLAUDECODE should be stripped from backend subprocess environment, got: {output}"
+        );
+        assert!(
+            !output.contains("LEAKED"),
+            "CLAUDECODE was leaked to backend subprocess, got: {output}"
+        );
     }
 }
