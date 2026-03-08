@@ -1082,11 +1082,34 @@ async fn poll_adopted_orphans(
         };
 
         // Determine terminal label heuristic: merged PR → completed, otherwise → failed.
-        let branch = format!("ralph/daemon/{}", orphan.task_id);
-        let terminal_label = if github::is_pr_merged(&config.owner, &config.repo, &branch).await {
-            "ralph:completed"
+        // First try persisted pr_url (most reliable), then fall back to project branch.
+        let meta = load_task_metadata(&config.workspace_root, &orphan.task_id);
+        let terminal_label = if let Some(ref pr_url) = meta.pr_url {
+            if let Some(pr_number) = github::extract_pr_number(pr_url) {
+                match github::query_pr_merge_info(&config.owner, &config.repo, pr_number).await {
+                    Ok(info) if info.state == "MERGED" => "ralph:completed",
+                    Ok(_) => "ralph:failed",
+                    Err(err) => {
+                        eprintln!(
+                            "orphan-poll: failed to query PR #{pr_number} state for issue #{issue_number}: {err}"
+                        );
+                        "ralph:failed"
+                    }
+                }
+            } else {
+                eprintln!(
+                    "orphan-poll: could not parse PR number from url {pr_url} for issue #{issue_number}"
+                );
+                "ralph:failed"
+            }
         } else {
-            "ralph:failed"
+            // Fallback: check for merged PR on the project branch
+            let branch = format!("ralph/issue-{issue_number}");
+            if github::is_pr_merged(&config.owner, &config.repo, &branch).await {
+                "ralph:completed"
+            } else {
+                "ralph:failed"
+            }
         };
 
         eprintln!(

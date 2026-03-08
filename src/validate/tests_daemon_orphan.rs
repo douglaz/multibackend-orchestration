@@ -37,6 +37,18 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon_orphan::abort_kills_adopted_orphan",
             func: abort_kills_adopted_orphan,
         },
+        ConformanceTest {
+            name: "daemon_orphan::orphan_terminalization_routes_through_complete_task",
+            func: orphan_terminalization_routes_through_complete_task,
+        },
+        ConformanceTest {
+            name: "daemon_orphan::crash_after_spawn_before_stage3",
+            func: crash_after_spawn_before_stage3,
+        },
+        ConformanceTest {
+            name: "daemon_orphan::dispatch_failure_clears_pid",
+            func: dispatch_failure_clears_pid,
+        },
     ]
 }
 
@@ -848,6 +860,359 @@ exit 1
         assert!(
             status.is_some(),
             "orphan child process should be terminated after abort"
+        );
+    })
+}
+
+/// Adopt an orphan whose PID refers to a process that has already exited.
+/// Run poll_adopted_orphans. Assert: complete_task side effects fire
+/// (completion comment posted, label swapped to terminal state).
+fn orphan_terminalization_routes_through_complete_task(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement");
+
+        // Use a dead PID so the orphan is immediately terminalized
+        let dead_pid = u32::MAX - 30;
+        let meta = TaskMetadata {
+            pr_url: None,
+            pid: Some(dead_pid),
+            pgid: Some(dead_pid),
+        };
+        write_task_metadata(&dh, "acme", "widgets", "acme-widgets-90", &meta);
+
+        let label_log = dh.temp_dir.path().join("orphan_terminalize_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+        let comment_log = dh.temp_dir.path().join("orphan_terminalize_comment.log");
+        let comment_log_str = comment_log.to_string_lossy().into_owned();
+
+        // Mock GH: issue 90 in-progress for reconciliation.
+        // When orphan dies, complete_task posts a comment and swaps labels.
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:in-progress)
+              printf '[{{"number":90,"title":"terminalize orphan","labels":[{{"name":"ralph:in-progress"}}],"body":"body"}}]'
+              exit 0
+              ;;
+            ralph:ready)
+              printf '[]'
+              exit 0
+              ;;
+          esac
+        done
+        printf '[]'
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      comment)
+        echo "$@" >> "{comment_log_str}"
+        exit 0
+        ;;
+      view)
+        printf '{{"labels":[{{"name":"ralph:in-progress"}}]}}'
+        exit 0
+        ;;
+    esac
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+  pr)
+    case "$2" in
+      list) printf '[]' ; exit 0 ;;
+      *) exit 0 ;;
+    esac
+    ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+
+        let combined = combined_output(&output);
+        assert_exit_code(&output, 0);
+
+        // Orphan should be adopted then terminalized (dead PID)
+        assert!(
+            combined.contains("reconcile: adopting orphan for issue #90"),
+            "expected orphan adoption for issue #90:\n{combined}"
+        );
+        assert!(
+            combined.contains("orphan-poll: process dead for issue #90"),
+            "expected orphan terminalization message for issue #90:\n{combined}"
+        );
+
+        // complete_task should post a completion comment (side effect)
+        let comments = fs::read_to_string(&comment_log).unwrap_or_default();
+        assert!(
+            comments.contains("acme-widgets-90"),
+            "expected completion comment for acme-widgets-90:\n{comments}\nfull output:\n{combined}"
+        );
+
+        // Label should be swapped from in-progress to terminal (ralph:failed since no merged PR)
+        let labels = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            labels.contains("ralph:failed"),
+            "expected terminal label swap to ralph:failed:\n{labels}\nfull output:\n{combined}"
+        );
+
+        // PID/PGID should be cleared from metadata after terminalization
+        let meta = read_task_metadata(&dh, "acme", "widgets", "acme-widgets-90");
+        assert_eq!(meta.pid, None, "PID should be cleared after terminalization");
+        assert_eq!(meta.pgid, None, "PGID should be cleared after terminalization");
+    })
+}
+
+/// Simulate the critical crash window: spawn a live child, persist PID/PGID
+/// to metadata (as dispatch_task would), but do NOT insert into children
+/// (simulating a crash before Stage 3). Run reconciliation. Assert: the live
+/// child is detected via metadata and adopted into adopted_orphans.
+fn crash_after_spawn_before_stage3(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        use std::os::unix::process::CommandExt;
+
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement");
+
+        // Spawn a session-leader child (simulates the child spawned by dispatch_task)
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep child");
+        let pid = child.id();
+        let pgid = pid; // session leader: pid == pgid
+
+        // Persist PID/PGID (dispatch_task writes this immediately after spawn)
+        // but we do NOT insert into children (simulating crash before Stage 3)
+        let meta = TaskMetadata {
+            pr_url: None,
+            pid: Some(pid),
+            pgid: Some(pgid),
+        };
+        write_task_metadata(&dh, "acme", "widgets", "acme-widgets-100", &meta);
+
+        let label_log = dh.temp_dir.path().join("crash_window_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // Mock GH: issue 100 in-progress (left over from pre-crash dispatch)
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:in-progress)
+              printf '[{{"number":100,"title":"crash window issue","labels":[{{"name":"ralph:in-progress"}}],"body":"body"}}]'
+              exit 0
+              ;;
+            ralph:ready)
+              printf '[]'
+              exit 0
+              ;;
+          esac
+        done
+        printf '[]'
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      view)
+        printf '{{"labels":[{{"name":"ralph:in-progress"}}]}}'
+        exit 0
+        ;;
+    esac
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+
+        // Clean up child
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let combined = combined_output(&output);
+        assert_exit_code(&output, 0);
+
+        // The live child should be detected via persisted PID/PGID and adopted
+        assert!(
+            combined.contains("reconcile: adopting orphan for issue #100"),
+            "expected orphan adoption for crash-window issue #100:\n{combined}"
+        );
+        assert!(
+            combined.contains("reconcile: adopted 1 surviving orphan(s)"),
+            "expected adopted count in output:\n{combined}"
+        );
+
+        // The label should NOT be reset to ralph:ready (process is still alive)
+        let log = fs::read_to_string(&label_log).unwrap_or_default();
+        assert!(
+            !log.contains("ralph:ready"),
+            "issue 100 should NOT be reset to ralph:ready (crash-window adoption):\n{log}"
+        );
+
+        // PID/PGID should still be present in metadata (orphan is alive, not yet terminalized)
+        let meta = read_task_metadata(&dh, "acme", "widgets", "acme-widgets-100");
+        assert_eq!(meta.pid, Some(pid), "PID should still be set for live adopted orphan");
+        assert_eq!(meta.pgid, Some(pgid), "PGID should still be set for live adopted orphan");
+    })
+}
+
+/// Pre-set PID/PGID in task metadata, trigger a dispatch failure (via a mock
+/// ralph that errors out), and assert PID/PGID are defensively cleared.
+fn dispatch_failure_clears_pid(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        dh.ralph_ok([
+            "config".to_owned(),
+            "set".to_owned(),
+            "workspace.daemon_refinement_enabled".to_owned(),
+            "false".to_owned(),
+        ])
+        .expect("disable daemon refinement");
+
+        // Pre-set PID/PGID in metadata (simulating a partial spawn that wrote PID before failing)
+        let stale_pid = u32::MAX - 40;
+        let meta = TaskMetadata {
+            pr_url: None,
+            pid: Some(stale_pid),
+            pgid: Some(stale_pid),
+        };
+        write_task_metadata(&dh, "acme", "widgets", "acme-widgets-110", &meta);
+
+        let label_log = dh.temp_dir.path().join("dispatch_fail_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // Mock GH: no in-progress issues, one ready issue that will be dispatched (and fail)
+        let gh_script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:in-progress)
+              printf '[]'
+              exit 0
+              ;;
+            ralph:ready)
+              printf '[{{"number":110,"title":"dispatch fail issue","labels":[{{"name":"ralph:ready"}}],"body":"body"}}]'
+              exit 0
+              ;;
+          esac
+        done
+        printf '[]'
+        exit 0
+        ;;
+      edit)
+        echo "$@" >> "{label_log_str}"
+        exit 0
+        ;;
+      view)
+        printf '{{"labels":[{{"name":"ralph:in-progress"}}]}}'
+        exit 0
+        ;;
+    esac
+    ;;
+  label) exit 0 ;;
+  repo) printf 'acme/widgets\n' ; exit 0 ;;
+esac
+exit 1
+"#
+        );
+
+        // Mock ralph that exits with error to trigger dispatch failure
+        let ralph_path = write_mock_ralph(&dh, "#!/bin/sh\nexit 1\n").expect("write failing mock ralph");
+
+        let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            )
+            .expect("daemon start should execute");
+
+        let combined = combined_output(&output);
+        assert_exit_code(&output, 0);
+
+        // PID/PGID should be defensively cleared from metadata after dispatch failure
+        let meta = read_task_metadata(&dh, "acme", "widgets", "acme-widgets-110");
+        assert_eq!(
+            meta.pid, None,
+            "PID should be cleared after dispatch failure:\n{combined}"
+        );
+        assert_eq!(
+            meta.pgid, None,
+            "PGID should be cleared after dispatch failure:\n{combined}"
         );
     })
 }
