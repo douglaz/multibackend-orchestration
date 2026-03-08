@@ -76,11 +76,20 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
                         "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
                         to_remove, args.loop_number, reference
                     );
-                } else {
+                } else if remote_ref_exists(repo_root, &format!("origin/{branch}"))?
+                    || remote_branch_exists_on_remote(repo_root, &branch)?
+                {
+                    // Branch can be recovered from remote — exact ref
+                    // unavailable without side effects.
                     println!(
                         "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard <ref> (branch '{}' requires recovery; exact ref unavailable in dry-run)",
                         to_remove, args.loop_number, branch
                     );
+                } else {
+                    return Err(RalphError::Validation(format!(
+                        "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
+                        branch
+                    )));
                 }
             } else {
                 println!(

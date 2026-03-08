@@ -284,12 +284,12 @@ fn reconstruct_project_state_internal(
     // branch do not resurrect the pre-rollback position.
     if let Some(ceiling) = read_rollback_ceiling(project_dir) {
         let max_artifact_loop = loop_dirs.iter().map(|(n, _, _)| *n).max().unwrap_or(0);
-        // Enforce capping only when checkpoint-derived position has advanced
-        // past the ceiling (stale checkpoint commits) AND no new artifact
-        // directories exist beyond the ceiling (no successful forward
-        // progress).  When artifacts have advanced past the ceiling the
-        // marker is inert — the project naturally moved on.
-        if checkpoint_loop > ceiling && max_artifact_loop <= ceiling {
+        // Enforce capping when the checkpoint is above the ceiling AND above
+        // all artifact directories.  A stale checkpoint (from before the
+        // rollback) will exceed both; once a new run produces artifacts at or
+        // above the checkpoint level the checkpoint is genuine and the marker
+        // becomes inert.
+        if checkpoint_loop > ceiling && checkpoint_loop > max_artifact_loop {
             // Cap position: re-derive from filtered checkpoint commits.
             let capped = checkpoint_commits
                 .iter()
@@ -1994,9 +1994,9 @@ mod tests {
 
     #[test]
     fn reconstruct_stale_ceiling_ignored() {
-        // When artifacts have advanced past the ceiling, the marker is inert.
+        // When checkpoint <= max_artifact_loop, the marker is inert.
         // Git checkpoint at loop 3, artifacts for loops 1-3, ceiling=1.
-        // max_artifact_loop=3 > ceiling=1 => marker inert, ceiling skipped.
+        // checkpoint_loop(3) <= max_artifact_loop(3) => marker inert, ceiling skipped.
         use crate::git::ralph_commit::build_ralph_commit_message;
 
         let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
@@ -2101,6 +2101,71 @@ mod tests {
             state.status,
             ProjectStatus::Pending,
             "ceiling=0 with no loops should set status to Pending"
+        );
+    }
+
+    #[test]
+    fn reconstruct_ceiling_enforced_with_artifacts_past_ceiling() {
+        // Regression: ceiling=1, stale checkpoint at loop 3, artifacts at
+        // loops 1 and 2.  max_artifact_loop(2) > ceiling(1) but
+        // checkpoint_loop(3) > max_artifact_loop(2), so the checkpoint is
+        // stale and the ceiling must still be enforced.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // Artifacts for loops 1 and 2 (loop 2 appeared from a failed run
+        // after the rollback, before a new checkpoint commit was written).
+        for num in 1u32..=2 {
+            write_loop_artifact(
+                &project_dir,
+                num,
+                "fix",
+                &format!("2026010100000{num}-spec.md"),
+                "spec",
+                "claude",
+                &format!("# Feature {num}"),
+                &format!("2026-01-01T00:00:0{num}Z"),
+            );
+        }
+
+        // Stale checkpoint commits for loops 1, 2, 3 (from before rollback).
+        for (num, from, to) in [
+            (1, Phase::Planning, Phase::Implementing),
+            (2, Phase::Implementing, Phase::Reviewing),
+            (3, Phase::Planning, Phase::Implementing),
+        ] {
+            let msg = build_ralph_commit_message("test-proj", num, from, to);
+            commit_empty_with_msg(&repo, &msg);
+            git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+        }
+
+        // Ceiling = 1 (soft rollback target).
+        fs::write(project_dir.join(".rollback-ceiling"), "1").unwrap();
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        // The stale checkpoint at loop 3 must NOT be used — ceiling caps to 1.
+        assert_eq!(
+            state.current_loop, 1,
+            "stale checkpoint at loop 3 with ceiling=1 must not resurrect loop 3, got {}",
+            state.current_loop
+        );
+        // Only loop 1 artifacts should survive the ceiling filter.
+        assert_eq!(
+            state.loops.len(),
+            1,
+            "only loop 1 should survive ceiling enforcement, got {}",
+            state.loops.len()
         );
     }
 }

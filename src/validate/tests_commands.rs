@@ -712,6 +712,21 @@ fn rollback_hard_missing_branch(h: &RalphHarness) -> TestResult {
 
         let head_detached = git_head_commit(&h.repo_root);
 
+        // Hard dry-run should ALSO FAIL when branch is truly gone.
+        let dry_output = h
+            .ralph(["rollback", "--hard", "--dry-run", "1"])
+            .expect("rollback --hard --dry-run 1 should execute");
+        assert_ne!(
+            dry_output.status.code().unwrap_or(-1),
+            0,
+            "rollback --hard --dry-run should fail when branch is truly missing"
+        );
+        let dry_stderr = String::from_utf8_lossy(&dry_output.stderr);
+        assert!(
+            dry_stderr.contains("does not exist"),
+            "hard dry-run error should mention missing branch, got:\n{dry_stderr}"
+        );
+
         // Hard rollback should FAIL — branch is truly gone.
         let output = h
             .ralph(["rollback", "--hard", "1"])
