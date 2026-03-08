@@ -20,7 +20,7 @@ use crate::daemon::interactive_prd::{self, PrdPollConfig};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
-use crate::daemon::{format_task_id, ChildHandle};
+use crate::daemon::{format_task_id, TaskHandle};
 use crate::error::RalphError;
 use crate::Result;
 
@@ -37,8 +37,6 @@ pub struct DaemonRuntimeConfig {
     pub single_iteration: bool,
     /// When true, emit runtime diagnostics to stderr.
     pub verbose: bool,
-    /// Path to the ralph binary for spawning daemon child commands.
-    pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
     pub repo_root: PathBuf,
     /// Prompt refinement feature toggle.
@@ -757,7 +755,7 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
 
 /// Run the daemon loop: reconcile, then poll/claim/dispatch/collect.
 ///
-/// All task state is in-memory (`children: HashMap<u32, ChildHandle>`).
+/// All task state is in-memory (`children: HashMap<u32, TaskHandle>`).
 /// GitHub lifecycle labels are the only durable task lifecycle source of truth.
 pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     if let Err(err) = validate_daemon_branch_format(&config.global_config.git.branch_format) {
@@ -820,7 +818,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         };
 
     // Phase 3: Main loop with in-memory child tracking
-    let mut children: HashMap<u32, ChildHandle> = HashMap::new();
+    let mut children: HashMap<u32, TaskHandle> = HashMap::new();
     let mut iteration: u64 = 0;
 
     loop {
@@ -1012,7 +1010,7 @@ enum DispatchOutcome {
     /// Dispatch succeeded — caller inserts the handle into `children`.
     Success {
         issue_number: u32,
-        handle: Box<ChildHandle>,
+        handle: Box<TaskHandle>,
     },
     /// Dispatch returned an error — per-issue rollback needed.
     Failure { issue_number: u32, detail: String },
@@ -1038,7 +1036,7 @@ enum CompletionOutcome {
 /// Poll for new issues, filter, claim, and dispatch.
 async fn poll_and_claim(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     slots: u32,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
@@ -1353,7 +1351,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
-) -> Result<ChildHandle> {
+) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
 
@@ -1532,64 +1530,70 @@ async fn dispatch_task(
         pr_url.as_deref().unwrap_or("none")
     );
 
-    // Spawn child process — branch by `ralph:quick` label for quick-dev flow
+    // Spawn in-process task — branch by `ralph:quick` label for quick-dev flow
     let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
-    let spawned = {
-        let ralph_bin = config.ralph_bin.clone();
-        let wt = wt_path.clone();
-        let idea_clone = idea.clone();
+    let cancel_token = CancellationToken::new();
+    let wt = wt_path.clone();
+    let global_config = config.global_config.clone();
+
+    let join_handle = {
+        let cancel = cancel_token.clone();
         match (is_quick, resume_existing_project) {
             (true, true) => {
                 eprintln!(
-                    "dispatch: task {task_id} resuming with ralph quick-dev-run --project {project_id} pr_url={}",
+                    "dispatch: task {task_id} resuming with quick-dev-run --project {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_quick_dev_run(
-                    &ralph_bin,
-                    &wt,
-                    &project_id,
-                    &log_path,
-                    pr_url.as_deref(),
-                )
-                .await?
+                let params = super::tasks::QuickDevRunTaskParams {
+                    workspace_root: wt,
+                    project_id: project_id.clone(),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                };
+                super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_run_task(params), &log_path)?
             }
             (true, false) => {
                 eprintln!(
-                    "dispatch: task {task_id} starting fresh with ralph quick-dev-auto --project-id {project_id} pr_url={}",
+                    "dispatch: task {task_id} starting fresh with quick-dev-auto --project-id {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_quick_dev_auto(
-                    &ralph_bin,
-                    &wt,
-                    &idea_clone,
-                    &log_path,
-                    Some(&project_id),
-                    pr_url.as_deref(),
-                )
-                .await?
+                let params = super::tasks::QuickDevAutoTaskParams {
+                    workspace_root: wt,
+                    idea: idea.clone(),
+                    project_id: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    global_config,
+                    cancel,
+                };
+                super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_auto_task(params), &log_path)?
             }
             (false, true) => {
                 eprintln!(
-                    "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
+                    "dispatch: task {task_id} resuming with run --project {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
-                    .await?
+                let params = super::tasks::RunTaskParams {
+                    workspace_root: wt,
+                    project_id: project_id.clone(),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                };
+                super::tasks::spawn_inprocess_task(|| super::tasks::run_run_task(params), &log_path)?
             }
             (false, false) => {
                 eprintln!(
-                    "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}",
+                    "dispatch: task {task_id} starting fresh with auto --project-id {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_auto(
-                    &ralph_bin,
-                    &wt,
-                    &idea_clone,
-                    &log_path,
-                    Some(&project_id),
-                    pr_url.as_deref(),
-                )
-                .await?
+                let params = super::tasks::AutoTaskParams {
+                    workspace_root: wt,
+                    idea: idea.clone(),
+                    project_id: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    global_config,
+                    cancel,
+                };
+                super::tasks::spawn_inprocess_task(|| super::tasks::run_auto_task(params), &log_path)?
             }
         }
     };
@@ -1640,12 +1644,11 @@ async fn dispatch_task(
         None
     };
 
-    eprintln!("dispatched task {task_id} (pid={})", spawned.pid);
+    eprintln!("dispatched task {task_id} (in-process)");
 
-    Ok(ChildHandle {
-        pid: spawned.pid,
-        pgid: spawned.pgid,
-        child: spawned.child,
+    Ok(TaskHandle {
+        join_handle,
+        cancel_token,
         watcher_cancel,
         watcher_handle,
         draft_pr_cancel,
@@ -1707,45 +1710,24 @@ async fn await_watcher_with_timeout_impl(
 /// Collect finished children and transition them to terminal states via labels.
 async fn collect_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
-    // Stage 1: Sequential child status scan
+    // Stage 1: Sequential task status scan via JoinHandle::is_finished()
     let mut finished: Vec<(u32, &'static str)> = Vec::new();
     let mut still_running = 0u32;
 
     for (issue_number, handle) in children.iter_mut() {
-        match handle.child.try_wait() {
-            Ok(Some(status)) => {
-                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
-                if config.verbose {
-                    let exit_code = status
-                        .code()
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "signal".to_owned());
-                    eprintln!(
-                        "verbose: child terminal task_id={task_id} pid={} exit_status={} exit_code={exit_code}",
-                        handle.pid, status
-                    );
-                }
-                let terminal_label = if status.success() {
-                    "ralph:completed"
-                } else {
-                    "ralph:failed"
-                };
-                finished.push((*issue_number, terminal_label));
+        if handle.join_handle.is_finished() {
+            let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
+            if config.verbose {
+                eprintln!("verbose: task terminal task_id={task_id}");
             }
-            Ok(None) => {
-                still_running = still_running.saturating_add(1);
-            }
-            Err(err) => {
-                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
-                eprintln!(
-                    "warning: failed to check child for {task_id} (pid={} pgid={}): {err}",
-                    handle.pid, handle.pgid
-                );
-                finished.push((*issue_number, "ralph:failed"));
-            }
+            // We cannot await the join handle yet because we only have &mut.
+            // Mark as finished; we'll resolve the Result in stage 2.
+            finished.push((*issue_number, "pending_resolve"));
+        } else {
+            still_running = still_running.saturating_add(1);
         }
     }
 
@@ -1753,14 +1735,32 @@ async fn collect_children(
         eprintln!("verbose: child collection still_running={still_running}");
     }
 
-    // Stage 2: Per-child teardown (sequential: watcher_cancel -> watcher_join -> draft_pr_cancel -> draft_pr_join)
-    // and print_log_tail for failed children
+    // Stage 2: Per-task teardown — resolve JoinHandle result to determine
+    // terminal label, then tear down watchers.
     let mut completion_tasks: Vec<(u32, String, &'static str)> = Vec::new();
-    for (issue_number, terminal_label) in finished {
+    for (issue_number, _) in finished {
         let task_id = format_task_id(&config.owner, &config.repo, issue_number);
         let Some(mut handle) = children.remove(&issue_number) else {
             continue;
         };
+
+        // Resolve the task result from the JoinHandle.
+        let terminal_label = match (&mut handle.join_handle).await {
+            Ok(Ok(_result)) => "ralph:completed",
+            Ok(Err(ref err)) => {
+                if matches!(err, RalphError::Cancelled) {
+                    eprintln!("collect: task {task_id} cancelled");
+                } else {
+                    eprintln!("collect: task {task_id} failed: {err}");
+                }
+                "ralph:failed"
+            }
+            Err(join_err) => {
+                eprintln!("collect: task {task_id} panicked: {join_err}");
+                "ralph:failed"
+            }
+        };
+
         handle.watcher_cancel.cancel();
         if let Some(join_handle) = handle.watcher_handle.take() {
             await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
@@ -1854,7 +1854,7 @@ async fn collect_children(
 /// `ralph:in-progress`.
 async fn kill_aborted_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     _repo_root_lock: &Arc<Semaphore>,
 ) {
     let issue_numbers: Vec<u32> = children.keys().cloned().collect();
@@ -1912,34 +1912,29 @@ async fn kill_aborted_children(
         }
     }
 
-    // Apply kill decisions sequentially against children
+    // Cancel aborted tasks — cooperative cancellation via token.
+    // Don't remove from children map; let collect_children() observe
+    // the JoinHandle completion on the next cycle.
     for issue_number in to_kill {
-        if let Some(mut handle) = children.remove(&issue_number) {
+        if let Some(handle) = children.get(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-            crate::daemon::process::terminate_process_group(handle.pgid, Duration::from_secs(10))
-                .await;
-            handle.watcher_cancel.cancel();
-            if let Some(join_handle) = handle.watcher_handle.take() {
-                await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
-            }
-            handle.draft_pr_cancel.cancel();
-            if let Some(join_handle) = handle.draft_pr_handle.take() {
-                await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
-            }
-            eprintln!(
-                "abort-check: killed {task_id} (pid={} pgid={})",
-                handle.pid, handle.pgid
-            );
+            handle.cancel_token.cancel();
+            eprintln!("abort-check: cancelled task {task_id}");
         }
     }
 }
 
-/// Wait until all active children have exited.
+/// Wait until all active tasks have exited.
 async fn drain_all_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
+    // Cancel all tasks to initiate cooperative shutdown.
+    for handle in children.values() {
+        handle.cancel_token.cancel();
+    }
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
@@ -1950,22 +1945,16 @@ async fn drain_all_children(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Force-kill remaining children
+    // Force-abort remaining tasks
     if !children.is_empty() {
         let remaining: Vec<u32> = children.keys().cloned().collect();
         for issue_number in remaining {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
             if let Some(mut handle) = children.remove(&issue_number) {
                 eprintln!(
-                    "warning: force-killing child for {task_id} (pid={} pgid={}, drain timeout)",
-                    handle.pid, handle.pgid
+                    "warning: force-aborting task {task_id} (drain timeout)"
                 );
-                if let Err(err) = handle.child.kill().await {
-                    eprintln!("warning: failed to kill child for {task_id}: {err}");
-                }
-                if let Err(err) = handle.child.wait().await {
-                    eprintln!("warning: failed to wait child for {task_id}: {err}");
-                }
+                handle.join_handle.abort();
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
                     await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
@@ -2203,7 +2192,7 @@ enum RebaseOutcome {
 
 async fn auto_rebase_phase(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
     if !config.auto_rebase_enabled {
@@ -2256,7 +2245,7 @@ async fn auto_rebase_phase(
 
         let branch = &branch;
 
-        // Use cached PR URL from ChildHandle when available; fall back to API.
+        // Use cached PR URL from TaskHandle when available; fall back to API.
         let pr_url = if let Some(url) = cached_pr_url {
             url
         } else {

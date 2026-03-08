@@ -31,6 +31,29 @@ use crate::Result;
 use self::tmux::RealTmuxRunner;
 use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 
+/// Environment variables that must be stripped from backend subprocess
+/// environments. Prevents in-process daemon tasks from leaking daemon-only
+/// env vars (e.g. `CLAUDECODE`) to backend child processes.
+pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
+
+/// Guard that kills a child process group on drop. Used inside
+/// `execute_streaming` to ensure backend processes are terminated when
+/// the future is cancelled (e.g. via `tokio::select!`).
+struct KillOnDrop(Option<u32>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            if let Ok(raw) = i32::try_from(pgid) {
+                // SAFETY: Sending SIGKILL to a process group is safe.
+                unsafe {
+                    libc::kill(-raw, libc::SIGKILL);
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
@@ -493,6 +516,11 @@ impl CliBackend {
             .stderr(std::process::Stdio::piped())
             .envs(self.env.clone());
 
+        // Strip daemon-only env vars so backend subprocesses don't inherit them.
+        for var in SANITIZED_ENV_VARS {
+            cmd.env_remove(var);
+        }
+
         // Place the child in its own process group so that
         // `kill(-(pid), SIGKILL)` reliably terminates it and all its
         // descendants on timeout.
@@ -515,6 +543,11 @@ impl CliBackend {
                     resolved_command.display()
                 ),
             })?;
+
+        // Guard: kill the child's process group if this future is dropped
+        // (e.g. due to cancellation via tokio::select!). Disarmed on
+        // successful completion.
+        let mut kill_guard = KillOnDrop(child.id());
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await.map_err(|err| {
@@ -682,6 +715,10 @@ impl CliBackend {
                 details,
             });
         }
+
+        // Disarm the kill guard: the child has exited or will be reaped
+        // explicitly in each outcome branch below.
+        kill_guard.0 = None;
 
         match execution_outcome {
             ExecutionOutcome::Completed(Ok((status, captured_stdout))) => {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use tokio_util::sync::CancellationToken;
 
 use super::init;
 use super::parse_positive_u32;
@@ -82,6 +83,12 @@ fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
 
 fn truncate_idea_for_name(idea: &str) -> String {
     idea.chars().take(MAX_PROJECT_NAME_LEN).collect()
+}
+
+/// Slugify an idea string into a project ID.
+/// Public for use by `daemon::tasks`.
+pub fn slugify_idea_public(idea: &str) -> String {
+    slugify_idea(idea)
 }
 
 fn slugify_idea(idea: &str) -> String {
@@ -291,6 +298,8 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
             skip_commit,
             skip_prompt_review,
             pr_url,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await?;
     println!("{}", run_result.summary);

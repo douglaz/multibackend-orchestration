@@ -7,6 +7,7 @@ use ralph::project::state::{Phase, ProjectStatus, QuickDevPhase};
 use ralph::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunOptions};
 use ralph::workspace::Workspace;
 use std::collections::BTreeMap;
+use tokio_util::sync::CancellationToken;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -398,6 +399,8 @@ async fn missing_reviewer_backend_fails_fast() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect_err("should fail when reviewer backend is missing");
@@ -425,6 +428,8 @@ async fn equal_backend_rejection() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect_err("should fail when both backends are equal");
@@ -482,6 +487,8 @@ fn default_option_values() {
         skip_commit: false,
         max_review_iterations: None,
         max_final_review_retries: None,
+        cancel: CancellationToken::new(),
+        max_backend_retries: None,
     };
 
     // When max values are None, defaults should be applied internally
@@ -538,6 +545,8 @@ async fn happy_path_review_satisfied_then_complete() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should succeed");
@@ -577,6 +586,8 @@ async fn review_loop_with_changes_requested_then_satisfied() {
             skip_commit: true,
             max_review_iterations: Some(5),
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should succeed after review loop");
@@ -614,6 +625,8 @@ async fn max_review_iterations_guard_skips_to_final_review() {
             skip_commit: true,
             max_review_iterations: Some(2),
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should complete via guard");
@@ -655,6 +668,8 @@ async fn max_final_review_retries_guard_force_completes() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: Some(2),
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should force-complete");
@@ -702,6 +717,8 @@ async fn final_review_reloop_then_complete() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: Some(5), // allow enough retries
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should complete after final-review reloop");
@@ -774,6 +791,8 @@ async fn resume_from_codex_review_phase() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should resume from CodexReview");
@@ -850,6 +869,8 @@ async fn resume_from_final_review_phase() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should resume from FinalReview");
@@ -893,6 +914,8 @@ async fn resume_from_none_starts_at_plan_and_implement() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should start from PlanAndImplement");
@@ -960,6 +983,8 @@ async fn resume_after_completion_does_not_restart() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should not restart a completed project");
@@ -1087,6 +1112,8 @@ fi
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should resume from ApplyFixes");
@@ -1129,6 +1156,8 @@ async fn skip_commit_prevents_git_commits() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should succeed");
@@ -1160,6 +1189,8 @@ async fn whitespace_equal_backend_rejection() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect_err("should fail when backends are semantically equal");
@@ -1187,6 +1218,8 @@ async fn whitespace_padded_model_equal_backend_rejection() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect_err("should fail when backends are semantically equal (whitespace-padded model)");
@@ -1219,6 +1252,8 @@ async fn force_complete_persists_final_review_attempts() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: Some(2),
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should force-complete");
@@ -1259,6 +1294,8 @@ async fn review_iteration_persisted_after_changes_requested() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should succeed");
@@ -1341,6 +1378,8 @@ async fn transition_failure_preserves_review_counter_on_resume() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("resumed run should complete");
@@ -1435,6 +1474,8 @@ async fn transition_failure_preserves_final_review_counter_on_resume() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("resumed run should complete");
@@ -1507,6 +1548,8 @@ async fn high_configured_limits_do_not_hit_fixed_transition_cap() {
             // 60 review iterations → 3 + 2*60 = 123 transitions (exceeds old cap of 100)
             max_review_iterations: Some(60),
             max_final_review_retries: Some(0),
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await;
 
@@ -1577,6 +1620,8 @@ async fn guard_at_entry_codex_review_skips_reviewer_when_at_limit() {
             skip_commit: true,
             max_review_iterations: Some(5),
             max_final_review_retries: Some(2),
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("guard-at-entry should complete");
@@ -1654,6 +1699,8 @@ async fn guard_at_entry_final_review_force_completes_when_at_limit() {
             skip_commit: true,
             max_review_iterations: Some(5),
             max_final_review_retries: Some(2),
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("guard-at-entry should force-complete");
@@ -1718,6 +1765,8 @@ async fn destination_state_persisted_before_checkpoint_plan_to_codex() {
             skip_commit: true,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await
         .expect("orchestrator should complete");

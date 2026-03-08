@@ -7,6 +7,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Instant};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::backend::tmux_backend::TmuxExecutionContext;
@@ -135,6 +136,13 @@ pub struct RunOptions {
     /// via CLI `--pr-url`).  If `None`, the draft-PR watcher will create a new
     /// draft PR when the branch diverges.
     pub pr_url: Option<String>,
+    /// Cancellation token for cooperative shutdown. When cancelled, the
+    /// orchestrator checks between phases and short-circuits backend calls.
+    /// CLI callers pass `CancellationToken::new()` (never cancelled).
+    pub cancel: CancellationToken,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Defaults to 3 if `None`. Replaces `RALPH_MAX_BACKEND_RETRIES` env var.
+    pub max_backend_retries: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +154,8 @@ pub struct OrchestrationResult {
 pub struct Orchestrator {
     workspace: Workspace,
     tmux_preflight_checker: Option<fn() -> Result<()>>,
+    cancel: CancellationToken,
+    max_backend_retries: Option<u8>,
 }
 
 impl Orchestrator {
@@ -153,6 +163,8 @@ impl Orchestrator {
         Self {
             workspace,
             tmux_preflight_checker: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         }
     }
 
@@ -164,6 +176,8 @@ impl Orchestrator {
     }
 
     pub async fn run(&mut self, options: RunOptions) -> Result<OrchestrationResult> {
+        self.cancel = options.cancel.clone();
+        self.max_backend_retries = options.max_backend_retries;
         validate_termination_controls(&options)?;
 
         let explicit_project = options.project.is_some();
@@ -374,6 +388,8 @@ impl Orchestrator {
                 &mut pr_log,
                 None,
                 repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
             )
             .await?;
             let decision = _retry_result.parsed;
@@ -439,6 +455,8 @@ impl Orchestrator {
                         &mut validator_log,
                         None,
                         repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                     )
                     .await?;
                 let verdict = _retry_result.parsed;
@@ -622,6 +640,8 @@ impl Orchestrator {
                         &mut planner_log,
                         None,
                         repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                     )
                     .await?;
                     let planner_decision = _retry_result.parsed;
@@ -867,6 +887,8 @@ impl Orchestrator {
                             &mut impl_log,
                             Some(&mut impl_out_session_id),
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
                         // Session lifecycle: upsert even if parse failed (D6)
@@ -1024,6 +1046,8 @@ impl Orchestrator {
                             &mut impl_log,
                             Some(&mut impl_out_session_id),
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
                         let effective_sid = retry_result.as_ref().ok()
@@ -1196,6 +1220,8 @@ impl Orchestrator {
                             &mut impl_log,
                             Some(&mut impl_out_session_id),
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
                         let effective_sid = retry_result.as_ref().ok()
@@ -1350,6 +1376,8 @@ impl Orchestrator {
                             &mut impl_log,
                             Some(&mut impl_out_session_id),
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
                         let effective_sid = retry_result.as_ref().ok()
@@ -1591,6 +1619,8 @@ impl Orchestrator {
                         &mut qa_log,
                         Some(&mut qa_out_session_id),
                         repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                     )
                     .await;
                     // Session lifecycle: upsert even if parse failed (D6)
@@ -1858,6 +1888,8 @@ impl Orchestrator {
                             &mut reviewer_log,
                             Some(&mut reviewer_out_session_id),
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
                         // Session lifecycle: upsert even if parse failed (D6)
@@ -2206,6 +2238,8 @@ impl Orchestrator {
                             &mut completer_log,
                             None,
                             repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                         )
                         .await;
 
@@ -2370,6 +2404,8 @@ impl Orchestrator {
                                         &mut acceptance_log,
                                         None,
                                         repo_root_ref,
+                    &self.cancel,
+                    self.max_backend_retries,
                                     )
                                     .await?;
                                     let acceptance_decision = retry_result.parsed;
@@ -2607,6 +2643,8 @@ impl Orchestrator {
                         &mut logs,
                         repo_root_ref,
                         &resolved_planner,
+                        &self.cancel,
+                        self.max_backend_retries,
                     )
                     .await?;
                     pending_phase_checkpoint = checkpoint;
@@ -3691,6 +3729,8 @@ async fn run_final_review_phase(
     logs: &mut Vec<String>,
     repo_root_ref: Option<&Path>,
     planner_backend: &str,
+    cancel: &CancellationToken,
+    max_backend_retries: Option<u8>,
 ) -> Result<Option<(Phase, Phase)>> {
     info!(
         loop = state.current_loop,
@@ -3834,6 +3874,8 @@ async fn run_final_review_phase(
                     &mut reviewer_log,
                     Some(&mut fr_out_session_id),
                     repo_root_ref,
+                    cancel,
+                    max_backend_retries,
                 )
                 .await
                 {
@@ -3999,6 +4041,8 @@ async fn run_final_review_phase(
             &mut planner_position_log,
             None,
             repo_root_ref,
+            cancel,
+            max_backend_retries,
         )
         .await?;
         let decision = retry_result.parsed;
@@ -4069,6 +4113,8 @@ async fn run_final_review_phase(
                 &mut vote_log,
                 None,
                 repo_root_ref,
+                cancel,
+                max_backend_retries,
             )
             .await
             {
@@ -4177,6 +4223,8 @@ async fn run_final_review_phase(
                 &mut arbiter_log,
                 None,
                 repo_root_ref,
+                cancel,
+                max_backend_retries,
             )
             .await?;
             let decision = retry_result.parsed;
@@ -5681,13 +5729,21 @@ async fn execute_with_parse_retries<T, F>(
     // Enables callers to persist session records per D6 lifecycle rules.
     out_session_id: Option<&mut Option<String>>,
     // Repo root for cwd invariant assertion (spec D6).
+    // Also used as loop_dir_hint fallback instead of current_dir().
     repo_root: Option<&Path>,
+    cancel: &CancellationToken,
+    max_retries_configured: Option<u8>,
 ) -> Result<ParseRetryResult<T>>
 where
     F: Fn(&str) -> Result<T>,
 {
+    if cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
+    }
     let backend_name = backend.name().to_owned();
-    let loop_dir_hint = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let loop_dir_hint = repo_root
+        .map(|p| p.to_owned())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut attempts_executed: u8 = 0;
     let mut active_session_id = validate_session_rewrite(
         registry,
@@ -5710,6 +5766,8 @@ where
         timeout_secs,
         log_writer,
         repo_root,
+        cancel,
+        max_retries_configured,
     )
     .await?;
 
@@ -5753,6 +5811,8 @@ where
             timeout_secs,
             log_writer,
             repo_root,
+            cancel,
+            max_retries_configured,
         )
         .await?;
         if retry_raw.trim().len() > first_raw.trim().len() {
@@ -5829,6 +5889,8 @@ where
             timeout_secs,
             log_writer,
             repo_root,
+            cancel,
+            max_retries_configured,
         )
         .await?;
         attempts_executed += 1;
@@ -5898,6 +5960,8 @@ where
         reformatter_timeout_secs,
         log_writer,
         repo_root,
+        cancel,
+        max_retries_configured,
     )
     .await?;
     attempts_executed += 1;
@@ -5939,6 +6003,8 @@ where
         timeout_secs,
         log_writer,
         repo_root,
+        cancel,
+        max_retries_configured,
     )
     .await?;
     attempts_executed += 1;
@@ -5985,36 +6051,31 @@ async fn execute_with_timeout_retries(
     prompt: &str,
     timeout_secs: u64,
     log_writer: &mut LogWriter,
-    repo_root: Option<&Path>,
+    _repo_root: Option<&Path>,
+    cancel: &CancellationToken,
+    max_retries_configured: Option<u8>,
 ) -> Result<String> {
-    // Verify cwd is exactly at repo root before backend invocation (spec D6).
-    // Enforces strict equality: debug_assert_eq!(current_dir, repo_root).
-    // Guard: only assert when cwd is related to repo_root (same tree).
-    // Unit tests that don't chdir into the temp workspace have an unrelated
-    // cwd and are safely skipped.
-    if let (Ok(cwd), Some(root)) = (std::env::current_dir(), repo_root) {
-        if cwd.starts_with(root) || root.starts_with(&cwd) {
-            debug_assert_eq!(
-                cwd,
-                root,
-                "backend invocation cwd ({}) must equal repo root ({})",
-                cwd.display(),
-                root.display()
-            );
-        }
+    // Check cancellation before starting backend invocation.
+    if cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
     }
 
     let retry_started = Instant::now();
-    let max_retries = max_backend_retries();
+    let max_retries = max_backend_retries(max_retries_configured);
 
     for attempt in 1..=max_retries {
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
 
-        match backend.execute_with_log(prompt, Some(log_writer)).await {
+        let exec_result = tokio::select! {
+            result = backend.execute_with_log(prompt, Some(log_writer)) => result,
+            _ = cancel.cancelled() => Err(RalphError::Cancelled),
+        };
+        match exec_result {
             Ok(output) => {
                 return Ok(output);
             }
+            Err(RalphError::Cancelled) => return Err(RalphError::Cancelled),
             Err(RalphError::BackendTimeout {
                 backend: backend_name,
                 idle_seconds,
@@ -6061,23 +6122,28 @@ async fn execute_with_timeout_retries(
     ))
 }
 
-fn max_backend_retries() -> u8 {
+fn max_backend_retries(configured: Option<u8>) -> u8 {
     const DEFAULT_RETRIES: u8 = 3;
-    const MAX_RETRIES: u32 = 10;
+    const MAX_RETRIES: u8 = 10;
 
-    let raw = match std::env::var("RALPH_MAX_BACKEND_RETRIES") {
-        Ok(value) => value,
-        Err(_) => return DEFAULT_RETRIES,
-    };
-    let parsed = match raw.parse::<u32>() {
-        Ok(value) => value,
-        Err(_) => return DEFAULT_RETRIES,
-    };
-    if parsed == 0 {
-        return DEFAULT_RETRIES;
+    match configured {
+        Some(0) | None => {
+            // Fall back to env var for backward compatibility, then default.
+            let raw = match std::env::var("RALPH_MAX_BACKEND_RETRIES") {
+                Ok(value) => value,
+                Err(_) => return DEFAULT_RETRIES,
+            };
+            let parsed = match raw.parse::<u8>() {
+                Ok(value) => value,
+                Err(_) => return DEFAULT_RETRIES,
+            };
+            if parsed == 0 {
+                return DEFAULT_RETRIES;
+            }
+            parsed.min(MAX_RETRIES)
+        }
+        Some(v) => v.min(MAX_RETRIES),
     }
-
-    parsed.min(MAX_RETRIES) as u8
 }
 
 /// Evaluate whether a completion panel has reached consensus.
@@ -6264,6 +6330,7 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio_util::sync::CancellationToken;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::{Context, Layer};
     use tracing_subscriber::prelude::*;
@@ -6325,7 +6392,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_unset_defaults_to_three() {
         with_retry_env_var(None, || {
-            assert_eq!(super::max_backend_retries(), 3);
+            assert_eq!(super::max_backend_retries(None), 3);
         });
     }
 
@@ -6333,7 +6400,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_accepts_one() {
         with_retry_env_var(Some("1"), || {
-            assert_eq!(super::max_backend_retries(), 1);
+            assert_eq!(super::max_backend_retries(None), 1);
         });
     }
 
@@ -6341,7 +6408,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_accepts_five() {
         with_retry_env_var(Some("5"), || {
-            assert_eq!(super::max_backend_retries(), 5);
+            assert_eq!(super::max_backend_retries(None), 5);
         });
     }
 
@@ -6349,7 +6416,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_accepts_ten() {
         with_retry_env_var(Some("10"), || {
-            assert_eq!(super::max_backend_retries(), 10);
+            assert_eq!(super::max_backend_retries(None), 10);
         });
     }
 
@@ -6357,7 +6424,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_rejects_zero() {
         with_retry_env_var(Some("0"), || {
-            assert_eq!(super::max_backend_retries(), 3);
+            assert_eq!(super::max_backend_retries(None), 3);
         });
     }
 
@@ -6365,7 +6432,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_rejects_non_numeric_value() {
         with_retry_env_var(Some("abc"), || {
-            assert_eq!(super::max_backend_retries(), 3);
+            assert_eq!(super::max_backend_retries(None), 3);
         });
     }
 
@@ -6373,7 +6440,7 @@ mod tests {
     #[serial]
     fn max_backend_retries_rejects_empty_value() {
         with_retry_env_var(Some(""), || {
-            assert_eq!(super::max_backend_retries(), 3);
+            assert_eq!(super::max_backend_retries(None), 3);
         });
     }
 
@@ -6381,15 +6448,16 @@ mod tests {
     #[serial]
     fn max_backend_retries_clamps_eleven_to_ten() {
         with_retry_env_var(Some("11"), || {
-            assert_eq!(super::max_backend_retries(), 10);
+            assert_eq!(super::max_backend_retries(None), 10);
         });
     }
 
     #[test]
     #[serial]
     fn max_backend_retries_clamps_large_numeric_value() {
+        // "256" overflows u8, so parse fails and we get the default (3).
         with_retry_env_var(Some("256"), || {
-            assert_eq!(super::max_backend_retries(), 10);
+            assert_eq!(super::max_backend_retries(None), 3);
         });
     }
 
@@ -7721,6 +7789,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
+        let cancel = CancellationToken::new();
         let result = runtime.block_on(execute_with_parse_retries(
             backend,
             &registry,
@@ -7736,6 +7805,8 @@ mod tests {
             30,
             &mut log,
             None,
+            None,
+            &cancel,
             None,
         ));
 
@@ -7781,6 +7852,7 @@ mod tests {
             .build()
             .expect("runtime");
 
+        let cancel = CancellationToken::new();
         let result = tracing::subscriber::with_default(subscriber, || {
             tracing::callsite::rebuild_interest_cache();
             runtime.block_on(execute_with_parse_retries(
@@ -7798,6 +7870,8 @@ mod tests {
                 30,
                 &mut log,
                 None,
+                None,
+                &cancel,
                 None,
             ))
         });

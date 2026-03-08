@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
@@ -50,6 +51,10 @@ pub struct QuickDevRunOptions {
     pub skip_commit: bool,
     pub max_review_iterations: Option<u32>,
     pub max_final_review_retries: Option<u32>,
+    /// Cancellation token for cooperative shutdown.
+    pub cancel: CancellationToken,
+    /// Maximum number of backend timeout retries per invocation.
+    pub max_backend_retries: Option<u8>,
 }
 
 const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 5;
@@ -67,14 +72,19 @@ pub struct OrchestrationResult {
 
 pub struct QuickDevOrchestrator {
     workspace: Workspace,
+    cancel: CancellationToken,
 }
 
 impl QuickDevOrchestrator {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            cancel: CancellationToken::new(),
+        }
     }
 
     pub async fn run(&mut self, options: QuickDevRunOptions) -> Result<OrchestrationResult> {
+        self.cancel = options.cancel.clone();
         let project_id = self
             .workspace
             .resolve_project_id(options.project.as_deref())?;
@@ -337,6 +347,7 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
                     )
                     .await?;
 
@@ -430,6 +441,7 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
+                        &self.cancel,
                     )
                     .await?;
 
@@ -593,6 +605,7 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
                     )
                     .await?;
 
@@ -711,6 +724,7 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
                     )
                     .await?;
                     let impl_decision = parse_quick_final_review_output(&impl_raw)?;
@@ -754,6 +768,7 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
+                        &self.cancel,
                     )
                     .await?;
                     let rev_decision = parse_quick_final_review_output(&rev_raw)?;
@@ -1400,12 +1415,18 @@ async fn execute_backend(
     prompt: &str,
     log_writer: &mut LogWriter,
     timeout_secs: u64,
+    cancel: &CancellationToken,
 ) -> Result<String> {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        backend.execute_with_log(prompt, Some(log_writer)),
-    )
-    .await;
+    if cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
+    }
+    let result = tokio::select! {
+        r = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            backend.execute_with_log(prompt, Some(log_writer)),
+        ) => r,
+        _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+    };
 
     match result {
         Ok(inner) => inner,
@@ -1454,6 +1475,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(
             Some("eff-impl".to_owned()),
@@ -1474,6 +1497,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(
             Some("eff-impl".to_owned()),
@@ -1494,6 +1519,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1511,6 +1538,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1528,6 +1557,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1545,6 +1576,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(None, None, "starting".to_owned());
         let err = resolve_reviewer_backend(&options, &effective).unwrap_err();

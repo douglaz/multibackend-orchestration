@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use tokio_util::sync::CancellationToken;
+
 use super::init;
 use super::parse_positive_u32;
 use crate::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunOptions};
@@ -55,6 +57,8 @@ pub async fn execute(args: QuickDevRunArgs) -> Result<()> {
             skip_commit: args.skip_commit,
             max_review_iterations: args.max_review_iterations,
             max_final_review_retries: args.max_final_review_retries,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await?;
     println!("{}", result.summary);

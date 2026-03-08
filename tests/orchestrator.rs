@@ -14,6 +14,7 @@ use ralph::prompts::templates::{
 use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
 use regex::Regex;
+use tokio_util::sync::CancellationToken;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -312,6 +313,8 @@ fn run_options(project_id: &str) -> RunOptions {
         skip_commit: false,
         skip_prompt_review: false,
         pr_url: None,
+        cancel: CancellationToken::new(),
+        max_backend_retries: None,
     }
 }
 

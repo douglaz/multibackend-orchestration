@@ -405,7 +405,6 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         labels: vec!["ralph:ready".to_owned()],
         single_iteration: true,
         verbose: false,
-        ralph_bin: repo_root.join("ralph-unused"),
         repo_root: repo_root.to_path_buf(),
         refinement_enabled: false,
         refinement_backend: "claude".to_owned(),

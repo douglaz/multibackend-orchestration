@@ -1,3 +1,5 @@
+use tokio_util::sync::CancellationToken;
+
 use crate::cli::init;
 use crate::cli::RunArgs;
 use crate::workflow::orchestrator::{Orchestrator, RunOptions};
@@ -37,6 +39,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             skip_prompt_review: args.skip_prompt_review,
             tmux: args.tmux.or(args.no_tmux),
             pr_url: args.pr_url,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         })
         .await;
 

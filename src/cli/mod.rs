@@ -1,4 +1,4 @@
-mod auto;
+pub(crate) mod auto;
 mod backend;
 pub(crate) mod backend_spec;
 mod config;

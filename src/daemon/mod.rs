@@ -5,27 +5,27 @@ pub mod process;
 pub mod rebase_agent;
 pub mod refine;
 pub mod runtime;
+pub mod tasks;
 pub mod worktree;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::RalphError;
 use crate::Result;
 
-use self::process as daemon_process;
-
-/// In-memory child process handle tracked by the daemon runtime.
+/// In-memory task handle tracked by the daemon runtime.
 ///
-/// No daemon task metadata is durably persisted. Issue metadata is fetched
-/// from GitHub on demand.
-pub struct ChildHandle {
-    pub pid: u32,
-    pub pgid: u32,
-    pub child: tokio::process::Child,
+/// Replaces the former `ChildHandle` that held a `tokio::process::Child`.
+/// Orchestration now runs as in-process tokio tasks instead of forked
+/// subprocesses.
+pub struct TaskHandle {
+    /// Join handle for the in-process orchestration task.
+    pub join_handle: JoinHandle<crate::Result<crate::workflow::orchestrator::OrchestrationResult>>,
+    /// Cancellation token for cooperative task shutdown.
+    pub cancel_token: CancellationToken,
     pub watcher_cancel: CancellationToken,
     pub watcher_handle: Option<JoinHandle<()>>,
     /// Cancellation token for the draft-PR watcher task.
@@ -46,19 +46,19 @@ pub fn format_task_id(owner: &str, repo: &str, issue_number: u32) -> String {
     format!("{owner}-{repo}-{issue_number}")
 }
 
-/// Abort a running task by issue number: kill the process group (if any PID
-/// is provided) and update labels from `ralph:in-progress` to `ralph:failed`.
+/// Abort a running task by issue number: cancel the task's cancellation token
+/// and update labels from `ralph:in-progress` to `ralph:failed`.
 ///
-/// The caller is responsible for removing the child from the in-memory map.
-/// This function only performs process termination and label updates.
+/// The caller is responsible for removing the task from the in-memory map.
 pub async fn abort_task_by_labels(
     owner: &str,
     repo: &str,
     issue_number: u32,
-    child_pid: Option<u32>,
-    child_pgid: Option<u32>,
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<()> {
-    terminate_process_group_if_present(child_pid, child_pgid).await;
+    if let Some(token) = cancel_token {
+        token.cancel();
+    }
 
     // Swap label: ralph:in-progress -> ralph:failed
     github::swap_lifecycle_label(
@@ -70,24 +70,12 @@ pub async fn abort_task_by_labels(
     )
     .await
     .map_err(|err| {
-        RalphError::Orchestration(format!(
+        crate::error::RalphError::Orchestration(format!(
             "failed to update labels for abort of {owner}/{repo}#{issue_number}: {err}"
         ))
     })?;
 
     Ok(())
-}
-
-async fn terminate_process_group_if_present(child_pid: Option<u32>, child_pgid: Option<u32>) {
-    // Prefer killing by process group; fall back to single PID.
-    if let Some(pgid) = child_pgid.filter(|v| *v > 0) {
-        daemon_process::terminate_process_group(pgid, Duration::from_secs(10)).await;
-        return;
-    }
-    if let Some(pid) = child_pid.filter(|v| *v > 0) {
-        // No PGID available — treat the single PID as a one-member "group".
-        daemon_process::terminate_process_group(pid, Duration::from_secs(10)).await;
-    }
 }
 
 #[cfg(test)]

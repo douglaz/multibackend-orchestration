@@ -296,11 +296,15 @@ impl QuickPrdPipeline {
         }
     }
 
+    /// Run the quick-prd pipeline using the current working directory.
+    /// Prefer `run_in()` for in-process dispatch to avoid CWD dependencies.
     pub async fn run(self) -> Result<QuickPrdResult> {
         self.run_in(std::env::current_dir()?).await
     }
 
-    async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
+    /// Run the quick-prd pipeline in the given working directory.
+    /// The `working_dir` should be the repo root (parent of `.ralph/`).
+    pub async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
         let started_at = now_iso8601();
         let idea_hash = sha256_hex(&self.options.idea)[..12].to_owned();
 
