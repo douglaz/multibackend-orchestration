@@ -17,6 +17,7 @@ mod tests_commands;
 mod tests_completion_panel;
 mod tests_daemon;
 mod tests_daemon_concurrency;
+mod tests_daemon_orphan;
 mod tests_daemon_rebase;
 mod tests_e2e_conformance;
 mod tests_final_review;
@@ -126,6 +127,7 @@ fn register_tests() -> Vec<ConformanceTest> {
     tests.extend(tests_tail::tests());
     tests.extend(tests_daemon::tests());
     tests.extend(tests_daemon_concurrency::tests());
+    tests.extend(tests_daemon_orphan::tests());
     tests.extend(tests_daemon_rebase::tests());
     tests.extend(tests_sessions::tests());
     tests.extend(tests_e2e_conformance::tests());

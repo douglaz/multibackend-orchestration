@@ -1068,7 +1068,11 @@ async fn poll_adopted_orphans(
 ) {
     let dead: Vec<u32> = adopted_orphans
         .iter()
-        .filter(|(_, info)| !process::pid_exists(info.pid) || !process::pgid_exists(info.pgid))
+        .filter(|(_, info)| {
+            info.pid != info.pgid
+                || !process::pid_exists(info.pid)
+                || !process::pgid_exists(info.pgid)
+        })
         .map(|(issue_number, _)| *issue_number)
         .collect();
 
@@ -2083,6 +2087,13 @@ async fn kill_aborted_children(
             if let Some(join_handle) = handle.draft_pr_handle.take() {
                 await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
             }
+            // Clear PID/PGID from metadata
+            {
+                let mut meta = load_task_metadata(&config.workspace_root, &task_id);
+                meta.pid = None;
+                meta.pgid = None;
+                save_task_metadata(&config.workspace_root, &task_id, &meta);
+            }
             eprintln!(
                 "abort-check: killed {task_id} (pid={} pgid={})",
                 handle.pid, handle.pgid
@@ -2141,6 +2152,13 @@ async fn drain_all_children(
                 handle.draft_pr_cancel.cancel();
                 if let Some(join_handle) = handle.draft_pr_handle.take() {
                     await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
+                }
+                // Clear PID/PGID from metadata
+                {
+                    let mut meta = load_task_metadata(&config.workspace_root, &task_id);
+                    meta.pid = None;
+                    meta.pgid = None;
+                    save_task_metadata(&config.workspace_root, &task_id, &meta);
                 }
             }
             complete_task(
@@ -3925,6 +3943,80 @@ mod tests {
                 .filter(|c| c.phase == "final-prompt")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn test_task_metadata_pid_roundtrip() {
+        use super::{load_task_metadata, save_task_metadata, TaskMetadata};
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+
+        let meta = TaskMetadata {
+            pr_url: Some("https://github.com/acme/widgets/pull/1".to_owned()),
+            pid: Some(12345),
+            pgid: Some(12345),
+        };
+        save_task_metadata(&workspace, "acme-widgets-1", &meta);
+        let loaded = load_task_metadata(&workspace, "acme-widgets-1");
+        assert_eq!(loaded.pid, Some(12345));
+        assert_eq!(loaded.pgid, Some(12345));
+        assert_eq!(
+            loaded.pr_url.as_deref(),
+            Some("https://github.com/acme/widgets/pull/1")
+        );
+    }
+
+    #[test]
+    fn test_task_metadata_backward_compat() {
+        use super::{load_task_metadata, task_metadata_path};
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join(".ralph");
+        let path = task_metadata_path(&workspace, "acme-widgets-2");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create dir");
+        std::fs::write(&path, r#"{"pr_url": "https://github.com/acme/widgets/pull/2"}"#)
+            .expect("write legacy JSON");
+
+        let loaded = load_task_metadata(&workspace, "acme-widgets-2");
+        assert_eq!(loaded.pid, None);
+        assert_eq!(loaded.pgid, None);
+        assert_eq!(
+            loaded.pr_url.as_deref(),
+            Some("https://github.com/acme/widgets/pull/2")
+        );
+    }
+
+    #[test]
+    fn test_task_metadata_concurrent_field_preservation() {
+        use super::{load_task_metadata, save_task_metadata, TaskMetadata};
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join(".ralph");
+        std::fs::create_dir_all(&workspace).expect("create workspace dir");
+
+        // First writer sets PID/PGID
+        let meta1 = TaskMetadata {
+            pr_url: None,
+            pid: Some(9999),
+            pgid: Some(9999),
+        };
+        save_task_metadata(&workspace, "acme-widgets-3", &meta1);
+
+        // Second writer sets pr_url using load-modify-save
+        let mut meta2 = load_task_metadata(&workspace, "acme-widgets-3");
+        meta2.pr_url = Some("https://github.com/acme/widgets/pull/3".to_owned());
+        save_task_metadata(&workspace, "acme-widgets-3", &meta2);
+
+        // Verify both fields are preserved
+        let final_meta = load_task_metadata(&workspace, "acme-widgets-3");
+        assert_eq!(final_meta.pid, Some(9999));
+        assert_eq!(final_meta.pgid, Some(9999));
+        assert_eq!(
+            final_meta.pr_url.as_deref(),
+            Some("https://github.com/acme/widgets/pull/3")
         );
     }
 }

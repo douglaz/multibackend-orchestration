@@ -600,7 +600,7 @@ mod tests {
         has_content_for_separator,
     };
     #[cfg(unix)]
-    use super::{pid_exists, terminate_process_group};
+    use super::{pgid_exists, pid_exists, terminate_process_group};
 
     #[test]
     fn spawn_command_uses_long_idea_flag() {
@@ -839,6 +839,29 @@ mod tests {
     fn test_pid_exists_rejects_low_pids() {
         assert!(!pid_exists(0));
         assert!(!pid_exists(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pgid_exists_current_process() {
+        // The current process's PGID should exist.
+        let pgid = nix::unistd::getpgrp();
+        assert!(pgid_exists(pgid.as_raw() as u32));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pgid_exists_dead_group() {
+        // A very high PGID almost certainly does not exist.
+        assert!(!pgid_exists(u32::MAX - 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pgid_exists_boundary() {
+        // Guard clause should reject 0 and 1.
+        assert!(!pgid_exists(0));
+        assert!(!pgid_exists(1));
     }
 
     #[cfg(unix)]
