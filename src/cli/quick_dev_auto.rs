@@ -167,6 +167,12 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
     println!("  reviewer backend: {reviewer_spec}");
     println!("  max revisions: 1");
 
+    let repo_root = workspace
+        .root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| workspace.root.clone());
+
     let mut registry = BackendRegistry::new(
         &workspace.config,
         BackendRegistryTmuxConfig {
@@ -175,7 +181,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
             window_keep_seconds: workspace.config.workspace.tmux_window_keep_seconds,
         },
     );
-    registry.set_cwd(Some(std::env::current_dir()?));
+    registry.set_cwd(Some(repo_root.clone()));
 
     backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
     backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;
@@ -196,7 +202,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
             dry_run: false,
         },
     );
-    let quick_prd_result = quick_prd.run().await?;
+    let quick_prd_result = quick_prd.run_in(repo_root).await?;
 
     println!("Quick-prd completed.");
     println!("  spec: {}", quick_prd_result.spec_path.display());

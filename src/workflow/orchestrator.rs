@@ -238,6 +238,7 @@ impl Orchestrator {
                 window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
             },
         );
+        registry.set_cwd(self.workspace.root.parent().map(|p| p.to_path_buf()));
         preload_override_backends(&mut registry, &role_overrides)?;
         preload_role_model_backends(&mut registry)?;
         if !options.dry_run {
@@ -528,6 +529,9 @@ impl Orchestrator {
 
         let result: Result<OrchestrationResult> = async {
         for _ in 0..MAX_PHASE_STEPS_PER_RUN {
+            if self.cancel.is_cancelled() {
+                return Err(RalphError::Cancelled);
+            }
             let prompt_path = project_dir.join(&state.prompt_file);
             let prompt_content = if prompt_path.exists() {
                 fs::read_to_string(&prompt_path).map_err(|e| {
@@ -5743,7 +5747,7 @@ where
     let backend_name = backend.name().to_owned();
     let loop_dir_hint = repo_root
         .map(|p| p.to_owned())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut attempts_executed: u8 = 0;
     let mut active_session_id = validate_session_rewrite(
         registry,
@@ -6127,21 +6131,7 @@ fn max_backend_retries(configured: Option<u8>) -> u8 {
     const MAX_RETRIES: u8 = 10;
 
     match configured {
-        Some(0) | None => {
-            // Fall back to env var for backward compatibility, then default.
-            let raw = match std::env::var("RALPH_MAX_BACKEND_RETRIES") {
-                Ok(value) => value,
-                Err(_) => return DEFAULT_RETRIES,
-            };
-            let parsed = match raw.parse::<u8>() {
-                Ok(value) => value,
-                Err(_) => return DEFAULT_RETRIES,
-            };
-            if parsed == 0 {
-                return DEFAULT_RETRIES;
-            }
-            parsed.min(MAX_RETRIES)
-        }
+        Some(0) | None => DEFAULT_RETRIES,
         Some(v) => v.min(MAX_RETRIES),
     }
 }
@@ -6327,7 +6317,6 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use serial_test::serial;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio_util::sync::CancellationToken;
@@ -6371,94 +6360,34 @@ mod tests {
         });
     }
 
-    fn with_retry_env_var<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let previous = std::env::var("RALPH_MAX_BACKEND_RETRIES").ok();
-        match value {
-            Some(raw) => std::env::set_var("RALPH_MAX_BACKEND_RETRIES", raw),
-            None => std::env::remove_var("RALPH_MAX_BACKEND_RETRIES"),
-        }
-
-        let result = f();
-
-        match previous {
-            Some(raw) => std::env::set_var("RALPH_MAX_BACKEND_RETRIES", raw),
-            None => std::env::remove_var("RALPH_MAX_BACKEND_RETRIES"),
-        }
-
-        result
+    #[test]
+    fn max_backend_retries_none_defaults_to_three() {
+        assert_eq!(super::max_backend_retries(None), 3);
     }
 
     #[test]
-    #[serial]
-    fn max_backend_retries_unset_defaults_to_three() {
-        with_retry_env_var(None, || {
-            assert_eq!(super::max_backend_retries(None), 3);
-        });
+    fn max_backend_retries_zero_defaults_to_three() {
+        assert_eq!(super::max_backend_retries(Some(0)), 3);
     }
 
     #[test]
-    #[serial]
     fn max_backend_retries_accepts_one() {
-        with_retry_env_var(Some("1"), || {
-            assert_eq!(super::max_backend_retries(None), 1);
-        });
+        assert_eq!(super::max_backend_retries(Some(1)), 1);
     }
 
     #[test]
-    #[serial]
     fn max_backend_retries_accepts_five() {
-        with_retry_env_var(Some("5"), || {
-            assert_eq!(super::max_backend_retries(None), 5);
-        });
+        assert_eq!(super::max_backend_retries(Some(5)), 5);
     }
 
     #[test]
-    #[serial]
     fn max_backend_retries_accepts_ten() {
-        with_retry_env_var(Some("10"), || {
-            assert_eq!(super::max_backend_retries(None), 10);
-        });
+        assert_eq!(super::max_backend_retries(Some(10)), 10);
     }
 
     #[test]
-    #[serial]
-    fn max_backend_retries_rejects_zero() {
-        with_retry_env_var(Some("0"), || {
-            assert_eq!(super::max_backend_retries(None), 3);
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn max_backend_retries_rejects_non_numeric_value() {
-        with_retry_env_var(Some("abc"), || {
-            assert_eq!(super::max_backend_retries(None), 3);
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn max_backend_retries_rejects_empty_value() {
-        with_retry_env_var(Some(""), || {
-            assert_eq!(super::max_backend_retries(None), 3);
-        });
-    }
-
-    #[test]
-    #[serial]
     fn max_backend_retries_clamps_eleven_to_ten() {
-        with_retry_env_var(Some("11"), || {
-            assert_eq!(super::max_backend_retries(None), 10);
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn max_backend_retries_clamps_large_numeric_value() {
-        // "256" overflows u8, so parse fails and we get the default (3).
-        with_retry_env_var(Some("256"), || {
-            assert_eq!(super::max_backend_retries(None), 3);
-        });
+        assert_eq!(super::max_backend_retries(Some(11)), 10);
     }
 
     #[test]

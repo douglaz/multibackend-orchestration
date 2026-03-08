@@ -45,9 +45,33 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
-                // SAFETY: Sending SIGKILL to a process group is safe.
+                // Graceful: send SIGTERM to process group first.
+                // SAFETY: Sending signals to a process group is safe.
+                unsafe {
+                    libc::kill(-raw, libc::SIGTERM);
+                }
+
+                // Wait up to 5 seconds for the process to exit.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let ret = unsafe {
+                        libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG)
+                    };
+                    if ret > 0 || ret == -1 {
+                        // Reaped or no such process — done.
+                        return;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
+                // Hard kill: SIGKILL + reap.
                 unsafe {
                     libc::kill(-raw, libc::SIGKILL);
+                    libc::waitpid(raw, std::ptr::null_mut(), 0);
                 }
             }
         }

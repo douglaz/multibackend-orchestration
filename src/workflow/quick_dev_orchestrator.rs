@@ -122,6 +122,7 @@ impl QuickDevOrchestrator {
                 window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
             },
         );
+        registry.set_cwd(self.workspace.root.parent().map(|p| p.to_path_buf()));
 
         // Health check both backends
         let _impl_backend = registry.get_or_create_for_role(&implementer_spec, "implementer")?;
@@ -223,6 +224,7 @@ impl QuickDevOrchestrator {
                 max_final_review_retries,
                 options.skip_commit,
                 repo_root.as_deref(),
+                options.max_backend_retries,
             )
             .await;
 
@@ -247,6 +249,7 @@ impl QuickDevOrchestrator {
         max_final_review_retries: u32,
         skip_commit: bool,
         repo_root: Option<&Path>,
+        max_backend_retries: Option<u8>,
     ) -> Result<OrchestrationResult> {
         let mut current_qd_phase = starting_phase;
         let mut review_iteration: u32 = state.quick_dev_review_iteration;
@@ -302,6 +305,9 @@ impl QuickDevOrchestrator {
 
         // Phase machine loop (bounded by configured limits)
         for _step in 0..max_transitions {
+            if self.cancel.is_cancelled() {
+                return Err(RalphError::Cancelled);
+            }
             // Persist current phase state before executing phase action.
             // This ensures that if the process crashes during the backend call,
             // resume starts from the current phase (not an earlier one).
@@ -348,6 +354,7 @@ impl QuickDevOrchestrator {
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
                         &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -442,6 +449,7 @@ impl QuickDevOrchestrator {
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
                         &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -606,6 +614,7 @@ impl QuickDevOrchestrator {
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
                         &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -725,6 +734,7 @@ impl QuickDevOrchestrator {
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
                         &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
                     let impl_decision = parse_quick_final_review_output(&impl_raw)?;
@@ -769,6 +779,7 @@ impl QuickDevOrchestrator {
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
                         &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
                     let rev_decision = parse_quick_final_review_output(&rev_raw)?;
@@ -1416,25 +1427,59 @@ async fn execute_backend(
     log_writer: &mut LogWriter,
     timeout_secs: u64,
     cancel: &CancellationToken,
+    max_retries_configured: Option<u8>,
 ) -> Result<String> {
     if cancel.is_cancelled() {
         return Err(RalphError::Cancelled);
     }
-    let result = tokio::select! {
-        r = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            backend.execute_with_log(prompt, Some(log_writer)),
-        ) => r,
-        _ = cancel.cancelled() => return Err(RalphError::Cancelled),
-    };
 
-    match result {
-        Ok(inner) => inner,
-        Err(_) => Err(RalphError::BackendTimeout {
-            backend: backend.name().to_owned(),
-            idle_seconds: timeout_secs,
-            timeout_kind: crate::error::TimeoutKind::Walltime,
-        }),
+    let max_retries = max_backend_retries(max_retries_configured);
+
+    for attempt in 1..=max_retries {
+        let result = tokio::select! {
+            r = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                backend.execute_with_log(prompt, Some(log_writer)),
+            ) => r,
+            _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+        };
+
+        match result {
+            Ok(inner) => return inner,
+            Err(_) => {
+                if attempt >= max_retries {
+                    return Err(RalphError::BackendTimeout {
+                        backend: backend.name().to_owned(),
+                        idle_seconds: timeout_secs,
+                        timeout_kind: crate::error::TimeoutKind::Walltime,
+                    });
+                }
+                let backoff = 2_u64.pow((attempt - 1) as u32);
+                tracing::warn!(
+                    backend = %backend.name(),
+                    attempt = attempt,
+                    backoff_secs = backoff,
+                    "backend timeout, retrying..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            }
+        }
+    }
+
+    Err(RalphError::BackendTimeout {
+        backend: backend.name().to_owned(),
+        idle_seconds: timeout_secs,
+        timeout_kind: crate::error::TimeoutKind::Walltime,
+    })
+}
+
+fn max_backend_retries(configured: Option<u8>) -> u8 {
+    const DEFAULT_RETRIES: u8 = 3;
+    const MAX_RETRIES: u8 = 10;
+
+    match configured {
+        Some(0) | None => DEFAULT_RETRIES,
+        Some(v) => v.min(MAX_RETRIES),
     }
 }
 

@@ -4011,16 +4011,6 @@ fn quick_label_fresh_dispatches_quick_dev_auto(h: &RalphHarness) -> TestResult {
         // Issue with ralph:quick + ralph:ready labels, no existing project
         let issues = r#"[{"number":600,"title":"Quick task","labels":[{"name":"ralph:ready"},{"name":"ralph:quick"}],"body":"quick feature"}]"#;
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let args_log = dh.temp_dir.path().join("quick_fresh_args.log");
-        let args_log_str = args_log.to_string_lossy().into_owned();
-
-        let ralph_script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "{args_log_str}"
-exit 0
-"#
-        );
-        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
         let label_log = dh.temp_dir.path().join("quick_fresh_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -4036,7 +4026,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -4044,14 +4033,15 @@ exit 0
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let args = fs::read_to_string(&args_log).expect("read args log");
+        // In-process dispatch: verify variant from daemon stderr output
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            args.starts_with("quick-dev-auto\n"),
-            "expected quick-dev-auto for fresh quick dispatch, got:\n{args}"
+            stderr.contains("starting fresh with quick-dev-auto"),
+            "expected quick-dev-auto for fresh quick dispatch, got stderr:\n{stderr}"
         );
         assert!(
-            args.contains("--project-id\nissue-600\n"),
-            "expected --project-id issue-600, got:\n{args}"
+            stderr.contains("--project-id issue-600"),
+            "expected --project-id issue-600 in dispatch, got stderr:\n{stderr}"
         );
     })
 }
@@ -4100,16 +4090,6 @@ fn quick_label_resume_dispatches_quick_dev_run(h: &RalphHarness) -> TestResult {
 
         let issues = r#"[{"number":601,"title":"Quick resume","labels":[{"name":"ralph:ready"},{"name":"ralph:quick"}],"body":"resume quick"}]"#;
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let args_log = dh.temp_dir.path().join("quick_resume_args.log");
-        let args_log_str = args_log.to_string_lossy().into_owned();
-
-        let ralph_script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "{args_log_str}"
-exit 0
-"#
-        );
-        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
         let label_log = dh.temp_dir.path().join("quick_resume_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -4125,7 +4105,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -4133,14 +4112,15 @@ exit 0
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let args = fs::read_to_string(&args_log).expect("read args log");
+        // In-process dispatch: verify variant from daemon stderr output
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            args.starts_with("quick-dev-run\n"),
-            "expected quick-dev-run for resumed quick dispatch, got:\n{args}"
+            stderr.contains("resuming with quick-dev-run"),
+            "expected quick-dev-run for resumed quick dispatch, got stderr:\n{stderr}"
         );
         assert!(
-            args.contains("--project\nissue-601\n"),
-            "expected --project issue-601, got:\n{args}"
+            stderr.contains("--project issue-601"),
+            "expected --project issue-601 in dispatch, got stderr:\n{stderr}"
         );
     })
 }
@@ -4153,16 +4133,6 @@ fn no_quick_label_fresh_dispatches_auto(h: &RalphHarness) -> TestResult {
         // Issue WITHOUT ralph:quick label
         let issues = r#"[{"number":602,"title":"Normal task","labels":[{"name":"ralph:ready"}],"body":"normal feature"}]"#;
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let args_log = dh.temp_dir.path().join("normal_fresh_args.log");
-        let args_log_str = args_log.to_string_lossy().into_owned();
-
-        let ralph_script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "{args_log_str}"
-exit 0
-"#
-        );
-        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
         let label_log = dh.temp_dir.path().join("normal_fresh_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -4178,7 +4148,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -4186,14 +4155,15 @@ exit 0
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let args = fs::read_to_string(&args_log).expect("read args log");
+        // In-process dispatch: verify variant from daemon stderr output
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            args.starts_with("auto\n"),
-            "expected auto for fresh non-quick dispatch, got:\n{args}"
+            stderr.contains("starting fresh with auto"),
+            "expected auto for fresh non-quick dispatch, got stderr:\n{stderr}"
         );
         assert!(
-            !args.starts_with("quick-dev-auto\n"),
-            "non-quick fresh dispatch must NOT use quick-dev-auto, got:\n{args}"
+            !stderr.contains("quick-dev-auto"),
+            "non-quick fresh dispatch must NOT use quick-dev-auto, got stderr:\n{stderr}"
         );
     })
 }
@@ -4243,16 +4213,6 @@ fn no_quick_label_resume_dispatches_run(h: &RalphHarness) -> TestResult {
         // Issue WITHOUT ralph:quick label
         let issues = r#"[{"number":603,"title":"Normal resume","labels":[{"name":"ralph:ready"}],"body":"resume normal"}]"#;
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let args_log = dh.temp_dir.path().join("normal_resume_args.log");
-        let args_log_str = args_log.to_string_lossy().into_owned();
-
-        let ralph_script = format!(
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "{args_log_str}"
-exit 0
-"#
-        );
-        let ralph_path = write_mock_ralph(&dh, &ralph_script).expect("write mock ralph");
 
         let label_log = dh.temp_dir.path().join("normal_resume_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
@@ -4268,7 +4228,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -4276,14 +4235,15 @@ exit 0
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        let args = fs::read_to_string(&args_log).expect("read args log");
+        // In-process dispatch: verify variant from daemon stderr output
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            args.starts_with("run\n"),
-            "expected run for resumed non-quick dispatch, got:\n{args}"
+            stderr.contains("resuming with run"),
+            "expected run for resumed non-quick dispatch, got stderr:\n{stderr}"
         );
         assert!(
-            !args.starts_with("quick-dev-run\n"),
-            "non-quick resume dispatch must NOT use quick-dev-run, got:\n{args}"
+            !stderr.contains("quick-dev-run"),
+            "non-quick resume dispatch must NOT use quick-dev-run, got stderr:\n{stderr}"
         );
     })
 }
