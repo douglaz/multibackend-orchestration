@@ -2016,9 +2016,13 @@ async fn drain_all_children_with_deadline(
     repo_root_lock: &Arc<Semaphore>,
     drain_timeout: Duration,
 ) {
-    // Cancel all tasks to initiate cooperative shutdown.
+    // Cancel all tasks and their watchers to initiate cooperative shutdown.
+    // Cancelling watcher tokens here prevents side effects (e.g. draft-PR
+    // creation) from racing with task teardown during the drain period.
     for handle in children.values() {
         handle.cancel_token.cancel();
+        handle.watcher_cancel.cancel();
+        handle.draft_pr_cancel.cancel();
     }
 
     let deadline = tokio::time::Instant::now() + drain_timeout;
@@ -2069,40 +2073,41 @@ async fn drain_all_children_with_deadline(
                 if let Some(join_handle) = handle.draft_pr_handle.take() {
                     await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
                 }
-            }
-            // Panic-isolate complete_task so that a panic in one task's
-            // completion does not prevent subsequent tasks from completing
-            // (matching the pattern used in collect_children).
-            let config_clone = config.clone();
-            let repo_root_lock_clone = repo_root_lock.clone();
-            let tid = task_id.clone();
-            let inner = tokio::spawn(async move {
-                complete_task(
-                    &config_clone,
-                    issue_number,
-                    &tid,
-                    "ralph:failed",
-                    false, // drain timeout is not an external abort
-                    &repo_root_lock_clone,
-                )
-                .await;
-            });
-            if let Err(join_err) = inner.await {
-                eprintln!(
-                    "warning: complete_task panicked for {task_id} during drain: {join_err}"
-                );
-                if let Err(rollback_err) = github::swap_lifecycle_label(
-                    &config.owner,
-                    &config.repo,
-                    issue_number,
-                    "ralph:in-progress",
-                    "ralph:failed",
-                )
-                .await
-                {
+
+                // Panic-isolate complete_task so that a panic in one task's
+                // completion does not prevent subsequent tasks from completing
+                // (matching the pattern used in collect_children).
+                let config_clone = config.clone();
+                let repo_root_lock_clone = repo_root_lock.clone();
+                let tid = task_id.clone();
+                let inner = tokio::spawn(async move {
+                    complete_task(
+                        &config_clone,
+                        issue_number,
+                        &tid,
+                        "ralph:failed",
+                        false, // drain timeout is not an external abort
+                        &repo_root_lock_clone,
+                    )
+                    .await;
+                });
+                if let Err(join_err) = inner.await {
                     eprintln!(
-                        "warning: drain panic rollback failed for {task_id}: {rollback_err}"
+                        "warning: complete_task panicked for {task_id} during drain: {join_err}"
                     );
+                    if let Err(rollback_err) = github::swap_lifecycle_label(
+                        &config.owner,
+                        &config.repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "warning: drain panic rollback failed for {task_id}: {rollback_err}"
+                        );
+                    }
                 }
             }
         }

@@ -129,13 +129,18 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
         // Prepend env var exports, skipping any that were just sanitized
         // so a configured CLAUDECODE (or future sanitized var) cannot be
         // re-introduced after the unset above.
+        // Keys are emitted unquoted (validated as safe shell identifiers);
+        // values are single-quote escaped.
         for (key, val) in self.inner.env() {
             if super::SANITIZED_ENV_VARS.contains(&key.as_str()) {
                 continue;
             }
+            if !is_valid_shell_identifier(key) {
+                continue;
+            }
             parts.push(format!(
                 "export {}={};",
-                shell_escape(key),
+                key,
                 shell_escape(val)
             ));
         }
@@ -442,6 +447,18 @@ impl Drop for TempFileGuard {
     }
 }
 
+/// Returns true if `s` is a valid POSIX shell identifier (used for env var
+/// names in `export`). Must start with a letter or underscore, followed by
+/// alphanumeric or underscore characters.
+fn is_valid_shell_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Shell-escape a string by wrapping in single quotes and escaping embedded
 /// single quotes (the standard `'\''` trick).
 fn shell_escape(s: &str) -> String {
@@ -662,7 +679,7 @@ mod tests {
         );
 
         assert!(
-            cmd.contains("export 'MY_VAR'='hello world'"),
+            cmd.contains("export MY_VAR='hello world'"),
             "missing env export: {cmd}"
         );
     }
@@ -704,7 +721,7 @@ mod tests {
         );
         // Non-sanitized vars should still be exported
         assert!(
-            cmd.contains("export 'SAFE_VAR'='ok'"),
+            cmd.contains("export SAFE_VAR='ok'"),
             "missing export for non-sanitized var: {cmd}"
         );
     }
@@ -1097,6 +1114,58 @@ mod tests {
     #[test]
     fn shell_escape_with_single_quotes() {
         assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    // --- Shell identifier validation ---
+
+    #[test]
+    fn valid_shell_identifiers() {
+        assert!(is_valid_shell_identifier("FOO"));
+        assert!(is_valid_shell_identifier("_BAR"));
+        assert!(is_valid_shell_identifier("MY_VAR_123"));
+        assert!(is_valid_shell_identifier("a"));
+    }
+
+    #[test]
+    fn invalid_shell_identifiers() {
+        assert!(!is_valid_shell_identifier(""));
+        assert!(!is_valid_shell_identifier("1FOO"));
+        assert!(!is_valid_shell_identifier("MY-VAR"));
+        assert!(!is_valid_shell_identifier("MY VAR"));
+        assert!(!is_valid_shell_identifier("FOO;BAR"));
+    }
+
+    #[test]
+    fn build_shell_command_skips_invalid_env_key() {
+        let mut env = BTreeMap::new();
+        env.insert("GOOD_VAR".to_owned(), "ok".to_owned());
+        env.insert("BAD-VAR".to_owned(), "bad".to_owned());
+        let cli = CliBackend::new(
+            "test",
+            "cmd".to_owned(),
+            vec![],
+            Duration::from_secs(10),
+            env,
+        );
+        let runner = MockTmuxRunner::default();
+        let backend = make_backend(cli, "ralph", runner);
+
+        let cmd = backend.build_shell_command(
+            Path::new("/tmp/p.txt"),
+            Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
+            Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
+        );
+
+        assert!(
+            cmd.contains("export GOOD_VAR='ok'"),
+            "valid key should be exported: {cmd}"
+        );
+        assert!(
+            !cmd.contains("BAD-VAR"),
+            "invalid key should be skipped: {cmd}"
+        );
     }
 
     // --- Name delegation ---

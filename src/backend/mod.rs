@@ -95,6 +95,14 @@ pub trait Backend: Send + Sync {
     /// cancellation token. Backends that spawn subprocesses (e.g.
     /// `CliBackend`) override this to perform synchronous cleanup so that
     /// backend processes are guaranteed dead before this method returns.
+    ///
+    /// **WARNING**: When the cancel branch wins the `select!`, the
+    /// `execute_with_log` future is dropped. If that future has spawned
+    /// a child process, dropping the future does NOT kill the child.
+    /// Backends that spawn subprocesses MUST override this method to
+    /// perform explicit child process cleanup on cancellation (see
+    /// `CliBackend::execute_streaming` for the reference implementation
+    /// with `KillOnDrop` guard).
     async fn execute_with_cancel(
         &self,
         prompt: &str,
