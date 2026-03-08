@@ -916,19 +916,45 @@ fn orphan_terminalization_routes_through_complete_task(h: &RalphHarness) -> Test
         ])
         .expect("disable daemon refinement");
 
-        // Spawn a real session-leader child via shell so that init becomes its
-        // parent. This avoids zombie-process issues: when the mock GH script
-        // kills the process, init reaps it immediately, so pid_exists returns
-        // false by the time poll_adopted_orphans checks liveness.
-        let spawn_out = std::process::Command::new("sh")
-            .args(["-c", "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!"])
-            .output()
+        // Spawn a real session-leader child via setsid + exec so that the PID
+        // captured in the pidfile is the actual long-lived process (not a
+        // short-lived wrapper shell). Using `exec sleep` replaces the shell
+        // with sleep, so the pidfile PID remains valid and `pid_exists` returns
+        // true throughout the test.
+        let pidfile = dh.temp_dir.path().join("orphan_terminalize.pid");
+        let pidfile_str = pidfile.to_string_lossy().into_owned();
+        let spawn_status = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "setsid sh -c 'echo $$ > {pidfile_str}; exec sleep 300' </dev/null >/dev/null 2>&1 &"
+                ),
+            ])
+            .status()
             .expect("spawn session-leader sleep via shell");
-        let pid: u32 = String::from_utf8_lossy(&spawn_out.stdout)
-            .trim()
-            .parse()
-            .expect("parse spawned PID");
+        assert!(spawn_status.success(), "setsid spawn command should succeed");
+
+        // Wait for pidfile to appear (bounded)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid: u32 = loop {
+            if let Ok(content) = fs::read_to_string(&pidfile) {
+                if let Ok(p) = content.trim().parse::<u32>() {
+                    break p;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for pidfile"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         let pgid = pid; // setsid makes pid == pgid
+
+        // Confirm the process is alive before proceeding
+        assert!(
+            crate::daemon::process::pid_exists(pid),
+            "orphan process (pid={pid}) should be alive before test begins"
+        );
 
         let meta = TaskMetadata {
             pr_url: None,

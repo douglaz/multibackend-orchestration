@@ -1103,8 +1103,8 @@ async fn poll_adopted_orphans(
                 "ralph:failed"
             }
         } else {
-            // Fallback: check for merged PR on the project branch
-            let branch = format!("ralph/issue-{issue_number}");
+            // Fallback: check for merged PR on the daemon task branch
+            let branch = format!("ralph/daemon/{}", orphan.task_id);
             if github::is_pr_merged(&config.owner, &config.repo, &branch).await {
                 "ralph:completed"
             } else {
