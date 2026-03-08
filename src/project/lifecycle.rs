@@ -282,14 +282,34 @@ fn reconstruct_project_state_internal(
     // Rollback ceiling: if a soft rollback wrote a `.rollback-ceiling` marker,
     // cap checkpoint-derived position so that stale checkpoint commits on the
     // branch do not resurrect the pre-rollback position.
-    if let Some(ceiling) = read_rollback_ceiling(project_dir) {
+    if let Some((ceiling, rollback_hash)) = read_rollback_ceiling(project_dir) {
         let max_artifact_loop = loop_dirs.iter().map(|(n, _, _)| *n).max().unwrap_or(0);
-        // Enforce capping when the checkpoint is above the ceiling AND above
-        // all artifact directories.  A stale checkpoint (from before the
-        // rollback) will exceed both; once a new run produces artifacts at or
-        // above the checkpoint level the checkpoint is genuine and the marker
-        // becomes inert.
-        if checkpoint_loop > ceiling && checkpoint_loop > max_artifact_loop {
+        let latest_checkpoint_hash = checkpoint_commits
+            .first()
+            .and_then(|c| c.commit_hash.as_deref());
+
+        // Determine whether the marker should enforce capping.
+        //
+        // When a rollback hash is available (recorded at rollback time):
+        //   Cap when the latest checkpoint hash matches the rollback hash —
+        //   this means the checkpoint is still the same stale one from before
+        //   the rollback.  Once a new checkpoint is committed (different hash),
+        //   the marker becomes inert regardless of artifact loop numbers.
+        //
+        // When no rollback hash is available (backward compat / no git at
+        //   rollback time): fall back to the artifact-based heuristic —
+        //   cap when checkpoint_loop > max_artifact_loop.
+        let should_cap = if checkpoint_loop > ceiling {
+            match (&rollback_hash, latest_checkpoint_hash) {
+                (Some(rh), Some(ch)) => rh == ch,
+                (None, _) => checkpoint_loop > max_artifact_loop,
+                (Some(_), None) => true,
+            }
+        } else {
+            false
+        };
+
+        if should_cap {
             // Cap position: re-derive from filtered checkpoint commits.
             let capped = checkpoint_commits
                 .iter()
@@ -399,11 +419,30 @@ fn reconstruct_project_state_internal(
     Ok(state)
 }
 
-fn read_rollback_ceiling(project_dir: &Path) -> Option<u32> {
+/// Read the `.rollback-ceiling` marker file.
+///
+/// Returns `(ceiling, checkpoint_hash)` where `checkpoint_hash` is the hash
+/// of the latest checkpoint commit at rollback time (if recorded).  The hash
+/// enables precise staleness detection: the marker is inert once a *different*
+/// checkpoint commit appears, rather than relying solely on artifact loop
+/// numbers which can match the stale checkpoint before a new checkpoint is
+/// written.
+///
+/// File format (two lines, second optional for backward compat):
+/// ```text
+/// <ceiling_number>
+/// <checkpoint_hash>
+/// ```
+fn read_rollback_ceiling(project_dir: &Path) -> Option<(u32, Option<String>)> {
     let path = project_dir.join(".rollback-ceiling");
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
+    let content = fs::read_to_string(&path).ok()?;
+    let mut lines = content.lines();
+    let ceiling = lines.next()?.trim().parse::<u32>().ok()?;
+    let hash = lines
+        .next()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    Some((ceiling, hash))
 }
 
 fn maybe_create_project_branch(
@@ -1380,6 +1419,22 @@ mod tests {
         );
     }
 
+    fn git_output(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should execute");
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
     #[test]
     fn maybe_create_project_branch_is_idempotent_when_head_matches_target() {
         let tmp = TempDir::new().expect("tempdir");
@@ -2166,6 +2221,153 @@ mod tests {
             1,
             "only loop 1 should survive ceiling enforcement, got {}",
             state.loops.len()
+        );
+    }
+
+    #[test]
+    fn reconstruct_ceiling_stale_checkpoint_equals_max_artifact() {
+        // Regression (P1): ceiling=1, stale checkpoint at loop 2, artifacts at
+        // loops 1 and 2 (max_artifact_loop == checkpoint_loop == 2).
+        //
+        // Without checkpoint hash provenance, the old heuristic
+        // (checkpoint_loop > max_artifact_loop) would fail because 2 > 2 is
+        // false, causing the stale checkpoint to resurrect the pre-rollback
+        // position.  With hash provenance, the marker records the checkpoint
+        // hash at rollback time and caps as long as it matches the latest.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // Artifacts for loops 1 and 2 (loop 2 recreated by a new run before
+        // a new checkpoint commit was written).
+        for num in 1u32..=2 {
+            write_loop_artifact(
+                &project_dir,
+                num,
+                "fix",
+                &format!("2026010100000{num}-spec.md"),
+                "spec",
+                "claude",
+                &format!("# Feature {num}"),
+                &format!("2026-01-01T00:00:0{num}Z"),
+            );
+        }
+
+        // Stale checkpoint commits for loops 1 and 2 (from before rollback).
+        for (num, from, to) in [
+            (1, Phase::Planning, Phase::Implementing),
+            (2, Phase::Implementing, Phase::Reviewing),
+        ] {
+            let msg = build_ralph_commit_message("test-proj", num, from, to);
+            commit_empty_with_msg(&repo, &msg);
+            git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+        }
+
+        // Capture the latest checkpoint hash (loop 2's commit).
+        let latest_hash = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        // Write ceiling marker WITH the checkpoint hash at rollback time.
+        fs::write(
+            project_dir.join(".rollback-ceiling"),
+            format!("1\n{latest_hash}"),
+        )
+        .unwrap();
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        // With hash provenance, the stale checkpoint at loop 2 should be
+        // capped because its hash matches the rollback hash.
+        assert_eq!(
+            state.current_loop, 1,
+            "stale checkpoint at loop 2 (== max_artifact) with matching hash must be capped to 1, got {}",
+            state.current_loop
+        );
+        assert_eq!(
+            state.loops.len(),
+            1,
+            "only loop 1 should survive ceiling enforcement, got {}",
+            state.loops.len()
+        );
+    }
+
+    #[test]
+    fn reconstruct_ceiling_inert_after_new_checkpoint() {
+        // Once a new checkpoint commit (different hash) appears, the ceiling
+        // marker becomes inert even if checkpoint_loop matches the old value.
+        use crate::git::ralph_commit::build_ralph_commit_message;
+
+        let (_temp, repo) = init_test_repo_with_remote_for_ceiling();
+        let proj_base = repo.join(".test-meta");
+        let project_dir = make_project_dir(&proj_base, "test-proj");
+
+        // Artifacts for loops 1 and 2.
+        for num in 1u32..=2 {
+            write_loop_artifact(
+                &project_dir,
+                num,
+                "fix",
+                &format!("2026010100000{num}-spec.md"),
+                "spec",
+                "claude",
+                &format!("# Feature {num}"),
+                &format!("2026-01-01T00:00:0{num}Z"),
+            );
+        }
+
+        // Original checkpoint commits (from before rollback).
+        let msg1 =
+            build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
+        commit_empty_with_msg(&repo, &msg1);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+
+        let old_hash = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        // Write ceiling marker with the OLD hash.
+        fs::write(
+            project_dir.join(".rollback-ceiling"),
+            format!("1\n{old_hash}"),
+        )
+        .unwrap();
+
+        // Simulate a NEW checkpoint commit (different hash) — this represents
+        // a successful run after the rollback.
+        let msg2 =
+            build_ralph_commit_message("test-proj", 2, Phase::Implementing, Phase::Reviewing);
+        commit_empty_with_msg(&repo, &msg2);
+        git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
+
+        let new_hash = git_output(&repo, &["rev-parse", "HEAD"]);
+        assert_ne!(old_hash, new_hash, "hashes should differ");
+
+        let state = reconstruct_project_state_internal(
+            &project_dir,
+            "test-proj",
+            Some(&repo),
+            Some("ralph/test-proj"),
+            None,
+        )
+        .expect("reconstruction should succeed");
+
+        // Ceiling should be inert — the new checkpoint hash differs from the
+        // rollback hash, so position is NOT capped.
+        assert_eq!(
+            state.current_loop, 2,
+            "new checkpoint (different hash) should make ceiling inert, got {}",
+            state.current_loop
+        );
+        assert_eq!(
+            state.loops.len(),
+            2,
+            "both loops should be present when ceiling is inert"
         );
     }
 }

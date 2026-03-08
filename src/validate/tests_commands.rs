@@ -1289,8 +1289,13 @@ fn rollback_push_failure_continues(h: &RalphHarness) -> TestResult {
         // in rollback is exercised.  Note: the standard mock does not emit
         // session_id values, so no SessionRecords are actually created —
         // the assertion below verifies structural correctness but not real
-        // invalidation.  Real session invalidation is unit-tested in
-        // state.rs::remove_loop_clears_session_records.
+        // invalidation.  This is a known limitation: CliBackend.execute_streaming
+        // normalizes output and discards session_id (mod.rs line ~710), so even
+        // a mock emitting NDJSON with session_id would not produce records.
+        // Real session invalidation is unit-tested in
+        // state.rs::remove_loop_clears_session_records.  Making this test
+        // non-vacuous requires preserving session_id through the CliBackend
+        // normalization layer, which is out of scope for the rollback feature.
         h.ralph_ok(["config", "set", "workflow.session_reuse_enabled", "true"])
             .expect("config set session_reuse_enabled failed");
         h.ralph_ok([
