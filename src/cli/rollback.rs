@@ -50,28 +50,27 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .filter(|num| *num > args.loop_number)
         .collect();
 
-    // Only compute a git reset ref when --hard is requested.  Soft rollback
-    // relies on a `.rollback-ceiling` marker instead of git reset.
-    let hard_ref = if args.hard {
-        let repo_root = workspace.root.parent().ok_or_else(|| {
-            RalphError::Orchestration("workspace root has no parent path".to_owned())
-        })?;
-        if is_git_repo(repo_root) {
-            Some(resolve_hard_reset_ref(
-                &workspace,
-                &original_state,
-                &project_id,
-                args.loop_number,
-                repo_root,
-            )?)
+    // Dry-run: resolve ref early for display (read-only, no branch mutations).
+    if args.dry_run {
+        let hard_ref = if args.hard {
+            let repo_root = workspace.root.parent().ok_or_else(|| {
+                RalphError::Orchestration("workspace root has no parent path".to_owned())
+            })?;
+            if is_git_repo(repo_root) {
+                Some(resolve_hard_reset_ref(
+                    &workspace,
+                    &original_state,
+                    &project_id,
+                    args.loop_number,
+                    repo_root,
+                )?)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    if args.dry_run {
         if let Some(reference) = &hard_ref {
             println!(
                 "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
@@ -94,66 +93,86 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
     }
     let mut push_outcome = PushOutcome::Skipped;
 
-    if let Some(reference) = hard_ref.as_deref() {
+    // For hard rollback: recover/create branch -> checkout -> resolve ref -> reset -> push.
+    // The ref is resolved AFTER branch recovery so that checkpoint commits on the
+    // project branch are visible to `resolve_hard_reset_ref`.
+    let hard_ref = if args.hard {
         let repo_root = workspace.root.parent().ok_or_else(|| {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
-
-        // Ensure we reset on the project's branch (not an unrelated branch
-        // that happens to be checked out).
-        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if !branch_exists(repo_root, &branch)? {
-            // Try to recreate from the local remote-tracking ref first.
-            let remote_ref = format!("origin/{branch}");
-            if remote_ref_exists(repo_root, &remote_ref)? {
-                create_branch(repo_root, &branch, &remote_ref)?;
-            } else if remote_branch_exists_on_remote(repo_root, &branch)? {
-                // Local tracking ref is stale/pruned but the branch exists on
-                // the actual remote.  Fetch it so the tracking ref is restored,
-                // then create the local branch.
-                run_git(repo_root, &["fetch", "origin", &branch])?;
-                create_branch(repo_root, &branch, &format!("origin/{branch}"))?;
-            } else {
-                return Err(RalphError::Validation(format!(
-                    "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
-                    branch
-                )));
+        if is_git_repo(repo_root) {
+            // Ensure we reset on the project's branch (not an unrelated branch
+            // that happens to be checked out).
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            if !branch_exists(repo_root, &branch)? {
+                // Try to recreate from the local remote-tracking ref first.
+                let remote_ref = format!("origin/{branch}");
+                if remote_ref_exists(repo_root, &remote_ref)? {
+                    create_branch(repo_root, &branch, &remote_ref)?;
+                } else if remote_branch_exists_on_remote(repo_root, &branch)? {
+                    // Local tracking ref is stale/pruned but the branch exists on
+                    // the actual remote.  Fetch it so the tracking ref is restored,
+                    // then create the local branch.
+                    run_git(repo_root, &["fetch", "origin", &branch])?;
+                    create_branch(repo_root, &branch, &format!("origin/{branch}"))?;
+                } else {
+                    return Err(RalphError::Validation(format!(
+                        "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
+                        branch
+                    )));
+                }
             }
-        }
-        checkout_branch(repo_root, &branch)?;
+            checkout_branch(repo_root, &branch)?;
 
-        // Reset the local branch so that checkpoint-derived state
-        // reconstruction sees the rolled-back position.
-        reset_hard(repo_root, reference)?;
-        restore_workspace_files(
-            &workspace,
-            &project_id,
-            prompt_backup.as_deref(),
-            project_config_backup.as_deref(),
-        )?;
-
-        // Force-push the reset branch so that checkpoint-derived state
-        // reconstruction (which may read `origin/<branch>`) sees the
-        // rolled-back position.  Without this the remote would retain
-        // stale checkpoint commits and reconstruction would undo the rollback.
-        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if branch_exists(repo_root, &branch)? {
-            if let Err(e) = run_git(
+            // Resolve the hard reset ref AFTER branch recovery so that
+            // checkpoint commits are visible.
+            let reference = resolve_hard_reset_ref(
+                &workspace,
+                &original_state,
+                &project_id,
+                args.loop_number,
                 repo_root,
-                &["push", "--force", "origin", &format!("{branch}:{branch}")],
-            ) {
-                eprintln!("warning: force-push failed: {e}");
-                push_outcome = PushOutcome::Failed;
+            )?;
+
+            // Reset the local branch so that checkpoint-derived state
+            // reconstruction sees the rolled-back position.
+            reset_hard(repo_root, &reference)?;
+            restore_workspace_files(
+                &workspace,
+                &project_id,
+                prompt_backup.as_deref(),
+                project_config_backup.as_deref(),
+            )?;
+
+            // Force-push the reset branch so that checkpoint-derived state
+            // reconstruction (which may read `origin/<branch>`) sees the
+            // rolled-back position.  Without this the remote would retain
+            // stale checkpoint commits and reconstruction would undo the rollback.
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            if branch_exists(repo_root, &branch)? {
+                if let Err(e) = run_git(
+                    repo_root,
+                    &["push", "--force", "origin", &format!("{branch}:{branch}")],
+                ) {
+                    eprintln!("warning: force-push failed: {e}");
+                    push_outcome = PushOutcome::Failed;
+                } else {
+                    push_outcome = PushOutcome::Succeeded;
+                }
             } else {
-                push_outcome = PushOutcome::Succeeded;
+                eprintln!(
+                    "warning: force-push skipped — branch '{}' does not exist",
+                    branch
+                );
             }
+
+            Some(reference)
         } else {
-            eprintln!(
-                "warning: force-push skipped — branch '{}' does not exist",
-                branch
-            );
+            None
         }
-    }
+    } else {
+        None
+    };
 
     for &loop_number in &to_remove {
         let pattern = format!("{loop_number:03}-");
