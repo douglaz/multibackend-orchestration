@@ -182,11 +182,17 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Verifies per-issue label isolation during concurrent in-process dispatch.
+/// Verifies that drain-induced cancellation independently terminalizes
+/// all dispatched tasks (label isolation).
 ///
 /// Two issues are claimed and dispatched as concurrent in-process tasks.
 /// In single-iteration mode, drain_all_children cancels all tasks and each
-/// reaches terminal state independently.
+/// reaches terminal state independently with its own label transitions.
+///
+/// NOTE: Both tasks receive the same cancellation treatment (both fail),
+/// so this test proves independent lifecycle management but not mixed
+/// outcomes. See `execution_failure_terminalization` for execution-error
+/// failures and `mixed_outcome_claim_isolation` for claim-level isolation.
 ///
 /// Asserts:
 /// - Both issues are dispatched (in-process)
@@ -538,6 +544,11 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
 /// `dispatch-failure:<issue>` markers when it detects a label swap to
 /// ralph:failed.
 ///
+/// NOTE: Both tasks are cancelled during drain (same outcome). This test
+/// proves each task independently produces its failure marker. See
+/// `execution_failure_terminalization` for the execution-error path and
+/// `mixed_outcome_claim_isolation` for mixed claim outcomes.
+///
 /// Asserts:
 /// - Both issues were dispatched (in-process)
 /// - Each issue produced its own dispatch-failure marker in the failure log
@@ -700,16 +711,24 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
             })
             .min();
 
-        if let (Some(last_dispatch), Some(first_terminal)) =
-            (last_dispatch_pos, first_terminal_pos)
-        {
-            assert!(
-                last_dispatch < first_terminal,
-                "concurrency ordering violated: last dispatch at byte {last_dispatch} \
-                 but first terminal at byte {first_terminal} — \
-                 both dispatches must precede any terminal event.\n{combined}"
-            );
-        }
+        let last_dispatch = last_dispatch_pos.expect(
+            &format!(
+                "both dispatch messages must be found to verify ordering; \
+                 missing dispatch position in output:\n{combined}"
+            ),
+        );
+        let first_terminal = first_terminal_pos.expect(
+            &format!(
+                "at least one terminal message must be found to verify ordering; \
+                 missing terminal position in output:\n{combined}"
+            ),
+        );
+        assert!(
+            last_dispatch < first_terminal,
+            "concurrency ordering violated: last dispatch at byte {last_dispatch} \
+             but first terminal at byte {first_terminal} — \
+             both dispatches must precede any terminal event.\n{combined}"
+        );
     })
 }
 

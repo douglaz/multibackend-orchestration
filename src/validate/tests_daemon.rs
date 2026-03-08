@@ -2644,13 +2644,16 @@ fn dispatch_fresh_issue_passes_project_id(h: &RalphHarness) -> TestResult {
             .join(".ralph")
             .join("projects")
             .join("issue-500");
-        if project_state_dir.exists() {
-            assert!(
-                project_state_dir.join("state.json").exists(),
-                "project state file should exist at {}",
-                project_state_dir.join("state.json").display()
-            );
-        }
+        assert!(
+            project_state_dir.exists(),
+            "project directory should exist at {} (project creation happens before orchestrator runs)",
+            project_state_dir.display()
+        );
+        assert!(
+            project_state_dir.join("state.json").exists(),
+            "project state file should exist at {}",
+            project_state_dir.join("state.json").display()
+        );
     })
 }
 

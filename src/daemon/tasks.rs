@@ -163,7 +163,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
     writer.health_check().await?;
     reviewer.health_check().await?;
 
-    let quick_prd = QuickPrdPipeline::new(
+    let quick_prd = QuickPrdPipeline::with_cancel(
         writer,
         reviewer,
         QuickPrdOptions {
@@ -173,6 +173,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
             max_revisions: params.max_spec_revisions,
             dry_run: false,
         },
+        params.cancel.clone(),
     );
     let quick_prd_result = tokio::select! {
         result = quick_prd.run(repo_root) => result?,
@@ -370,7 +371,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
     writer.health_check().await?;
     reviewer.health_check().await?;
 
-    let quick_prd = QuickPrdPipeline::new(
+    let quick_prd = QuickPrdPipeline::with_cancel(
         writer,
         reviewer,
         QuickPrdOptions {
@@ -380,6 +381,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
             max_revisions: 1,
             dry_run: false,
         },
+        params.cancel.clone(),
     );
     let quick_prd_result = tokio::select! {
         result = quick_prd.run(repo_root) => result?,

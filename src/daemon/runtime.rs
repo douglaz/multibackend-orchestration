@@ -2080,13 +2080,16 @@ async fn drain_all_children_with_deadline(
                 let config_clone = config.clone();
                 let repo_root_lock_clone = repo_root_lock.clone();
                 let tid = task_id.clone();
+                let externally_aborted = handle
+                    .aborted_externally
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let inner = tokio::spawn(async move {
                     complete_task(
                         &config_clone,
                         issue_number,
                         &tid,
                         "ralph:failed",
-                        false, // drain timeout is not an external abort
+                        externally_aborted,
                         &repo_root_lock_clone,
                     )
                     .await;

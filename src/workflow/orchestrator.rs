@@ -2952,6 +2952,14 @@ fn preload_role_model_backends(registry: &mut BackendRegistry) -> Result<()> {
 /// Without this, a bare opposite backend (e.g. `codex` without a role model)
 /// would not be found in the cache and the reformatter would silently fall
 /// back to the original backend, exhausting parse retries.
+///
+/// **Limitation**: This list is hard-coded to the three built-in backends.
+/// Custom backend configurations (e.g. `"gemini"`, `"claude-3.5"`) are not
+/// preloaded. If a custom backend is used as the opposite reformatter, the
+/// lookup will miss the cache and the reformatter will fall back to the
+/// original backend. A future improvement could derive this list from the
+/// workspace's configured backends or make `set_cwd` update existing cached
+/// backends' working directory instead of clearing the entire cache.
 fn preload_bare_default_backends(registry: &mut BackendRegistry) -> Result<()> {
     for name in ["claude", "codex", "openrouter"] {
         // Ignore errors — the backend may not be configured/available.
