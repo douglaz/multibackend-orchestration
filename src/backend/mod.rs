@@ -110,8 +110,12 @@ impl Drop for KillOnDrop {
                     // Grace period expired — hard kill the entire group.
                     unsafe {
                         libc::kill(-(raw), libc::SIGKILL);
-                        // Best-effort reap of the leader.
-                        libc::waitpid(raw, std::ptr::null_mut(), 0);
+                        // Best-effort reap of the leader.  Use WNOHANG to
+                        // avoid blocking indefinitely if the child is stuck
+                        // in an uninterruptible kernel state (D state).
+                        // Tokio's internal reaper will clean up the zombie
+                        // if this non-blocking call misses it.
+                        libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
                     }
                 });
             }

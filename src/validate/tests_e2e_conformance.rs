@@ -52,6 +52,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "e2e_conformance::e2e_mock_gh_logging_script_captures_pr_create",
             func: e2e_mock_gh_logging_script_captures_pr_create,
         },
+        ConformanceTest {
+            name: "e2e_conformance::e2e_pr_create_body_file_verification",
+            func: e2e_pr_create_body_file_verification,
+        },
     ]
 }
 
@@ -389,16 +393,7 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // With in-process dispatch, the task runs as a tokio task. In
-        // single-iteration mode, drain_all_children cancels tasks
-        // cooperatively, so the task reaches terminal state (ralph:failed
-        // due to cancellation) without completing full orchestration.
-        // PR creation requires the task to complete and produce a diff,
-        // which cannot happen under drain cancellation.
-        //
-        // PR metadata formatting is verified by unit tests for
-        // build_pr_title, build_pr_body, and extract_project_ref in
-        // daemon/runtime.rs. Here we verify dispatch and terminal state.
+        // Verify task dispatch occurred and reached terminal state.
         assert!(
             stderr.contains("dispatched task acme-widgets-901"),
             "expected task dispatch in stderr, got:\n{stderr}"
@@ -406,6 +401,187 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
         assert!(
             stderr.contains("ralph:failed") || stderr.contains("ralph:completed"),
             "expected terminal label in stderr, got:\n{stderr}"
+        );
+
+        // Verify PR metadata construction is correct by calling the build
+        // helpers directly with values matching what the daemon would use
+        // for this task.  This validates that the pr_metadata pipeline
+        // produces correct output for the given issue.
+        let task_id = "acme-widgets-901";
+        let branch = format!("ralph/daemon/{task_id}");
+        let title = crate::daemon::runtime::build_pr_title(&format!("ralph: {task_id}"));
+        assert!(
+            title.starts_with("ralph: acme-widgets-901"),
+            "expected title to contain task_id, got: {title}"
+        );
+
+        let pr_body = crate::daemon::runtime::build_pr_body(
+            &branch,
+            Some("src/main.rs | 5 ++---"),
+            Some("E2E PR metadata verification issue."),
+            task_id,
+            issue_number,
+        );
+        assert!(
+            pr_body.contains(&format!("Closes #{issue_number}")),
+            "expected issue closure marker in PR body, got:\n{pr_body}"
+        );
+        assert!(
+            pr_body.contains("Diff Stat"),
+            "expected Diff Stat section in PR body, got:\n{pr_body}"
+        );
+        assert!(
+            pr_body.contains("src/main.rs"),
+            "expected diff stat content in PR body, got:\n{pr_body}"
+        );
+        assert!(
+            pr_body.contains("Issue Context"),
+            "expected Issue Context section in PR body, got:\n{pr_body}"
+        );
+        assert!(
+            pr_body.contains("E2E PR metadata verification issue."),
+            "expected issue context in PR body, got:\n{pr_body}"
+        );
+
+        let project_ref = crate::daemon::runtime::extract_project_ref(&branch);
+        assert!(
+            pr_body.contains(&format!("Project Ref: `{}`", project_ref.as_deref().unwrap_or(""))),
+            "expected Project Ref footer in PR body, got:\n{pr_body}"
+        );
+    })
+}
+
+/// Verify that `create_pr_with_body_file` passes the correct arguments
+/// to `gh pr create` and that the body file content includes issue closure
+/// markers and PR metadata sections.
+fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mock_dir = temp.path().join("bin");
+        fs::create_dir_all(&mock_dir).expect("mkdir mock bin");
+
+        let gh_log = temp.path().join("gh-pr-body-file.log");
+        let gh_script = h
+            .write_mock_script("gh-body-file.sh", &e2e_mock_gh_logging_script())
+            .expect("failed to write gh script");
+
+        // Copy the script to mock_dir/gh for PATH resolution
+        let gh_dest = mock_dir.join("gh");
+        fs::copy(&gh_script, &gh_dest).expect("copy gh script");
+        let mut perms = fs::metadata(&gh_dest).expect("meta").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        fs::set_permissions(&gh_dest, perms).expect("chmod");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let composed = format!("{}:{}", mock_dir.display(), original_path);
+
+        // Build PR body using the library functions
+        let task_id = "acme-widgets-42";
+        let branch = "ralph/daemon/acme-widgets-42";
+        let issue_number = 42_u32;
+        let title = crate::daemon::runtime::build_pr_title(&format!("ralph: {task_id}"));
+        let pr_body = crate::daemon::runtime::build_pr_body(
+            branch,
+            Some("src/lib.rs | 10 ++++------"),
+            Some("Implement feature X"),
+            task_id,
+            issue_number,
+        );
+
+        // Write body file
+        let body_path = temp.path().join("pr-body-test.md");
+        fs::write(&body_path, &pr_body).expect("write body file");
+
+        // Call create_pr_with_body_file via the runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = rt.block_on(async {
+            // Temporarily set PATH and RALPH_E2E_GH_LOG for gh resolution
+            unsafe { std::env::set_var("PATH", &composed) };
+            unsafe { std::env::set_var("RALPH_E2E_GH_LOG", gh_log.to_string_lossy().as_ref()) };
+            let result = crate::daemon::github::create_pr_with_body_file(
+                "acme",
+                "widgets",
+                branch,
+                &title,
+                &body_path,
+                Some("master"),
+                false,
+            )
+            .await;
+            unsafe { std::env::remove_var("RALPH_E2E_GH_LOG") };
+            unsafe { std::env::set_var("PATH", &original_path) };
+            result
+        })
+        .expect("create_pr_with_body_file should succeed");
+
+        assert!(
+            url.contains("github.com"),
+            "expected PR URL in response, got: {url}"
+        );
+
+        // Read the gh log and verify args using the helper parsers
+        let log_content = fs::read_to_string(&gh_log).expect("read gh log");
+        let args = parse_logged_args(&log_content);
+
+        assert_eq!(
+            arg_value(&args, "--title"),
+            Some(title.as_str()),
+            "expected --title flag with correct value in gh args"
+        );
+        assert_eq!(
+            arg_value(&args, "--head"),
+            Some(branch),
+            "expected --head flag with correct branch"
+        );
+        assert_eq!(
+            arg_value(&args, "--repo"),
+            Some("acme/widgets"),
+            "expected --repo flag with correct value"
+        );
+        assert_eq!(
+            arg_value(&args, "--base"),
+            Some("master"),
+            "expected --base flag with correct value"
+        );
+        assert!(
+            arg_value(&args, "--body-file").is_some(),
+            "expected --body-file flag in gh args"
+        );
+
+        // Verify body file content via logged body
+        let body = extract_logged_body(&log_content);
+        assert!(
+            body.is_some(),
+            "expected body content in gh log, got:\n{log_content}"
+        );
+        let body = body.unwrap();
+        assert!(
+            body.contains(&format!("Closes #{issue_number}")),
+            "expected issue closure marker in body, got:\n{body}"
+        );
+        assert!(
+            body.contains("Diff Stat"),
+            "expected Diff Stat section in body, got:\n{body}"
+        );
+        assert!(
+            body.contains("src/lib.rs"),
+            "expected diff stat content in body, got:\n{body}"
+        );
+        assert!(
+            body.contains("Issue Context"),
+            "expected Issue Context section in body, got:\n{body}"
+        );
+        assert!(
+            body.contains("Implement feature X"),
+            "expected issue body content in body, got:\n{body}"
+        );
+        assert!(
+            body.contains("Project Ref:"),
+            "expected Project Ref footer in body, got:\n{body}"
         );
     })
 }
@@ -580,7 +756,6 @@ echo "unreachable"
     .to_owned()
 }
 
-#[allow(dead_code)]
 fn parse_logged_args(log_content: &str) -> Vec<String> {
     log_content
         .lines()
@@ -592,14 +767,12 @@ fn parse_logged_args(log_content: &str) -> Vec<String> {
         .collect()
 }
 
-#[allow(dead_code)]
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.windows(2)
         .find(|window| window[0] == flag)
         .map(|window| window[1].as_str())
 }
 
-#[allow(dead_code)]
 fn extract_logged_body(log_content: &str) -> Option<String> {
     let marker = "body_begin\n";
     let start = log_content.find(marker)? + marker.len();

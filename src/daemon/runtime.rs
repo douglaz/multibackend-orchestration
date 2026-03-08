@@ -2070,15 +2070,41 @@ async fn drain_all_children_with_deadline(
                     await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
                 }
             }
-            complete_task(
-                config,
-                issue_number,
-                &task_id,
-                "ralph:failed",
-                false, // drain timeout is not an external abort
-                repo_root_lock,
-            )
-            .await;
+            // Panic-isolate complete_task so that a panic in one task's
+            // completion does not prevent subsequent tasks from completing
+            // (matching the pattern used in collect_children).
+            let config_clone = config.clone();
+            let repo_root_lock_clone = repo_root_lock.clone();
+            let tid = task_id.clone();
+            let inner = tokio::spawn(async move {
+                complete_task(
+                    &config_clone,
+                    issue_number,
+                    &tid,
+                    "ralph:failed",
+                    false, // drain timeout is not an external abort
+                    &repo_root_lock_clone,
+                )
+                .await;
+            });
+            if let Err(join_err) = inner.await {
+                eprintln!(
+                    "warning: complete_task panicked for {task_id} during drain: {join_err}"
+                );
+                if let Err(rollback_err) = github::swap_lifecycle_label(
+                    &config.owner,
+                    &config.repo,
+                    issue_number,
+                    "ralph:in-progress",
+                    "ralph:failed",
+                )
+                .await
+                {
+                    eprintln!(
+                        "warning: drain panic rollback failed for {task_id}: {rollback_err}"
+                    );
+                }
+            }
         }
     }
 }

@@ -1826,6 +1826,13 @@ exit 1
 
 /// Conformance: daemon runtime watcher posts both quick-prd and final-prompt
 /// comments from child-produced artifacts.
+///
+/// Approach: the mock gh script seeds deterministic artifact files in the
+/// worktree when the `issue comment` handler is first invoked (during
+/// dispatch's `post_idempotent_comment` for refined-prompt, which occurs
+/// after the worktree exists).  The artifact watcher's final sweep on
+/// cancellation discovers these files and posts comments whose content and
+/// idempotency markers are verified via the comment log.
 fn runtime_artifact_comments_posted(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -1843,10 +1850,23 @@ fn runtime_artifact_comments_posted(h: &RalphHarness) -> TestResult {
         let label_log = dh.temp_dir.path().join("artifact_labels.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
+        // The worktree path where the daemon will create artifacts.
+        // task_id = "acme-widgets-121", path = <repo_root>/.ralph/daemon/worktrees/<task_id>
+        let wt_path = dh
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join("acme-widgets-121");
+        let wt_path_str = wt_path.to_string_lossy().into_owned();
+
         let issues = r#"[{"number":121,"title":"artifact watcher","labels":[{"name":"ralph:ready"}],"body":"artifact body"}]"#;
 
+        // The mock gh script seeds artifact files on first `issue comment`
+        // invocation (which happens during dispatch after worktree creation).
         let gh_script = format!(
             r#"#!/bin/sh
+WORKTREE="{wt_path_str}"
 case "$1" in
   issue)
     case "$2" in
@@ -1883,6 +1903,23 @@ case "$1" in
         exit 0
         ;;
       comment)
+        # Seed artifact files on first comment call (refined-prompt).
+        # The worktree exists by this point in the dispatch flow.
+        SEED_MARKER="$WORKTREE/.ralph/.artifact_seeded"
+        if [ ! -f "$SEED_MARKER" ] && [ -d "$WORKTREE" ]; then
+          # Quick-PRD artifact
+          QP_DIR="$WORKTREE/.ralph/quick-prd/mock-hash"
+          mkdir -p "$QP_DIR"
+          printf '{{"idea":"artifact test"}}' > "$QP_DIR/meta.json"
+          printf '# Mock Quick PRD Spec\n\nTest spec content for artifact watcher.\n' > "$QP_DIR/SPEC.md"
+          # Final-prompt artifact (prompt-original.md is the mtime signal,
+          # prompt.md is the content that gets posted).
+          FP_DIR="$WORKTREE/.ralph/projects/issue-121"
+          mkdir -p "$FP_DIR"
+          printf '# Original Prompt\n' > "$FP_DIR/prompt-original.md"
+          printf '# Final Prompt\n\nFinal prompt content for artifact watcher.\n' > "$FP_DIR/prompt.md"
+          touch "$SEED_MARKER"
+        fi
         shift; shift; shift
         while [ $# -gt 0 ]; do
           case "$1" in
@@ -1948,14 +1985,43 @@ exit 1
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
 
-        // With in-process dispatch (refinement disabled), the task will fail
-        // and no artifact files will be created. Verify the daemon still
-        // completes gracefully and the task was at least dispatched.
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("dispatched task acme-widgets-121")
                 || stderr.contains("acme-widgets-121"),
             "expected task dispatch attempt in stderr, got:\n{stderr}"
+        );
+
+        // Verify artifact comments were posted with correct content and
+        // idempotency markers.
+        let comments = fs::read_to_string(&comment_log).unwrap_or_default();
+
+        // Quick-PRD comment: marker + content from SPEC.md
+        assert!(
+            comments.contains("ralph:task:acme-widgets-121:quick-prd"),
+            "expected quick-prd idempotency marker in comments, got:\n{comments}"
+        );
+        assert!(
+            comments.contains("Quick PRD"),
+            "expected Quick PRD header in comments, got:\n{comments}"
+        );
+        assert!(
+            comments.contains("Mock Quick PRD Spec"),
+            "expected quick-prd spec content in comments, got:\n{comments}"
+        );
+
+        // Final-prompt comment: marker + content from prompt.md
+        assert!(
+            comments.contains("ralph:task:acme-widgets-121:final-prompt"),
+            "expected final-prompt idempotency marker in comments, got:\n{comments}"
+        );
+        assert!(
+            comments.contains("Final Prompt"),
+            "expected Final Prompt header in comments, got:\n{comments}"
+        );
+        assert!(
+            comments.contains("Final prompt content for artifact watcher"),
+            "expected final-prompt content in comments, got:\n{comments}"
         );
     })
 }
@@ -2626,9 +2692,51 @@ fn dispatch_resume_uses_issue_project_prompt_file(h: &RalphHarness) -> TestResul
         assert_exit_code(&output, 0);
 
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // 1. Verify the resume event was logged with the correct project ID
         assert!(
             stderr.contains("event=project_resume"),
             "expected project_resume event in stderr, got:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("project_id=issue-501"),
+            "expected project_id=issue-501 in project_resume event, got:\n{stderr}"
+        );
+
+        // 2. Verify the dispatch used the resume path (run --project), not
+        //    the fresh path (auto --project-id)
+        assert!(
+            stderr.contains("resuming with run --project issue-501")
+                || stderr.contains("resuming with quick-dev-run --project"),
+            "expected resume dispatch log line with 'run --project issue-501', got:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("starting fresh with auto --project-id issue-501"),
+            "resume dispatch must NOT use the fresh auto path, got:\n{stderr}"
+        );
+
+        // 3. Verify the worktree was created and the issue project prompt file
+        //    is present in the worktree (proves the worktree was seeded from
+        //    the issue branch containing the prompt).
+        let wt_prompt = dh
+            .repo_root
+            .join(".ralph")
+            .join("daemon")
+            .join("worktrees")
+            .join("acme-widgets-501")
+            .join(".ralph")
+            .join("projects")
+            .join("issue-501")
+            .join("prompt.md");
+        assert!(
+            wt_prompt.exists(),
+            "expected issue project prompt file in worktree at {}, got missing",
+            wt_prompt.display()
+        );
+        let prompt_content = fs::read_to_string(&wt_prompt).expect("read prompt");
+        assert!(
+            prompt_content.contains("existing prompt"),
+            "expected seeded prompt content in worktree, got: {prompt_content}"
         );
     })
 }
