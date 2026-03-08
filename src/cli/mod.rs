@@ -299,7 +299,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::QuickDevRun(args) => quick_dev_run::execute(args).await,
         Commands::QuickDevAuto(args) => quick_dev_auto::execute(args).await,
         Commands::Validate(args) => validate::execute(args),
-        Commands::Status(args) => status::execute(args),
+        Commands::Status(args) => status::execute(args).await,
         Commands::History(args) => history::execute(args),
         Commands::Tail(args) => tail::execute(args).await,
         Commands::Rollback(args) => rollback::execute(args),

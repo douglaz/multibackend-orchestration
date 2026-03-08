@@ -145,7 +145,7 @@ fn draft_pr_marked_ready_transition(h: &RalphHarness) -> TestResult {
         unsafe { std::env::set_var("PATH", composed) };
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -210,7 +210,7 @@ fn no_diff_draft_pr_closed_transition(h: &RalphHarness) -> TestResult {
         );
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -242,7 +242,7 @@ fn complete_task_retries_transient_up_to_three(_h: &RalphHarness) -> TestResult 
         let attempts_c = Arc::clone(&attempts);
         let sleeps_c = Arc::clone(&sleeps);
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
@@ -295,7 +295,7 @@ fn complete_task_no_retry_terminal(_h: &RalphHarness) -> TestResult {
         let attempts_c = Arc::clone(&attempts);
         let sleeps_c = Arc::clone(&sleeps);
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build runtime");
 
