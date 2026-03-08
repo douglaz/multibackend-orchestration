@@ -83,14 +83,15 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         .parent()
         .filter(|r| is_git_repo(r))
         .and_then(|repo_root| {
-            let branch =
-                resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-            list_ralph_commits(repo_root, &branch).ok().and_then(|commits| {
-                commits
-                    .iter()
-                    .find(|c| c.project_id == project_id)
-                    .and_then(|c| c.commit_hash.clone())
-            })
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            list_ralph_commits(repo_root, &branch)
+                .ok()
+                .and_then(|commits| {
+                    commits
+                        .iter()
+                        .find(|c| c.project_id == project_id)
+                        .and_then(|c| c.commit_hash.clone())
+                })
         });
 
     // Dry-run: resolve ref early for display (read-only, no branch mutations).
@@ -105,8 +106,7 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
                 // locally.  If it would need recovery (create from remote-
                 // tracking / fetch) we cannot determine the ref without side
                 // effects, so print a placeholder instead of a wrong value.
-                let branch =
-                    resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+                let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
                 if branch_exists(repo_root, &branch)? {
                     let reference = resolve_hard_reset_ref(
                         &workspace,
