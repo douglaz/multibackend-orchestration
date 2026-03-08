@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::config::global::BackendEnabled;
@@ -36,14 +37,15 @@ use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 /// env vars (e.g. `CLAUDECODE`) to backend child processes.
 pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
 
-/// Guard that kills a child process group on drop. Used inside
-/// `execute_streaming` to ensure backend processes are terminated when
-/// the future is cancelled (e.g. via `tokio::select!`).
+/// Emergency guard that SIGKILL-s a child process group on drop.
 ///
-/// On drop, sends SIGTERM to the process group for cooperative shutdown,
-/// then spawns a detached reaper thread that escalates to SIGKILL after
-/// a 5-second grace period if the group is still alive. The drop itself
-/// is non-blocking so it never stalls an async executor thread.
+/// This is a last-resort fallback for unexpected future drops (e.g. task
+/// abort). Normal cancellation and timeout paths call `kill_and_reap_child`
+/// directly for cooperative SIGTERM → SIGKILL shutdown and **disarm** this
+/// guard before returning.
+///
+/// The drop is non-blocking: it sends SIGKILL immediately and does a
+/// non-blocking waitpid to reap the leader zombie.
 struct KillOnDrop(Option<u32>);
 
 impl KillOnDrop {
@@ -60,64 +62,16 @@ impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
-                // Two-stage termination: SIGTERM first for cooperative shutdown,
-                // then SIGKILL after a grace period if the process group is
-                // still alive.
+                // Emergency path: SIGKILL immediately. The normal cancellation
+                // path already performed cooperative SIGTERM → wait → SIGKILL
+                // via `kill_and_reap_child` before disarming this guard.
+                // If we reach here, the future was dropped without cleanup
+                // (e.g. task abort), so hard-kill is appropriate.
                 // SAFETY: Sending signals to a process group is safe.
                 unsafe {
-                    libc::kill(-(raw), libc::SIGTERM);
-                }
-                // Best-effort reap of the leader zombie so that subsequent
-                // kill(-pgid, 0) reflects true group liveness. Without this
-                // reap, a zombie leader keeps the PID in the process table and
-                // kill(-pgid, 0) returns 0 even when no live processes remain.
-                unsafe {
+                    libc::kill(-(raw), libc::SIGKILL);
                     libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
                 }
-                // Check process-group liveness via kill(-pgid, 0).  Returns
-                // -1 with ESRCH when no processes in the group remain.
-                // This correctly detects descendants that survive the leader.
-                let group_alive = unsafe { libc::kill(-(raw), 0) } == 0;
-                if !group_alive {
-                    return;
-                }
-                // Group still alive — spawn a thread that waits up to 5s
-                // for graceful exit, then escalates to SIGKILL.
-                //
-                // NOTE: Because this child was spawned by
-                // `tokio::process::Command`, tokio's internal signal handler
-                // also monitors the PID. The `waitpid` call here may race
-                // with tokio's reaper, causing one of them to get `ECHILD`.
-                // Both ignore the result, so this is harmless.
-                std::thread::spawn(move || {
-                    // Poll for group exit over the grace period.
-                    let deadline = std::time::Instant::now()
-                        + std::time::Duration::from_secs(KILL_GRACE_SECONDS);
-                    loop {
-                        // Reap leader zombie so kill(-pgid, 0) is accurate.
-                        unsafe {
-                            libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
-                        }
-                        let group_alive = unsafe { libc::kill(-(raw), 0) } == 0;
-                        if !group_alive {
-                            return;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    // Grace period expired — hard kill the entire group.
-                    unsafe {
-                        libc::kill(-(raw), libc::SIGKILL);
-                        // Best-effort reap of the leader.  Use WNOHANG to
-                        // avoid blocking indefinitely if the child is stuck
-                        // in an uninterruptible kernel state (D state).
-                        // Tokio's internal reaper will clean up the zombie
-                        // if this non-blocking call misses it.
-                        libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
-                    }
-                });
             }
         }
     }
@@ -133,6 +87,24 @@ pub trait Backend: Send + Sync {
         _log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
         self.execute(prompt).await
+    }
+    /// Execute with cancellation support. On cancellation, backend
+    /// subprocesses are killed and reaped before returning `Cancelled`.
+    ///
+    /// The default implementation races `execute_with_log` against the
+    /// cancellation token. Backends that spawn subprocesses (e.g.
+    /// `CliBackend`) override this to perform synchronous cleanup so that
+    /// backend processes are guaranteed dead before this method returns.
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        tokio::select! {
+            result = self.execute_with_log(prompt, log_writer) => result,
+            _ = cancel.cancelled() => Err(RalphError::Cancelled),
+        }
     }
     async fn health_check(&self) -> Result<()>;
 }
@@ -552,6 +524,7 @@ impl CliBackend {
         &self,
         prompt: &str,
         mut log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
     ) -> Result<String> {
         // Compute effective args: if an invocation context is set, use
         // effective_args() for session-aware arg rewriting and/or JSON output
@@ -709,6 +682,7 @@ impl CliBackend {
             Completed(Result<(std::process::ExitStatus, Vec<u8>)>),
             TimedOut,
             WatchdogFailed(String),
+            Cancelled,
         }
 
         let mut watchdog_cancel_error: Option<String> = None;
@@ -766,13 +740,17 @@ impl CliBackend {
                         }
                     }
                 }
+                _ = cancel.cancelled() => ExecutionOutcome::Cancelled,
             };
 
-            if let ExecutionOutcome::Completed(_) = execution_outcome {
+            // Cancel the watchdog unless it already completed on its own.
+            if matches!(execution_outcome, ExecutionOutcome::Completed(_) | ExecutionOutcome::Cancelled) {
                 let _ = watchdog_cancel_tx.send(());
                 if let Err(err) = watchdog_handle.await {
-                    watchdog_cancel_error =
-                        Some(format!("watchdog task failed during cancellation: {err}"));
+                    if !matches!(execution_outcome, ExecutionOutcome::Cancelled) {
+                        watchdog_cancel_error =
+                            Some(format!("watchdog task failed during cancellation: {err}"));
+                    }
                 }
             }
 
@@ -876,6 +854,20 @@ impl CliBackend {
                     details,
                 })
             }
+            ExecutionOutcome::Cancelled => {
+                // Synchronous cancellation cleanup: kill the backend process
+                // group and wait for it to die before returning. This
+                // guarantees no backend processes outlive the task.
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                kill_guard.disarm();
+                // Best-effort drain of stderr (bounded to avoid stalling).
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.collect_stderr(stderr_handle),
+                )
+                .await;
+                Err(RalphError::Cancelled)
+            }
         }
     }
 
@@ -962,7 +954,8 @@ impl Backend for CliBackend {
     }
 
     async fn execute(&self, prompt: &str) -> Result<String> {
-        self.execute_streaming(prompt, None).await
+        self.execute_streaming(prompt, None, &CancellationToken::new())
+            .await
     }
 
     async fn execute_with_log(
@@ -970,7 +963,17 @@ impl Backend for CliBackend {
         prompt: &str,
         log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
-        self.execute_streaming(prompt, log_writer).await
+        self.execute_streaming(prompt, log_writer, &CancellationToken::new())
+            .await
+    }
+
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        self.execute_streaming(prompt, log_writer, cancel).await
     }
 
     async fn health_check(&self) -> Result<()> {

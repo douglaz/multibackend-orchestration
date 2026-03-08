@@ -3970,6 +3970,148 @@ esac
     .to_owned()
 }
 
+/// Mock GH script for mixed-outcome dispatch isolation tests.
+///
+/// Behaves like `daemon_mock_gh_script()` but makes the label claim for a
+/// specific issue number (`MOCK_GH_CLAIM_FAIL_ISSUE`) fail with exit 1.
+/// All other issues are claimed normally.
+///
+/// Environment variables:
+/// - `MOCK_GH_ISSUES` — JSON array of issues for `issue list`
+/// - `MOCK_GH_LABEL_LOG` — file to log label operations
+/// - `MOCK_GH_CLAIM_FAIL_ISSUE` — issue number whose claim should fail
+pub fn daemon_mock_gh_mixed_outcome_script() -> String {
+    r###"#!/bin/sh
+# Mock gh for mixed-outcome dispatch isolation tests.
+# MOCK_GH_CLAIM_FAIL_ISSUE: issue number whose claim should fail.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd|ralph:prd-active) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ] && [ -n "${MOCK_PRD_TICK_LOG:-}" ]; then
+          echo "prd-tick" >> "$MOCK_PRD_TICK_LOG"
+        fi
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        # Fail the claim for the specific issue
+        if [ -n "${MOCK_GH_CLAIM_FAIL_ISSUE:-}" ]; then
+          has_add_inprogress=0
+          issue_num=""
+          prev=""
+          for arg in "$@"; do
+            if [ "$prev" = "--add-label" ] && [ "$arg" = "ralph:in-progress" ]; then
+              has_add_inprogress=1
+            fi
+            case "$arg" in
+              [0-9]*) issue_num="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          if [ "$has_add_inprogress" = "1" ] && [ "$issue_num" = "$MOCK_GH_CLAIM_FAIL_ISSUE" ]; then
+            echo "mock gh: simulated claim failure for issue $issue_num" >&2
+            exit 1
+          fi
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      edit) exit 0 ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) exit 0 ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###
+    .to_owned()
+}
+
 /// Quick-dev implementer mock that also creates stray impl-notes and
 /// impl-response files in the worktree root (simulating the behaviour that
 /// caused the infinite loop in issue #146).

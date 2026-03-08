@@ -6094,10 +6094,9 @@ async fn execute_with_timeout_retries(
         let is_fallback = log_writer.attempt() > 0;
         log_writer.write_attempt_separator(backend.name(), is_fallback);
 
-        let exec_result = tokio::select! {
-            result = backend.execute_with_log(prompt, Some(log_writer)) => result,
-            _ = cancel.cancelled() => Err(RalphError::Cancelled),
-        };
+        let exec_result = backend
+            .execute_with_cancel(prompt, Some(log_writer), cancel)
+            .await;
         match exec_result {
             Ok(output) => {
                 return Ok(output);

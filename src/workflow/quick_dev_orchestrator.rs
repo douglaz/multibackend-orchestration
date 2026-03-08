@@ -1437,13 +1437,11 @@ async fn execute_backend(
     let max_retries = max_backend_retries(max_retries_configured);
 
     for attempt in 1..=max_retries {
-        let result = tokio::select! {
-            r = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                backend.execute_with_log(prompt, Some(log_writer)),
-            ) => r,
-            _ = cancel.cancelled() => return Err(RalphError::Cancelled),
-        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            backend.execute_with_cancel(prompt, Some(log_writer), cancel),
+        )
+        .await;
 
         match result {
             Ok(Ok(output)) => return Ok(output),

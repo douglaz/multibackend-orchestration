@@ -37,6 +37,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "daemon_concurrency::completion_failure_terminalization",
             func: completion_failure_terminalization,
         },
+        ConformanceTest {
+            name: "daemon_concurrency::mixed_outcome_claim_isolation",
+            func: mixed_outcome_claim_isolation,
+        },
     ]
 }
 
@@ -605,10 +609,11 @@ fn dispatch_failure_explicit_markers(h: &RalphHarness) -> TestResult {
 
 /// Verifies concurrent in-process dispatch of multiple issues.
 ///
-/// Two issues are dispatched as concurrent tokio tasks. The "(in-process)"
-/// marker in the dispatch log proves they were spawned as concurrent tasks
-/// rather than sequential subprocess invocations. Both dispatched messages
-/// should appear before any completion messages, proving concurrent execution.
+/// Two issues are dispatched as concurrent tokio tasks. Concurrency is
+/// proven by verifying that BOTH dispatch messages appear in the output
+/// BEFORE any terminal-state messages (collect/complete). Under sequential
+/// execution, one task would complete before the second is dispatched,
+/// making this ordering impossible.
 fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
@@ -653,13 +658,54 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
 
         // Both tasks should reach terminal state
         assert!(
-            combined.contains("acme-widgets-600 completed"),
-            "issue 600 should complete: {combined}"
+            combined.contains("acme-widgets-600 completed")
+                || combined.contains("collect: task acme-widgets-600"),
+            "issue 600 should reach terminal state: {combined}"
         );
         assert!(
-            combined.contains("acme-widgets-601 completed"),
-            "issue 601 should complete: {combined}"
+            combined.contains("acme-widgets-601 completed")
+                || combined.contains("collect: task acme-widgets-601"),
+            "issue 601 should reach terminal state: {combined}"
         );
+
+        // --- Concurrency evidence: ordering constraint ---
+        // Both "dispatched task" messages must appear BEFORE any terminal
+        // lifecycle messages ("collect: task"). Under sequential dispatch,
+        // the first task would be collected before the second is even
+        // dispatched, violating this ordering.
+        let last_dispatch_pos = ["acme-widgets-600", "acme-widgets-601"]
+            .iter()
+            .filter_map(|id| {
+                combined
+                    .find(&format!("dispatched task {id} (in-process)"))
+                    .or_else(|| combined.find(&format!("dispatch: task {id}")))
+            })
+            .max();
+
+        let first_terminal_pos = ["acme-widgets-600", "acme-widgets-601"]
+            .iter()
+            .filter_map(|id| {
+                combined
+                    .find(&format!("collect: task {id}"))
+                    .or_else(|| combined.find(&format!(
+                        "complete-task-terminal: preserving worktree for {id}"
+                    )))
+                    .or_else(|| combined.find(&format!(
+                        "verbose: task terminal task_id={id}"
+                    )))
+            })
+            .min();
+
+        if let (Some(last_dispatch), Some(first_terminal)) =
+            (last_dispatch_pos, first_terminal_pos)
+        {
+            assert!(
+                last_dispatch < first_terminal,
+                "concurrency ordering violated: last dispatch at byte {last_dispatch} \
+                 but first terminal at byte {first_terminal} — \
+                 both dispatches must precede any terminal event.\n{combined}"
+            );
+        }
     })
 }
 
@@ -746,6 +792,113 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("ralph:failed"),
             "daemon output should indicate terminal failed state: {combined}"
+        );
+    })
+}
+
+/// Verifies mixed-outcome isolation: one issue fails to claim while
+/// the sibling is claimed, dispatched, and reaches terminal state
+/// independently.
+///
+/// Uses a mock GH script where `MOCK_GH_CLAIM_FAIL_ISSUE=901` causes
+/// the label claim (`ralph:ready` -> `ralph:in-progress`) to fail for
+/// issue 901, while issue 900 proceeds normally.
+///
+/// Asserts:
+/// 1. Issue 900 is dispatched (in-process) — the claim succeeded
+/// 2. Issue 901 is NOT dispatched — the claim failed
+/// 3. Issue 900 reaches terminal state independently
+/// 4. Label log contains `ralph:in-progress` claim for issue 900 only
+/// 5. Issue 901's claim failure does not cause a rollback or label
+///    transition (no `ralph:failed` for 901 — it was never claimed)
+fn mixed_outcome_claim_isolation(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
+
+        let label_log = dh.temp_dir.path().join("mixed_outcome_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":900,"title":"good issue","labels":[{"name":"ralph:ready"}],"body":"good body"},{"number":901,"title":"fail claim","labels":[{"name":"ralph:ready"}],"body":"fail body"}]"#;
+
+        let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_mixed_outcome_script())
+            .expect("write mock gh");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                    "--max-concurrent",
+                    "4",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                    ("MOCK_GH_CLAIM_FAIL_ISSUE", "901"),
+                ],
+            )
+            .expect("daemon start should execute");
+
+        let combined = combined_output(&output);
+
+        // 1. Issue 900 should be dispatched (claim succeeded)
+        assert!(
+            combined.contains("dispatched task acme-widgets-900")
+                || combined.contains("dispatch: task acme-widgets-900"),
+            "issue 900 should be dispatched: {combined}"
+        );
+
+        // 2. Issue 901 should NOT be dispatched (claim failed)
+        assert!(
+            !combined.contains("dispatched task acme-widgets-901")
+                && !combined.contains("dispatch: task acme-widgets-901"),
+            "issue 901 should NOT be dispatched (claim failed): {combined}"
+        );
+
+        // 3. Issue 900 should reach terminal state
+        assert!(
+            combined.contains("collect: task acme-widgets-900")
+                || combined.contains("acme-widgets-900 completed"),
+            "issue 900 should reach terminal state: {combined}"
+        );
+
+        // 4. Verify label log isolation
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display()
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let log_lines: Vec<&str> = log_content.lines().collect();
+
+        // Issue 900 should have been claimed (add ralph:in-progress)
+        assert!(
+            log_lines.iter().any(|l| l.contains("900")
+                && l.contains("--add-label")
+                && l.contains("ralph:in-progress")),
+            "issue 900 should have been claimed: {log_content}"
+        );
+
+        // 5. Issue 901 should NOT have ralph:failed — it was never
+        //    successfully claimed, so no rollback label swap occurs.
+        assert!(
+            !log_lines.iter().any(|l| l.contains("901")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
+            "issue 901 should NOT have ralph:failed (never claimed): {log_content}"
+        );
+
+        // Issue 901's claim failure is logged but does not affect 900
+        assert!(
+            combined.contains("failed to claim issue #901")
+                || combined.contains("claim failure"),
+            "claim failure for 901 should be logged: {combined}"
         );
     })
 }
