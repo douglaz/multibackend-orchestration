@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt;
+use tracing_subscriber::EnvFilter;
 
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
 use crate::cli::backend_spec;
@@ -469,6 +470,28 @@ pub async fn run_quick_dev_run_task(params: QuickDevRunTaskParams) -> Result<Orc
         summary: result.summary,
         loop_number: result.loop_number,
     })
+}
+
+// ---------------------------------------------------------------------------
+// CLI interactive subscriber
+// ---------------------------------------------------------------------------
+
+/// Build a `tracing::Dispatch` that writes to stderr for interactive CLI use.
+///
+/// This ensures progress messages from the library entry points are visible
+/// to the user even if the global subscriber changes or is not set.  CLI
+/// callers should wrap their task future with `.with_subscriber(dispatch)`.
+pub fn cli_stderr_dispatch() -> tracing::dispatcher::Dispatch {
+    let subscriber = fmt::Subscriber::builder()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .without_time()
+        .finish();
+    tracing::dispatcher::Dispatch::new(subscriber)
 }
 
 // ---------------------------------------------------------------------------

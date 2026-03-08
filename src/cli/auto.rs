@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use super::init;
 use super::parse_positive_u32;
@@ -112,7 +113,7 @@ fn slugify_idea(idea: &str) -> String {
     slug
 }
 
-fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
+fn ensure_workspace(workspace_root: Option<&PathBuf>, fallback_cwd: &Path) -> Result<Workspace> {
     if let Some(root) = workspace_root {
         let ralph_dir = root.join(".ralph");
         if ralph_dir.join("ralph.toml").is_file() {
@@ -126,7 +127,7 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
     match Workspace::discover() {
         Ok(workspace) => Ok(workspace),
         Err(RalphError::WorkspaceNotFound) => {
-            let workspace = init::create_workspace(&std::env::current_dir()?.join(".ralph"))?;
+            let workspace = init::create_workspace(&fallback_cwd.join(".ralph"))?;
             eprintln!("initialized workspace at .ralph");
             Ok(workspace)
         }
@@ -142,8 +143,11 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         ));
     }
 
+    // Resolve CWD once at the CLI boundary for workspace fallback.
+    let cwd = std::env::current_dir()?;
+
     // Ensure workspace exists and resolve workspace_root for the task.
-    let workspace = ensure_workspace(args.workspace_root.as_ref())?;
+    let workspace = ensure_workspace(args.workspace_root.as_ref(), &cwd)?;
     let workspace_root = args.workspace_root.unwrap_or_else(|| {
         workspace
             .root
@@ -163,6 +167,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         Some(args.spec_reviewer)
     };
 
+    let dispatch = tasks::cli_stderr_dispatch();
     let result = tasks::run_auto_task(AutoTaskParams {
         workspace_root,
         idea,
@@ -184,6 +189,7 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
         skip_prompt_review: args.skip_prompt_review,
         dry_run: args.dry_run,
     })
+    .with_subscriber(dispatch)
     .await?;
 
     println!("{}", result.summary);
@@ -192,38 +198,12 @@ pub async fn execute(args: AutoArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
-
     use clap::Parser;
     use tempfile::tempdir;
 
     use super::{ensure_workspace, slugify_idea};
     use crate::cli::{Cli, Commands};
     use crate::config::GlobalConfig;
-
-    fn cwd_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct CwdGuard {
-        original: PathBuf,
-    }
-
-    impl CwdGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let original = std::env::current_dir().expect("get current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self { original }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
-        }
-    }
 
     #[test]
     fn test_slugify_idea_basic() {
@@ -331,11 +311,11 @@ mod tests {
 
     #[test]
     fn ensure_workspace_creates_workspace_when_missing() {
-        let _cwd_guard = cwd_lock().lock().expect("cwd lock");
         let temp = tempdir().expect("temp dir");
-        let _guard = CwdGuard::set(temp.path());
+        let fallback_cwd = temp.path();
 
-        let workspace = ensure_workspace(None).expect("workspace should be created");
+        let workspace =
+            ensure_workspace(None, fallback_cwd).expect("workspace should be created");
         let workspace_root = temp.path().join(".ralph");
 
         assert_eq!(workspace.root, workspace_root);
@@ -349,9 +329,10 @@ mod tests {
     fn ensure_workspace_with_explicit_root_creates_workspace() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path().to_path_buf();
+        let fallback_cwd = temp.path();
 
-        let workspace =
-            ensure_workspace(Some(&root)).expect("workspace should be created at explicit root");
+        let workspace = ensure_workspace(Some(&root), fallback_cwd)
+            .expect("workspace should be created at explicit root");
         let ralph_dir = root.join(".ralph");
 
         assert_eq!(workspace.root, ralph_dir);
@@ -364,13 +345,14 @@ mod tests {
     fn ensure_workspace_with_explicit_root_loads_existing() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path().to_path_buf();
+        let fallback_cwd = temp.path();
 
         // Create a workspace first
         let _ = crate::cli::init::create_workspace(&root.join(".ralph")).expect("create workspace");
 
         // Loading it again should succeed without re-creating
-        let workspace =
-            ensure_workspace(Some(&root)).expect("workspace should load from explicit root");
+        let workspace = ensure_workspace(Some(&root), fallback_cwd)
+            .expect("workspace should load from explicit root");
         assert_eq!(workspace.root, root.join(".ralph"));
     }
 }

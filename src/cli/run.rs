@@ -1,4 +1,5 @@
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use crate::cli::init;
 use crate::cli::RunArgs;
@@ -22,6 +23,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             .unwrap_or_else(|| ws.root.clone())
     };
 
+    let dispatch = tasks::cli_stderr_dispatch();
     let result = tasks::run_run_task(RunTaskParams {
         workspace_root,
         project: args.project,
@@ -43,6 +45,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         skip_commit: args.skip_commit,
         skip_prompt_review: args.skip_prompt_review,
     })
+    .with_subscriber(dispatch)
     .await?;
 
     println!("{}", result.summary);

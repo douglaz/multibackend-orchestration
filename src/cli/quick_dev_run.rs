@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use super::init;
 use super::parse_positive_u32;
@@ -53,6 +54,7 @@ pub async fn execute(args: QuickDevRunArgs) -> Result<()> {
             .unwrap_or_else(|| ws.root.clone())
     };
 
+    let dispatch = tasks::cli_stderr_dispatch();
     let result = tasks::run_quick_dev_run_task(QuickDevRunTaskParams {
         workspace_root,
         project: args.project,
@@ -65,6 +67,7 @@ pub async fn execute(args: QuickDevRunArgs) -> Result<()> {
         max_review_iterations: args.max_review_iterations,
         max_final_review_retries: args.max_final_review_retries,
     })
+    .with_subscriber(dispatch)
     .await?;
     println!("{}", result.summary);
 

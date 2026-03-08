@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use super::init;
 use super::parse_positive_u32;
@@ -47,7 +48,7 @@ fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
+fn ensure_workspace(workspace_root: Option<&PathBuf>, fallback_cwd: &Path) -> Result<Workspace> {
     if let Some(root) = workspace_root {
         let ralph_dir = root.join(".ralph");
         if ralph_dir.join("ralph.toml").is_file() {
@@ -61,7 +62,7 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
     match Workspace::discover() {
         Ok(workspace) => Ok(workspace),
         Err(RalphError::WorkspaceNotFound) => {
-            let workspace = init::create_workspace(&std::env::current_dir()?.join(".ralph"))?;
+            let workspace = init::create_workspace(&fallback_cwd.join(".ralph"))?;
             eprintln!("initialized workspace at .ralph");
             Ok(workspace)
         }
@@ -77,8 +78,11 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
         ));
     }
 
+    // Resolve CWD once at the CLI boundary for workspace fallback.
+    let cwd = std::env::current_dir()?;
+
     // Ensure workspace exists and resolve workspace_root for the task.
-    let workspace = ensure_workspace(args.workspace_root.as_ref())?;
+    let workspace = ensure_workspace(args.workspace_root.as_ref(), &cwd)?;
     let workspace_root = args.workspace_root.unwrap_or_else(|| {
         workspace
             .root
@@ -87,6 +91,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
             .unwrap_or_else(|| workspace.root.clone())
     });
 
+    let dispatch = tasks::cli_stderr_dispatch();
     let result = tasks::run_quick_dev_auto_task(QuickDevAutoTaskParams {
         workspace_root,
         idea,
@@ -100,6 +105,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
         max_review_iterations: args.max_review_iterations,
         max_final_review_retries: args.max_final_review_retries,
     })
+    .with_subscriber(dispatch)
     .await?;
 
     println!("{}", result.summary);
