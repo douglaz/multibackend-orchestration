@@ -1815,14 +1815,8 @@ mod tests {
         let remote = root.join("remote.git");
         let work = root.join("work");
 
-        git_ok(
-            root,
-            &["init", "--bare", remote.to_string_lossy().as_ref()],
-        );
-        git_ok(
-            root,
-            &["clone", remote.to_string_lossy().as_ref(), "work"],
-        );
+        git_ok(root, &["init", "--bare", remote.to_string_lossy().as_ref()]);
+        git_ok(root, &["clone", remote.to_string_lossy().as_ref(), "work"]);
         git_ok(&work, &["config", "user.email", "test@example.com"]);
         git_ok(&work, &["config", "user.name", "Test User"]);
 
@@ -1952,14 +1946,9 @@ mod tests {
         );
 
         // No git context — checkpoint defaults to (1, Planning).
-        let state = reconstruct_project_state_internal(
-            &project_dir,
-            "test-no-ceiling",
-            None,
-            None,
-            None,
-        )
-        .expect("reconstruction should succeed");
+        let state =
+            reconstruct_project_state_internal(&project_dir, "test-no-ceiling", None, None, None)
+                .expect("reconstruction should succeed");
 
         // Both loops should be present.
         assert_eq!(
@@ -2043,8 +2032,7 @@ mod tests {
         // No loop artifacts (removed by rollback 0).
 
         // Git checkpoint at loop 2.
-        let msg1 =
-            build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
+        let msg1 = build_ralph_commit_message("test-proj", 1, Phase::Planning, Phase::Implementing);
         commit_empty_with_msg(&repo, &msg1);
         git_ok(&repo, &["push", "origin", "HEAD:ralph/test-proj"]);
 
