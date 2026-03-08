@@ -1538,7 +1538,6 @@ async fn dispatch_task(
     let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
     let cancel_token = CancellationToken::new();
     let wt = wt_path.clone();
-    let global_config = config.global_config.clone();
 
     let join_handle = {
         let cancel = cancel_token.clone();
@@ -1550,10 +1549,15 @@ async fn dispatch_task(
                 );
                 let params = super::tasks::QuickDevRunTaskParams {
                     workspace_root: wt,
-                    project_id: project_id.clone(),
+                    project: Some(project_id.clone()),
                     pr_url: pr_url.clone(),
                     cancel,
                     max_backend_retries: config.max_backend_retries,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    skip_commit: false,
+                    max_review_iterations: None,
+                    max_final_review_retries: None,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_run_task(params), &log_path)?
             }
@@ -1567,9 +1571,13 @@ async fn dispatch_task(
                     idea: idea.clone(),
                     project_id: Some(project_id.clone()),
                     pr_url: pr_url.clone(),
-                    global_config,
                     cancel,
                     max_backend_retries: config.max_backend_retries,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    skip_commit: false,
+                    max_review_iterations: None,
+                    max_final_review_retries: None,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_auto_task(params), &log_path)?
             }
@@ -1580,10 +1588,24 @@ async fn dispatch_task(
                 );
                 let params = super::tasks::RunTaskParams {
                     workspace_root: wt,
-                    project_id: project_id.clone(),
+                    project: Some(project_id.clone()),
                     pr_url: pr_url.clone(),
                     cancel,
                     max_backend_retries: config.max_backend_retries,
+                    loops: None,
+                    until_review: false,
+                    until_complete: true,
+                    dry_run: false,
+                    backend: None,
+                    planner_backend: None,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    qa_backend: None,
+                    completer_backend: None,
+                    tmux: None,
+                    on_prompt_change: None,
+                    skip_commit: false,
+                    skip_prompt_review: false,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_run_task(params), &log_path)?
             }
@@ -1597,9 +1619,21 @@ async fn dispatch_task(
                     idea: idea.clone(),
                     project_id: Some(project_id.clone()),
                     pr_url: pr_url.clone(),
-                    global_config,
                     cancel,
                     max_backend_retries: config.max_backend_retries,
+                    spec_writer: None,
+                    spec_reviewer: None,
+                    max_spec_revisions: 1,
+                    backend: None,
+                    planner_backend: None,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    qa_backend: None,
+                    completer_backend: None,
+                    tmux: None,
+                    skip_commit: false,
+                    skip_prompt_review: false,
+                    dry_run: false,
                 };
                 super::tasks::spawn_inprocess_task(|| super::tasks::run_auto_task(params), &log_path)?
             }

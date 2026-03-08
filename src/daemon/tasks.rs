@@ -16,7 +16,8 @@ use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt;
 
 use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
-use crate::config::GlobalConfig;
+use crate::cli::backend_spec;
+use crate::config::PromptChangeAction;
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
@@ -30,23 +31,57 @@ use crate::Result;
 // ---------------------------------------------------------------------------
 
 /// Parameters for the `auto` dispatch variant (fresh project with quick-prd).
+///
+/// Both daemon and CLI callers use this struct.  Fields that are CLI-only
+/// (e.g. `dry_run`, per-role backend overrides) default to `None`/`false`
+/// when constructed by the daemon dispatcher.
 pub struct AutoTaskParams {
     pub workspace_root: PathBuf,
     pub idea: String,
     pub project_id: Option<String>,
     pub pr_url: Option<String>,
-    pub global_config: GlobalConfig,
     pub cancel: CancellationToken,
     pub max_backend_retries: Option<u8>,
+    // PRD options — `None` falls back to workspace config.
+    pub spec_writer: Option<String>,
+    pub spec_reviewer: Option<String>,
+    pub max_spec_revisions: u32,
+    // Orchestrator options
+    pub backend: Option<String>,
+    pub planner_backend: Option<String>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub qa_backend: Option<String>,
+    pub completer_backend: Option<String>,
+    pub tmux: Option<bool>,
+    pub skip_commit: bool,
+    pub skip_prompt_review: bool,
+    pub dry_run: bool,
 }
 
 /// Parameters for the `run` dispatch variant (resume existing project).
+///
+/// Mirrors `RunOptions` but carries the workspace root explicitly.
 pub struct RunTaskParams {
     pub workspace_root: PathBuf,
-    pub project_id: String,
+    pub project: Option<String>,
     pub pr_url: Option<String>,
     pub cancel: CancellationToken,
     pub max_backend_retries: Option<u8>,
+    pub loops: Option<u32>,
+    pub until_review: bool,
+    pub until_complete: bool,
+    pub dry_run: bool,
+    pub backend: Option<String>,
+    pub planner_backend: Option<String>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub qa_backend: Option<String>,
+    pub completer_backend: Option<String>,
+    pub tmux: Option<bool>,
+    pub on_prompt_change: Option<PromptChangeAction>,
+    pub skip_commit: bool,
+    pub skip_prompt_review: bool,
 }
 
 /// Parameters for the `quick-dev-auto` dispatch variant.
@@ -55,18 +90,27 @@ pub struct QuickDevAutoTaskParams {
     pub idea: String,
     pub project_id: Option<String>,
     pub pr_url: Option<String>,
-    pub global_config: GlobalConfig,
     pub cancel: CancellationToken,
     pub max_backend_retries: Option<u8>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub skip_commit: bool,
+    pub max_review_iterations: Option<u32>,
+    pub max_final_review_retries: Option<u32>,
 }
 
 /// Parameters for the `quick-dev-run` dispatch variant.
 pub struct QuickDevRunTaskParams {
     pub workspace_root: PathBuf,
-    pub project_id: String,
+    pub project: Option<String>,
     pub pr_url: Option<String>,
     pub cancel: CancellationToken,
     pub max_backend_retries: Option<u8>,
+    pub implementer_backend: Option<String>,
+    pub reviewer_backend: Option<String>,
+    pub skip_commit: bool,
+    pub max_review_iterations: Option<u32>,
+    pub max_final_review_retries: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +118,8 @@ pub struct QuickDevRunTaskParams {
 // ---------------------------------------------------------------------------
 
 /// Run `auto` flow: quick-prd → create project → orchestrate until complete.
+///
+/// Shared entry point for both CLI (`ralph auto`) and daemon dispatch.
 pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult> {
     let workspace = load_workspace(&params.workspace_root)?;
     let repo_root = workspace
@@ -82,13 +128,19 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         .map(|p| p.to_owned())
         .unwrap_or_else(|| params.workspace_root.clone());
 
-    // Quick-prd phase
-    let writer_spec = workspace.config.workspace.daemon_prd_writer_backend.clone();
-    let reviewer_spec = workspace
-        .config
-        .workspace
-        .daemon_prd_reviewer_backend
-        .clone();
+    // Quick-prd phase — use explicit overrides or fall back to workspace config.
+    let writer_spec = params
+        .spec_writer
+        .unwrap_or_else(|| workspace.config.workspace.daemon_prd_writer_backend.clone());
+    let reviewer_spec = params
+        .spec_reviewer
+        .unwrap_or_else(|| {
+            workspace
+                .config
+                .workspace
+                .daemon_prd_reviewer_backend
+                .clone()
+        });
 
     let mut registry = BackendRegistry::new(
         &workspace.config,
@@ -99,6 +151,9 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         },
     );
     registry.set_cwd(Some(repo_root.clone()));
+
+    backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
+    backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;
 
     let writer = registry.get_or_create_for_spec(&writer_spec)?;
     let reviewer = registry.get_or_create_for_spec(&reviewer_spec)?;
@@ -112,7 +167,7 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
             idea: params.idea.clone(),
             writer_spec,
             reviewer_spec,
-            max_revisions: 1,
+            max_revisions: params.max_spec_revisions,
             dry_run: false,
         },
     );
@@ -131,6 +186,35 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
         "quick-prd completed"
     );
 
+    // Handle dry-run: return the spec content as the summary.
+    if params.dry_run {
+        let spec = std::fs::read_to_string(&quick_prd_result.spec_path).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to read spec file {}: {err}",
+                quick_prd_result.spec_path.display()
+            ))
+        })?;
+        return Ok(OrchestrationResult {
+            summary: spec,
+            loop_number: None,
+        });
+    }
+
+    // Validate orchestrator backend specs (fail-fast before project creation).
+    for spec in [
+        params.backend.as_deref(),
+        params.planner_backend.as_deref(),
+        params.implementer_backend.as_deref(),
+        params.reviewer_backend.as_deref(),
+        params.qa_backend.as_deref(),
+        params.completer_backend.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        backend_spec::validate_backend_spec(spec, &workspace.config)?;
+    }
+
     // Create project
     let project_id =
         params
@@ -148,65 +232,73 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
             id: project_id.clone(),
             name: project_name,
             source: PromptSource::File(quick_prd_result.spec_path),
-            starting_backend: None,
+            starting_backend: params.backend.clone(),
         },
     )?;
+
+    tracing::info!(project_id = %project_id, "project created");
 
     // Orchestrate
     let workspace = load_workspace(&params.workspace_root)?;
     let mut orchestrator = Orchestrator::new(workspace);
-    orchestrator.run(RunOptions {
-        project: Some(project_id),
-        loops: None,
-        until_review: false,
-        until_complete: true,
-        dry_run: false,
-        backend: None,
-        planner_backend: None,
-        implementer_backend: None,
-        reviewer_backend: None,
-        qa_backend: None,
-        completer_backend: None,
-        tmux: None,
-        on_prompt_change: None,
-        skip_commit: false,
-        skip_prompt_review: false,
-        pr_url: params.pr_url,
-        cancel: params.cancel,
-        max_backend_retries: params.max_backend_retries,
-    })
-    .await
+    orchestrator
+        .run(RunOptions {
+            project: Some(project_id),
+            loops: None,
+            until_review: false,
+            until_complete: true,
+            dry_run: false,
+            backend: params.backend,
+            planner_backend: params.planner_backend,
+            implementer_backend: params.implementer_backend,
+            reviewer_backend: params.reviewer_backend,
+            qa_backend: params.qa_backend,
+            completer_backend: params.completer_backend,
+            tmux: params.tmux,
+            on_prompt_change: None,
+            skip_commit: params.skip_commit,
+            skip_prompt_review: params.skip_prompt_review,
+            pr_url: params.pr_url,
+            cancel: params.cancel,
+            max_backend_retries: params.max_backend_retries,
+        })
+        .await
 }
 
 /// Run `run` flow: resume existing project, orchestrate until complete.
+///
+/// Shared entry point for both CLI (`ralph run`) and daemon dispatch.
 pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> {
     let workspace = load_workspace(&params.workspace_root)?;
 
     let mut orchestrator = Orchestrator::new(workspace);
-    orchestrator.run(RunOptions {
-        project: Some(params.project_id),
-        loops: None,
-        until_review: false,
-        until_complete: true,
-        dry_run: false,
-        backend: None,
-        planner_backend: None,
-        implementer_backend: None,
-        reviewer_backend: None,
-        qa_backend: None,
-        completer_backend: None,
-        tmux: None,
-        on_prompt_change: None,
-        skip_commit: false,
-        skip_prompt_review: false,
-        pr_url: params.pr_url,
-        cancel: params.cancel,
-        max_backend_retries: params.max_backend_retries,
-    })
-    .await
+    orchestrator
+        .run(RunOptions {
+            project: params.project,
+            loops: params.loops,
+            until_review: params.until_review,
+            until_complete: params.until_complete,
+            dry_run: params.dry_run,
+            backend: params.backend,
+            planner_backend: params.planner_backend,
+            implementer_backend: params.implementer_backend,
+            reviewer_backend: params.reviewer_backend,
+            qa_backend: params.qa_backend,
+            completer_backend: params.completer_backend,
+            tmux: params.tmux,
+            on_prompt_change: params.on_prompt_change,
+            skip_commit: params.skip_commit,
+            skip_prompt_review: params.skip_prompt_review,
+            pr_url: params.pr_url,
+            cancel: params.cancel,
+            max_backend_retries: params.max_backend_retries,
+        })
+        .await
 }
 
 /// Run `quick-dev-auto` flow: quick-prd → create project → quick-dev orchestrate.
+///
+/// Shared entry point for both CLI (`ralph quick-dev-auto`) and daemon dispatch.
 pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<OrchestrationResult> {
     let workspace = load_workspace(&params.workspace_root)?;
     let repo_root = workspace
@@ -233,6 +325,9 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
     );
     registry.set_cwd(Some(repo_root.clone()));
 
+    backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
+    backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;
+
     let writer = registry.get_or_create_for_spec(&writer_spec)?;
     let reviewer = registry.get_or_create_for_spec(&reviewer_spec)?;
     writer.health_check().await?;
@@ -281,21 +376,23 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
             id: project_id.clone(),
             name: project_name,
             source: PromptSource::File(quick_prd_result.spec_path),
-            starting_backend: None,
+            starting_backend: params.implementer_backend.clone(),
         },
     )?;
+
+    tracing::info!(project_id = %project_id, "project created");
 
     // Orchestrate via quick-dev
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
     let result = orchestrator
         .run(QuickDevRunOptions {
             project: Some(project_id),
-            implementer_backend: None,
-            reviewer_backend: None,
+            implementer_backend: params.implementer_backend,
+            reviewer_backend: params.reviewer_backend,
             pr_url: params.pr_url,
-            skip_commit: false,
-            max_review_iterations: None,
-            max_final_review_retries: None,
+            skip_commit: params.skip_commit,
+            max_review_iterations: params.max_review_iterations,
+            max_final_review_retries: params.max_final_review_retries,
             cancel: params.cancel,
             max_backend_retries: params.max_backend_retries,
         })
@@ -308,19 +405,21 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
 }
 
 /// Run `quick-dev-run` flow: resume existing project via quick-dev orchestrator.
+///
+/// Shared entry point for both CLI (`ralph quick-dev-run`) and daemon dispatch.
 pub async fn run_quick_dev_run_task(params: QuickDevRunTaskParams) -> Result<OrchestrationResult> {
     let workspace = load_workspace(&params.workspace_root)?;
 
     let mut orchestrator = QuickDevOrchestrator::new(workspace);
     let result = orchestrator
         .run(QuickDevRunOptions {
-            project: Some(params.project_id),
-            implementer_backend: None,
-            reviewer_backend: None,
+            project: params.project,
+            implementer_backend: params.implementer_backend,
+            reviewer_backend: params.reviewer_backend,
             pr_url: params.pr_url,
-            skip_commit: false,
-            max_review_iterations: None,
-            max_final_review_retries: None,
+            skip_commit: params.skip_commit,
+            max_review_iterations: params.max_review_iterations,
+            max_final_review_retries: params.max_final_review_retries,
             cancel: params.cancel,
             max_backend_retries: params.max_backend_retries,
         })

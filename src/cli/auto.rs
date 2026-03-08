@@ -5,12 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::init;
 use super::parse_positive_u32;
-use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
-use crate::cli::backend_spec;
+use crate::daemon::tasks::{self, AutoTaskParams};
 use crate::error::RalphError;
-use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
-use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-use crate::workflow::orchestrator::{Orchestrator, RunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -22,7 +18,6 @@ fn parse_max_backend_retries_env() -> Option<u8> {
 }
 
 const MAX_PROJECT_ID_LEN: usize = 40;
-const MAX_PROJECT_NAME_LEN: usize = 60;
 
 #[derive(Debug, Args)]
 pub struct AutoArgs {
@@ -88,10 +83,6 @@ fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-fn truncate_idea_for_name(idea: &str) -> String {
-    idea.chars().take(MAX_PROJECT_NAME_LEN).collect()
-}
-
 /// Slugify an idea string into a project ID.
 /// Public for use by `daemon::tasks`.
 pub fn slugify_idea_public(idea: &str) -> String {
@@ -147,176 +138,58 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
 }
 
 pub async fn execute(args: AutoArgs) -> Result<()> {
-    let AutoArgs {
-        idea,
-        spec_writer,
-        spec_reviewer,
-        max_spec_revisions,
-        project_id,
-        backend,
-        planner_backend,
-        implementer_backend,
-        reviewer_backend,
-        qa_backend,
-        completer_backend,
-        skip_commit,
-        skip_prompt_review,
-        tmux,
-        no_tmux,
-        dry_run,
-        pr_url,
-        workspace_root,
-    } = args;
-
-    let idea = idea.trim().to_owned();
+    let idea = args.idea.trim().to_owned();
     if idea.is_empty() {
         return Err(RalphError::Validation(
             "--idea must not be empty".to_owned(),
         ));
     }
 
-    let workspace = ensure_workspace(workspace_root.as_ref())?;
-
-    let writer_spec = if spec_writer.trim().is_empty() {
-        workspace.config.workspace.daemon_prd_writer_backend.clone()
-    } else {
-        spec_writer
-    };
-    let reviewer_spec = if spec_reviewer.trim().is_empty() {
+    // Ensure workspace exists and resolve workspace_root for the task.
+    let workspace = ensure_workspace(args.workspace_root.as_ref())?;
+    let workspace_root = args.workspace_root.unwrap_or_else(|| {
         workspace
-            .config
-            .workspace
-            .daemon_prd_reviewer_backend
-            .clone()
+            .root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| workspace.root.clone())
+    });
+
+    let spec_writer = if args.spec_writer.trim().is_empty() {
+        None
     } else {
-        spec_reviewer
+        Some(args.spec_writer)
+    };
+    let spec_reviewer = if args.spec_reviewer.trim().is_empty() {
+        None
+    } else {
+        Some(args.spec_reviewer)
     };
 
-    println!("Running quick-prd phase...");
-    println!("  idea: {idea}");
-    println!("  writer backend: {writer_spec}");
-    println!("  reviewer backend: {reviewer_spec}");
-    println!("  max revisions: {max_spec_revisions}");
+    let result = tasks::run_auto_task(AutoTaskParams {
+        workspace_root,
+        idea,
+        project_id: args.project_id,
+        pr_url: args.pr_url,
+        cancel: CancellationToken::new(),
+        max_backend_retries: parse_max_backend_retries_env(),
+        spec_writer,
+        spec_reviewer,
+        max_spec_revisions: args.max_spec_revisions,
+        backend: args.backend,
+        planner_backend: args.planner_backend,
+        implementer_backend: args.implementer_backend,
+        reviewer_backend: args.reviewer_backend,
+        qa_backend: args.qa_backend,
+        completer_backend: args.completer_backend,
+        tmux: args.tmux.or(args.no_tmux),
+        skip_commit: args.skip_commit,
+        skip_prompt_review: args.skip_prompt_review,
+        dry_run: args.dry_run,
+    })
+    .await?;
 
-    let repo_root = workspace
-        .root
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| workspace.root.clone());
-
-    let mut registry = BackendRegistry::new(
-        &workspace.config,
-        BackendRegistryTmuxConfig {
-            enabled: false,
-            session_name: workspace.config.workspace.tmux_session.clone(),
-            window_keep_seconds: workspace.config.workspace.tmux_window_keep_seconds,
-        },
-    );
-    registry.set_cwd(Some(repo_root.clone()));
-
-    backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
-    backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;
-
-    let writer = registry.get_or_create_for_spec(&writer_spec)?;
-    let reviewer = registry.get_or_create_for_spec(&reviewer_spec)?;
-    writer.health_check().await?;
-    reviewer.health_check().await?;
-
-    let quick_prd = QuickPrdPipeline::new(
-        writer,
-        reviewer,
-        QuickPrdOptions {
-            idea: idea.clone(),
-            writer_spec: writer_spec.clone(),
-            reviewer_spec: reviewer_spec.clone(),
-            max_revisions: max_spec_revisions,
-            dry_run: false,
-        },
-    );
-    let quick_prd_result = quick_prd.run(repo_root).await?;
-
-    println!("Quick-prd completed.");
-    println!("  spec: {}", quick_prd_result.spec_path.display());
-    println!("  cache: {}", quick_prd_result.cache_dir.display());
-    println!("  revisions: {}", quick_prd_result.revision_count);
-    println!("  {}", quick_prd_result.summary);
-
-    if dry_run {
-        let spec = std::fs::read_to_string(&quick_prd_result.spec_path)?;
-        println!();
-        println!("{spec}");
-        return Ok(());
-    }
-
-    if let Some(spec) = backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = planner_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = implementer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = reviewer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = qa_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = completer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-
-    let project_id = project_id.unwrap_or_else(|| slugify_idea(&idea));
-    if project_id.is_empty() {
-        return Err(RalphError::Validation(
-            "derived project id from --idea is empty; pass --project-id".to_owned(),
-        ));
-    }
-    let project_name = truncate_idea_for_name(&idea);
-
-    println!();
-    println!("Creating project...");
-    create_project(
-        &workspace,
-        CreateProjectOptions {
-            id: project_id.clone(),
-            name: project_name,
-            source: PromptSource::File(quick_prd_result.spec_path),
-            starting_backend: backend.clone(),
-        },
-    )?;
-    println!("  project id: {project_id}");
-    println!("  project created");
-
-    println!();
-    println!("Running orchestration until completion...");
-    let workspace = ensure_workspace(workspace_root.as_ref())?;
-    let mut orchestrator = Orchestrator::new(workspace);
-    let run_result = orchestrator
-        .run(RunOptions {
-            project: Some(project_id),
-            loops: None,
-            until_review: false,
-            until_complete: true,
-            dry_run: false,
-            backend,
-            planner_backend,
-            implementer_backend,
-            reviewer_backend,
-            qa_backend,
-            completer_backend,
-            tmux: tmux.or(no_tmux),
-            on_prompt_change: None,
-            skip_commit,
-            skip_prompt_review,
-            pr_url,
-            cancel: CancellationToken::new(),
-            max_backend_retries: parse_max_backend_retries_env(),
-        })
-        .await?;
-    println!("{}", run_result.summary);
-
+    println!("{}", result.summary);
     Ok(())
 }
 

@@ -60,20 +60,27 @@ impl Drop for KillOnDrop {
         if let Some(pgid) = self.0 {
             if let Ok(raw) = i32::try_from(pgid) {
                 // Two-stage termination: SIGTERM first for cooperative shutdown,
-                // then SIGKILL after a grace period if the process is still alive.
+                // then SIGKILL after a grace period if the process group is
+                // still alive.
                 // SAFETY: Sending signals to a process group is safe.
                 unsafe {
                     libc::kill(-(raw), libc::SIGTERM);
                 }
-                // Check if the process already exited after SIGTERM.
-                let reap_result = unsafe {
-                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG)
-                };
-                if reap_result != 0 {
-                    // Already exited (or error) — nothing more to do.
+                // Best-effort reap of the leader zombie so that subsequent
+                // kill(-pgid, 0) reflects true group liveness. Without this
+                // reap, a zombie leader keeps the PID in the process table and
+                // kill(-pgid, 0) returns 0 even when no live processes remain.
+                unsafe {
+                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
+                }
+                // Check process-group liveness via kill(-pgid, 0).  Returns
+                // -1 with ESRCH when no processes in the group remain.
+                // This correctly detects descendants that survive the leader.
+                let group_alive = unsafe { libc::kill(-(raw), 0) } == 0;
+                if !group_alive {
                     return;
                 }
-                // Child still alive — spawn a thread that waits up to 5s
+                // Group still alive — spawn a thread that waits up to 5s
                 // for graceful exit, then escalates to SIGKILL.
                 //
                 // NOTE: Because this child was spawned by
@@ -82,15 +89,16 @@ impl Drop for KillOnDrop {
                 // with tokio's reaper, causing one of them to get `ECHILD`.
                 // Both ignore the result, so this is harmless.
                 std::thread::spawn(move || {
-                    // Poll for exit over the grace period.
+                    // Poll for group exit over the grace period.
                     let deadline = std::time::Instant::now()
                         + std::time::Duration::from_secs(KILL_GRACE_SECONDS);
                     loop {
-                        let result = unsafe {
-                            libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG)
-                        };
-                        if result != 0 {
-                            // Exited (or error) — done.
+                        // Reap leader zombie so kill(-pgid, 0) is accurate.
+                        unsafe {
+                            libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
+                        }
+                        let group_alive = unsafe { libc::kill(-(raw), 0) } == 0;
+                        if !group_alive {
                             return;
                         }
                         if std::time::Instant::now() >= deadline {
@@ -98,9 +106,10 @@ impl Drop for KillOnDrop {
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
-                    // Grace period expired — hard kill.
+                    // Grace period expired — hard kill the entire group.
                     unsafe {
                         libc::kill(-(raw), libc::SIGKILL);
+                        // Best-effort reap of the leader.
                         libc::waitpid(raw, std::ptr::null_mut(), 0);
                     }
                 });
@@ -839,29 +848,37 @@ impl CliBackend {
         // Two-stage termination for the entire process group (child used
         // setsid(), so its PID is the group leader). Send SIGTERM first
         // for cooperative shutdown, then escalate to SIGKILL after a 5s
-        // grace period if the process is still alive.
+        // grace period if the process group is still alive.
+        //
+        // Track group liveness via kill(-pgid, 0) combined with
+        // child.try_wait() to reap the leader zombie.  Using only
+        // child.wait() would miss descendants that ignore SIGTERM but
+        // whose leader exits; using only kill(-pgid, 0) without reaping
+        // would see zombies as alive.
         if let Some(pid) = child.id() {
-            // Stage 1: SIGTERM
+            // Stage 1: SIGTERM the entire process group.
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGTERM);
             }
-            // Wait up to 5s for graceful exit.
+            // Poll group liveness over the grace period.
             let grace = Duration::from_secs(KILL_GRACE_SECONDS);
-            match tokio::time::timeout(grace, child.wait()).await {
-                Ok(Ok(_)) => return, // Exited gracefully.
-                Ok(Err(err)) => {
-                    warn!(
-                        backend = %self.name,
-                        error = %err,
-                        "error waiting for child after SIGTERM"
-                    );
-                    return;
+            let deadline = tokio::time::Instant::now() + grace;
+            let group_dead = loop {
+                // Reap leader zombie via tokio so kill(-pgid, 0) is accurate.
+                let _ = child.try_wait();
+                let group_alive = unsafe { libc::kill(-(pid as i32), 0) } == 0;
+                if !group_alive {
+                    break true;
                 }
-                Err(_) => {
-                    // Stage 2: Grace period expired — hard kill.
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
+                if tokio::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            if !group_dead {
+                // Stage 2: Grace period expired — hard kill the entire group.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
                 }
             }
         } else if let Err(err) = child.kill().await {
@@ -873,6 +890,7 @@ impl CliBackend {
                 );
             }
         }
+        // Best-effort reap of the leader process.
         if let Err(err) = child.wait().await {
             warn!(
                 backend = %self.name,
@@ -2551,6 +2569,98 @@ while true; do sleep 0.1; done
         assert!(
             elapsed < Duration::from_secs(10),
             "kill_and_reap_child took too long ({elapsed:?}), should complete near the 5s grace period"
+        );
+    }
+
+    /// Regression test: parent exits on SIGTERM but a child descendant ignores
+    /// it.  `kill_and_reap_child` must send SIGKILL to the process group when
+    /// descendants survive the leader, ensuring no orphaned processes.
+    #[tokio::test]
+    async fn kill_and_reap_child_kills_descendants_that_survive_leader() {
+        let temp = tempdir().expect("tempdir");
+        let child_pid_file = temp.path().join("child-pid");
+        // Parent spawns a background child that ignores SIGTERM, then the
+        // parent itself exits immediately on SIGTERM.
+        let script_path = write_executable_script(
+            temp.path(),
+            "parent-exits-child-stays.sh",
+            &format!(
+                r#"#!/bin/sh
+# Child: ignore SIGTERM and busy-wait forever
+(
+    trap '' TERM
+    echo $$ > "{child_pid}"
+    while true; do sleep 0.1; done
+) &
+# Parent: exit gracefully on SIGTERM
+trap 'exit 0' TERM
+cat >/dev/null
+while true; do sleep 0.1; done
+"#,
+                child_pid = child_pid_file.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "descendant-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(30),
+            BTreeMap::new(),
+        );
+
+        let mut cmd = tokio::process::Command::new(&backend.command);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn parent");
+
+        // Close stdin so the parent reaches the busy-wait loop.
+        drop(child.stdin.take());
+        // Wait for the child process to write its PID.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let child_pid_str =
+            std::fs::read_to_string(&child_pid_file).expect("child pid file should exist");
+        let descendant_pid: i32 = child_pid_str
+            .trim()
+            .parse()
+            .expect("child pid should be a valid number");
+
+        // Verify the descendant is alive before cleanup.
+        assert_eq!(
+            unsafe { libc::kill(descendant_pid, 0) },
+            0,
+            "descendant process should be alive before cleanup"
+        );
+
+        let start = Instant::now();
+        backend.kill_and_reap_child(&mut child).await;
+        let elapsed = start.elapsed();
+
+        // The descendant must be dead after kill_and_reap_child.
+        let descendant_alive = unsafe { libc::kill(descendant_pid, 0) } == 0;
+        assert!(
+            !descendant_alive,
+            "descendant process {descendant_pid} should be dead after kill_and_reap_child"
+        );
+
+        // Should complete within the grace period + margin.  The leader exits
+        // immediately on SIGTERM, but the group stays alive until SIGKILL
+        // escalation after ~5s.
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "expected group-level grace period before SIGKILL, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "kill_and_reap_child took too long ({elapsed:?})"
         );
     }
 }

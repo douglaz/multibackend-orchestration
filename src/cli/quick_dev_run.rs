@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::init;
 use super::parse_positive_u32;
-use crate::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunOptions};
+use crate::daemon::tasks::{self, QuickDevRunTaskParams};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -41,33 +41,34 @@ pub struct QuickDevRunArgs {
 }
 
 pub async fn execute(args: QuickDevRunArgs) -> Result<()> {
-    let workspace = if let Some(ref root) = args.workspace_root {
+    let workspace_root = if let Some(root) = args.workspace_root {
         let ralph_dir = root.join(".ralph");
-        if ralph_dir.join("ralph.toml").is_file() {
-            Workspace::load(ralph_dir)?
-        } else {
-            let ws = init::create_workspace(&ralph_dir)?;
+        if !ralph_dir.join("ralph.toml").is_file() {
+            let _ = init::create_workspace(&ralph_dir)?;
             eprintln!("initialized workspace at {}", ralph_dir.display());
-            ws
         }
+        root
     } else {
-        Workspace::discover()?
+        let ws = Workspace::discover()?;
+        ws.root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| ws.root.clone())
     };
 
-    let mut orchestrator = QuickDevOrchestrator::new(workspace);
-    let result = orchestrator
-        .run(QuickDevRunOptions {
-            project: args.project,
-            implementer_backend: args.implementer_backend,
-            reviewer_backend: args.reviewer_backend,
-            pr_url: args.pr_url,
-            skip_commit: args.skip_commit,
-            max_review_iterations: args.max_review_iterations,
-            max_final_review_retries: args.max_final_review_retries,
-            cancel: CancellationToken::new(),
-            max_backend_retries: parse_max_backend_retries_env(),
-        })
-        .await?;
+    let result = tasks::run_quick_dev_run_task(QuickDevRunTaskParams {
+        workspace_root,
+        project: args.project,
+        pr_url: args.pr_url,
+        cancel: CancellationToken::new(),
+        max_backend_retries: parse_max_backend_retries_env(),
+        implementer_backend: args.implementer_backend,
+        reviewer_backend: args.reviewer_backend,
+        skip_commit: args.skip_commit,
+        max_review_iterations: args.max_review_iterations,
+        max_final_review_retries: args.max_final_review_retries,
+    })
+    .await?;
     println!("{}", result.summary);
 
     Ok(())
