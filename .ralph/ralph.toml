@@ -118,7 +118,7 @@ final_review_backends = [
 final_review_arbiter_backend = "codex"
 final_review_min_reviewers = 2
 final_review_consensus_threshold = 1.0
-max_final_review_restarts = 15
+max_final_review_restarts = 25
 completion_backends = [
     "claude",
     "codex",
