@@ -239,6 +239,7 @@ impl Orchestrator {
             },
         );
         registry.set_cwd(self.workspace.root.parent().map(|p| p.to_path_buf()));
+        preload_bare_default_backends(&mut registry)?;
         preload_override_backends(&mut registry, &role_overrides)?;
         preload_role_model_backends(&mut registry)?;
         if !options.dry_run {
@@ -2937,6 +2938,19 @@ fn preload_override_backends(
 fn preload_role_model_backends(registry: &mut BackendRegistry) -> Result<()> {
     for backend_spec in registry.backend_role_model_specs() {
         registry.get_or_create_for_spec(&backend_spec)?;
+    }
+    Ok(())
+}
+
+/// Preload bare (no-role-model) backends so that reformatter lookup via
+/// `registry.get(opposite_name)` works even after `set_cwd` clears the cache.
+/// Without this, a bare opposite backend (e.g. `codex` without a role model)
+/// would not be found in the cache and the reformatter would silently fall
+/// back to the original backend, exhausting parse retries.
+fn preload_bare_default_backends(registry: &mut BackendRegistry) -> Result<()> {
+    for name in ["claude", "codex"] {
+        // Ignore errors — the backend may not be configured/available.
+        let _ = registry.get_or_create_for_spec(name);
     }
     Ok(())
 }

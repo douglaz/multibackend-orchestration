@@ -6,6 +6,16 @@ use crate::workflow::orchestrator::{Orchestrator, RunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
+/// Read `RALPH_MAX_BACKEND_RETRIES` from the environment for backward
+/// compatibility.  The orchestrator no longer reads this env var directly;
+/// the CLI bridges it into `RunOptions.max_backend_retries`.
+fn parse_max_backend_retries_env() -> Option<u8> {
+    std::env::var("RALPH_MAX_BACKEND_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&v| v > 0)
+}
+
 pub async fn execute(args: RunArgs) -> Result<()> {
     let workspace = if let Some(ref root) = args.workspace_root {
         let ralph_dir = root.join(".ralph");
@@ -40,7 +50,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             tmux: args.tmux.or(args.no_tmux),
             pr_url: args.pr_url,
             cancel: CancellationToken::new(),
-            max_backend_retries: None,
+            max_backend_retries: parse_max_backend_retries_env(),
         })
         .await;
 

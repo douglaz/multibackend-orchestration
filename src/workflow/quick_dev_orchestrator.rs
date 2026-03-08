@@ -1445,7 +1445,32 @@ async fn execute_backend(
         };
 
         match result {
-            Ok(inner) => return inner,
+            Ok(Ok(output)) => return Ok(output),
+            Ok(Err(RalphError::Cancelled)) => return Err(RalphError::Cancelled),
+            Ok(Err(RalphError::BackendTimeout {
+                backend: ref be,
+                idle_seconds,
+                timeout_kind,
+            })) => {
+                if attempt >= max_retries {
+                    return Err(RalphError::BackendTimeout {
+                        backend: be.clone(),
+                        idle_seconds,
+                        timeout_kind,
+                    });
+                }
+                let backoff = 2_u64.pow((attempt - 1) as u32);
+                tracing::warn!(
+                    backend = %backend.name(),
+                    attempt = attempt,
+                    idle_seconds = idle_seconds,
+                    timeout_kind = ?timeout_kind,
+                    backoff_secs = backoff,
+                    "backend timeout, retrying..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            }
+            Ok(Err(other)) => return Err(other),
             Err(_) => {
                 if attempt >= max_retries {
                     return Err(RalphError::BackendTimeout {
@@ -1459,7 +1484,7 @@ async fn execute_backend(
                     backend = %backend.name(),
                     attempt = attempt,
                     backoff_secs = backoff,
-                    "backend timeout, retrying..."
+                    "walltime timeout, retrying..."
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
             }

@@ -10,6 +10,13 @@ use crate::workflow::quick_dev_orchestrator::{QuickDevOrchestrator, QuickDevRunO
 use crate::workspace::Workspace;
 use crate::Result;
 
+fn parse_max_backend_retries_env() -> Option<u8> {
+    std::env::var("RALPH_MAX_BACKEND_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&v| v > 0)
+}
+
 #[derive(Debug, Args)]
 pub struct QuickDevRunArgs {
     #[arg(long)]
@@ -58,7 +65,7 @@ pub async fn execute(args: QuickDevRunArgs) -> Result<()> {
             max_review_iterations: args.max_review_iterations,
             max_final_review_retries: args.max_final_review_retries,
             cancel: CancellationToken::new(),
-            max_backend_retries: None,
+            max_backend_retries: parse_max_backend_retries_env(),
         })
         .await?;
     println!("{}", result.summary);

@@ -15,6 +15,13 @@ use crate::workflow::quick_dev_orchestrator::{self, QuickDevOrchestrator, QuickD
 use crate::workspace::Workspace;
 use crate::Result;
 
+fn parse_max_backend_retries_env() -> Option<u8> {
+    std::env::var("RALPH_MAX_BACKEND_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&v| v > 0)
+}
+
 const MAX_PROJECT_ID_LEN: usize = 40;
 const MAX_PROJECT_NAME_LEN: usize = 60;
 
@@ -245,7 +252,7 @@ pub async fn execute(args: QuickDevAutoArgs) -> Result<()> {
             max_review_iterations,
             max_final_review_retries,
             cancel: CancellationToken::new(),
-            max_backend_retries: None,
+            max_backend_retries: parse_max_backend_retries_env(),
         })
         .await?;
     println!("{}", run_result.summary);
