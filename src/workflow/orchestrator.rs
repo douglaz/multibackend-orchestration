@@ -32,6 +32,10 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
+use crate::project::amendments::{
+    drain_amendment_queue, format_external_amendments_for_prompt, pending_amendment_count,
+    AmendmentSource,
+};
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{
@@ -596,6 +600,29 @@ impl Orchestrator {
                     let planner_backend =
                         registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
+                    let drained_amendments = drain_amendment_queue(&project_dir)?;
+                    let planner_amendments = if unify_final_review_enabled(
+                        &self.workspace.root,
+                        &project_dir,
+                    ) {
+                        drained_amendments
+                            .into_iter()
+                            .filter(|req| req.source != AmendmentSource::FinalReview)
+                            .collect::<Vec<_>>()
+                    } else {
+                        drained_amendments
+                    };
+                    let external_amendments_text = if planner_amendments.is_empty() {
+                        String::new()
+                    } else {
+                        info!(
+                            loop = loop_number,
+                            count = planner_amendments.len(),
+                            "drained external amendments"
+                        );
+                        format_external_amendments_for_prompt(&planner_amendments)
+                    };
+
                     let planner_prompt = build_planner_prompt(
                         &effective,
                         &state,
@@ -604,6 +631,7 @@ impl Orchestrator {
                         planner_backend.name(),
                         &feature_backends.implementer,
                         &project_dir,
+                        &external_amendments_text,
                     )?;
 
                     // Session reuse: exercise role policy for planner (will warn+skip for v1)
@@ -710,6 +738,12 @@ impl Orchestrator {
                                             .to_owned(),
                                     ));
                                 }
+                            }
+                            let pending = pending_amendment_count(&project_dir)?;
+                            if pending > 0 {
+                                return Err(RalphError::Orchestration(format!(
+                                    "planner requested completion but {pending} amendment(s) are still pending in the queue"
+                                )));
                             }
                             info!(loop = loop_number, "planner requested project completion");
                             let base_backends = registry.assign_completion_backends(
@@ -3276,6 +3310,7 @@ fn build_planner_prompt(
     backend: &str,
     opposite_backend: &str,
     project_dir: &Path,
+    external_amendments: &str,
 ) -> Result<String> {
     let template_source =
         load_template_source(&effective.templates.planner, default_planner_template());
@@ -3321,6 +3356,10 @@ fn build_planner_prompt(
     vars.insert(
         "final_review_amendments".to_owned(),
         amendments_content.clone(),
+    );
+    vars.insert(
+        "external_amendments".to_owned(),
+        external_amendments.to_owned(),
     );
 
     let rendered = render_template_with_fallback(
@@ -3375,8 +3414,36 @@ fn build_planner_prompt(
             &amendments_content,
         );
     }
+    if !external_amendments.is_empty() {
+        append_section_if_missing(
+            &mut prompt,
+            &template_source,
+            &["external_amendments"],
+            "## External Amendments",
+            external_amendments,
+        );
+    }
 
     Ok(prompt)
+}
+
+fn unify_final_review_enabled(workspace_root: &Path, project_dir: &Path) -> bool {
+    let global_path = workspace_root.join("ralph.toml");
+    let project_path = project_dir.join("config.toml");
+
+    // Project-level config overrides global when both are present.
+    read_unify_final_review_value(&project_path).unwrap_or_else(|| {
+        read_unify_final_review_value(&global_path).unwrap_or(false)
+    })
+}
+
+fn read_unify_final_review_value(path: &Path) -> Option<bool> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&raw).ok()?;
+    value
+        .get("amendments")?
+        .get("unify_final_review")?
+        .as_bool()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6638,6 +6705,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -6677,6 +6745,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -7335,6 +7404,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7384,6 +7454,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7423,6 +7494,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7466,6 +7538,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -7503,12 +7576,86 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
         assert!(
             !prompt.contains("## Final Review Amendments"),
             "prompt should not contain Final Review Amendments when file is absent"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_includes_external_amendments_when_provided() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+        let external = "### Amendment 1\n- id: EXT-001\n- body:\n  external fix";
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+            external,
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            prompt.contains("## External Amendments"),
+            "prompt should contain External Amendments heading"
+        );
+        assert!(
+            prompt.contains("EXT-001"),
+            "prompt should contain external amendment content"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_omits_external_amendments_when_empty() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+            "",
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            !prompt.contains("## External Amendments"),
+            "prompt should not contain External Amendments when empty"
         );
     }
 

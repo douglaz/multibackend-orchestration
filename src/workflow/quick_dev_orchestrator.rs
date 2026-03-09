@@ -22,6 +22,7 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
+use crate::project::amendments::{drain_amendment_queue, format_external_amendments_for_prompt};
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{Phase, ProjectState, ProjectStatus, QuickDevPhase};
@@ -340,6 +341,18 @@ impl QuickDevOrchestrator {
                              The following automated checks (fmt/clippy/build) failed after \
                              reviewer approval. Fix these issues without changing unrelated logic:\n\n");
                         prompt.push_str(&feedback);
+                    }
+                    let drained_amendments = drain_amendment_queue(project_dir)?;
+                    if !drained_amendments.is_empty() {
+                        info!(
+                            loop_number,
+                            count = drained_amendments.len(),
+                            "quick-dev: drained external amendments"
+                        );
+                        prompt.push_str("\n\n## External Amendments\n");
+                        prompt.push_str(&format_external_amendments_for_prompt(
+                            &drained_amendments,
+                        ));
                     }
 
                     let impl_backend =

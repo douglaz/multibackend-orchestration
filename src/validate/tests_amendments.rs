@@ -1,8 +1,15 @@
 use super::*;
 
+use chrono::Utc;
 use std::fs;
 
-use crate::validate::assertions::{assert_exit_code, assert_file_exists, assert_path_not_exists};
+use crate::project::amendments::{
+    enqueue_amendment, pending_amendment_count, AmendmentPriority, AmendmentRequest,
+    AmendmentSource,
+};
+use crate::validate::assertions::{
+    assert_exit_code, assert_file_exists, assert_path_not_exists, assert_stderr_contains,
+};
 use crate::validate::harness::RalphHarness;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -42,6 +49,18 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "amendments::amend_missing_body_file_creates_no_queue_files",
             func: amend_missing_body_file_creates_no_queue_files,
+        },
+        ConformanceTest {
+            name: "amendments::standard_planner_drains_and_injects_amendments",
+            func: standard_planner_drains_and_injects_amendments,
+        },
+        ConformanceTest {
+            name: "amendments::quick_dev_drains_and_injects_amendments",
+            func: quick_dev_drains_and_injects_amendments,
+        },
+        ConformanceTest {
+            name: "amendments::completion_guard_rejects_with_pending_amendments",
+            func: completion_guard_rejects_with_pending_amendments,
         },
     ]
 }
@@ -336,6 +355,334 @@ fn amend_missing_body_file_creates_no_queue_files(h: &RalphHarness) -> TestResul
             );
         }
     })
+}
+
+fn standard_planner_drains_and_injects_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-plan-inject";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "amend-standard-injection.sh",
+                &standard_planner_injection_mock_script(),
+            )
+            .expect("write planner injection mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Planner Amendment Injection",
+            "planner amendment injection prompt",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable qa");
+
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-PLAN-001",
+            "planner external amendment body",
+        );
+        let output = h
+            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 0);
+
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert_eq!(pending, 0, "queue should be empty after planner drain");
+    })
+}
+
+fn quick_dev_drains_and_injects_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-qd-inject";
+        h.init_workspace().expect("init workspace");
+
+        let impl_mock = h
+            .write_stable_mock_script(
+                "amend-quick-dev-impl.sh",
+                &quick_dev_injection_implementer_mock_script(),
+            )
+            .expect("write quick-dev implementer mock");
+        let rev_mock = h
+            .write_stable_mock_script(
+                "amend-quick-dev-rev.sh",
+                &quick_dev_injection_reviewer_mock_script(),
+            )
+            .expect("write quick-dev reviewer mock");
+        h.setup_separate_mock_backends(&impl_mock, &rev_mock)
+            .expect("setup separate mock backends");
+
+        h.create_project(
+            project_id,
+            "Quick Dev Amendment Injection",
+            "quick dev amendment injection prompt",
+        )
+        .expect("create project");
+
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-QD-001",
+            "quick dev external amendment body",
+        );
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 0);
+
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert_eq!(pending, 0, "queue should be empty after quick-dev drain");
+    })
+}
+
+fn completion_guard_rejects_with_pending_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-completion-guard";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "amend-completion-guard.sh",
+                &completion_guard_pending_mock_script(project_id),
+            )
+            .expect("write completion guard mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Completion Guard Pending Amendments",
+            "completion guard pending amendments prompt",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+
+        let output = h
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--until-complete",
+                "--skip-commit",
+            ])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 1);
+        assert_stderr_contains(
+            &output,
+            "planner requested completion but 1 amendment(s) are still pending in the queue",
+        );
+
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert!(
+            pending > 0,
+            "completion guard should not drain or mutate pending amendment queue"
+        );
+    })
+}
+
+fn enqueue_external_amendment(h: &RalphHarness, project_id: &str, id: &str, body: &str) {
+    enqueue_amendment(
+        &h.project_dir(project_id),
+        &AmendmentRequest {
+            id: id.to_owned(),
+            body: body.to_owned(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::Cli,
+            source_detail: Some("validate".to_owned()),
+            created_at: Utc::now(),
+        },
+    )
+    .expect("enqueue amendment");
+}
+
+fn standard_planner_injection_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  grep -q "## External Amendments" <<< "$INPUT" || { echo "planner prompt missing external amendments heading" >&2; exit 1; }
+  grep -q -- "- id: EXT-PLAN-001" <<< "$INPUT" || { echo "planner prompt missing amendment id" >&2; exit 1; }
+  grep -q "planner external amendment body" <<< "$INPUT" || { echo "planner prompt missing amendment body" >&2; exit 1; }
+  cat <<'EOF'
+# Feature: Amendment Prompt Injection
+
+## Description
+Validate planner prompt includes externally queued amendments.
+
+## Acceptance Criteria
+- [ ] Mock criteria
+
+## Files to Modify/Create
+- `mock_file.txt` - mock implementation output
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created mock implementation for planner amendment injection test.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  echo "implemented" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock criteria
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: validate amendment planner injection
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+fn quick_dev_injection_implementer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  grep -q "## External Amendments" <<< "$INPUT" || { echo "quick-dev prompt missing external amendments heading" >&2; exit 1; }
+  grep -q -- "- id: EXT-QD-001" <<< "$INPUT" || { echo "quick-dev prompt missing amendment id" >&2; exit 1; }
+  grep -q "quick dev external amendment body" <<< "$INPUT" || { echo "quick-dev prompt missing amendment body" >&2; exit 1; }
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created quick-dev implementation for amendment injection test.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  echo "quick-dev-implemented" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied reviewer-requested fixes.
+
+## Could Not Address
+- None
+EOF
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No further quick-dev amendments.
+EOF
+else
+  echo "quick-dev implementer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+fn quick_dev_injection_reviewer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: SATISFIED
+
+Implementation is acceptable.
+EOF
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No further quick-dev amendments.
+EOF
+else
+  echo "quick-dev reviewer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+fn completion_guard_pending_mock_script(project_id: &str) -> String {
+    let queue_dir = format!(".ralph/projects/{project_id}/amendment-queue");
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  mkdir -p "{queue_dir}"
+  cat > "{queue_dir}/99999999999999-injected-pending.json" <<'EOF'
+{{"id":"EXT-PENDING-001","body":"pending amendment injected during planner call","priority":"P2","source":"cli","source_detail":"validate","created_at":"2026-03-09T00:00:00Z"}}
+EOF
+  cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All work is complete.
+
+## Summary of Work
+- Completed all required behavior.
+
+## Remaining Items
+- None
+EOF
+else
+  echo "completion guard mock received unexpected prompt" >&2
+  exit 1
+fi
+"###
+    )
 }
 
 fn run_case<F>(f: F) -> TestResult
