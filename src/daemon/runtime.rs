@@ -2939,9 +2939,23 @@ fn execute_rebase_fetch(worktree_path: &Path, timeout: Duration) -> Result<()> {
 pub(crate) fn extract_project_ref(branch: &str) -> Option<String> {
     let mut parts = branch.split('/');
     let prefix = parts.next()?;
-    let project_id = parts.next()?;
-    if prefix == "ralph" && !project_id.is_empty() && parts.next().is_none() {
-        Some(project_id.to_owned())
+    if prefix != "ralph" {
+        return None;
+    }
+    let second = parts.next()?;
+    if second.is_empty() {
+        return None;
+    }
+    // Handle both `ralph/{project_id}` and `ralph/daemon/{task_id}` formats.
+    if second == "daemon" {
+        let task_id = parts.next()?;
+        if !task_id.is_empty() && parts.next().is_none() {
+            return Some(task_id.to_owned());
+        }
+        return None;
+    }
+    if parts.next().is_none() {
+        Some(second.to_owned())
     } else {
         None
     }
@@ -3345,6 +3359,14 @@ mod tests {
     }
 
     #[test]
+    fn extract_project_ref_daemon_format() {
+        assert_eq!(
+            extract_project_ref("ralph/daemon/acme-widgets-901"),
+            Some("acme-widgets-901".to_owned())
+        );
+    }
+
+    #[test]
     fn extract_original_title_empty() {
         assert_eq!(extract_original_title(""), None);
     }
@@ -3359,6 +3381,8 @@ mod tests {
         assert_eq!(extract_project_ref("main"), None);
         assert_eq!(extract_project_ref("feature/foo"), None);
         assert_eq!(extract_project_ref("ralph/"), None);
+        assert_eq!(extract_project_ref("ralph/daemon/"), None);
+        assert_eq!(extract_project_ref("ralph/daemon/a/b"), None);
     }
 
     #[test]

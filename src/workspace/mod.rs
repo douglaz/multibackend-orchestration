@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
@@ -80,7 +80,7 @@ impl Workspace {
                 return;
             }
             if active::write_active_project(&self.root, &legacy_id).is_ok() {
-                info!(
+                eprintln!(
                     "migrated active project '{}' from index.json to worktree-local storage",
                     legacy_id
                 );
