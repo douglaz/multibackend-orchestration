@@ -184,7 +184,7 @@ where
             continue;
         }
         let path = entry.path();
-        if has_extension(&path, "json") || has_extension(&path, "inflight") {
+        if is_queue_file_for_drain(&path) {
             queue_files.push(path);
         }
     }
@@ -259,7 +259,7 @@ pub fn pending_amendment_count(project_dir: &Path) -> Result<usize> {
             continue;
         }
         let path = entry.path();
-        if has_extension(&path, "json") || has_extension(&path, "inflight") {
+        if is_queue_file_for_drain(&path) {
             count += 1;
         }
     }
@@ -376,6 +376,18 @@ fn has_extension(path: &Path, ext: &str) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(ext))
+}
+
+fn is_temp_queue_file(path: &Path) -> bool {
+    has_extension(path, "json")
+        && path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(".tmp-"))
+}
+
+fn is_queue_file_for_drain(path: &Path) -> bool {
+    has_extension(path, "inflight") || (has_extension(path, "json") && !is_temp_queue_file(path))
 }
 
 fn parse_inflight_request(path: &Path) -> Result<AmendmentRequest> {
@@ -733,6 +745,60 @@ mod tests {
         assert!(
             quarantined_name.ends_with(".inflight"),
             "quarantine file should keep inflight extension: {quarantined_name}"
+        );
+    }
+
+    #[test]
+    fn temp_staging_files_are_ignored_by_drain_and_pending_count() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let tmp_path = queue_dir.join(".tmp-1234.json");
+        fs::write(&tmp_path, "{ not valid json").expect("write temp staging file");
+
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count should ignore temp file"),
+            0
+        );
+        let drained = drain_amendment_queue(project_dir).expect("drain queue");
+        assert!(drained.is_empty(), "temp staging files must not be drained");
+        assert!(tmp_path.exists(), "drain should leave temp staging files untouched");
+    }
+
+    #[test]
+    fn drain_skips_temp_staging_and_processes_published_files() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let tmp_path = queue_dir.join(".tmp-5678.json");
+        fs::write(&tmp_path, "{ not valid json").expect("write temp staging file");
+
+        let published_path = queue_dir.join("20260309030009-real.json");
+        write_request_file(&published_path, &sample_request("real", "published payload"));
+
+        assert_eq!(
+            pending_amendment_count(project_dir)
+                .expect("pending count should include only published queue files"),
+            1
+        );
+        let drained = drain_amendment_queue(project_dir).expect("drain queue");
+        let ids: Vec<_> = drained.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["real"]);
+        assert!(
+            !published_path.exists(),
+            "published queue file should be removed after successful drain"
+        );
+        assert!(
+            tmp_path.exists(),
+            "temp staging file should be ignored and left untouched"
+        );
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count after drain"),
+            0
         );
     }
 
