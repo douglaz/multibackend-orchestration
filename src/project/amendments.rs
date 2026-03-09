@@ -205,31 +205,56 @@ where
             if let Some(stem) = queue_stem(&queued_path) {
                 if let Some(prev) = completed_inflight_items.get(&stem) {
                     // Same-stem .json found after its .inflight was already processed.
-                    // Compare content: true duplicates (interrupted claims) are dropped;
-                    // distinct payloads are processed to avoid silent data loss.
-                    match read_and_parse_inflight(&queued_path) {
+                    // Claim .json → .inflight before reading (same lifecycle as the
+                    // main path), then compare content for dedup vs. distinct handling.
+                    let claimed_path = queued_path.with_extension("inflight");
+                    if let Err(err) = before_json_claim(&queued_path, &claimed_path) {
+                        return Err(rollback_mid_drain(project_dir, drained, err));
+                    }
+                    let inflight_path =
+                        match claim_file_without_overwrite(&queued_path, &claimed_path) {
+                            Ok(FileClaimOutcome::Claimed) => claimed_path,
+                            Ok(
+                                FileClaimOutcome::DestinationExists
+                                | FileClaimOutcome::SourceMissing,
+                            ) => {
+                                continue;
+                            }
+                            Err(io_err) => {
+                                return Err(rollback_mid_drain(
+                                    project_dir,
+                                    drained,
+                                    io_err.into(),
+                                ));
+                            }
+                        };
+                    match read_and_parse_inflight(&inflight_path) {
                         InflightReadOutcome::Parsed(ref req) if req == prev => {
-                            if let Err(err) = remove_file_if_exists(&queued_path) {
+                            if let Err(err) = remove_file_if_exists(&inflight_path) {
                                 return Err(rollback_mid_drain(project_dir, drained, err));
                             }
                         }
                         InflightReadOutcome::Parsed(req) => {
-                            if let Err(err) = remove_file_if_exists(&queued_path) {
-                                return Err(rollback_mid_drain(project_dir, drained, err));
+                            if let Err(io_err) = fs::remove_file(&inflight_path) {
+                                return Err(rollback_mid_drain(
+                                    project_dir,
+                                    drained,
+                                    io_err.into(),
+                                ));
                             }
                             drained.push(req);
                         }
                         InflightReadOutcome::Malformed(err) => {
                             warn!(
-                                path = %queued_path.display(),
+                                path = %inflight_path.display(),
                                 error = %err,
                                 "failed to parse same-stem amendment; quarantining file"
                             );
                             if let Err(q_err) =
-                                quarantine_inflight_file(&queue_dir, &queued_path)
+                                quarantine_inflight_file(&queue_dir, &inflight_path)
                             {
                                 warn!(
-                                    path = %queued_path.display(),
+                                    path = %inflight_path.display(),
                                     error = %q_err,
                                     "failed to quarantine malformed same-stem amendment"
                                 );
@@ -828,6 +853,75 @@ mod tests {
             pending_amendment_count(project_dir).expect("pending count"),
             0
         );
+    }
+
+    #[test]
+    fn drain_same_stem_distinct_content_claims_json_to_inflight_before_parse() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let req_inflight = sample_request("dup", "inflight payload");
+        let req_json = sample_request("dup-new", "json payload");
+        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
+
+        // Track that the before_json_claim hook fires for the same-stem .json
+        // and that the claimed path is a .inflight extension.
+        let mut same_stem_claim_observed = false;
+        let json_path = queue_dir.join("20260309030008-dup.json");
+        let expected_inflight = queue_dir.join("20260309030008-dup.inflight");
+
+        let drained = drain_amendment_queue_with_hook(project_dir, |queued, claimed| {
+            if queued == json_path.as_path() {
+                assert_eq!(
+                    claimed,
+                    expected_inflight.as_path(),
+                    "same-stem .json must be claimed to .inflight"
+                );
+                same_stem_claim_observed = true;
+            }
+            Ok(())
+        })
+        .expect("drain queue");
+
+        assert!(
+            same_stem_claim_observed,
+            "before_json_claim hook must fire for same-stem .json"
+        );
+        let ids: Vec<&str> = drained.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "both distinct payloads must be drained");
+        assert!(ids.contains(&"dup"), "inflight payload must be present");
+        assert!(ids.contains(&"dup-new"), "json payload must be present");
+    }
+
+    #[test]
+    fn drain_same_stem_json_skipped_on_rename_race() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let req_inflight = sample_request("dup", "inflight payload");
+        let req_json = sample_request("dup-new", "json payload");
+        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
+
+        // Simulate race: remove the .json before the claim rename happens.
+        let json_path = queue_dir.join("20260309030008-dup.json");
+        let drained = drain_amendment_queue_with_hook(project_dir, |queued, _claimed| {
+            if queued == json_path.as_path() {
+                // Another process already claimed this file.
+                fs::remove_file(queued)?;
+            }
+            Ok(())
+        })
+        .expect("drain queue");
+
+        // Only the inflight item should be drained; the raced .json is skipped.
+        let ids: Vec<&str> = drained.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup"], "raced .json must be skipped");
     }
 
     #[test]
