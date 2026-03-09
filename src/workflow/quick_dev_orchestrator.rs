@@ -393,14 +393,24 @@ impl QuickDevOrchestrator {
                     .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
 
                     // Transition: PlanAndImplement -> CodexReview
+                    // Split into two steps so that rollback only applies before
+                    // durable state is persisted.  Once save_state_to_disk
+                    // succeeds, the phase is committed and amendments must NOT
+                    // be re-enqueued (even if the checkpoint commit fails).
                     review_iteration = 0;
-                    persist_destination_and_checkpoint(
+                    persist_quick_dev_state(
                         state,
                         &QuickDevPhase::CodexReview,
                         1,
                         review_iteration,
                         final_review_attempts,
-                        project_dir,
+                    );
+                    save_state_to_disk(state, project_dir)
+                        .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
+
+                    // Durable success: state is persisted.  Checkpoint failure
+                    // must not trigger amendment rollback.
+                    checkpoint_if_enabled(
                         &self.workspace,
                         project_id,
                         loop_number,
@@ -409,8 +419,7 @@ impl QuickDevOrchestrator {
                         effective.workflow.auto_commit,
                         skip_commit,
                         effective.global.git.sign_commits,
-                    )
-                    .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
+                    )?;
 
                     current_qd_phase = QuickDevPhase::CodexReview;
                 }

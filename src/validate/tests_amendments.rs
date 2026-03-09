@@ -87,6 +87,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "amendments::quick_dev_failure_preserves_drained_amendments",
             func: quick_dev_failure_preserves_drained_amendments,
         },
+        ConformanceTest {
+            name: "amendments::quick_dev_checkpoint_failure_no_rollback_after_durable_success",
+            func: quick_dev_checkpoint_failure_no_rollback_after_durable_success,
+        },
     ]
 }
 
@@ -722,6 +726,73 @@ fn quick_dev_failure_preserves_drained_amendments(h: &RalphHarness) -> TestResul
         assert_eq!(drained[0].body, "quick dev rollback test body");
         assert_eq!(drained[0].priority, AmendmentPriority::P2);
         assert_eq!(drained[0].source, AmendmentSource::Cli);
+    })
+}
+
+/// Verify that if quick-dev PlanAndImplement succeeds and state is durably
+/// persisted but the checkpoint (git commit) fails, amendments are NOT
+/// re-enqueued.  This tests the "no duplicate replay after durable success"
+/// invariant from the loop-8 spec.
+fn quick_dev_checkpoint_failure_no_rollback_after_durable_success(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-qd-no-rollback";
+        h.init_workspace().expect("init workspace");
+
+        // Use an implementer mock that succeeds but corrupts the git index
+        // so the checkpoint commit will fail.
+        let impl_mock = h
+            .write_stable_mock_script(
+                "amend-qd-no-rollback-impl.sh",
+                &quick_dev_checkpoint_fail_implementer_mock_script(),
+            )
+            .expect("write quick-dev checkpoint-fail implementer mock");
+        let rev_mock = h
+            .write_stable_mock_script(
+                "amend-qd-no-rollback-rev.sh",
+                &quick_dev_checkpoint_fail_reviewer_mock_script(),
+            )
+            .expect("write quick-dev checkpoint-fail reviewer mock");
+        h.setup_separate_mock_backends(&impl_mock, &rev_mock)
+            .expect("setup separate mock backends");
+
+        h.create_project(
+            project_id,
+            "Quick Dev Checkpoint Fail No Rollback",
+            "checkpoint failure no-rollback test prompt",
+        )
+        .expect("create project");
+
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-QD-NOROLLBACK-001",
+            "no rollback after durable success body",
+        );
+
+        // Run without --skip-commit so the checkpoint path is exercised.
+        // The implementer mock corrupts the git index, causing the
+        // checkpoint commit to fail after state is durably written.
+        let _output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+            ])
+            .expect("quick-dev-run should execute");
+
+        // Whether the run succeeded or failed (due to checkpoint error),
+        // the drained amendments must NOT be re-enqueued because state was
+        // durably committed before the checkpoint was attempted.
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert_eq!(
+            pending, 0,
+            "amendments must not be re-enqueued after durable state persistence, got pending={pending}"
+        );
     })
 }
 
@@ -1468,6 +1539,85 @@ fn quick_dev_failure_reviewer_mock_script() -> String {
 set -euo pipefail
 echo "quick-dev reviewer: unexpected call" >&2
 exit 1
+"###
+    .to_owned()
+}
+
+/// Mock implementer for the checkpoint-failure-no-rollback test.
+/// Succeeds for PlanAndImplement but corrupts the git index so the
+/// subsequent checkpoint commit will fail.
+fn quick_dev_checkpoint_fail_implementer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  # Corrupt the git index so the next `git commit` fails.
+  # This simulates a checkpoint failure after the implementer succeeds.
+  echo "corrupt" > .git/index
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Created implementation for checkpoint failure no-rollback test.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock script execution only
+EOF
+  echo "checkpoint-fail-test" > mock_file.txt
+elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Response (Iteration 1)
+
+## Changes Made
+1. Applied fixes.
+
+## Could Not Address
+- None
+EOF
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No further amendments.
+EOF
+else
+  echo "checkpoint-fail implementer: unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
+}
+
+/// Reviewer mock for the checkpoint-failure-no-rollback test.
+fn quick_dev_checkpoint_fail_reviewer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: SATISFIED
+
+Implementation is acceptable.
+EOF
+elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+  cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No further amendments.
+EOF
+else
+  echo "checkpoint-fail reviewer: unrecognized prompt" >&2
+  exit 1
+fi
 "###
     .to_owned()
 }
