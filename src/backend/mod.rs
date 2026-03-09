@@ -2560,6 +2560,7 @@ done
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cli_backend_strips_claudecode_from_subprocess_env() {
         let _env_lock = env_test_mutex().lock().expect("env mutex");
 

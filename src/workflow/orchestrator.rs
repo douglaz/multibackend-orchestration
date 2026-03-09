@@ -6079,6 +6079,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_timeout_retries(
     backend: Arc<dyn Backend>,
     role: &str,
