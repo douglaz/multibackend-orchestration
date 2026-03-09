@@ -91,6 +91,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "amendments::quick_dev_checkpoint_failure_no_rollback_after_durable_success",
             func: quick_dev_checkpoint_failure_no_rollback_after_durable_success,
         },
+        ConformanceTest {
+            name: "amendments::malformed_queue_file_does_not_fail_orchestration",
+            func: malformed_queue_file_does_not_fail_orchestration,
+        },
     ]
 }
 
@@ -807,6 +811,80 @@ fn quick_dev_checkpoint_failure_no_rollback_after_durable_success(h: &RalphHarne
         assert_eq!(
             pending, 0,
             "amendments must not be re-enqueued after durable state persistence, got pending={pending}"
+        );
+    })
+}
+
+/// Verify that a malformed queue file (invalid JSON) is quarantined during
+/// orchestration drain and does not prevent valid amendments from being
+/// processed.
+fn malformed_queue_file_does_not_fail_orchestration(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-malformed-orch";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "amend-malformed-orch.sh",
+                &standard_planner_injection_mock_script(),
+            )
+            .expect("write planner injection mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Malformed Queue Orchestration",
+            "malformed queue orchestration prompt",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable qa");
+
+        // Enqueue a valid amendment.
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-PLAN-001",
+            "planner external amendment body",
+        );
+
+        // Also write a malformed (non-JSON) file directly into the queue.
+        let queue_dir = h.project_dir(project_id).join("amendment-queue");
+        fs::write(
+            queue_dir.join("00000000000000-malformed.json"),
+            "{ this is not valid json !!!",
+        )
+        .expect("write malformed queue file");
+
+        let output = h
+            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 0);
+
+        // Valid amendment must have been drained.
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert_eq!(
+            pending, 0,
+            "valid amendment queue should be empty after drain"
+        );
+
+        // Malformed file must be quarantined.
+        let quarantine_dir = queue_dir.join(".quarantine");
+        assert!(
+            quarantine_dir.exists(),
+            "quarantine directory must be created for malformed file"
+        );
+        let quarantine_count = fs::read_dir(&quarantine_dir)
+            .expect("read quarantine dir")
+            .filter_map(|e| e.ok())
+            .count();
+        assert!(
+            quarantine_count > 0,
+            "malformed file must be moved to quarantine"
         );
     })
 }
