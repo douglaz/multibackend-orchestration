@@ -1,3 +1,24 @@
+---
+artifact: prompt-review
+project: issue-194
+backend: codex
+role: prompt_reviewer
+created_at: 2026-03-09T02:50:23Z
+---
+
+# Prompt Review
+
+## Issues Found
+- The objective says amendments should reach the implementer’s next prompt, but the standard-flow requirements only inject into the planner prompt. That ambiguity can change behavior.
+- `priority` is defined as `Option<String>` while also “defaulting to P2,” which is inconsistent and weakly typed; parsing/validation outcomes are unclear.
+- The completion guard proposal drains and re-enqueues pending items, which can reorder items, create duplicates, and introduce race conditions.
+- Queue naming does not define ID sanitization or collision handling, so invalid filenames and timestamp collisions are possible.
+- Concurrent drain behavior is under-specified (rename races and IO error policy), which can produce nondeterministic processing with two orchestrators.
+- Final-review unification dedupe is not fully explicit about precedence, risking duplicate or dropped prompt content.
+- Several requirements reference source line numbers, which is brittle and hard to maintain.
+- Some test suggestions depend on low-level FS operation spying; outcome-based tests are clearer and more feasible.
+
+## Refined Prompt
 ### Objective
 Implement an external amendment queue so any active project can receive amendment requests from CLI and file-based writers at any time, then process them safely at orchestration phase boundaries.
 
