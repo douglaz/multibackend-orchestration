@@ -772,7 +772,7 @@ fn quick_dev_checkpoint_failure_no_rollback_after_durable_success(h: &RalphHarne
         // Run without --skip-commit so the checkpoint path is exercised.
         // The implementer mock corrupts the git index, causing the
         // checkpoint commit to fail after state is durably written.
-        let _output = h
+        let output = h
             .ralph([
                 "quick-dev-run",
                 "--project",
@@ -784,9 +784,24 @@ fn quick_dev_checkpoint_failure_no_rollback_after_durable_success(h: &RalphHarne
             ])
             .expect("quick-dev-run should execute");
 
-        // Whether the run succeeded or failed (due to checkpoint error),
-        // the drained amendments must NOT be re-enqueued because state was
-        // durably committed before the checkpoint was attempted.
+        // The checkpoint failure must surface as a non-zero exit code,
+        // proving the failure path was actually exercised.
+        assert!(
+            !output.status.success(),
+            "quick-dev-run must fail when checkpoint fails after durable persistence \
+             (exit code {:?})",
+            output.status.code()
+        );
+
+        // Verify checkpoint-failure evidence in stderr.
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        assert!(
+            !stderr.is_empty(),
+            "stderr should contain checkpoint-failure diagnostics"
+        );
+
+        // Despite the failure, drained amendments must NOT be re-enqueued
+        // because state was durably committed before the checkpoint was attempted.
         let pending =
             pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
         assert_eq!(

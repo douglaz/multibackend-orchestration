@@ -202,16 +202,25 @@ where
             // Interrupted claims can leave both <stem>.json and <stem>.inflight.
             // Once the inflight copy has been drained, drop the stale json copy
             // to preserve at-most-once processing for that logical amendment.
-            remove_file_if_exists(&queued_path)?;
+            if let Err(err) = remove_file_if_exists(&queued_path) {
+                return Err(rollback_mid_drain(project_dir, drained, err));
+            }
             continue;
         }
 
         let inflight_path = if has_extension(&queued_path, "json") {
             let claimed_path = queued_path.with_extension("inflight");
-            before_json_claim(&queued_path, &claimed_path)?;
-            match claim_file_without_overwrite(&queued_path, &claimed_path)? {
-                FileClaimOutcome::Claimed => claimed_path,
-                FileClaimOutcome::DestinationExists | FileClaimOutcome::SourceMissing => continue,
+            if let Err(err) = before_json_claim(&queued_path, &claimed_path) {
+                return Err(rollback_mid_drain(project_dir, drained, err));
+            }
+            match claim_file_without_overwrite(&queued_path, &claimed_path) {
+                Ok(FileClaimOutcome::Claimed) => claimed_path,
+                Ok(FileClaimOutcome::DestinationExists | FileClaimOutcome::SourceMissing) => {
+                    continue
+                }
+                Err(io_err) => {
+                    return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
+                }
             }
         } else {
             queued_path
@@ -236,7 +245,9 @@ where
             }
         };
 
-        fs::remove_file(&inflight_path)?;
+        if let Err(io_err) = fs::remove_file(&inflight_path) {
+            return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
+        }
         if let Some(stem) = queue_stem(&inflight_path) {
             completed_inflight_stems.insert(stem);
         }
@@ -244,6 +255,32 @@ where
     }
 
     Ok(drained)
+}
+
+/// Best-effort rollback of already-drained amendments after a mid-drain failure.
+/// Re-enqueues all items in `drained`, then returns an appropriate error.
+/// If rollback is partial, the returned error includes the unrestored amendment IDs.
+fn rollback_mid_drain(
+    project_dir: &Path,
+    drained: Vec<AmendmentRequest>,
+    original_error: RalphError,
+) -> RalphError {
+    if drained.is_empty() {
+        return original_error;
+    }
+    let failed_ids = re_enqueue_amendments(project_dir, &drained);
+    if failed_ids.is_empty() {
+        warn!(
+            count = drained.len(),
+            "re-enqueued drained amendments after mid-drain failure"
+        );
+        original_error
+    } else {
+        RalphError::Orchestration(format!(
+            "{original_error}; mid-drain rollback partially failed, could not restore IDs: [{}]",
+            failed_ids.join(", ")
+        ))
+    }
 }
 
 /// Re-enqueue previously drained amendments back to the queue.
@@ -976,6 +1013,149 @@ mod tests {
         assert_eq!(drained[0].source, req.source);
         assert_eq!(drained[0].source_detail, req.source_detail);
         assert_eq!(drained[0].created_at, req.created_at);
+    }
+
+    #[test]
+    fn drain_rolls_back_already_drained_items_on_mid_drain_fatal_error() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // Enqueue 3 items in deterministic lexicographic order.
+        let req_a = sample_request("a", "body a");
+        let req_b = sample_request("b", "body b");
+        let req_c = sample_request("c", "body c");
+        write_request_file(&queue_dir.join("20260309030001-a.json"), &req_a);
+        write_request_file(&queue_dir.join("20260309030002-b.json"), &req_b);
+        write_request_file(&queue_dir.join("20260309030003-c.json"), &req_c);
+
+        // The before_json_claim hook fires once per .json file before the
+        // claim rename.  Items a and b are fully drained (parsed + deleted)
+        // before the hook fires for item c.  Injecting a fatal error here
+        // exercises the mid-drain rollback path.
+        let mut call_count = 0u32;
+        let result = drain_amendment_queue_with_hook(project_dir, |_, _| {
+            call_count += 1;
+            if call_count == 3 {
+                Err(RalphError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected mid-drain failure",
+                )))
+            } else {
+                Ok(())
+            }
+        });
+
+        // Drain must return an error.
+        assert!(result.is_err(), "drain should fail on injected error");
+
+        // All 3 amendments must be recoverable: a and b were rolled back,
+        // c was never claimed from its .json file.
+        let pending = pending_amendment_count(project_dir).expect("pending count");
+        assert_eq!(
+            pending, 3,
+            "all amendments must be preserved after mid-drain rollback"
+        );
+
+        // A fresh drain must succeed and return all 3 items.
+        let drained = drain_amendment_queue(project_dir).expect("retry drain");
+        assert_eq!(
+            drained.len(),
+            3,
+            "all amendments should be drainable after rollback"
+        );
+        let ids: Vec<&str> = drained.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"a"));
+        assert!(ids.contains(&"b"));
+        assert!(ids.contains(&"c"));
+    }
+
+    #[test]
+    fn drain_rollback_preserves_original_amendment_fields() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let original = AmendmentRequest {
+            id: "EXT-ORIG".to_owned(),
+            body: "original body".to_owned(),
+            priority: AmendmentPriority::P1,
+            source: AmendmentSource::FinalReview,
+            source_detail: Some("claude(opus)".to_owned()),
+            created_at: Utc
+                .with_ymd_and_hms(2026, 3, 9, 12, 0, 0)
+                .single()
+                .expect("valid datetime"),
+        };
+        write_request_file(&queue_dir.join("20260309030001-EXT-ORIG.json"), &original);
+        write_request_file(
+            &queue_dir.join("20260309030002-trigger.json"),
+            &sample_request("trigger", "trigger body"),
+        );
+
+        // Fail on the 2nd item so the 1st is rolled back.
+        let mut call_count = 0u32;
+        let result = drain_amendment_queue_with_hook(project_dir, |_, _| {
+            call_count += 1;
+            if call_count == 2 {
+                Err(RalphError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected failure",
+                )))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+
+        // Drain again and verify the rolled-back item retains all original fields.
+        let drained = drain_amendment_queue(project_dir).expect("drain after rollback");
+        let restored = drained
+            .iter()
+            .find(|r| r.id == "EXT-ORIG")
+            .expect("rolled-back item must be present");
+        assert_eq!(restored.body, original.body);
+        assert_eq!(restored.priority, AmendmentPriority::P1);
+        assert_eq!(restored.source, AmendmentSource::FinalReview);
+        assert_eq!(restored.source_detail, Some("claude(opus)".to_owned()));
+        assert_eq!(restored.created_at, original.created_at);
+    }
+
+    #[test]
+    fn drain_malformed_files_do_not_trigger_rollback() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // A valid item first, then a malformed item, then another valid item.
+        write_request_file(
+            &queue_dir.join("20260309030001-good1.json"),
+            &sample_request("good1", "body 1"),
+        );
+        fs::write(
+            queue_dir.join("20260309030002-bad.json"),
+            "{ not valid json",
+        )
+        .expect("write malformed");
+        write_request_file(
+            &queue_dir.join("20260309030003-good2.json"),
+            &sample_request("good2", "body 2"),
+        );
+
+        // Drain should succeed: malformed item is quarantined, valid items are drained.
+        let drained = drain_amendment_queue(project_dir).expect("drain should succeed");
+        assert_eq!(drained.len(), 2);
+        let ids: Vec<&str> = drained.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["good1", "good2"]);
+
+        // No items re-enqueued; malformed file went to quarantine.
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
     }
 
     fn sample_request(id: &str, body: &str) -> AmendmentRequest {
