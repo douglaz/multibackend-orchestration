@@ -2083,11 +2083,28 @@ async fn drain_all_children_with_deadline(
                 // abort() is cooperative — it only takes effect at .await
                 // points.  This bounded wait ensures we don't label the task
                 // as failed while it is still running blocking code.
-                match tokio::time::timeout(Duration::from_secs(10), &mut handle.join_handle).await {
-                    Ok(_) => {}
-                    Err(_) => {
-                        eprintln!("warning: task {task_id} did not resolve within 10s after abort");
-                    }
+                let task_resolved =
+                    tokio::time::timeout(Duration::from_secs(10), &mut handle.join_handle)
+                        .await
+                        .is_ok();
+                if !task_resolved {
+                    // The task is still running — we must NOT proceed with
+                    // complete_task (which cleans up the worktree) because the
+                    // task may still be mutating git state.  Only swap the
+                    // label so the issue is not stuck as in-progress.
+                    eprintln!(
+                        "warning: task {task_id} did not resolve within 10s after abort, \
+                         skipping worktree cleanup"
+                    );
+                    let _ = github::swap_lifecycle_label(
+                        &config.owner,
+                        &config.repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                    .await;
+                    continue;
                 }
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
