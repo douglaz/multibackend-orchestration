@@ -628,6 +628,15 @@ pub fn parse_arbiter_output(raw: &str, required_ids: &[&str]) -> Result<ArbiterD
 // FinalReview parser helpers
 // ---------------------------------------------------------------------------
 
+/// Strip a trailing priority tag like ` [P0]`–`[P3]` from an amendment ID.
+/// Backends sometimes place the priority tag on the `## Amendment:` header line
+/// instead of inside the `### Problem` section, e.g. `## Amendment: FR-1 [P2]`.
+fn strip_trailing_priority_tag(id: &str) -> &str {
+    static RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\s*\[P[0-3]\]\s*$").expect("valid regex"));
+    RE.find(id).map_or(id, |m| id[..m.start()].trim_end())
+}
+
 fn extract_amendment_blocks(body: &str) -> Result<Vec<Amendment>> {
     let mut amendments = Vec::new();
     let mut current_id: Option<String> = None;
@@ -642,7 +651,7 @@ fn extract_amendment_blocks(body: &str) -> Result<Vec<Amendment>> {
                 });
                 current_lines.clear();
             }
-            let id = rest.trim().to_owned();
+            let id = strip_trailing_priority_tag(rest.trim()).to_owned();
             if id.is_empty() {
                 return Err(RalphError::ParseError(
                     "amendment block has empty ID".to_owned(),
@@ -714,7 +723,7 @@ fn extract_amendment_value_blocks(
                 results.push(flush(id, &current_lines, value_section, scope)?);
                 current_lines.clear();
             }
-            let id = rest.trim().to_owned();
+            let id = strip_trailing_priority_tag(rest.trim()).to_owned();
             if id.is_empty() {
                 return Err(RalphError::ParseError(
                     "amendment block has empty ID".to_owned(),
@@ -1399,6 +1408,30 @@ mod tests {
             }
             _ => panic!("expected amendments"),
         }
+    }
+
+    #[test]
+    fn final_reviewer_strips_priority_tags_from_amendment_ids() {
+        let text = "# Final Review: AMENDMENTS\n\n## Amendment: FR-194-001 [P2]\n\n### Problem\nbug\n\n### Proposed Change\nfix it\n\n### Affected Files\n- `src/lib.rs`\n\n## Amendment: FR-194-002 [P3]\n\n### Problem\ntypo\n\n### Proposed Change\ncorrect\n\n### Affected Files\n- `README.md`";
+        let parsed = parse_final_reviewer_output(text).expect("should parse");
+        match parsed {
+            FinalReviewerDecision::Amendments { amendments, .. } => {
+                assert_eq!(amendments.len(), 2);
+                assert_eq!(amendments[0].id, "FR-194-001");
+                assert_eq!(amendments[1].id, "FR-194-002");
+            }
+            _ => panic!("expected amendments"),
+        }
+    }
+
+    #[test]
+    fn strip_trailing_priority_tag_cases() {
+        assert_eq!(super::strip_trailing_priority_tag("FR-1 [P0]"), "FR-1");
+        assert_eq!(super::strip_trailing_priority_tag("FR-1 [P2]"), "FR-1");
+        assert_eq!(super::strip_trailing_priority_tag("FR-1 [P3]"), "FR-1");
+        assert_eq!(super::strip_trailing_priority_tag("FR-1[P2]"), "FR-1");
+        assert_eq!(super::strip_trailing_priority_tag("FR-1"), "FR-1");
+        assert_eq!(super::strip_trailing_priority_tag("FR-1 [P5]"), "FR-1 [P5]");
     }
 
     #[test]
