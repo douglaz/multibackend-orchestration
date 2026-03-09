@@ -1,3 +1,4 @@
+pub mod amendments;
 pub mod artifacts;
 pub mod lifecycle;
 pub mod state;
