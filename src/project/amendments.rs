@@ -108,40 +108,69 @@ pub fn sanitize_id(id: &str) -> String {
 }
 
 pub fn enqueue_amendment(project_dir: &Path, req: &AmendmentRequest) -> Result<PathBuf> {
-    enqueue_amendment_with_timestamp(project_dir, req, &now_timestamp_yyyymmddhhmmss())
+    enqueue_amendment_with_timestamp_and_hook(
+        project_dir,
+        req,
+        &now_timestamp_yyyymmddhhmmss(),
+        |_| Ok(()),
+    )
 }
 
+#[cfg(test)]
 fn enqueue_amendment_with_timestamp(
     project_dir: &Path,
     req: &AmendmentRequest,
     timestamp: &str,
 ) -> Result<PathBuf> {
+    enqueue_amendment_with_timestamp_and_hook(project_dir, req, timestamp, |_| Ok(()))
+}
+
+fn enqueue_amendment_with_timestamp_and_hook<F>(
+    project_dir: &Path,
+    req: &AmendmentRequest,
+    timestamp: &str,
+    mut before_publish: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(&Path) -> Result<()>,
+{
     req.validate()?;
 
     let queue_dir = amendment_queue_dir(project_dir);
     fs::create_dir_all(&queue_dir)?;
 
     let sanitized_id = sanitize_id(&req.id);
-    let mut final_path = unique_queue_path(&queue_dir, timestamp, &sanitized_id);
     let payload = serde_json::to_vec(req)?;
+    let mut suffix = 0usize;
 
     loop {
+        let final_path = queue_path_with_suffix(&queue_dir, timestamp, &sanitized_id, suffix);
         let temp_path = write_payload_to_temp_file(&queue_dir, &payload)?;
-        match fs::rename(&temp_path, &final_path) {
-            Ok(()) => return Ok(final_path),
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+        before_publish(&final_path)?;
+        match claim_file_without_overwrite(&temp_path, &final_path)? {
+            FileClaimOutcome::Claimed => return Ok(final_path),
+            FileClaimOutcome::DestinationExists => {
                 let _ = fs::remove_file(&temp_path);
-                final_path = unique_queue_path(&queue_dir, timestamp, &sanitized_id);
+                suffix += 1;
             }
-            Err(err) => {
-                let _ = fs::remove_file(&temp_path);
-                return Err(err.into());
+            FileClaimOutcome::SourceMissing => {
+                suffix += 1;
             }
         }
     }
 }
 
 pub fn drain_amendment_queue(project_dir: &Path) -> Result<Vec<AmendmentRequest>> {
+    drain_amendment_queue_with_hook(project_dir, |_, _| Ok(()))
+}
+
+fn drain_amendment_queue_with_hook<F>(
+    project_dir: &Path,
+    mut before_json_claim: F,
+) -> Result<Vec<AmendmentRequest>>
+where
+    F: FnMut(&Path, &Path) -> Result<()>,
+{
     let queue_dir = amendment_queue_dir(project_dir);
     if !queue_dir.exists() {
         return Ok(Vec::new());
@@ -165,10 +194,10 @@ pub fn drain_amendment_queue(project_dir: &Path) -> Result<Vec<AmendmentRequest>
     for queued_path in queue_files {
         let inflight_path = if has_extension(&queued_path, "json") {
             let claimed_path = queued_path.with_extension("inflight");
-            match fs::rename(&queued_path, &claimed_path) {
-                Ok(()) => claimed_path,
-                Err(err) if err.kind() == ErrorKind::NotFound => continue,
-                Err(err) => return Err(err.into()),
+            before_json_claim(&queued_path, &claimed_path)?;
+            match claim_file_without_overwrite(&queued_path, &claimed_path)? {
+                FileClaimOutcome::Claimed => claimed_path,
+                FileClaimOutcome::DestinationExists | FileClaimOutcome::SourceMissing => continue,
             }
         } else {
             queued_path
@@ -260,20 +289,18 @@ fn amendment_queue_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(QUEUE_DIR_NAME)
 }
 
-fn unique_queue_path(queue_dir: &Path, timestamp: &str, sanitized_id: &str) -> PathBuf {
-    let mut suffix = 0usize;
-    loop {
-        let filename = if suffix == 0 {
-            format!("{timestamp}-{sanitized_id}.json")
-        } else {
-            format!("{timestamp}-{sanitized_id}-{suffix}.json")
-        };
-        let candidate = queue_dir.join(filename);
-        if !candidate.exists() {
-            return candidate;
-        }
-        suffix += 1;
-    }
+fn queue_path_with_suffix(
+    queue_dir: &Path,
+    timestamp: &str,
+    sanitized_id: &str,
+    suffix: usize,
+) -> PathBuf {
+    let filename = if suffix == 0 {
+        format!("{timestamp}-{sanitized_id}.json")
+    } else {
+        format!("{timestamp}-{sanitized_id}-{suffix}.json")
+    };
+    queue_dir.join(filename)
 }
 
 fn write_payload_to_temp_file(queue_dir: &Path, payload: &[u8]) -> Result<PathBuf> {
@@ -293,6 +320,33 @@ fn write_payload_to_temp_file(queue_dir: &Path, payload: &[u8]) -> Result<PathBu
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err.into()),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileClaimOutcome {
+    Claimed,
+    DestinationExists,
+    SourceMissing,
+}
+
+fn claim_file_without_overwrite(
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<FileClaimOutcome> {
+    // Plain rename is not safe for collision detection on Unix because it overwrites
+    // existing destinations. hard_link gives us a no-overwrite claim primitive.
+    match fs::hard_link(source, destination) {
+        Ok(()) => match fs::remove_file(source) {
+            Ok(()) => Ok(FileClaimOutcome::Claimed),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(FileClaimOutcome::Claimed),
+            Err(err) => Err(err),
+        },
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            Ok(FileClaimOutcome::DestinationExists)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(FileClaimOutcome::SourceMissing),
+        Err(err) => Err(err),
     }
 }
 
@@ -338,13 +392,11 @@ fn quarantine_inflight_file(queue_dir: &Path, inflight_path: &Path) -> Result<()
         }
 
         let target = quarantine_dir.join(filename);
-        match fs::rename(inflight_path, &target) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+        match claim_file_without_overwrite(inflight_path, &target)? {
+            FileClaimOutcome::Claimed | FileClaimOutcome::SourceMissing => return Ok(()),
+            FileClaimOutcome::DestinationExists => {
                 suffix += 1;
             }
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
         }
     }
 }
@@ -424,13 +476,51 @@ mod tests {
         fs::create_dir_all(&queue_dir).expect("create queue dir");
         fs::write(queue_dir.join("20260309030001-EXT-1.json"), "{}").expect("write existing file");
 
-        let path =
-            enqueue_amendment_with_timestamp(project_dir, &req, timestamp).expect("enqueue with suffix");
+        let path = enqueue_amendment_with_timestamp(project_dir, &req, timestamp)
+            .expect("enqueue with suffix");
         let file_name = path
             .file_name()
             .and_then(OsStr::to_str)
             .expect("file name should be utf-8");
         assert_eq!(file_name, "20260309030001-EXT-1-1.json");
+    }
+
+    #[test]
+    fn enqueue_avoids_overwriting_file_that_appears_before_publish() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+        let timestamp = "20260309030006";
+        let first_candidate = queue_dir.join("20260309030006-EXT-1.json");
+        let req = sample_request("EXT-1", "new body");
+        let mut injected = false;
+
+        let path =
+            enqueue_amendment_with_timestamp_and_hook(project_dir, &req, timestamp, |candidate| {
+                if !injected {
+                    assert_eq!(candidate, first_candidate.as_path());
+                    fs::write(candidate, r#"{"winner":"other-writer"}"#)?;
+                    injected = true;
+                }
+                Ok(())
+            })
+            .expect("enqueue with concurrent destination");
+
+        assert_eq!(
+            path.file_name().and_then(OsStr::to_str),
+            Some("20260309030006-EXT-1-1.json")
+        );
+
+        let original = fs::read_to_string(&first_candidate).expect("read preserved destination");
+        assert_eq!(original, r#"{"winner":"other-writer"}"#);
+
+        let created_payload = fs::read_to_string(&path).expect("read new queued amendment");
+        let created_request: AmendmentRequest =
+            serde_json::from_str(&created_payload).expect("deserialize queued amendment");
+        assert_eq!(created_request.id, "EXT-1");
+        assert_eq!(created_request.body, "new body");
     }
 
     #[test]
@@ -471,7 +561,10 @@ mod tests {
 
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
         assert_eq!(drained.len(), 1);
-        assert_eq!(pending_amendment_count(project_dir).expect("pending count"), 0);
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
 
         let leftover = fs::read_dir(&queue_dir)
             .expect("read queue")
@@ -498,7 +591,54 @@ mod tests {
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].id, "recovered");
-        assert_eq!(pending_amendment_count(project_dir).expect("pending count"), 0);
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_does_not_overwrite_inflight_created_before_json_claim() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let json_path = queue_dir.join("20260309030007-item.json");
+        let inflight_path = queue_dir.join("20260309030007-item.inflight");
+        write_request_file(&json_path, &sample_request("json-item", "json payload"));
+
+        let mut injected = false;
+        let drained = drain_amendment_queue_with_hook(project_dir, |queued, claimed| {
+            if !injected {
+                assert_eq!(queued, json_path.as_path());
+                assert_eq!(claimed, inflight_path.as_path());
+                write_request_file(
+                    claimed,
+                    &sample_request("inflight-item", "inflight payload"),
+                );
+                injected = true;
+            }
+            Ok(())
+        })
+        .expect("drain queue");
+
+        assert!(
+            drained.is_empty(),
+            "json file should not be claimed when inflight appears first"
+        );
+
+        let existing_inflight_payload =
+            fs::read_to_string(&inflight_path).expect("read preserved inflight file");
+        let existing_inflight: AmendmentRequest = serde_json::from_str(&existing_inflight_payload)
+            .expect("deserialize preserved inflight");
+        assert_eq!(existing_inflight.id, "inflight-item");
+
+        let preserved_json_payload =
+            fs::read_to_string(&json_path).expect("read preserved json file");
+        let preserved_json: AmendmentRequest =
+            serde_json::from_str(&preserved_json_payload).expect("deserialize preserved json");
+        assert_eq!(preserved_json.id, "json-item");
     }
 
     #[test]
@@ -515,10 +655,16 @@ mod tests {
 
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
         assert!(drained.is_empty(), "malformed input should be skipped");
-        assert_eq!(pending_amendment_count(project_dir).expect("pending count"), 0);
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
 
         let quarantine_dir = queue_dir.join(QUARANTINE_DIR_NAME);
-        assert!(quarantine_dir.exists(), "quarantine directory should be created");
+        assert!(
+            quarantine_dir.exists(),
+            "quarantine directory should be created"
+        );
         let quarantine_entries: Vec<_> = fs::read_dir(&quarantine_dir)
             .expect("read quarantine")
             .filter_map(|entry| entry.ok())
