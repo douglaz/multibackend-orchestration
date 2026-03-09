@@ -272,14 +272,34 @@ pub fn stage_implementation_changes(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Returns `true` if `file_name` matches the canonical stray impl artifact
-/// patterns: `YYYYMMDDHHMMSS-impl-notes.md` or `YYYYMMDDHHMMSS-impl-response-NNN.md`.
-fn is_stray_impl_artifact(file_name: &str) -> bool {
-    if parse_artifact_filename_timestamp(file_name).is_none() {
+const ISO_BASIC_TIMESTAMP_LEN: usize = 16;
+
+/// Returns `true` if `file_name` starts with an ISO-basic timestamp prefix
+/// of the form `YYYYMMDDTHHMMSSZ` followed by `-`.
+fn has_iso_basic_timestamp_prefix(file_name: &str) -> bool {
+    let Some((prefix, _)) = file_name.split_once('-') else {
         return false;
-    }
-    // Skip past "YYYYMMDDHHMMSS-"
-    let suffix = &file_name[ARTIFACT_TIMESTAMP_LEN + 1..];
+    };
+    prefix.len() == ISO_BASIC_TIMESTAMP_LEN
+        && prefix.as_bytes().get(8) == Some(&b'T')
+        && prefix.as_bytes().get(15) == Some(&b'Z')
+        && prefix[..8].chars().all(|c| c.is_ascii_digit())
+        && prefix[9..15].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Returns `true` if `file_name` matches stray impl artifact patterns:
+/// `YYYYMMDDHHMMSS-impl-notes.md`, `YYYYMMDDHHMMSS-impl-response-NNN.md`,
+/// `YYYYMMDDTHHMMSSZ-impl-notes.md`, or `YYYYMMDDTHHMMSSZ-impl-response-NNN.md`.
+fn is_stray_impl_artifact(file_name: &str) -> bool {
+    let ts_len = if parse_artifact_filename_timestamp(file_name).is_some() {
+        ARTIFACT_TIMESTAMP_LEN
+    } else if has_iso_basic_timestamp_prefix(file_name) {
+        ISO_BASIC_TIMESTAMP_LEN
+    } else {
+        return false;
+    };
+    // Skip past the timestamp prefix and its trailing '-'.
+    let suffix = &file_name[ts_len + 1..];
     if suffix == "impl-notes.md" {
         return true;
     }
@@ -870,6 +890,48 @@ mod tests {
     }
 
     #[test]
+    fn is_stray_impl_artifact_iso_basic_notes() {
+        assert!(super::is_stray_impl_artifact(
+            "20260309T165947Z-impl-notes.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_basic_response() {
+        assert!(super::is_stray_impl_artifact(
+            "20260309T165947Z-impl-response-001.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_basic_response_999() {
+        assert!(super::is_stray_impl_artifact(
+            "20260309T165947Z-impl-response-999.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_basic_non_impl() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260309T165947Z-review-001-feedback.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_basic_four_digit_seq() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260309T165947Z-impl-response-0001.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_basic_draft() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260309T165947Z-impl-response-draft.md"
+        ));
+    }
+
+    #[test]
     fn remove_stray_impl_artifacts_cleans_tracked_and_untracked() {
         let temp = init_repo();
         let repo = temp.path();
@@ -952,6 +1014,55 @@ mod tests {
         assert!(
             !ls_after.contains("20260304130000-impl-response-002.md"),
             "untracked stray should not be in index"
+        );
+    }
+
+    #[test]
+    fn remove_stray_impl_artifacts_cleans_iso_basic_timestamped_files() {
+        let temp = init_repo();
+        let repo = temp.path();
+
+        // ISO-basic timestamped stray files
+        fs::write(
+            repo.join("20260309T165947Z-impl-notes.md"),
+            "stray notes\n",
+        )
+        .expect("write iso-basic stray notes");
+        fs::write(
+            repo.join("20260309T165947Z-impl-response-001.md"),
+            "stray response\n",
+        )
+        .expect("write iso-basic stray response");
+
+        // Decoy: non-impl ISO-basic file should survive
+        fs::write(
+            repo.join("20260309T165947Z-review-001-feedback.md"),
+            "review\n",
+        )
+        .expect("write iso-basic review artifact");
+
+        // Also keep a canonical-timestamp decoy alive
+        fs::write(repo.join("impl-notes.md"), "user notes\n").expect("write decoy notes");
+
+        git_ok(repo, &["add", "-A"]);
+        super::remove_stray_impl_artifacts(repo).expect("cleanup should succeed");
+
+        assert!(
+            !repo.join("20260309T165947Z-impl-notes.md").exists(),
+            "iso-basic stray notes should be removed"
+        );
+        assert!(
+            !repo.join("20260309T165947Z-impl-response-001.md").exists(),
+            "iso-basic stray response should be removed"
+        );
+        assert!(
+            repo.join("20260309T165947Z-review-001-feedback.md")
+                .exists(),
+            "iso-basic review artifact should survive"
+        );
+        assert!(
+            repo.join("impl-notes.md").exists(),
+            "decoy notes should survive"
         );
     }
 }

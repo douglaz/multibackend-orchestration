@@ -226,9 +226,9 @@ where
             queued_path
         };
 
-        let parsed = match parse_inflight_request(&inflight_path) {
-            Ok(req) => req,
-            Err(err) => {
+        let parsed = match read_and_parse_inflight(&inflight_path) {
+            InflightReadOutcome::Parsed(req) => req,
+            InflightReadOutcome::Malformed(err) => {
                 warn!(
                     path = %inflight_path.display(),
                     error = %err,
@@ -242,6 +242,9 @@ where
                     );
                 }
                 continue;
+            }
+            InflightReadOutcome::ReadFailed(io_err) => {
+                return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
             }
         };
 
@@ -474,11 +477,30 @@ fn is_queue_file_for_drain(path: &Path) -> bool {
     has_extension(path, "inflight") || (has_extension(path, "json") && !is_temp_queue_file(path))
 }
 
-fn parse_inflight_request(path: &Path) -> Result<AmendmentRequest> {
-    let content = fs::read_to_string(path)?;
-    let req: AmendmentRequest = serde_json::from_str(&content)?;
-    req.validate()?;
-    Ok(req)
+/// Outcome of reading and parsing an inflight amendment file.
+/// Separates I/O read failures (fatal) from content failures (quarantinable).
+enum InflightReadOutcome {
+    /// Successfully read and validated the amendment.
+    Parsed(AmendmentRequest),
+    /// File was readable but content was invalid (bad JSON or validation failure).
+    Malformed(RalphError),
+    /// File could not be read due to an I/O error (e.g. PermissionDenied).
+    ReadFailed(std::io::Error),
+}
+
+fn read_and_parse_inflight(path: &Path) -> InflightReadOutcome {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(io_err) => return InflightReadOutcome::ReadFailed(io_err),
+    };
+    let req: AmendmentRequest = match serde_json::from_str(&content) {
+        Ok(r) => r,
+        Err(err) => return InflightReadOutcome::Malformed(err.into()),
+    };
+    match req.validate() {
+        Ok(()) => InflightReadOutcome::Parsed(req),
+        Err(err) => InflightReadOutcome::Malformed(err),
+    }
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -1155,6 +1177,77 @@ mod tests {
         assert_eq!(
             pending_amendment_count(project_dir).expect("pending count"),
             0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_io_error_on_inflight_read_is_fatal_with_rollback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // First item: valid, will be drained before the fatal error.
+        write_request_file(
+            &queue_dir.join("20260309030001-good.json"),
+            &sample_request("good", "body good"),
+        );
+
+        // Second item: pre-existing .inflight with no read permission.
+        let unreadable = queue_dir.join("20260309030002-unreadable.inflight");
+        write_request_file(&unreadable, &sample_request("unreadable", "body"));
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("remove read permissions");
+
+        // Skip if running as root (root bypasses file permissions).
+        if fs::read_to_string(&unreadable).is_ok() {
+            let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+            return;
+        }
+
+        let result = drain_amendment_queue(project_dir);
+
+        // Restore permissions before assertions so tempdir cleanup always works.
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+
+        assert!(result.is_err(), "read I/O error must be fatal");
+
+        // The first item was drained then rolled back; the second is still inflight.
+        let pending = pending_amendment_count(project_dir).expect("pending count");
+        assert_eq!(
+            pending, 2,
+            "rolled-back item and unreadable inflight should both be pending"
+        );
+    }
+
+    #[test]
+    fn drain_validation_failure_is_quarantined_not_fatal() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // Valid JSON that fails validation (empty id).
+        let invalid_json =
+            r#"{"id":"","body":"x","source":"cli","created_at":"2026-03-09T03:00:00Z"}"#;
+        fs::write(queue_dir.join("20260309030001-bad.json"), invalid_json)
+            .expect("write invalid amendment");
+        write_request_file(
+            &queue_dir.join("20260309030002-good.json"),
+            &sample_request("good", "body good"),
+        );
+
+        let drained = drain_amendment_queue(project_dir).expect("drain should succeed");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, "good");
+
+        let quarantine_dir = queue_dir.join(QUARANTINE_DIR_NAME);
+        assert!(
+            quarantine_dir.exists(),
+            "quarantine directory should exist for validation failure"
         );
     }
 
