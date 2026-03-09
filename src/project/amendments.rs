@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -191,7 +192,20 @@ where
     queue_files.sort_by_key(queue_sort_key);
 
     let mut drained = Vec::new();
+    let mut completed_inflight_stems = HashSet::new();
     for queued_path in queue_files {
+        if has_extension(&queued_path, "json")
+            && queue_stem(&queued_path)
+                .as_ref()
+                .is_some_and(|stem| completed_inflight_stems.contains(stem))
+        {
+            // Interrupted claims can leave both <stem>.json and <stem>.inflight.
+            // Once the inflight copy has been drained, drop the stale json copy
+            // to preserve at-most-once processing for that logical amendment.
+            remove_file_if_exists(&queued_path)?;
+            continue;
+        }
+
         let inflight_path = if has_extension(&queued_path, "json") {
             let claimed_path = queued_path.with_extension("inflight");
             before_json_claim(&queued_path, &claimed_path)?;
@@ -223,6 +237,9 @@ where
         };
 
         fs::remove_file(&inflight_path)?;
+        if let Some(stem) = queue_stem(&inflight_path) {
+            completed_inflight_stems.insert(stem);
+        }
         drained.push(parsed);
     }
 
@@ -366,6 +383,20 @@ fn parse_inflight_request(path: &Path) -> Result<AmendmentRequest> {
     let req: AmendmentRequest = serde_json::from_str(&content)?;
     req.validate()?;
     Ok(req)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn queue_stem(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .map(ToOwned::to_owned)
 }
 
 fn quarantine_inflight_file(queue_dir: &Path, inflight_path: &Path) -> Result<()> {
@@ -591,6 +622,26 @@ mod tests {
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].id, "recovered");
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_processes_same_stem_json_and_inflight_only_once() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        let req = sample_request("dup", "claim interrupted");
+        write_request_file(&queue_dir.join("20260309030008-dup.json"), &req);
+        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req);
+
+        let drained = drain_amendment_queue(project_dir).expect("drain queue");
+        let ids: Vec<_> = drained.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup"]);
         assert_eq!(
             pending_amendment_count(project_dir).expect("pending count"),
             0
