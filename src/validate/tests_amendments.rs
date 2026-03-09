@@ -541,6 +541,10 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
         .expect("create project");
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
             .expect("disable prompt review");
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable qa");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "false"])
+            .expect("disable final review");
 
         let output = h
             .ralph([
@@ -566,6 +570,25 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
             pending > 0,
             "late guard should not drain or mutate pending amendment queue"
         );
+
+        // Verify no .json files were renamed to .inflight (guard must not
+        // drain or mutate queue files).
+        let queue_dir = h.project_dir(project_id).join("amendment-queue");
+        if queue_dir.exists() {
+            let inflight_count = fs::read_dir(&queue_dir)
+                .expect("read queue dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map_or(false, |ext| ext == "inflight")
+                })
+                .count();
+            assert_eq!(
+                inflight_count, 0,
+                "late guard must not rename .json to .inflight; found {inflight_count} .inflight file(s)"
+            );
+        }
     })
 }
 
