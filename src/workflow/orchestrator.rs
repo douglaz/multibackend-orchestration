@@ -27,15 +27,15 @@ use crate::git::commit::{
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
+use crate::project::amendments::{
+    cleanup_drained_inflight_files, drain_amendment_queue_deferred, enqueue_amendment,
+    format_external_amendments_for_prompt, pending_amendment_count, rollback_drained_amendments,
+    AmendmentPriority, AmendmentRequest, AmendmentSource,
+};
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, slugify_backend, write_artifact,
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
-};
-use crate::project::amendments::{
-    drain_amendment_queue, enqueue_amendment, format_external_amendments_for_prompt,
-    pending_amendment_count, rollback_drained_amendments, AmendmentPriority, AmendmentRequest,
-    AmendmentSource,
 };
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
@@ -584,6 +584,7 @@ impl Orchestrator {
             let phase_iteration_at_step_start = state.phase_iteration;
             let mut completed_feature_loop_for_checkpoint: Option<u32> = None;
             let mut pending_phase_checkpoint: Option<(Phase, Phase)> = None;
+            let mut deferred_inflight_cleanup: Vec<PathBuf> = Vec::new();
 
             match state.current_phase {
                 Phase::Planning => {
@@ -601,7 +602,9 @@ impl Orchestrator {
                     let planner_backend =
                         registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
-                    let drained_amendments = drain_amendment_queue(&project_dir)?;
+                    let (drained_amendments, inflight_paths) =
+                        drain_amendment_queue_deferred(&project_dir)?;
+                    deferred_inflight_cleanup = inflight_paths;
                     let drained_for_rollback = drained_amendments.clone();
                     let planner_amendments = if effective.amendments.unify_final_review {
                         drained_amendments
@@ -2773,6 +2776,12 @@ impl Orchestrator {
                 state.current_phase = transitioned_phase;
                 state.phase_iteration = transitioned_iteration;
 
+                // Phase transition is durable — safe to clean up inflight files.
+                if !deferred_inflight_cleanup.is_empty() {
+                    cleanup_drained_inflight_files(&deferred_inflight_cleanup);
+                    deferred_inflight_cleanup.clear();
+                }
+
                 if let Some(loop_number) = completed_feature_loop_for_checkpoint {
                     let repo_root = self.workspace.root.parent().ok_or_else(|| {
                         RalphError::Orchestration("workspace root has no parent path".to_owned())
@@ -2825,15 +2834,25 @@ impl Orchestrator {
                 ) {
                     warn!("failed to checkpoint completion artifacts: {err}");
                 }
-                // Late guard: reject completion if amendments arrived during
-                // completing/final-review phases. Placed immediately before
-                // success return (after checkpoint) to close the post-check
-                // window.
+                // Late guard: if amendments arrived during completing/final-review,
+                // reopen planning instead of finalizing completion. Returning an
+                // error here would leave completion artifacts intact, causing
+                // state reconstruction to re-enter completion on restart and
+                // creating a stuck loop.
                 let late_pending = pending_amendment_count(&project_dir)?;
                 if late_pending > 0 {
-                    return Err(RalphError::Orchestration(format!(
-                        "completion blocked: {late_pending} amendment(s) arrived in the queue during completing/final-review"
-                    )));
+                    info!(
+                        loop = state.current_loop,
+                        late_pending,
+                        "amendments arrived during completing/final-review; reopening planning"
+                    );
+                    logs.push(format!(
+                        "loop {}: {late_pending} amendment(s) arrived during completing/final-review; reopening planning",
+                        state.current_loop
+                    ));
+                    state.current_phase = Phase::Planning;
+                    state.status = ProjectStatus::InProgress;
+                    continue;
                 }
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
@@ -4390,10 +4409,8 @@ async fn run_final_review_phase(
     // When unify_final_review is enabled, mirror accepted amendments into the
     // external amendment queue so the planner can process them uniformly.
     if effective.amendments.unify_final_review {
-        let by_id: HashMap<&str, &FinalReviewAmendment> = amendments
-            .iter()
-            .map(|a| (a.id.as_str(), a))
-            .collect();
+        let by_id: HashMap<&str, &FinalReviewAmendment> =
+            amendments.iter().map(|a| (a.id.as_str(), a)).collect();
         for accepted_id in &final_accepted {
             if let Some(amendment) = by_id.get(accepted_id.as_str()) {
                 let req = AmendmentRequest {

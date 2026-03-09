@@ -169,19 +169,41 @@ where
 }
 
 pub fn drain_amendment_queue(project_dir: &Path) -> Result<Vec<AmendmentRequest>> {
-    drain_amendment_queue_with_hook(project_dir, |_, _| Ok(()))
+    let (amendments, inflight_paths) = drain_amendment_queue_core(project_dir, |_, _| Ok(()))?;
+    cleanup_drained_inflight_files(&inflight_paths);
+    Ok(amendments)
 }
 
-fn drain_amendment_queue_with_hook<F>(
+/// Drain the amendment queue but defer inflight file cleanup.
+///
+/// Returns the drained amendments and the list of `.inflight` file paths that
+/// must be deleted once the caller has durably committed the phase transition.
+/// This prevents amendment loss if the process crashes between drain and commit.
+///
+/// Call [`cleanup_drained_inflight_files`] after the phase commit succeeds.
+pub fn drain_amendment_queue_deferred(
+    project_dir: &Path,
+) -> Result<(Vec<AmendmentRequest>, Vec<PathBuf>)> {
+    drain_amendment_queue_core(project_dir, |_, _| Ok(()))
+}
+
+/// Best-effort deletion of inflight files after durable consumption.
+pub fn cleanup_drained_inflight_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn drain_amendment_queue_core<F>(
     project_dir: &Path,
     mut before_json_claim: F,
-) -> Result<Vec<AmendmentRequest>>
+) -> Result<(Vec<AmendmentRequest>, Vec<PathBuf>)>
 where
     F: FnMut(&Path, &Path) -> Result<()>,
 {
     let queue_dir = amendment_queue_dir(project_dir);
     if !queue_dir.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let mut queue_files = Vec::new();
@@ -199,6 +221,7 @@ where
     queue_files.sort_by_key(queue_sort_key);
 
     let mut drained = Vec::new();
+    let mut inflight_to_cleanup = Vec::new();
     let mut completed_inflight_items: HashMap<String, AmendmentRequest> = HashMap::new();
     for queued_path in queue_files {
         if has_extension(&queued_path, "json") {
@@ -209,39 +232,67 @@ where
                     // main path), then compare content for dedup vs. distinct handling.
                     let claimed_path = queued_path.with_extension("inflight");
                     if let Err(err) = before_json_claim(&queued_path, &claimed_path) {
-                        return Err(rollback_mid_drain(project_dir, drained, err));
+                        return Err(rollback_mid_drain(
+                            project_dir,
+                            drained,
+                            &inflight_to_cleanup,
+                            err,
+                        ));
                     }
                     let inflight_path =
                         match claim_file_without_overwrite(&queued_path, &claimed_path) {
                             Ok(FileClaimOutcome::Claimed) => claimed_path,
-                            Ok(
-                                FileClaimOutcome::DestinationExists
-                                | FileClaimOutcome::SourceMissing,
-                            ) => {
+                            Ok(FileClaimOutcome::DestinationExists) => {
+                                // .inflight already exists (deferred cleanup hasn't
+                                // removed it yet).  Read the .json in-place; if it
+                                // matches the already-drained inflight, schedule the
+                                // .json for cleanup.  If content differs, drain it.
+                                match read_and_parse_inflight(&queued_path) {
+                                    InflightReadOutcome::Parsed(ref req) if req == prev => {
+                                        inflight_to_cleanup.push(queued_path);
+                                    }
+                                    InflightReadOutcome::Parsed(req) => {
+                                        inflight_to_cleanup.push(queued_path);
+                                        drained.push(req);
+                                    }
+                                    InflightReadOutcome::Malformed(err) => {
+                                        warn!(
+                                            path = %queued_path.display(),
+                                            error = %err,
+                                            "failed to parse same-stem json; quarantining"
+                                        );
+                                        let _ = quarantine_inflight_file(&queue_dir, &queued_path);
+                                    }
+                                    InflightReadOutcome::ReadFailed(io_err) => {
+                                        return Err(rollback_mid_drain(
+                                            project_dir,
+                                            drained,
+                                            &inflight_to_cleanup,
+                                            io_err.into(),
+                                        ));
+                                    }
+                                }
+                                continue;
+                            }
+                            Ok(FileClaimOutcome::SourceMissing) => {
                                 continue;
                             }
                             Err(io_err) => {
                                 return Err(rollback_mid_drain(
                                     project_dir,
                                     drained,
+                                    &inflight_to_cleanup,
                                     io_err.into(),
                                 ));
                             }
                         };
                     match read_and_parse_inflight(&inflight_path) {
                         InflightReadOutcome::Parsed(ref req) if req == prev => {
-                            if let Err(err) = remove_file_if_exists(&inflight_path) {
-                                return Err(rollback_mid_drain(project_dir, drained, err));
-                            }
+                            // Duplicate — schedule for cleanup but don't add to drained.
+                            inflight_to_cleanup.push(inflight_path);
                         }
                         InflightReadOutcome::Parsed(req) => {
-                            if let Err(io_err) = fs::remove_file(&inflight_path) {
-                                return Err(rollback_mid_drain(
-                                    project_dir,
-                                    drained,
-                                    io_err.into(),
-                                ));
-                            }
+                            inflight_to_cleanup.push(inflight_path);
                             drained.push(req);
                         }
                         InflightReadOutcome::Malformed(err) => {
@@ -250,8 +301,7 @@ where
                                 error = %err,
                                 "failed to parse same-stem amendment; quarantining file"
                             );
-                            if let Err(q_err) =
-                                quarantine_inflight_file(&queue_dir, &inflight_path)
+                            if let Err(q_err) = quarantine_inflight_file(&queue_dir, &inflight_path)
                             {
                                 warn!(
                                     path = %inflight_path.display(),
@@ -264,6 +314,7 @@ where
                             return Err(rollback_mid_drain(
                                 project_dir,
                                 drained,
+                                &inflight_to_cleanup,
                                 io_err.into(),
                             ));
                         }
@@ -276,7 +327,12 @@ where
         let inflight_path = if has_extension(&queued_path, "json") {
             let claimed_path = queued_path.with_extension("inflight");
             if let Err(err) = before_json_claim(&queued_path, &claimed_path) {
-                return Err(rollback_mid_drain(project_dir, drained, err));
+                return Err(rollback_mid_drain(
+                    project_dir,
+                    drained,
+                    &inflight_to_cleanup,
+                    err,
+                ));
             }
             match claim_file_without_overwrite(&queued_path, &claimed_path) {
                 Ok(FileClaimOutcome::Claimed) => claimed_path,
@@ -284,7 +340,12 @@ where
                     continue
                 }
                 Err(io_err) => {
-                    return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
+                    return Err(rollback_mid_drain(
+                        project_dir,
+                        drained,
+                        &inflight_to_cleanup,
+                        io_err.into(),
+                    ));
                 }
             }
         } else {
@@ -309,30 +370,37 @@ where
                 continue;
             }
             InflightReadOutcome::ReadFailed(io_err) => {
-                return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
+                return Err(rollback_mid_drain(
+                    project_dir,
+                    drained,
+                    &inflight_to_cleanup,
+                    io_err.into(),
+                ));
             }
         };
 
-        if let Err(io_err) = fs::remove_file(&inflight_path) {
-            return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
-        }
         if let Some(stem) = queue_stem(&inflight_path) {
             completed_inflight_items.insert(stem, parsed.clone());
         }
+        inflight_to_cleanup.push(inflight_path);
         drained.push(parsed);
     }
 
-    Ok(drained)
+    Ok((drained, inflight_to_cleanup))
 }
 
 /// Best-effort rollback of already-drained amendments after a mid-drain failure.
-/// Re-enqueues all items in `drained`, then returns an appropriate error.
+/// Re-enqueues all items in `drained`, cleans up inflight files, then returns
+/// an appropriate error.
 /// If rollback is partial, the returned error includes the unrestored amendment IDs.
 fn rollback_mid_drain(
     project_dir: &Path,
     drained: Vec<AmendmentRequest>,
+    inflight_paths: &[PathBuf],
     original_error: RalphError,
 ) -> RalphError {
+    // Clean up inflight files since we're re-enqueuing the amendments.
+    cleanup_drained_inflight_files(inflight_paths);
     if drained.is_empty() {
         return original_error;
     }
@@ -354,10 +422,7 @@ fn rollback_mid_drain(
 /// Re-enqueue previously drained amendments back to the queue.
 /// Returns a list of amendment IDs that could not be re-enqueued.
 /// Successfully re-enqueued items remain queued even if later items fail.
-pub fn re_enqueue_amendments(
-    project_dir: &Path,
-    amendments: &[AmendmentRequest],
-) -> Vec<String> {
+pub fn re_enqueue_amendments(project_dir: &Path, amendments: &[AmendmentRequest]) -> Vec<String> {
     let mut failed_ids = Vec::new();
     for req in amendments {
         if let Err(err) = enqueue_amendment(project_dir, req) {
@@ -565,14 +630,6 @@ fn read_and_parse_inflight(path: &Path) -> InflightReadOutcome {
     match req.validate() {
         Ok(()) => InflightReadOutcome::Parsed(req),
         Err(err) => InflightReadOutcome::Malformed(err),
-    }
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
     }
 }
 
@@ -841,7 +898,10 @@ mod tests {
         // Same stem but different payloads: both must be processed.
         let req_inflight = sample_request("dup", "inflight payload");
         let req_json = sample_request("dup-new", "json payload");
-        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(
+            &queue_dir.join("20260309030008-dup.inflight"),
+            &req_inflight,
+        );
         write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
 
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
@@ -864,7 +924,10 @@ mod tests {
 
         let req_inflight = sample_request("dup", "inflight payload");
         let req_json = sample_request("dup-new", "json payload");
-        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(
+            &queue_dir.join("20260309030008-dup.inflight"),
+            &req_inflight,
+        );
         write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
 
         // Track that the before_json_claim hook fires for the same-stem .json
@@ -873,18 +936,19 @@ mod tests {
         let json_path = queue_dir.join("20260309030008-dup.json");
         let expected_inflight = queue_dir.join("20260309030008-dup.inflight");
 
-        let drained = drain_amendment_queue_with_hook(project_dir, |queued, claimed| {
-            if queued == json_path.as_path() {
-                assert_eq!(
-                    claimed,
-                    expected_inflight.as_path(),
-                    "same-stem .json must be claimed to .inflight"
-                );
-                same_stem_claim_observed = true;
-            }
-            Ok(())
-        })
-        .expect("drain queue");
+        let (drained, _inflight_paths) =
+            drain_amendment_queue_core(project_dir, |queued, claimed| {
+                if queued == json_path.as_path() {
+                    assert_eq!(
+                        claimed,
+                        expected_inflight.as_path(),
+                        "same-stem .json must be claimed to .inflight"
+                    );
+                    same_stem_claim_observed = true;
+                }
+                Ok(())
+            })
+            .expect("drain queue");
 
         assert!(
             same_stem_claim_observed,
@@ -905,19 +969,23 @@ mod tests {
 
         let req_inflight = sample_request("dup", "inflight payload");
         let req_json = sample_request("dup-new", "json payload");
-        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(
+            &queue_dir.join("20260309030008-dup.inflight"),
+            &req_inflight,
+        );
         write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
 
         // Simulate race: remove the .json before the claim rename happens.
         let json_path = queue_dir.join("20260309030008-dup.json");
-        let drained = drain_amendment_queue_with_hook(project_dir, |queued, _claimed| {
-            if queued == json_path.as_path() {
-                // Another process already claimed this file.
-                fs::remove_file(queued)?;
-            }
-            Ok(())
-        })
-        .expect("drain queue");
+        let (drained, _inflight_paths) =
+            drain_amendment_queue_core(project_dir, |queued, _claimed| {
+                if queued == json_path.as_path() {
+                    // Another process already claimed this file.
+                    fs::remove_file(queued)?;
+                }
+                Ok(())
+            })
+            .expect("drain queue");
 
         // Only the inflight item should be drained; the raced .json is skipped.
         let ids: Vec<&str> = drained.iter().map(|item| item.id.as_str()).collect();
@@ -1000,19 +1068,20 @@ mod tests {
         write_request_file(&json_path, &sample_request("json-item", "json payload"));
 
         let mut injected = false;
-        let drained = drain_amendment_queue_with_hook(project_dir, |queued, claimed| {
-            if !injected {
-                assert_eq!(queued, json_path.as_path());
-                assert_eq!(claimed, inflight_path.as_path());
-                write_request_file(
-                    claimed,
-                    &sample_request("inflight-item", "inflight payload"),
-                );
-                injected = true;
-            }
-            Ok(())
-        })
-        .expect("drain queue");
+        let (drained, _inflight_paths) =
+            drain_amendment_queue_core(project_dir, |queued, claimed| {
+                if !injected {
+                    assert_eq!(queued, json_path.as_path());
+                    assert_eq!(claimed, inflight_path.as_path());
+                    write_request_file(
+                        claimed,
+                        &sample_request("inflight-item", "inflight payload"),
+                    );
+                    injected = true;
+                }
+                Ok(())
+            })
+            .expect("drain queue");
 
         assert!(
             drained.is_empty(),
@@ -1092,7 +1161,10 @@ mod tests {
         );
         let drained = drain_amendment_queue(project_dir).expect("drain queue");
         assert!(drained.is_empty(), "temp staging files must not be drained");
-        assert!(tmp_path.exists(), "drain should leave temp staging files untouched");
+        assert!(
+            tmp_path.exists(),
+            "drain should leave temp staging files untouched"
+        );
     }
 
     #[test]
@@ -1106,7 +1178,10 @@ mod tests {
         fs::write(&tmp_path, "{ not valid json").expect("write temp staging file");
 
         let published_path = queue_dir.join("20260309030009-real.json");
-        write_request_file(&published_path, &sample_request("real", "published payload"));
+        write_request_file(
+            &published_path,
+            &sample_request("real", "published payload"),
+        );
 
         assert_eq!(
             pending_amendment_count(project_dir)
@@ -1279,7 +1354,7 @@ mod tests {
         // before the hook fires for item c.  Injecting a fatal error here
         // exercises the mid-drain rollback path.
         let mut call_count = 0u32;
-        let result = drain_amendment_queue_with_hook(project_dir, |_, _| {
+        let result = drain_amendment_queue_core(project_dir, |_, _| {
             call_count += 1;
             if call_count == 3 {
                 Err(RalphError::Io(std::io::Error::new(
@@ -1341,7 +1416,7 @@ mod tests {
 
         // Fail on the 2nd item so the 1st is rolled back.
         let mut call_count = 0u32;
-        let result = drain_amendment_queue_with_hook(project_dir, |_, _| {
+        let result = drain_amendment_queue_core(project_dir, |_, _| {
             call_count += 1;
             if call_count == 2 {
                 Err(RalphError::Io(std::io::Error::new(
