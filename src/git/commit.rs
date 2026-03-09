@@ -305,11 +305,13 @@ fn strip_noncanonical_timestamp_prefix(file_name: &str) -> Option<&str> {
     let (prefix, rest) = file_name.split_once('-')?;
     let len = prefix.len();
     // ISO-T: "YYYYMMDDTHHMMSS" (15) or "YYYYMMDDTHHMMSSZ" (16)
-    if (len == 15 || len == 16) && prefix.as_bytes().get(8) == Some(&b'T') {
-        let date_part = &prefix[..8];
-        let time_part = &prefix[9..15];
-        if date_part.chars().all(|c| c.is_ascii_digit())
-            && time_part.chars().all(|c| c.is_ascii_digit())
+    // Work on bytes to avoid panicking on non-ASCII filenames.
+    let bytes = prefix.as_bytes();
+    if (len == 15 || len == 16) && bytes.get(8) == Some(&b'T') {
+        if len == 16 && bytes[15] != b'Z' {
+            // 16-char variant must end with 'Z'
+        } else if bytes[..8].iter().all(|b| b.is_ascii_digit())
+            && bytes[9..15].iter().all(|b| b.is_ascii_digit())
         {
             return Some(rest);
         }
@@ -928,6 +930,13 @@ mod tests {
     fn is_stray_impl_artifact_unix_epoch_response() {
         assert!(super::is_stray_impl_artifact(
             "1738520488-impl-response-001.md"
+        ));
+    }
+
+    #[test]
+    fn is_stray_impl_artifact_iso_t_non_z_suffix_rejected() {
+        assert!(!super::is_stray_impl_artifact(
+            "20260301T141108X-impl-notes.md"
         ));
     }
 
