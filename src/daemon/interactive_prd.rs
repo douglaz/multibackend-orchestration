@@ -1998,7 +1998,11 @@ fn run_review_with_retry_sync(
     let backend: Arc<dyn Backend> = Arc::new(reviewer.clone());
     let no_cancel = tokio_util::sync::CancellationToken::new();
     let result = rt.block_on(async {
-        tokio::time::timeout(remaining, run_review_with_retry(backend, prompt, &no_cancel)).await
+        tokio::time::timeout(
+            remaining,
+            run_review_with_retry(backend, prompt, &no_cancel),
+        )
+        .await
     });
 
     match result {

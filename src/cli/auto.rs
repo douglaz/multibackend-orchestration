@@ -316,8 +316,7 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let fallback_cwd = temp.path();
 
-        let workspace =
-            ensure_workspace(None, fallback_cwd).expect("workspace should be created");
+        let workspace = ensure_workspace(None, fallback_cwd).expect("workspace should be created");
         let workspace_root = temp.path().join(".ralph");
 
         assert_eq!(workspace.root, workspace_root);

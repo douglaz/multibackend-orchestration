@@ -755,7 +755,10 @@ impl CliBackend {
             };
 
             // Cancel the watchdog unless it already completed on its own.
-            if matches!(execution_outcome, ExecutionOutcome::Completed(_) | ExecutionOutcome::Cancelled) {
+            if matches!(
+                execution_outcome,
+                ExecutionOutcome::Completed(_) | ExecutionOutcome::Cancelled
+            ) {
                 let _ = watchdog_cancel_tx.send(());
                 if let Err(err) = watchdog_handle.await {
                     if !matches!(execution_outcome, ExecutionOutcome::Cancelled) {
@@ -2814,8 +2817,7 @@ exit 1
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         if child_pid_file.exists() {
-            let pid_str = std::fs::read_to_string(&child_pid_file)
-                .expect("read child pid file");
+            let pid_str = std::fs::read_to_string(&child_pid_file).expect("read child pid file");
             if let Ok(descendant_pid) = pid_str.trim().parse::<i32>() {
                 // The descendant must be dead — killed via process group
                 // cleanup on the non-zero exit path.

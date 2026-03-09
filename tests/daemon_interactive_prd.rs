@@ -2396,10 +2396,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[
-                ("PATH", &path_env),
-                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-            ],
+            &[("PATH", &path_env), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
         )
         .expect("daemon start");
 
@@ -2707,7 +2704,6 @@ esac; exit 0
     h.setup_mock_backends_stable(&fail_backend)
         .expect("setup fail backends");
 
-
     // Inject save failure via env var — deterministic regardless of privilege level.
     // Run one tick — backend error pushes error_count to 3, transition_to_failed
     // tries to save but fails, state should remain non-terminal
@@ -2720,10 +2716,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[
-                ("PATH", &path_env),
-                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-            ],
+            &[("PATH", &path_env), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
         )
         .expect("daemon start");
 

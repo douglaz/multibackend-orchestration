@@ -1335,17 +1335,19 @@ fn detect_legacy_slug_branch(worktree_path: &Path) -> Result<Option<String>> {
 }
 
 fn validate_daemon_branch_format(branch_format: &str) -> Result<()> {
-    let project_id = "issue-1";
-    let rendered = crate::git::branch::resolve_branch_name(branch_format, project_id);
-    if rendered == "ralph/issue-1" {
-        return Ok(());
+    // Validate two distinct project IDs to reject constant formats (e.g. "ralph/issue-1")
+    // that accidentally pass a single-ID check.
+    for (project_id, expected) in [("issue-1", "ralph/issue-1"), ("issue-2", "ralph/issue-2")] {
+        let rendered = crate::git::branch::resolve_branch_name(branch_format, project_id);
+        if rendered != expected {
+            return Err(RalphError::Validation(format!(
+                "incompatible git.branch_format for daemon-managed issue dispatch: \
+                 formatting project_id '{project_id}' must produce '{expected}', \
+                 but '{branch_format}' produced '{rendered}'"
+            )));
+        }
     }
-
-    Err(RalphError::Validation(format!(
-        "incompatible git.branch_format for daemon-managed issue dispatch: \
-         formatting project_id '{project_id}' must produce 'ralph/issue-1', \
-         but '{branch_format}' produced '{rendered}'"
-    )))
+    Ok(())
 }
 
 /// Dispatch a single task: create worktree, spawn child, track in-memory.
@@ -1358,6 +1360,10 @@ async fn dispatch_task(
 ) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
+    let branch_name = crate::git::branch::resolve_branch_name(
+        &config.global_config.git.branch_format,
+        &project_id,
+    );
 
     bootstrap::ensure_repo_ready(&config.repo_root, Some(repo_root_lock.clone())).await?;
 
@@ -1375,9 +1381,12 @@ async fn dispatch_task(
         let repo_root = config.repo_root.clone();
         let ws_root = workspace_root.clone();
         let tid = task_id.clone();
+        let branch_name_clone = branch_name.clone();
         let lock = Some(repo_root_lock.clone());
-        spawn_blocking_op(move || worktree::create_worktree(&repo_root, &ws_root, &tid, lock))
-            .await?
+        spawn_blocking_op(move || {
+            worktree::create_worktree(&repo_root, &ws_root, &tid, &branch_name_clone, lock)
+        })
+        .await?
     };
 
     // Clean worktree of any dirty files from previous runs
@@ -1502,9 +1511,6 @@ async fn dispatch_task(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Determine branch name for the child handle
-    let branch_name = format!("ralph/daemon/{task_id}");
-
     // Ignore stale artifacts left from prior runs.  Subtract 2 seconds to
     // tolerate filesystems that truncate mtime to whole-second granularity
     // (e.g. tmpfs in nix build sandboxes).
@@ -1559,7 +1565,10 @@ async fn dispatch_task(
                     max_review_iterations: None,
                     max_final_review_retries: None,
                 };
-                super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_run_task(params), &log_path)?
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_quick_dev_run_task(params),
+                    &log_path,
+                )?
             }
             (true, false) => {
                 eprintln!(
@@ -1579,7 +1588,10 @@ async fn dispatch_task(
                     max_review_iterations: None,
                     max_final_review_retries: None,
                 };
-                super::tasks::spawn_inprocess_task(|| super::tasks::run_quick_dev_auto_task(params), &log_path)?
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_quick_dev_auto_task(params),
+                    &log_path,
+                )?
             }
             (false, true) => {
                 eprintln!(
@@ -1607,7 +1619,10 @@ async fn dispatch_task(
                     skip_commit: false,
                     skip_prompt_review: false,
                 };
-                super::tasks::spawn_inprocess_task(|| super::tasks::run_run_task(params), &log_path)?
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_run_task(params),
+                    &log_path,
+                )?
             }
             (false, false) => {
                 eprintln!(
@@ -1635,7 +1650,10 @@ async fn dispatch_task(
                     skip_prompt_review: false,
                     dry_run: false,
                 };
-                super::tasks::spawn_inprocess_task(|| super::tasks::run_auto_task(params), &log_path)?
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_auto_task(params),
+                    &log_path,
+                )?
             }
         }
     };
@@ -1757,7 +1775,10 @@ async fn await_watcher_with_timeout_impl(
 /// - `Ok(Err(_))` → `"ralph:failed"` (task error)
 /// - `Err(JoinError)` → `"ralph:failed"` (task panicked)
 fn derive_terminal_label(
-    result: &std::result::Result<crate::Result<crate::workflow::orchestrator::OrchestrationResult>, tokio::task::JoinError>,
+    result: &std::result::Result<
+        crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+        tokio::task::JoinError,
+    >,
 ) -> &'static str {
     match result {
         Ok(Ok(_)) => "ralph:completed",
@@ -1805,7 +1826,9 @@ async fn collect_children(
 
         // Resolve the task result from the JoinHandle.
         let join_result = (&mut handle.join_handle).await;
-        let was_externally_aborted = handle.aborted_externally.load(std::sync::atomic::Ordering::SeqCst);
+        let was_externally_aborted = handle
+            .aborted_externally
+            .load(std::sync::atomic::Ordering::SeqCst);
         let terminal_label = if was_externally_aborted {
             eprintln!("collect: task {task_id} was externally aborted, forcing ralph:failed");
             "ralph:failed"
@@ -1837,7 +1860,12 @@ async fn collect_children(
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
-        completion_tasks.push((issue_number, task_id, terminal_label, was_externally_aborted));
+        completion_tasks.push((
+            issue_number,
+            task_id,
+            terminal_label,
+            was_externally_aborted,
+        ));
     }
 
     // Stage 3: Run complete_task concurrently across finished children via JoinSet.
@@ -1857,7 +1885,15 @@ async fn collect_children(
         complete_set.spawn(async move {
             // Inner spawn isolates panics so issue_number is preserved.
             let inner = tokio::spawn(async move {
-                complete_task(&config, issue_number, &tid, terminal_label, externally_aborted, &repo_root_lock).await;
+                complete_task(
+                    &config,
+                    issue_number,
+                    &tid,
+                    terminal_label,
+                    externally_aborted,
+                    &repo_root_lock,
+                )
+                .await;
             });
             match inner.await {
                 Ok(()) => CompletionOutcome::Done {
@@ -1985,7 +2021,9 @@ async fn kill_aborted_children(
     for issue_number in to_kill {
         if let Some(handle) = children.get(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-            handle.aborted_externally.store(true, std::sync::atomic::Ordering::SeqCst);
+            handle
+                .aborted_externally
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             handle.cancel_token.cancel();
             handle.watcher_cancel.cancel();
             handle.draft_pr_cancel.cancel();
@@ -2000,13 +2038,8 @@ async fn drain_all_children(
     children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
-    drain_all_children_with_deadline(
-        config,
-        children,
-        repo_root_lock,
-        Duration::from_secs(7200),
-    )
-    .await;
+    drain_all_children_with_deadline(config, children, repo_root_lock, Duration::from_secs(7200))
+        .await;
 }
 
 /// Inner implementation with a configurable drain deadline (testable).
@@ -2044,25 +2077,16 @@ async fn drain_all_children_with_deadline(
         for issue_number in remaining {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
             if let Some(mut handle) = children.remove(&issue_number) {
-                eprintln!(
-                    "warning: force-aborting task {task_id} (drain timeout)"
-                );
+                eprintln!("warning: force-aborting task {task_id} (drain timeout)");
                 handle.join_handle.abort();
                 // Wait for the aborted task to actually resolve (up to 10s).
                 // abort() is cooperative — it only takes effect at .await
                 // points.  This bounded wait ensures we don't label the task
                 // as failed while it is still running blocking code.
-                match tokio::time::timeout(
-                    Duration::from_secs(10),
-                    &mut handle.join_handle,
-                )
-                .await
-                {
+                match tokio::time::timeout(Duration::from_secs(10), &mut handle.join_handle).await {
                     Ok(_) => {}
                     Err(_) => {
-                        eprintln!(
-                            "warning: task {task_id} did not resolve within 10s after abort"
-                        );
+                        eprintln!("warning: task {task_id} did not resolve within 10s after abort");
                     }
                 }
                 handle.watcher_cancel.cancel();
@@ -2240,13 +2264,9 @@ async fn complete_task_attempt(
     if externally_aborted {
         // Best-effort: ensure terminal label is present even if external
         // actor only removed in-progress without adding failed.
-        if let Err(err) = github::add_label_with_retry(
-            &config.owner,
-            &config.repo,
-            issue_number,
-            terminal_label,
-        )
-        .await
+        if let Err(err) =
+            github::add_label_with_retry(&config.owner, &config.repo, issue_number, terminal_label)
+                .await
         {
             eprintln!(
                 "warning: failed to ensure {terminal_label} for externally aborted {task_id}: {err}"
@@ -2381,7 +2401,8 @@ async fn auto_rebase_phase(
                 Some(h) => {
                     // Skip tasks that are externally aborted or already cancelling —
                     // they should not trigger rebase activity.
-                    if h.aborted_externally.load(std::sync::atomic::Ordering::SeqCst)
+                    if h.aborted_externally
+                        .load(std::sync::atomic::Ordering::SeqCst)
                         || h.cancel_token.is_cancelled()
                     {
                         continue;
@@ -3255,9 +3276,9 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        await_watcher_with_timeout_impl, build_pr_body, build_pr_title,
-        derive_terminal_label, detect_final_prompt_artifact, detect_quick_prd_artifact,
-        extract_issue_body, extract_original_title, extract_project_ref, newest_by_mtime,
+        await_watcher_with_timeout_impl, build_pr_body, build_pr_title, derive_terminal_label,
+        detect_final_prompt_artifact, detect_quick_prd_artifact, extract_issue_body,
+        extract_original_title, extract_project_ref, newest_by_mtime,
         post_artifact_comments_with_client, should_close_no_diff_draft_pr,
         should_mark_draft_pr_ready, should_resume_issue_project, should_retry_complete_task,
         sweep_artifact_comments, truncate_for_github, validate_daemon_branch_format,
@@ -3506,6 +3527,21 @@ mod tests {
         assert!(
             msg.contains("ralph/issue-1"),
             "expected expected-branch hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn daemon_branch_format_validation_rejects_constant_format() {
+        let err = validate_daemon_branch_format("ralph/issue-1")
+            .expect_err("constant branch format should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("git.branch_format"),
+            "expected branch format validation message, got: {msg}"
+        );
+        assert!(
+            msg.contains("ralph/issue-2"),
+            "expected second project_id hint, got: {msg}"
         );
     }
 

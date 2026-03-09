@@ -391,8 +391,8 @@ impl Orchestrator {
                 &mut pr_log,
                 None,
                 repo_root_ref,
-                    &self.cancel,
-                    self.max_backend_retries,
+                &self.cancel,
+                self.max_backend_retries,
             )
             .await?;
             let decision = _retry_result.parsed;
@@ -458,8 +458,8 @@ impl Orchestrator {
                         &mut validator_log,
                         None,
                         repo_root_ref,
-                    &self.cancel,
-                    self.max_backend_retries,
+                        &self.cancel,
+                        self.max_backend_retries,
                     )
                     .await?;
                 let verdict = _retry_result.parsed;

@@ -22,10 +22,8 @@ use crate::config::{validate_required_backend_spec, PromptChangeAction};
 use crate::error::RalphError;
 use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
 use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-use crate::workflow::orchestrator::{Orchestrator, OrchestrationResult, RunOptions};
-use crate::workflow::quick_dev_orchestrator::{
-    self, QuickDevOrchestrator, QuickDevRunOptions,
-};
+use crate::workflow::orchestrator::{OrchestrationResult, Orchestrator, RunOptions};
+use crate::workflow::quick_dev_orchestrator::{self, QuickDevOrchestrator, QuickDevRunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
@@ -141,15 +139,13 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
     let writer_spec = params
         .spec_writer
         .unwrap_or_else(|| workspace.config.workspace.daemon_prd_writer_backend.clone());
-    let reviewer_spec = params
-        .spec_reviewer
-        .unwrap_or_else(|| {
-            workspace
-                .config
-                .workspace
-                .daemon_prd_reviewer_backend
-                .clone()
-        });
+    let reviewer_spec = params.spec_reviewer.unwrap_or_else(|| {
+        workspace
+            .config
+            .workspace
+            .daemon_prd_reviewer_backend
+            .clone()
+    });
 
     let mut registry = BackendRegistry::new(
         &workspace.config,
@@ -223,10 +219,9 @@ pub async fn run_auto_task(params: AutoTaskParams) -> Result<OrchestrationResult
     }
 
     // Create project
-    let project_id =
-        params
-            .project_id
-            .unwrap_or_else(|| crate::cli::auto::slugify_idea_public(&params.idea));
+    let project_id = params
+        .project_id
+        .unwrap_or_else(|| crate::cli::auto::slugify_idea_public(&params.idea));
     if project_id.is_empty() {
         return Err(RalphError::Validation(
             "derived project id from idea is empty".to_owned(),
@@ -312,7 +307,9 @@ pub async fn run_run_task(params: RunTaskParams) -> Result<OrchestrationResult> 
 /// Run `quick-dev-auto` flow: quick-prd → create project → quick-dev orchestrate.
 ///
 /// Shared entry point for both CLI (`ralph quick-dev-auto`) and daemon dispatch.
-pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<OrchestrationResult> {
+pub async fn run_quick_dev_auto_task(
+    params: QuickDevAutoTaskParams,
+) -> Result<OrchestrationResult> {
     tracing::info!(
         variant = "quick-dev-auto",
         project_id = params.project_id.as_deref().unwrap_or("none"),
@@ -334,10 +331,11 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
         .as_deref()
         .or(workspace.config.workflow.implementer_backend.as_deref())
         .unwrap_or(&workspace.config.workspace.default_backend);
-    let preflight_reviewer = params
+    let preflight_reviewer = params.reviewer_backend.as_deref().or(workspace
+        .config
+        .workflow
         .reviewer_backend
-        .as_deref()
-        .or(workspace.config.workflow.reviewer_backend.as_deref());
+        .as_deref());
 
     match preflight_reviewer {
         None => {
@@ -352,11 +350,7 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
                 preflight_implementer,
                 "quick-dev implementer backend",
             )?;
-            validate_required_backend_spec(
-                &workspace.config,
-                rev,
-                "quick-dev reviewer backend",
-            )?;
+            validate_required_backend_spec(&workspace.config, rev, "quick-dev reviewer backend")?;
         }
     }
 
@@ -411,10 +405,9 @@ pub async fn run_quick_dev_auto_task(params: QuickDevAutoTaskParams) -> Result<O
     );
 
     // Create project
-    let project_id =
-        params
-            .project_id
-            .unwrap_or_else(|| crate::cli::auto::slugify_idea_public(&params.idea));
+    let project_id = params
+        .project_id
+        .unwrap_or_else(|| crate::cli::auto::slugify_idea_public(&params.idea));
     if project_id.is_empty() {
         return Err(RalphError::Validation(
             "derived project id from idea is empty".to_owned(),
@@ -505,8 +498,7 @@ pub fn cli_stderr_dispatch() -> tracing::dispatcher::Dispatch {
     let subscriber = fmt::Subscriber::builder()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
         .without_time()

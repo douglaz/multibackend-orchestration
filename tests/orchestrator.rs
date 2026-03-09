@@ -14,12 +14,12 @@ use ralph::prompts::templates::{
 use ralph::workflow::orchestrator::{Orchestrator, RunOptions};
 use ralph::workspace::Workspace;
 use regex::Regex;
-use tokio_util::sync::CancellationToken;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 fn git_ok(repo: &Path, args: &[&str]) {
     let status = Command::new("git")

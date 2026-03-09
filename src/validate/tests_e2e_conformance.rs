@@ -439,8 +439,8 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
         // `gh pr create` is invoked.  If the task reached completion, the
         // daemon's PR creation path must have fired.
         if gh_log_path.exists() {
-            let log_content = fs::read_to_string(&gh_log_path)
-                .expect("should be able to read gh log file");
+            let log_content =
+                fs::read_to_string(&gh_log_path).expect("should be able to read gh log file");
             let args = parse_logged_args(&log_content);
 
             // Verify expected gh pr create arguments
@@ -510,7 +510,10 @@ fn pr_metadata_verification(h: &RalphHarness) -> TestResult {
 
         let project_ref = crate::daemon::runtime::extract_project_ref(&branch);
         assert!(
-            pr_body.contains(&format!("Project Ref: `{}`", project_ref.as_deref().unwrap_or(""))),
+            pr_body.contains(&format!(
+                "Project Ref: `{}`",
+                project_ref.as_deref().unwrap_or("")
+            )),
             "expected Project Ref footer in PR body, got:\n{pr_body}"
         );
     })
@@ -566,25 +569,23 @@ fn e2e_pr_create_body_file_verification(h: &RalphHarness) -> TestResult {
         // cross-test interference under parallel execution.
         let _env_lock = env_mutex().lock().expect("env mutex");
         let _path_guard = EnvGuard::set("PATH", &composed);
-        let _gh_log_guard = EnvGuard::set(
-            "RALPH_E2E_GH_LOG",
-            &gh_log.to_string_lossy(),
-        );
+        let _gh_log_guard = EnvGuard::set("RALPH_E2E_GH_LOG", &gh_log.to_string_lossy());
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let url = rt.block_on(async {
-            crate::daemon::github::create_pr_with_body_file(
-                "acme",
-                "widgets",
-                branch,
-                &title,
-                &body_path,
-                Some("master"),
-                false,
-            )
-            .await
-        })
-        .expect("create_pr_with_body_file should succeed");
+        let url = rt
+            .block_on(async {
+                crate::daemon::github::create_pr_with_body_file(
+                    "acme",
+                    "widgets",
+                    branch,
+                    &title,
+                    &body_path,
+                    Some("master"),
+                    false,
+                )
+                .await
+            })
+            .expect("create_pr_with_body_file should succeed");
 
         assert!(
             url.contains("github.com"),

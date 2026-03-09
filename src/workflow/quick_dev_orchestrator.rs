@@ -7,9 +7,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::max_backend_retries;
 use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverrides};
-use super::max_backend_retries;
 use crate::error::RalphError;
 use crate::git::commit::{
     changed_paths_excluding_prefixes, commit_and_push_phase_transition,
@@ -58,7 +58,7 @@ pub struct QuickDevRunOptions {
     pub max_backend_retries: Option<u8>,
 }
 
-const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 5;
+const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 30;
 const DEFAULT_MAX_FINAL_REVIEW_RETRIES: u32 = 15;
 
 #[derive(Debug, Clone)]
@@ -1758,7 +1758,7 @@ mod tests {
 
     #[test]
     fn default_max_values() {
-        assert_eq!(DEFAULT_MAX_REVIEW_ITERATIONS, 5);
+        assert_eq!(DEFAULT_MAX_REVIEW_ITERATIONS, 30);
         assert_eq!(DEFAULT_MAX_FINAL_REVIEW_RETRIES, 15);
     }
 
@@ -1957,8 +1957,8 @@ mod tests {
                 session_reuse_roles: vec![],
                 session_reuse_reset_on_prompt_change: false,
                 session_reuse_reset_on_rollback: false,
-                pre_commit_fmt: true,
-                pre_commit_clippy: true,
+                pre_commit_fmt: false,
+                pre_commit_clippy: false,
                 pre_commit_nix_build: false,
                 pre_commit_fmt_auto_fix: false,
             },

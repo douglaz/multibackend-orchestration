@@ -368,12 +368,8 @@ impl QuickPrdPipeline {
 
             // Run review with retry (cancel-aware for cooperative subprocess shutdown)
             let review_start = Instant::now();
-            let feedback = run_review_with_retry(
-                self.reviewer.clone(),
-                review_prompt,
-                &self.cancel,
-            )
-            .await?;
+            let feedback =
+                run_review_with_retry(self.reviewer.clone(), review_prompt, &self.cancel).await?;
             review_times_secs.push(review_start.elapsed().as_secs_f64());
 
             // Cache review

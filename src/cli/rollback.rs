@@ -2,7 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use crate::cli::RollbackArgs;
-use crate::git::branch::{branch_exists, checkout_branch, resolve_branch_name};
+use crate::git::branch::{
+    branch_exists, checkout_branch, create_branch, remote_branch_exists_on_remote,
+    resolve_branch_name, RemoteBranchProbeResult,
+};
 use crate::git::commit::{merge_base, ref_exists, reset_hard};
 use crate::git::ralph_commit::list_ralph_commits;
 use crate::git::{is_git_repo, run_git};
@@ -39,84 +42,214 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         )));
     }
 
-    let to_remove: Vec<u32> = state
+    // Compute removal targets from BOTH state-derived loop numbers AND on-disk
+    // loop directories.  Reconstruction may hide loops above the rollback
+    // ceiling (via `loop_dirs.retain`), so relying solely on state would miss
+    // artifact directories that exist on disk but are invisible to the capped
+    // state.  The union ensures `rollback 0` removes all loop artifacts.
+    let mut removal_set: std::collections::HashSet<u32> = state
         .loops
         .iter()
         .map(|l| l.loop_number)
         .chain(state.completion_attempts.iter().map(|l| l.loop_number))
         .filter(|num| *num > args.loop_number)
         .collect();
-
-    // Always compute a reset ref so checkpoint-derived state reconstruction
-    // sees the correct position after rollback.  Without a git reset the
-    // checkpoint commits would remain on the branch and the next
-    // `reconstruct_project_state()` call would undo the rollback.
-    let hard_ref = {
-        let repo_root = workspace.root.parent().ok_or_else(|| {
-            RalphError::Orchestration("workspace root has no parent path".to_owned())
-        })?;
-        if is_git_repo(repo_root) {
-            Some(resolve_hard_reset_ref(
-                &workspace,
-                &original_state,
-                &project_id,
-                args.loop_number,
-                repo_root,
-            )?)
-        } else {
-            None
+    let loops_dir = project_dir.join("loops");
+    if loops_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&loops_dir) {
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some((num_str, _)) = name.split_once('-') {
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        if n > args.loop_number {
+                            removal_set.insert(n);
+                        }
+                    }
+                }
+            }
         }
-    };
+    }
+    let mut to_remove: Vec<u32> = removal_set.into_iter().collect();
+    to_remove.sort();
 
+    // Capture the latest checkpoint commit hash BEFORE any git mutations.
+    // This is stored in the `.rollback-ceiling` marker for provenance-based
+    // staleness detection during reconstruction (P1).
+    let latest_checkpoint_hash: Option<String> = workspace
+        .root
+        .parent()
+        .filter(|r| is_git_repo(r))
+        .and_then(|repo_root| {
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            list_ralph_commits(repo_root, &branch)
+                .ok()
+                .and_then(|commits| {
+                    commits
+                        .iter()
+                        .find(|c| c.project_id == project_id)
+                        .and_then(|c| c.commit_hash.clone())
+                })
+        });
+
+    // Dry-run: resolve ref early for display (read-only, no branch mutations).
     if args.dry_run {
-        if let Some(reference) = hard_ref {
-            println!(
-                "dry-run: would remove loops {:?}, set current loop to {}, and git reset --hard {}",
-                to_remove, args.loop_number, reference
-            );
+        if args.hard {
+            let repo_root = workspace.root.parent().ok_or_else(|| {
+                RalphError::Orchestration("workspace root has no parent path".to_owned())
+            })?;
+            if is_git_repo(repo_root) {
+                // Mirror the execution path's branch-visibility check: only
+                // resolve the reset ref when the project branch already exists
+                // locally.  If it would need recovery (create from remote-
+                // tracking / fetch) we cannot determine the ref without side
+                // effects, so print a placeholder instead of a wrong value.
+                let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+                if branch_exists(repo_root, &branch)? {
+                    let reference = resolve_hard_reset_ref(
+                        &workspace,
+                        &original_state,
+                        &project_id,
+                        args.loop_number,
+                        repo_root,
+                    )?;
+                    println!(
+                        "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard {}",
+                        to_remove, args.loop_number, reference
+                    );
+                } else {
+                    match remote_branch_exists_on_remote(repo_root, &branch)? {
+                        RemoteBranchProbeResult::Exists => {
+                            // Branch can be recovered from remote — exact ref
+                            // unavailable without side effects.
+                            println!(
+                                "dry-run (hard rollback): would remove loops {:?}, set current loop to {}, and git reset --hard <ref> (branch '{}' requires recovery; exact ref unavailable in dry-run)",
+                                to_remove, args.loop_number, branch
+                            );
+                        }
+                        RemoteBranchProbeResult::Missing => {
+                            return Err(RalphError::Validation(format!(
+                                "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
+                                branch
+                            )));
+                        }
+                        RemoteBranchProbeResult::ProbeFailed(stderr) => {
+                            return Err(RalphError::Orchestration(format!(
+                                "cannot hard-rollback: failed to probe remote for branch '{}': {}",
+                                branch, stderr
+                            )));
+                        }
+                    }
+                }
+            } else {
+                println!(
+                    "dry-run (hard rollback): would remove loops {:?} and set current loop to {} (no git repo)",
+                    to_remove, args.loop_number
+                );
+            }
         } else {
             println!(
-                "dry-run: would remove loops {:?} and set current loop to {}",
+                "dry-run (soft rollback): would remove loops {:?} and set current loop to {} (no git reset)",
                 to_remove, args.loop_number
             );
         }
         return Ok(());
     }
 
-    if let Some(reference) = hard_ref.as_deref() {
+    #[derive(PartialEq)]
+    enum PushOutcome {
+        Succeeded,
+        Failed,
+        Skipped,
+    }
+    let mut push_outcome = PushOutcome::Skipped;
+
+    // For hard rollback: recover/create branch -> checkout -> resolve ref -> reset -> push.
+    // The ref is resolved AFTER branch recovery so that checkpoint commits on the
+    // project branch are visible to `resolve_hard_reset_ref`.
+    let hard_ref = if args.hard {
         let repo_root = workspace.root.parent().ok_or_else(|| {
             RalphError::Orchestration("workspace root has no parent path".to_owned())
         })?;
-
-        // Ensure we reset on the project's branch (not an unrelated branch
-        // that happens to be checked out).
-        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if branch_exists(repo_root, &branch)? {
+        if is_git_repo(repo_root) {
+            // Ensure we reset on the project's branch (not an unrelated branch
+            // that happens to be checked out).
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            if !branch_exists(repo_root, &branch)? {
+                // Always check the actual remote (authoritative) — local
+                // tracking refs can be stale if the branch was deleted upstream.
+                match remote_branch_exists_on_remote(repo_root, &branch)? {
+                    RemoteBranchProbeResult::Exists => {
+                        run_git(repo_root, &["fetch", "origin", &branch])?;
+                        create_branch(repo_root, &branch, &format!("origin/{branch}"))?;
+                    }
+                    RemoteBranchProbeResult::Missing => {
+                        return Err(RalphError::Validation(format!(
+                            "cannot hard-rollback: project branch '{}' does not exist locally or on origin",
+                            branch
+                        )));
+                    }
+                    RemoteBranchProbeResult::ProbeFailed(stderr) => {
+                        return Err(RalphError::Orchestration(format!(
+                            "cannot hard-rollback: failed to probe remote for branch '{}': {}",
+                            branch, stderr
+                        )));
+                    }
+                }
+            }
             checkout_branch(repo_root, &branch)?;
-        }
 
-        // Always reset the local branch so that checkpoint-derived state
-        // reconstruction sees the rolled-back position.
-        reset_hard(repo_root, reference)?;
-        restore_workspace_files(
-            &workspace,
-            &project_id,
-            prompt_backup.as_deref(),
-            project_config_backup.as_deref(),
-        )?;
-
-        // Force-push the reset branch so that checkpoint-derived state
-        // reconstruction (which may read `origin/<branch>`) sees the
-        // rolled-back position.  Without this the remote would retain
-        // stale checkpoint commits and reconstruction would undo the rollback.
-        let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
-        if branch_exists(repo_root, &branch)? {
-            run_git(
+            // Resolve the hard reset ref AFTER branch recovery so that
+            // checkpoint commits are visible.
+            let reference = resolve_hard_reset_ref(
+                &workspace,
+                &original_state,
+                &project_id,
+                args.loop_number,
                 repo_root,
-                &["push", "--force", "origin", &format!("{branch}:{branch}")],
             )?;
+
+            // Reset the local branch so that checkpoint-derived state
+            // reconstruction sees the rolled-back position.
+            reset_hard(repo_root, &reference)?;
+            restore_workspace_files(
+                &workspace,
+                &project_id,
+                prompt_backup.as_deref(),
+                project_config_backup.as_deref(),
+            )?;
+
+            // Force-push the reset branch so that checkpoint-derived state
+            // reconstruction (which may read `origin/<branch>`) sees the
+            // rolled-back position.  Without this the remote would retain
+            // stale checkpoint commits and reconstruction would undo the rollback.
+            let branch = resolve_branch_name(&workspace.config.git.branch_format, &project_id);
+            if branch_exists(repo_root, &branch)? {
+                if let Err(e) = run_git(
+                    repo_root,
+                    &["push", "--force", "origin", &format!("{branch}:{branch}")],
+                ) {
+                    eprintln!("warning: force-push failed: {e}");
+                    push_outcome = PushOutcome::Failed;
+                } else {
+                    push_outcome = PushOutcome::Succeeded;
+                }
+            } else {
+                eprintln!(
+                    "warning: force-push skipped — branch '{}' does not exist",
+                    branch
+                );
+            }
+
+            Some(reference)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     for &loop_number in &to_remove {
         let pattern = format!("{loop_number:03}-");
@@ -169,14 +302,43 @@ pub fn execute(args: RollbackArgs) -> Result<()> {
         state.status = ProjectStatus::InProgress;
     }
 
-    if let Some(reference) = hard_ref {
-        println!(
-            "rolled back project {} to loop {} and reset git to {}",
-            project_id, args.loop_number, reference
-        );
+    // Manage the .rollback-ceiling marker.
+    // Include the latest checkpoint hash for provenance-based staleness
+    // detection (see P1 in lifecycle.rs).
+    let ceiling_marker_content = match &latest_checkpoint_hash {
+        Some(hash) => format!("{}\n{}", args.loop_number, hash),
+        None => args.loop_number.to_string(),
+    };
+    let ceiling_path = project_dir.join(".rollback-ceiling");
+    if let Some(reference) = &hard_ref {
+        if push_outcome == PushOutcome::Succeeded {
+            // Hard rollback succeeded fully — remove any stale ceiling marker.
+            let _ = fs::remove_file(&ceiling_path);
+            println!(
+                "rolled back project {} to loop {} and reset git to {}",
+                project_id, args.loop_number, reference
+            );
+        } else {
+            // Push failed or was skipped — retain (or write) the ceiling marker
+            // to guard against checkpoint resurrection from the remote on next
+            // reconstruction.
+            let reason = if push_outcome == PushOutcome::Failed {
+                "force-push failed"
+            } else {
+                "force-push skipped"
+            };
+            fs::write(&ceiling_path, &ceiling_marker_content)?;
+            println!(
+                "rolled back project {} to loop {} and reset git to {} (warning: {}; .rollback-ceiling marker retained)",
+                project_id, args.loop_number, reference, reason
+            );
+        }
     } else {
+        // Soft rollback — write the ceiling marker so that
+        // reconstruct_project_state caps checkpoint-derived position.
+        fs::write(&ceiling_path, &ceiling_marker_content)?;
         println!(
-            "rolled back project {} to loop {}",
+            "soft-rolled back project {} to loop {} (no git reset)",
             project_id, args.loop_number
         );
     }

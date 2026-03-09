@@ -146,11 +146,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             if !is_valid_shell_identifier(key) {
                 continue;
             }
-            parts.push(format!(
-                "export {}={};",
-                key,
-                shell_escape(val)
-            ));
+            parts.push(format!("export {}={};", key, shell_escape(val)));
         }
 
         // cat prompt | command args 2>stderr | tee output; echo ${PIPESTATUS[1]} > exit
@@ -261,10 +257,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         // Guard: kill the window if this future is dropped (e.g. due to
         // cancellation). Disarmed in normal cleanup paths below.
-        let mut window_guard = TmuxWindowGuard::new(
-            self.session_name.clone(),
-            window_id.clone(),
-        );
+        let mut window_guard = TmuxWindowGuard::new(self.session_name.clone(), window_id.clone());
 
         // Publish the active window ID so execute_with_cancel can perform
         // explicit synchronous cleanup on cancellation.
@@ -1349,9 +1342,7 @@ mod tests {
                 if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with("ralph-test-cancel-")
-                            && name.ends_with("-prompt.txt")
-                        {
+                        if name.starts_with("ralph-test-cancel-") && name.ends_with("-prompt.txt") {
                             // Small delay to let execute_raw reach wait_for_exit
                             tokio::time::sleep(Duration::from_millis(50)).await;
                             cancel_clone.cancel();

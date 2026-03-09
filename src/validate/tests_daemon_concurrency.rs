@@ -72,7 +72,6 @@ fn write_daemon_mock_gh_concurrency(h: &RalphHarness) -> crate::Result<String> {
     write_mock_gh(h, &mock_scripts::daemon_mock_gh_concurrency_script())
 }
 
-
 /// Like `enable_fast_daemon_refinement` but uses a backend that writes
 /// per-invocation start/end nanosecond timestamps to `barrier_dir`, enabling
 /// callers to assert temporal overlap across concurrent task executions.
@@ -707,10 +706,7 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
                     "--max-concurrent",
                     "4",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("MOCK_GH_ISSUES", issues),
-                ],
+                &[("PATH", &gh_path), ("MOCK_GH_ISSUES", issues)],
             )
             .expect("daemon start should execute");
 
@@ -817,17 +813,16 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
             .filter_map(|id| {
                 combined
                     .find(&format!("collect: task {id}"))
-                    .or_else(|| combined.find(&format!(
-                        "complete-task-terminal: preserving worktree for {id}"
-                    )))
-                    .or_else(|| combined.find(&format!(
-                        "verbose: task terminal task_id={id}"
-                    )))
+                    .or_else(|| {
+                        combined.find(&format!(
+                            "complete-task-terminal: preserving worktree for {id}"
+                        ))
+                    })
+                    .or_else(|| combined.find(&format!("verbose: task terminal task_id={id}")))
             })
             .min();
 
-        if let (Some(last_dispatch), Some(first_terminal)) =
-            (last_dispatch_pos, first_terminal_pos)
+        if let (Some(last_dispatch), Some(first_terminal)) = (last_dispatch_pos, first_terminal_pos)
         {
             assert!(
                 last_dispatch < first_terminal,
@@ -954,13 +949,8 @@ fn execution_failure_terminalization(h: &RalphHarness) -> TestResult {
             .write_mock_script("fail_backend.sh", "#!/bin/sh\nexit 1\n")
             .expect("write fail script");
         let fail_script_str = fail_script.to_string_lossy().into_owned();
-        dh.ralph_ok([
-            "config",
-            "set",
-            "backends.claude.command",
-            &fail_script_str,
-        ])
-        .expect("set failing backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.command", &fail_script_str])
+            .expect("set failing backend command");
         dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
             .expect("set backend args");
         // Refinement will fail gracefully (non-fatal), falling back to raw idea.
@@ -1071,11 +1061,9 @@ fn execution_failure_terminalization(h: &RalphHarness) -> TestResult {
         );
         let log_content = fs::read_to_string(&label_log).expect("read label log");
         assert!(
-            log_content
-                .lines()
-                .any(|l| l.contains("750")
-                    && l.contains("--add-label")
-                    && l.contains("ralph:failed")),
+            log_content.lines().any(|l| l.contains("750")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
             "issue 750 should have terminal ralph:failed label: {log_content}"
         );
     })
@@ -1181,8 +1169,7 @@ fn mixed_outcome_claim_isolation(h: &RalphHarness) -> TestResult {
 
         // Issue 901's claim failure is logged but does not affect 900
         assert!(
-            combined.contains("failed to claim issue #901")
-                || combined.contains("claim failure"),
+            combined.contains("failed to claim issue #901") || combined.contains("claim failure"),
             "claim failure for 901 should be logged: {combined}"
         );
     })

@@ -519,7 +519,6 @@ fn write_mock_gh(h: &RalphHarness, body: &str) -> crate::Result<String> {
     Ok(format!("{base}:{existing}"))
 }
 
-
 /// Verify that `daemon start` creates PRD lifecycle labels at startup.
 ///
 /// The mock gh logs every `label create` call. We verify that all 6 PRD labels
@@ -1199,9 +1198,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path_missing),
-                ],
+                &[("PATH", &gh_path_missing)],
             )
             .expect("daemon start");
         assert_exit_code(&output_missing, 0);
@@ -1312,9 +1309,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path_present),
-                ],
+                &[("PATH", &gh_path_present)],
             )
             .expect("daemon start");
         assert_exit_code(&output_present, 0);
@@ -3688,10 +3683,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-                ],
+                &[("PATH", &gh_path), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
             )
             .unwrap();
 
@@ -3903,10 +3895,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-                ],
+                &[("PATH", &gh_path), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
             )
             .unwrap();
 
@@ -5516,9 +5505,7 @@ fn run_prd_done_daemon(harness: &RalphHarness, gh_script: &str) -> PrdDoneDaemon
         )
         .expect("daemon start should execute");
 
-    PrdDoneDaemonRun {
-        output,
-    }
+    PrdDoneDaemonRun { output }
 }
 
 /// PRD-done issue dispatches with approved spec and logs success message.
