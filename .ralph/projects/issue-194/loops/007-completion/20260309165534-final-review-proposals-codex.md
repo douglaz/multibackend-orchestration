@@ -1,45 +1,27 @@
-# Final Review Amendments Applied
-
-## Round 1
-
-### Amendment: FR-194-001
-
-### Problem
-Completion is only guarded against pending queue items at planner decision time ([`src/workflow/orchestrator.rs:739`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/workflow/orchestrator.rs:739)).  
-The run can still return completed without a second queue check ([`src/workflow/orchestrator.rs:2797`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/workflow/orchestrator.rs:2797)).  
-If an amendment arrives during completing/final-review windows, this run may still report success as completed while leaving pending amendments unprocessed.
-
-### Proposed Change
-Add a final pending-queue check immediately before the completed return path. If `pending_amendment_count > 0`, do not finalize completion in that run (either error out with count or transition back to planning). Add a conformance test that enqueues during late phases and verifies completion is blocked.
-
-### Affected Files
-- [`src/workflow/orchestrator.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/workflow/orchestrator.rs) - add late-stage queue guard before final completed return.
-- [`src/validate/tests_amendments.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/validate/tests_amendments.rs) - add coverage for amendment arrival after planner completion request.
-
-### Reviewer
-codex
-
-### Amendment: FR-194-002
-
-### Problem
-`amend_cli_multiple_amendments_drain_in_order` claims order verification but only checks membership with `contains` ([`tests/amend_cli.rs:191`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/tests/amend_cli.rs:191)-[`tests/amend_cli.rs:221`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/tests/amend_cli.rs:221)).  
-This test passes even if drain ordering regresses.
-
-### Proposed Change
-Assert the exact drained ID sequence (or rename the test to remove the order claim). Prefer exact sequence to preserve intended contract.
-
-### Affected Files
-- [`tests/amend_cli.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/tests/amend_cli.rs) - make assertion match test intent.
-
+---
+artifact: final-review-proposals
+loop: 7
+project: issue-194
+backend: codex
+role: final_reviewer
+created_at: 2026-03-09T16:55:34Z
 ---
 
-### Reviewer
-codex
+I’m auditing the completed changes directly from the repository state and will start by identifying the correct base commit, then running the requested `git diff ...` and tracing key code paths and tests for correctness/safety.
+I identified the active branch (`ralph/issue-194`) and I’m now diffing it against its merge-base with `master` to inspect the full code delta (excluding `.ralph`) before tracing critical paths.
+I’ve confirmed the exact changed file set; next I’m reading the new queue/model code and orchestrator integrations line-by-line to check crash-safety, concurrency handling, and error paths.
+I’ve loaded the primary files and now I’m narrowing to the exact hunks in each changed file so I can validate the new logic against existing control flow and persistence behavior.
+I’m moving through CLI/config and test additions next to verify input validation, default handling, and whether tests truly assert the intended behavior rather than incidental side effects.
+I’m now auditing the added conformance and integration tests in detail, including mock backend scripts, to confirm they validate the real behaviors (drain/inject/guard/mirroring) and don’t pass for accidental reasons.
+I’ve covered the tests and am now tracing the orchestrator’s changed execution paths (planning drain, completion guards, final-review mirroring, prompt assembly) with exact line-level checks.
+I’ve finished static tracing of the changed paths and I’m now executing focused test runs (queue unit tests + CLI integration paths) to validate behavior under actual execution and catch any hidden regressions.
+The environment lacks `cargo` directly, so I’m rerunning the same targeted tests through `nix develop -c` to match the project’s required build/test workflow.
+Both test runs are in progress under Nix and currently waiting on shared build/cache locks; I’m polling them until completion and will use the results in the final audit findings.
+Unit and integration tests for the new queue/CLI paths are passing. I’m running the new conformance test module next to verify the orchestration-boundary behaviors under the harness.
+The previous command didn’t execute conformance cases (those aren’t Rust `#[test]`s), so I’m now running `ralph validate` with an amendments filter to execute the actual conformance suite entries.
+# Final Review: AMENDMENTS
 
-
-## Round 2
-
-### Amendment: A-194-REVIEW-001
+## Amendment: A-194-REVIEW-001 [P1]
 
 ### Problem
 Queued amendments can be silently lost on phase failure.
@@ -63,7 +45,3 @@ Make drain handling at-least-once for phase failures.
 - [`src/validate/tests_amendments.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/validate/tests_amendments.rs) - conformance coverage for drain+failure persistence.
 
 ---
-
-### Reviewer
-codex
-
