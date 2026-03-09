@@ -917,6 +917,11 @@ fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestRes
             ml.contains("source=final-review") || ml.contains("source=\"final-review\""),
             "mirror log should contain source=final-review, got: {ml}"
         );
+        // Verify source_detail contains the reviewer backend name
+        assert!(
+            ml.contains("source_detail=") || ml.contains("source_detail=\""),
+            "mirror log should contain source_detail (reviewer backend), got: {ml}"
+        );
 
         // The mirrored amendment should have been drained by the planner
         // in the restart loop, so the queue should be empty.
@@ -1028,7 +1033,7 @@ elif grep -q "You are a technical evaluator assessing proposed amendments from f
   cat <<'EOF'
 # Planner Positions
 
-## FR-MIRROR-001
+## Amendment: FR-MIRROR-001
 
 ### Position
 ACCEPT
@@ -1040,7 +1045,7 @@ elif grep -q "You are a reviewer voting on proposed amendments after considering
   cat <<'EOF'
 # Vote Results
 
-## FR-MIRROR-001
+## Amendment: FR-MIRROR-001
 
 ### Vote
 ACCEPT
@@ -1052,7 +1057,7 @@ elif grep -q "You are the arbiter resolving disputed amendments where reviewers 
   cat <<'EOF'
 # Arbiter Ruling
 
-## FR-MIRROR-001
+## Amendment: FR-MIRROR-001
 
 ### Ruling
 ACCEPT
