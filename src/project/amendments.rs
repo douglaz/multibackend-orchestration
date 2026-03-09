@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -146,6 +146,13 @@ where
 
     loop {
         let final_path = queue_path_with_suffix(&queue_dir, timestamp, &sanitized_id, suffix);
+        // Treat an existing .inflight sibling as an occupied stem so we never
+        // create a .json that shares a stem with an in-progress drain claim.
+        let inflight_sibling = final_path.with_extension("inflight");
+        if inflight_sibling.exists() {
+            suffix += 1;
+            continue;
+        }
         let temp_path = write_payload_to_temp_file(&queue_dir, &payload)?;
         before_publish(&final_path)?;
         match claim_file_without_overwrite(&temp_path, &final_path)? {
@@ -192,20 +199,53 @@ where
     queue_files.sort_by_key(queue_sort_key);
 
     let mut drained = Vec::new();
-    let mut completed_inflight_stems = HashSet::new();
+    let mut completed_inflight_items: HashMap<String, AmendmentRequest> = HashMap::new();
     for queued_path in queue_files {
-        if has_extension(&queued_path, "json")
-            && queue_stem(&queued_path)
-                .as_ref()
-                .is_some_and(|stem| completed_inflight_stems.contains(stem))
-        {
-            // Interrupted claims can leave both <stem>.json and <stem>.inflight.
-            // Once the inflight copy has been drained, drop the stale json copy
-            // to preserve at-most-once processing for that logical amendment.
-            if let Err(err) = remove_file_if_exists(&queued_path) {
-                return Err(rollback_mid_drain(project_dir, drained, err));
+        if has_extension(&queued_path, "json") {
+            if let Some(stem) = queue_stem(&queued_path) {
+                if let Some(prev) = completed_inflight_items.get(&stem) {
+                    // Same-stem .json found after its .inflight was already processed.
+                    // Compare content: true duplicates (interrupted claims) are dropped;
+                    // distinct payloads are processed to avoid silent data loss.
+                    match read_and_parse_inflight(&queued_path) {
+                        InflightReadOutcome::Parsed(ref req) if req == prev => {
+                            if let Err(err) = remove_file_if_exists(&queued_path) {
+                                return Err(rollback_mid_drain(project_dir, drained, err));
+                            }
+                        }
+                        InflightReadOutcome::Parsed(req) => {
+                            if let Err(err) = remove_file_if_exists(&queued_path) {
+                                return Err(rollback_mid_drain(project_dir, drained, err));
+                            }
+                            drained.push(req);
+                        }
+                        InflightReadOutcome::Malformed(err) => {
+                            warn!(
+                                path = %queued_path.display(),
+                                error = %err,
+                                "failed to parse same-stem amendment; quarantining file"
+                            );
+                            if let Err(q_err) =
+                                quarantine_inflight_file(&queue_dir, &queued_path)
+                            {
+                                warn!(
+                                    path = %queued_path.display(),
+                                    error = %q_err,
+                                    "failed to quarantine malformed same-stem amendment"
+                                );
+                            }
+                        }
+                        InflightReadOutcome::ReadFailed(io_err) => {
+                            return Err(rollback_mid_drain(
+                                project_dir,
+                                drained,
+                                io_err.into(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
             }
-            continue;
         }
 
         let inflight_path = if has_extension(&queued_path, "json") {
@@ -252,7 +292,7 @@ where
             return Err(rollback_mid_drain(project_dir, drained, io_err.into()));
         }
         if let Some(stem) = queue_stem(&inflight_path) {
-            completed_inflight_stems.insert(stem);
+            completed_inflight_items.insert(stem, parsed.clone());
         }
         drained.push(parsed);
     }
@@ -489,11 +529,11 @@ enum InflightReadOutcome {
 }
 
 fn read_and_parse_inflight(path: &Path) -> InflightReadOutcome {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
         Err(io_err) => return InflightReadOutcome::ReadFailed(io_err),
     };
-    let req: AmendmentRequest = match serde_json::from_str(&content) {
+    let req: AmendmentRequest = match serde_json::from_slice(&bytes) {
         Ok(r) => r,
         Err(err) => return InflightReadOutcome::Malformed(err.into()),
     };
@@ -763,6 +803,94 @@ mod tests {
         assert_eq!(
             pending_amendment_count(project_dir).expect("pending count"),
             0
+        );
+    }
+
+    #[test]
+    fn drain_processes_same_stem_json_and_inflight_with_different_content() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // Same stem but different payloads: both must be processed.
+        let req_inflight = sample_request("dup", "inflight payload");
+        let req_json = sample_request("dup-new", "json payload");
+        write_request_file(&queue_dir.join("20260309030008-dup.inflight"), &req_inflight);
+        write_request_file(&queue_dir.join("20260309030008-dup.json"), &req_json);
+
+        let drained = drain_amendment_queue(project_dir).expect("drain queue");
+        let ids: Vec<&str> = drained.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "both distinct payloads must be drained");
+        assert!(ids.contains(&"dup"), "inflight payload must be present");
+        assert!(ids.contains(&"dup-new"), "json payload must be present");
+        assert_eq!(
+            pending_amendment_count(project_dir).expect("pending count"),
+            0
+        );
+    }
+
+    #[test]
+    fn enqueue_skips_stem_occupied_by_inflight() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue dir");
+
+        // Pre-create an .inflight file with the stem that enqueue would choose.
+        let inflight_path = queue_dir.join("20260309030010-EXT-1.inflight");
+        fs::write(&inflight_path, "{}").expect("write inflight");
+
+        let req = sample_request("EXT-1", "Body");
+        let path = enqueue_amendment_with_timestamp(project_dir, &req, "20260309030010")
+            .expect("enqueue should succeed with suffix");
+        let file_name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .expect("file name should be utf-8");
+        assert_eq!(
+            file_name, "20260309030010-EXT-1-1.json",
+            "enqueue must skip stem occupied by .inflight"
+        );
+        assert!(
+            inflight_path.exists(),
+            ".inflight file must not be disturbed"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_file_is_quarantined_not_fatal() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+        let queue_dir = amendment_queue_dir(project_dir);
+        fs::create_dir_all(&queue_dir).expect("create queue");
+
+        // Write bytes that are not valid UTF-8.
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0x80, 0x81];
+        fs::write(queue_dir.join("20260309030001-bad-utf8.json"), bad_bytes)
+            .expect("write invalid utf-8");
+        write_request_file(
+            &queue_dir.join("20260309030002-good.json"),
+            &sample_request("good", "valid payload"),
+        );
+
+        let drained = drain_amendment_queue(project_dir).expect("drain should succeed");
+        assert_eq!(drained.len(), 1, "valid item must still be drained");
+        assert_eq!(drained[0].id, "good");
+
+        let quarantine_dir = queue_dir.join(QUARANTINE_DIR_NAME);
+        assert!(
+            quarantine_dir.exists(),
+            "quarantine directory must be created for invalid utf-8"
+        );
+        let quarantine_entries: Vec<_> = fs::read_dir(&quarantine_dir)
+            .expect("read quarantine")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(
+            quarantine_entries.len(),
+            1,
+            "invalid utf-8 file must be quarantined"
         );
     }
 
