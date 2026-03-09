@@ -2096,14 +2096,38 @@ async fn drain_all_children_with_deadline(
                         "warning: task {task_id} did not resolve within 10s after abort, \
                          skipping worktree cleanup"
                     );
-                    let _ = github::swap_lifecycle_label(
+                    if let Err(err) = github::swap_lifecycle_label(
                         &config.owner,
                         &config.repo,
                         issue_number,
                         "ralph:in-progress",
                         "ralph:failed",
                     )
-                    .await;
+                    .await
+                    {
+                        eprintln!(
+                            "warning: swap_lifecycle_label failed for {task_id}, \
+                             falling back to add_label_with_retry: {err}"
+                        );
+                        let _ = github::add_label_with_retry(
+                            &config.owner,
+                            &config.repo,
+                            issue_number,
+                            "ralph:failed",
+                        )
+                        .await;
+                    }
+                    // Still cancel and await watcher tasks so in-flight GitHub
+                    // operations (draft PR creation, artifact comments) don't
+                    // complete after the issue is marked failed.
+                    handle.watcher_cancel.cancel();
+                    if let Some(join_handle) = handle.watcher_handle.take() {
+                        await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
+                    }
+                    handle.draft_pr_cancel.cancel();
+                    if let Some(join_handle) = handle.draft_pr_handle.take() {
+                        await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
+                    }
                     continue;
                 }
                 handle.watcher_cancel.cancel();
