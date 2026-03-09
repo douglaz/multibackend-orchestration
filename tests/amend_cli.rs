@@ -215,10 +215,14 @@ fn amend_cli_multiple_amendments_drain_in_order() {
     let drained = drain_amendment_queue(&project_dir).expect("drain should succeed");
     assert_eq!(drained.len(), 3);
 
+    // Assert exact drain order: lexicographic by filename, which preserves
+    // enqueue order because filenames are timestamp-prefixed.
     let ids: Vec<&str> = drained.iter().map(|r| r.id.as_str()).collect();
-    assert!(ids.contains(&"EXT-MULTI-0"));
-    assert!(ids.contains(&"EXT-MULTI-1"));
-    assert!(ids.contains(&"EXT-MULTI-2"));
+    assert_eq!(
+        ids,
+        vec!["EXT-MULTI-0", "EXT-MULTI-1", "EXT-MULTI-2"],
+        "drain must return amendments in exact enqueue order (lexicographic filename sort)"
+    );
 }
 
 #[test]

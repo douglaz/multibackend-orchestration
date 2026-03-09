@@ -64,6 +64,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: completion_guard_rejects_with_pending_amendments,
         },
         ConformanceTest {
+            name: "amendments::late_guard_blocks_completion_after_completing_phase_amendment",
+            func: late_guard_blocks_completion_after_completing_phase_amendment,
+        },
+        ConformanceTest {
             name: "amendments::unify_config_default_off",
             func: unify_config_default_off,
         },
@@ -512,6 +516,59 @@ fn completion_guard_rejects_with_pending_amendments(h: &RalphHarness) -> TestRes
     })
 }
 
+/// Verify that an amendment arriving during the completing/final-review window
+/// (after the planning-phase guard passes) is caught by the late guard
+/// immediately before the successful completion return.
+fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-late-guard";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "amend-late-guard.sh",
+                &late_guard_completing_phase_mock_script(project_id),
+            )
+            .expect("write late guard mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Late Guard Completing Phase",
+            "late guard completing phase prompt",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+
+        let output = h
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--until-complete",
+                "--skip-commit",
+            ])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 1);
+
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        assert!(
+            stderr.contains("completion blocked:")
+                && stderr.contains("amendment(s) arrived in the queue during completing/final-review"),
+            "late guard should block completion with descriptive error, got stderr: {stderr}"
+        );
+
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert!(
+            pending > 0,
+            "late guard should not drain or mutate pending amendment queue"
+        );
+    })
+}
+
 fn enqueue_external_amendment(h: &RalphHarness, project_id: &str, id: &str, body: &str) {
     enqueue_amendment(
         &h.project_dir(project_id),
@@ -692,6 +749,50 @@ All work is complete.
 EOF
 else
   echo "completion guard mock received unexpected prompt" >&2
+  exit 1
+fi
+"###
+    )
+}
+
+/// Mock script for late-guard test. The planner returns a CompletionRequest
+/// with no pending amendments (so the planning-phase guard passes). The
+/// completer injects an amendment into the queue and returns COMPLETE, so
+/// the late guard at the final return path catches it.
+fn late_guard_completing_phase_mock_script(project_id: &str) -> String {
+    let queue_dir = format!(".ralph/projects/{project_id}/amendment-queue");
+    format!(
+        r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All work is complete.
+
+## Summary of Work
+- Completed all required behavior.
+
+## Remaining Items
+- None
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  mkdir -p "{queue_dir}"
+  cat > "{queue_dir}/99999999999999-late-arrival.json" <<'EOF'
+{{"id":"EXT-LATE-001","body":"amendment injected during completing phase","priority":"P2","source":"cli","source_detail":"validate","created_at":"2026-03-09T00:00:00Z"}}
+EOF
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- All acceptance criteria met
+EOF
+else
+  echo "late guard completing-phase mock received unexpected prompt" >&2
   exit 1
 fi
 "###
