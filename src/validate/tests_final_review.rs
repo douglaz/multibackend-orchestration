@@ -199,7 +199,7 @@ elif [[ "$prompt" == *"You are a QA engineer"* ]]; then
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
+elif [[ "$prompt" == *"You are a code reviewer. Review"* ]]; then
   total=$(inc_counter "final_reviewer_total")
   round=$(( (total - 1) / 2 + 1 ))
   slot=$(( (total - 1) % 2 + 1 ))
@@ -451,7 +451,7 @@ elif [[ "$prompt" == *"You are a QA engineer validating overall project acceptan
 ## Acceptance Criteria Verification
 All good.
 EOF
-elif [[ "$prompt" == *"You are a final reviewer auditing a completed project for correctness, safety, and robustness."* ]]; then
+elif [[ "$prompt" == *"You are a code reviewer. Review"* ]]; then
   total=$(inc_counter "final_reviewer_total")
   slot=$(( (total - 1) % 2 + 1 ))
   cat <<EOF

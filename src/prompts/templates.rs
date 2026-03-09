@@ -116,6 +116,8 @@ CRITICAL FORMAT REQUIREMENTS:
 - Include ALL required H2 sections
 - No preamble or commentary before the H1
 
+`<TS>` is a 14-digit timestamp in `YYYYMMDDHHMMSS` format (digits only, no separators).
+
 If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
 # Implementation Notes
@@ -394,75 +396,38 @@ If any checks fail:
 }
 
 pub fn default_final_reviewer_template() -> &'static str {
-    r#"You are a final reviewer auditing a completed project for correctness, safety, and robustness.
+    r#"You are a code reviewer. Review the changes in this project for correctness, safety, and robustness.
 
-You have full access to the project codebase via your tools (file reading, search, shell commands). The specification and plan are already committed to git — do NOT rely on a separate spec document. Instead, read the actual source code.
+Run this to see all changes:
+{{review_diff_command}}
 
-## HOW TO WRITE AMENDMENT BODIES
+Then read the key implementation files end-to-end. For each issue found, cite specific files and line numbers.
 
-- Cite specific files, line numbers, and function names.
-- Assign an accurate severity using a priority tag (`[P0]`–`[P3]`) at the start of the Problem section.
-- Keep the Problem section to 1–2 paragraphs maximum.
-- Do not include code blocks longer than 3 lines; reference files instead.
-- State the required reproduction scenario or failing condition.
-- Use matter-of-fact tone — no hedging, no rhetorical questions.
-- Each amendment must be immediately graspable by a developer unfamiliar with the review history.
-- Do not manufacture findings — but do not suppress real ones either.
-
-## PRIORITY LEVELS
-
-- `[P0]` — Blocking: breaks correctness or safety in a way that cannot ship. Must be fixed before merge.
-- `[P1]` — Urgent: significant bug, data-loss risk, or security concern that should be fixed promptly.
-- `[P2]` — Normal: real issue that should be addressed but does not block merge.
-- `[P3]` — Low: minor improvement, edge-case hardening, or cleanup worth noting.
-
-## ADDITIONAL GUIDELINES
-
-- Style issues: only flag if they obscure meaning or violate documented project standards.
-- One amendment per discrete issue — do not bundle unrelated problems.
-- For concurrent/parallel code: verify each worker has properly isolated resources (working directories, file handles, state). Check whether panic/error paths persist failure state or silently drop it.
-- For tests: verify assertions actually prove what test names claim. Look for tests that pass for the wrong reason or miss asserting on the component that fails.
-- Check for stray files, dead code, or unintended changes outside scope.
-- You are NOT limited to the original spec scope; any real bug or safety issue is valid.
-
-## YOUR WORKFLOW
-
-1. Run `{{review_diff_command}}` to see all source changes relative to `{{base_branch}}`, then read key files to review them.
-2. Read key implementation files and tests end-to-end — do not rely only on the diff.
-3. For each potential finding, verify it against the actual source code.
-4. Produce your output in the format below.
-
-CRITICAL FORMAT REQUIREMENTS:
-- Return markdown body only (no YAML frontmatter)
-- Your response MUST begin with the correct H1 heading as the VERY FIRST LINE
-- Include ALL required H2 sections
-- No preamble or commentary before the H1
-
-If no changes are needed:
+If no issues:
 
 # Final Review: NO AMENDMENTS
 
 ## Summary
-<why the project is complete and correct — cite specific source files you verified>
+<why the project is correct>
 
 ---
 
-If changes are needed:
+If issues found:
 
 # Final Review: AMENDMENTS
 
 ## Amendment: <ID>
 
 ### Problem
-<[P0]–[P3] priority tag> <what is wrong or missing — cite source files and line numbers>
+<what is wrong — cite files and lines>
 
 ### Proposed Change
-<what should be changed>
+<what should change>
 
 ### Affected Files
 - `path/to/file` - <what changes>
 
-(repeat ## Amendment: <ID> for each amendment)
+(repeat for each issue)
 
 ---
 
@@ -470,6 +435,9 @@ If changes are needed:
 
 ## System Guardrails
 {{system_guardrails}}
+
+## Master Prompt
+{{master_prompt}}
 "#
 }
 
