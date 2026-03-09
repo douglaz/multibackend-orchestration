@@ -4,11 +4,12 @@ use chrono::Utc;
 use std::fs;
 
 use crate::project::amendments::{
-    drain_amendment_queue, enqueue_amendment, pending_amendment_count, AmendmentPriority,
-    AmendmentRequest, AmendmentSource,
+    enqueue_amendment, pending_amendment_count, AmendmentPriority, AmendmentRequest,
+    AmendmentSource,
 };
 use crate::validate::assertions::{
     assert_exit_code, assert_file_exists, assert_path_not_exists, assert_stderr_contains,
+    strip_ansi,
 };
 use crate::validate::harness::RalphHarness;
 
@@ -839,15 +840,45 @@ fn unify_planner_dedupe_excludes_final_review(h: &RalphHarness) -> TestResult {
 }
 
 /// Verify that when unify is enabled and a final-review round accepts
-/// amendments, the accepted amendments are enqueued as AmendmentRequests
-/// in the queue with source=final-review.
+/// amendments, the orchestrator's `run_final_review_phase` enqueues them
+/// as AmendmentRequests with source=final-review via the actual mirroring
+/// code path (not just a manual enqueue/drain roundtrip).
 fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "unify-mirror";
         h.init_workspace().expect("init workspace");
 
-        // Enable unify at the global level so the final-review phase
-        // mirrors accepted amendments to the queue.
+        let mock = h
+            .write_stable_mock_script(
+                "unify-mirror-final-review.sh",
+                &unify_mirroring_mock_script(),
+            )
+            .expect("write mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Unify Mirror Test",
+            "test prompt for unify mirroring",
+        )
+        .expect("create project");
+
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable qa");
+        h.ralph_ok(["config", "set", "workflow.final_review_enabled", "true"])
+            .expect("enable final review");
+        h.ralph_ok([
+            "config",
+            "set",
+            "workflow.completion_backends",
+            "[\"claude\"]",
+        ])
+        .expect("set completion backends");
+        h.ralph_ok(["config", "set", "workflow.completion_min_completers", "1"])
+            .expect("set min completers");
         h.ralph_ok([
             "config",
             "set",
@@ -857,52 +888,167 @@ fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestRes
         ])
         .expect("enable unify globally");
 
-        // Directly test the enqueue→drain round-trip with final-review source.
-        // This validates the data model integration: AmendmentRequest with
-        // source=FinalReview round-trips through the queue correctly.
-        h.create_project(
-            project_id,
-            "Unify Mirror Test",
-            "test prompt for unify mirroring",
-        )
-        .expect("create project");
+        // Run the full orchestration flow. The final reviewer returns
+        // AMENDMENTS on its first call (with id=FR-MIRROR-001), triggering
+        // the mirroring code path in run_final_review_phase.
+        let output = h
+            .ralph_with_log(["run", "--project", project_id, "--until-complete"], "info")
+            .expect("ralph run");
+        assert_exit_code(&output, 0);
 
-        let req = AmendmentRequest {
-            id: "FR-ACCEPT-001".to_owned(),
-            body: "accepted final review amendment body".to_owned(),
-            priority: AmendmentPriority::P2,
-            source: AmendmentSource::FinalReview,
-            source_detail: Some("codex(gpt-5)".to_owned()),
-            created_at: Utc::now(),
-        };
-        let path = enqueue_amendment(&h.project_dir(project_id), &req)
-            .expect("enqueue final-review amendment");
-
-        // Verify the file exists and contains correct source
-        assert_file_exists(&path);
-        let raw = fs::read_to_string(&path).expect("read queue file");
-        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse JSON");
-        assert_eq!(value["source"], "final-review");
-        assert_eq!(value["source_detail"], "codex(gpt-5)");
-        assert_eq!(value["id"], "FR-ACCEPT-001");
-        assert_eq!(value["priority"], "P2");
-
-        // Verify drain returns correct source
-        let drained =
-            drain_amendment_queue(&h.project_dir(project_id)).expect("drain queue");
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].source, AmendmentSource::FinalReview);
-        assert_eq!(
-            drained[0].source_detail.as_deref(),
-            Some("codex(gpt-5)")
+        // Verify the orchestrator mirroring code path ran by checking
+        // for the info-level log emitted by run_final_review_phase.
+        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        let mirrored = stderr
+            .lines()
+            .any(|l| l.contains("mirrored accepted final-review amendment to queue"));
+        assert!(
+            mirrored,
+            "expected orchestrator to log mirroring of accepted final-review amendment"
         );
-        assert_eq!(drained[0].id, "FR-ACCEPT-001");
 
-        // Queue should now be empty
+        // The mirrored amendment should have been drained by the planner
+        // in the restart loop, so the queue should be empty.
         let pending =
             pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
-        assert_eq!(pending, 0, "queue should be empty after drain");
+        assert_eq!(pending, 0, "queue should be empty after planner drain");
     })
+}
+
+/// Mock script for unify mirroring test. Handles all orchestration phases:
+/// - Planner: returns feature spec on odd calls, completion request on even
+/// - Implementer: creates mock file
+/// - Reviewer: approves
+/// - Completer: marks complete
+/// - Final reviewer: returns AMENDMENTS on first call, NO AMENDMENTS on second
+fn unify_mirroring_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+PLANNER_COUNTER=".ralph-planner-counter"
+FINAL_REVIEWER_COUNTER=".ralph-final-reviewer-counter"
+
+if grep -q "You are a prompt reviewer" <<< "$INPUT"; then
+  cat <<'EOF'
+# Prompt Review
+
+## Issues Found
+- none
+
+## Refined Prompt
+No changes.
+EOF
+elif grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  COUNT=0
+  if [ -f "$PLANNER_COUNTER" ]; then
+    COUNT="$(cat "$PLANNER_COUNTER")"
+  fi
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$PLANNER_COUNTER"
+  if [ "$COUNT" -eq 1 ] || [ "$COUNT" -eq 3 ]; then
+    cat <<'EOF'
+# Feature: Unify Mirror Validation
+
+## Description
+Validate that accepted final-review amendments are mirrored to the queue.
+
+## Acceptance Criteria
+- [ ] Mock implementation file exists
+
+## Files to Modify/Create
+- `mirror_test.txt` - mock output
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+  else
+    cat <<'EOF'
+# Project Completion Request
+
+## Rationale
+All required behavior is complete.
+
+## Summary of Work
+- Prior loops implemented and reviewed successfully.
+
+## Remaining Items
+- None
+EOF
+  fi
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Mock implementation for unify mirroring test.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock only
+EOF
+  echo "mirrored" > mirror_test.txt
+  git add mirror_test.txt
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock implementation file exists
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: validate unify mirroring
+EOF
+elif grep -q "You are a project completion validator." <<< "$INPUT"; then
+  cat <<'EOF'
+# Verdict: COMPLETE
+
+The project satisfies all requirements:
+- Mock requirement: satisfied
+EOF
+elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+  COUNT=0
+  if [ -f "$FINAL_REVIEWER_COUNTER" ]; then
+    COUNT="$(cat "$FINAL_REVIEWER_COUNTER")"
+  fi
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$FINAL_REVIEWER_COUNTER"
+  if [ "$COUNT" -le 1 ]; then
+    cat <<'EOF'
+# Final Review: AMENDMENTS
+
+## Amendment: FR-MIRROR-001
+
+### Problem
+mirror_test.txt needs a header comment.
+
+### Proposed Change
+Add a header comment to mirror_test.txt.
+
+### Affected Files
+- `mirror_test.txt`
+EOF
+  else
+    cat <<'EOF'
+# Final Review: NO AMENDMENTS
+
+## Summary
+No amendments required.
+EOF
+  fi
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
 }
 
 fn unify_dedupe_planner_mock_script() -> String {

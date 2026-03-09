@@ -1929,7 +1929,8 @@ mod tests {
     ) -> EffectiveConfig {
         use crate::config::global::GlobalConfig;
         use crate::config::{
-            EffectiveDaemonConfig, EffectiveTemplateConfig, EffectiveWorkflowConfig,
+            EffectiveAmendmentsConfig, EffectiveDaemonConfig, EffectiveTemplateConfig,
+            EffectiveWorkflowConfig,
         };
         use std::path::PathBuf;
 
@@ -2011,6 +2012,9 @@ mod tests {
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
                 max_backend_retries: None,
+            },
+            amendments: EffectiveAmendmentsConfig {
+                unify_final_review: false,
             },
             global: GlobalConfig::default(),
             project: None,
