@@ -194,6 +194,9 @@ fn execute_show(workspace: &Workspace, scope: &ConfigScope) -> Result<()> {
                     "vote": effective.templates.vote,
                     "arbiter": effective.templates.arbiter,
                 },
+                "amendments": {
+                    "unify_final_review": effective.amendments.unify_final_review,
+                },
                 "git": effective.global.git,
                 "project_overrides": project_config,
             });
@@ -299,6 +302,9 @@ fn execute_get(workspace: &Workspace, scope: &ConfigScope, key: &str) -> Result<
                     "planner_position": effective.templates.planner_position,
                     "vote": effective.templates.vote,
                     "arbiter": effective.templates.arbiter,
+                },
+                "amendments": {
+                    "unify_final_review": effective.amendments.unify_final_review,
                 },
                 "git": effective.global.git,
             })
@@ -586,6 +592,9 @@ fn set_project_value(config: &mut ProjectConfig, key: &str, raw_value: &str) -> 
         }
         "daemon.rebase_agent_backend" => {
             config.daemon.rebase_agent_backend = parse_optional_rebase_agent_backend(raw_value)?;
+        }
+        "amendments.unify_final_review" => {
+            config.amendments.unify_final_review = parse_optional_bool(raw_value, key)?;
         }
         _ => {
             return Err(RalphError::Validation(format!(

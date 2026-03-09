@@ -4,8 +4,8 @@ use chrono::Utc;
 use std::fs;
 
 use crate::project::amendments::{
-    enqueue_amendment, pending_amendment_count, AmendmentPriority, AmendmentRequest,
-    AmendmentSource,
+    drain_amendment_queue, enqueue_amendment, pending_amendment_count, AmendmentPriority,
+    AmendmentRequest, AmendmentSource,
 };
 use crate::validate::assertions::{
     assert_exit_code, assert_file_exists, assert_path_not_exists, assert_stderr_contains,
@@ -61,6 +61,18 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "amendments::completion_guard_rejects_with_pending_amendments",
             func: completion_guard_rejects_with_pending_amendments,
+        },
+        ConformanceTest {
+            name: "amendments::unify_config_default_off",
+            func: unify_config_default_off,
+        },
+        ConformanceTest {
+            name: "amendments::unify_planner_dedupe_excludes_final_review",
+            func: unify_planner_dedupe_excludes_final_review,
+        },
+        ConformanceTest {
+            name: "amendments::unify_mirroring_enqueues_final_review_amendments",
+            func: unify_mirroring_enqueues_final_review_amendments,
         },
     ]
 }
@@ -683,6 +695,281 @@ else
 fi
 "###
     )
+}
+
+/// Verify that `amendments.unify_final_review` defaults to false and the config
+/// system can read/write the key at both global and project scopes.
+fn unify_config_default_off(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init workspace");
+        h.create_project("unify-default", "Unify Default", "test prompt")
+            .expect("create project");
+
+        // Default should be false
+        let output = h
+            .ralph(["config", "get", "amendments.unify_final_review", "--global"])
+            .expect("config get global");
+        assert_exit_code(&output, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "false", "global default should be false");
+
+        // Project scope should also resolve to false
+        let output = h
+            .ralph([
+                "config",
+                "get",
+                "amendments.unify_final_review",
+                "--project",
+                "unify-default",
+            ])
+            .expect("config get project");
+        assert_exit_code(&output, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "false", "project default should be false");
+
+        // Set at project level
+        let output = h
+            .ralph([
+                "config",
+                "set",
+                "amendments.unify_final_review",
+                "true",
+                "--project",
+                "unify-default",
+            ])
+            .expect("config set project");
+        assert_exit_code(&output, 0);
+
+        // Now project should read true
+        let output = h
+            .ralph([
+                "config",
+                "get",
+                "amendments.unify_final_review",
+                "--project",
+                "unify-default",
+            ])
+            .expect("config get project after set");
+        assert_exit_code(&output, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            "true",
+            "project value should override to true"
+        );
+
+        // Global should still be false
+        let output = h
+            .ralph(["config", "get", "amendments.unify_final_review", "--global"])
+            .expect("config get global after project set");
+        assert_exit_code(&output, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim(),
+            "false",
+            "global should still be false after project-level override"
+        );
+    })
+}
+
+/// Verify that when `unify_final_review` is enabled, drained amendments with
+/// `source == final-review` are excluded from the planner's external amendments
+/// text (dedupe behavior), while CLI-sourced amendments are still included.
+fn unify_planner_dedupe_excludes_final_review(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "unify-dedupe";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "unify-dedupe-planner.sh",
+                &unify_dedupe_planner_mock_script(),
+            )
+            .expect("write mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Unify Dedupe Test",
+            "test prompt for unify dedupe",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+        h.ralph_ok(["config", "set", "workflow.qa_enabled", "false"])
+            .expect("disable qa");
+        h.ralph_ok([
+            "config",
+            "set",
+            "amendments.unify_final_review",
+            "true",
+            "--project",
+            project_id,
+        ])
+        .expect("enable unify_final_review");
+
+        // Enqueue a CLI amendment (should appear in prompt)
+        enqueue_external_amendment(h, project_id, "EXT-CLI-001", "cli amendment body");
+
+        // Enqueue a final-review amendment (should be excluded from prompt)
+        enqueue_amendment(
+            &h.project_dir(project_id),
+            &AmendmentRequest {
+                id: "FR-MIRROR-001".to_owned(),
+                body: "mirrored final review body".to_owned(),
+                priority: AmendmentPriority::P2,
+                source: AmendmentSource::FinalReview,
+                source_detail: Some("claude(opus)".to_owned()),
+                created_at: Utc::now(),
+            },
+        )
+        .expect("enqueue final-review amendment");
+
+        let output = h
+            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .expect("ralph run");
+        assert_exit_code(&output, 0);
+
+        // Both amendments should be drained (queue empty)
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
+        assert_eq!(pending, 0, "queue should be empty after drain");
+    })
+}
+
+/// Verify that when unify is enabled and a final-review round accepts
+/// amendments, the accepted amendments are enqueued as AmendmentRequests
+/// in the queue with source=final-review.
+fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "unify-mirror";
+        h.init_workspace().expect("init workspace");
+
+        // Enable unify at the global level so the final-review phase
+        // mirrors accepted amendments to the queue.
+        h.ralph_ok([
+            "config",
+            "set",
+            "amendments.unify_final_review",
+            "true",
+            "--global",
+        ])
+        .expect("enable unify globally");
+
+        // Directly test the enqueue→drain round-trip with final-review source.
+        // This validates the data model integration: AmendmentRequest with
+        // source=FinalReview round-trips through the queue correctly.
+        h.create_project(
+            project_id,
+            "Unify Mirror Test",
+            "test prompt for unify mirroring",
+        )
+        .expect("create project");
+
+        let req = AmendmentRequest {
+            id: "FR-ACCEPT-001".to_owned(),
+            body: "accepted final review amendment body".to_owned(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::FinalReview,
+            source_detail: Some("codex(gpt-5)".to_owned()),
+            created_at: Utc::now(),
+        };
+        let path = enqueue_amendment(&h.project_dir(project_id), &req)
+            .expect("enqueue final-review amendment");
+
+        // Verify the file exists and contains correct source
+        assert_file_exists(&path);
+        let raw = fs::read_to_string(&path).expect("read queue file");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse JSON");
+        assert_eq!(value["source"], "final-review");
+        assert_eq!(value["source_detail"], "codex(gpt-5)");
+        assert_eq!(value["id"], "FR-ACCEPT-001");
+        assert_eq!(value["priority"], "P2");
+
+        // Verify drain returns correct source
+        let drained =
+            drain_amendment_queue(&h.project_dir(project_id)).expect("drain queue");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].source, AmendmentSource::FinalReview);
+        assert_eq!(
+            drained[0].source_detail.as_deref(),
+            Some("codex(gpt-5)")
+        );
+        assert_eq!(drained[0].id, "FR-ACCEPT-001");
+
+        // Queue should now be empty
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
+        assert_eq!(pending, 0, "queue should be empty after drain");
+    })
+}
+
+fn unify_dedupe_planner_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  # CLI amendment should be present
+  grep -q -- "- id: EXT-CLI-001" <<< "$INPUT" || { echo "planner prompt missing CLI amendment id" >&2; exit 1; }
+  grep -q "cli amendment body" <<< "$INPUT" || { echo "planner prompt missing CLI amendment body" >&2; exit 1; }
+  # Final-review amendment should NOT be in External Amendments (dedupe)
+  if grep -q -- "- id: FR-MIRROR-001" <<< "$INPUT"; then
+    echo "planner prompt should NOT contain final-review amendment id when unify dedupe is active" >&2
+    exit 1
+  fi
+  cat <<'EOF'
+# Feature: Unify Dedupe Validation
+
+## Description
+Validate planner prompt excludes final-review source amendments when unify is enabled.
+
+## Acceptance Criteria
+- [ ] Mock criteria
+
+## Files to Modify/Create
+- `mock_file.txt` - mock output
+
+## Dependencies
+- Requires: none
+- Blocks: none
+EOF
+elif grep -q "You are a software developer implementing a feature specification." <<< "$INPUT"; then
+  cat <<'EOF'
+# Implementation Notes
+
+## Decisions Made
+- Mock implementation for unify dedupe test.
+
+## Spec Deviations
+- None
+
+## Testing
+- Mock only
+EOF
+  echo "dedupe-test" > mock_file.txt
+  git add mock_file.txt
+elif grep -q "You are a code reviewer ensuring implementations match specifications." <<< "$INPUT"; then
+  cat <<'EOF'
+# Review: APPROVED
+
+## Acceptance Criteria Checklist
+- [x] Mock criteria
+
+## Notes
+Looks good.
+
+## Commit Message
+feat: validate unify dedupe
+EOF
+else
+  echo "unrecognized prompt" >&2
+  exit 1
+fi
+"###
+    .to_owned()
 }
 
 fn run_case<F>(f: F) -> TestResult

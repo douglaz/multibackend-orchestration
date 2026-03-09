@@ -33,8 +33,8 @@ use crate::project::artifacts::{
     ProjectScopedArtifactWriteInput,
 };
 use crate::project::amendments::{
-    drain_amendment_queue, format_external_amendments_for_prompt, pending_amendment_count,
-    AmendmentSource,
+    drain_amendment_queue, enqueue_amendment, format_external_amendments_for_prompt,
+    pending_amendment_count, AmendmentPriority, AmendmentRequest, AmendmentSource,
 };
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
@@ -601,10 +601,7 @@ impl Orchestrator {
                         registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
                     let drained_amendments = drain_amendment_queue(&project_dir)?;
-                    let planner_amendments = if unify_final_review_enabled(
-                        &self.workspace.root,
-                        &project_dir,
-                    ) {
+                    let planner_amendments = if effective.amendments.unify_final_review {
                         drained_amendments
                             .into_iter()
                             .filter(|req| req.source != AmendmentSource::FinalReview)
@@ -3427,25 +3424,6 @@ fn build_planner_prompt(
     Ok(prompt)
 }
 
-fn unify_final_review_enabled(workspace_root: &Path, project_dir: &Path) -> bool {
-    let global_path = workspace_root.join("ralph.toml");
-    let project_path = project_dir.join("config.toml");
-
-    // Project-level config overrides global when both are present.
-    read_unify_final_review_value(&project_path).unwrap_or_else(|| {
-        read_unify_final_review_value(&global_path).unwrap_or(false)
-    })
-}
-
-fn read_unify_final_review_value(path: &Path) -> Option<bool> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value: toml::Value = toml::from_str(&raw).ok()?;
-    value
-        .get("amendments")?
-        .get("unify_final_review")?
-        .as_bool()
-}
-
 #[allow(clippy::too_many_arguments)]
 fn build_implementer_prompt(
     effective: &EffectiveConfig,
@@ -4380,6 +4358,44 @@ async fn run_final_review_phase(
     }
 
     append_final_review_amendments_file(project_dir, round, &amendments, &final_accepted)?;
+
+    // When unify_final_review is enabled, mirror accepted amendments into the
+    // external amendment queue so the planner can process them uniformly.
+    if effective.amendments.unify_final_review {
+        let by_id: HashMap<&str, &FinalReviewAmendment> = amendments
+            .iter()
+            .map(|a| (a.id.as_str(), a))
+            .collect();
+        for accepted_id in &final_accepted {
+            if let Some(amendment) = by_id.get(accepted_id.as_str()) {
+                let req = AmendmentRequest {
+                    id: amendment.id.clone(),
+                    body: amendment.body.clone(),
+                    priority: AmendmentPriority::P2,
+                    source: AmendmentSource::FinalReview,
+                    source_detail: Some(amendment.reviewer_backend.clone()),
+                    created_at: Utc::now(),
+                };
+                match enqueue_amendment(project_dir, &req) {
+                    Ok(path) => {
+                        info!(
+                            id = %amendment.id,
+                            path = %path.display(),
+                            "mirrored accepted final-review amendment to queue"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            id = %amendment.id,
+                            error = %e,
+                            "failed to enqueue final-review amendment; continuing"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     write_final_review_exit_artifact(
         project_dir,
         &state.project_id,

@@ -23,6 +23,15 @@ pub struct GlobalConfig {
     pub templates: TemplateConfig,
     #[serde(default)]
     pub git: GitConfig,
+    #[serde(default)]
+    pub amendments: AmendmentsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct AmendmentsConfig {
+    #[serde(default)]
+    pub unify_final_review: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1554,6 +1563,9 @@ pub(crate) fn set_global_config_value(
         "templates.planner_position" => config.templates.planner_position = raw_value.to_owned(),
         "templates.vote" => config.templates.vote = raw_value.to_owned(),
         "templates.arbiter" => config.templates.arbiter = raw_value.to_owned(),
+        "amendments.unify_final_review" => {
+            config.amendments.unify_final_review = cfg_parse_bool(raw_value, key)?;
+        }
         "git.auto_branch" => config.git.auto_branch = cfg_parse_bool(raw_value, key)?,
         "git.branch_format" => config.git.branch_format = raw_value.to_owned(),
         "git.sign_commits" => config.git.sign_commits = cfg_parse_bool(raw_value, key)?,

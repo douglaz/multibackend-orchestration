@@ -13,8 +13,8 @@ use tracing::warn;
 pub(crate) use global::save_sparse;
 pub(crate) use global::set_global_config_value;
 pub use global::{
-    CommitMessageStyle, GlobalConfig, PlannerStateInPrompt, PreviousSpecsInPrompt,
-    PromptChangeAction,
+    AmendmentsConfig, CommitMessageStyle, GlobalConfig, PlannerStateInPrompt,
+    PreviousSpecsInPrompt, PromptChangeAction,
 };
 pub use project::{ProjectConfig, ProjectDaemonOverrides};
 
@@ -127,10 +127,16 @@ pub struct EffectiveDaemonConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct EffectiveAmendmentsConfig {
+    pub unify_final_review: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct EffectiveConfig {
     pub workflow: EffectiveWorkflowConfig,
     pub templates: EffectiveTemplateConfig,
     pub daemon: EffectiveDaemonConfig,
+    pub amendments: EffectiveAmendmentsConfig,
     pub global: GlobalConfig,
     pub project: Option<ProjectConfig>,
 }
@@ -453,10 +459,17 @@ pub fn resolve_effective_config(
         ),
     };
 
+    let amendments = EffectiveAmendmentsConfig {
+        unify_final_review: project_ref
+            .and_then(|p| p.amendments.unify_final_review)
+            .unwrap_or(global.amendments.unify_final_review),
+    };
+
     Ok(EffectiveConfig {
         workflow,
         templates,
         daemon,
+        amendments,
         global,
         project,
     })
