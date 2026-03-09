@@ -16,6 +16,11 @@ use super::AmendArgs;
 pub fn execute(args: AmendArgs) -> Result<()> {
     let workspace = Workspace::discover()?;
     let project_id = workspace.resolve_project_id(args.project.as_deref())?;
+
+    if !workspace.project_exists(&project_id) {
+        return Err(RalphError::ProjectNotFound(project_id));
+    }
+
     let project_dir = workspace.project_dir(&project_id);
 
     let priority = parse_priority(&args.priority)?;

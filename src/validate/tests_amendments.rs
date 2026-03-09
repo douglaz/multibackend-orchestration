@@ -2,7 +2,7 @@ use super::*;
 
 use std::fs;
 
-use crate::validate::assertions::{assert_exit_code, assert_file_exists};
+use crate::validate::assertions::{assert_exit_code, assert_file_exists, assert_path_not_exists};
 use crate::validate::harness::RalphHarness;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -30,6 +30,18 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "amendments::amend_fails_for_missing_body_file",
             func: amend_fails_for_missing_body_file,
+        },
+        ConformanceTest {
+            name: "amendments::amend_rejects_nonexistent_project",
+            func: amend_rejects_nonexistent_project,
+        },
+        ConformanceTest {
+            name: "amendments::amend_invalid_priority_creates_no_queue_files",
+            func: amend_invalid_priority_creates_no_queue_files,
+        },
+        ConformanceTest {
+            name: "amendments::amend_missing_body_file_creates_no_queue_files",
+            func: amend_missing_body_file_creates_no_queue_files,
         },
     ]
 }
@@ -200,6 +212,129 @@ fn amend_fails_for_missing_body_file(h: &RalphHarness) -> TestResult {
             !output.status.success(),
             "amend with missing body file should fail"
         );
+    })
+}
+
+fn amend_rejects_nonexistent_project(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init workspace");
+        h.create_project("amend-exists", "Amend Exists", "test prompt")
+            .expect("create project");
+
+        let output = h
+            .ralph(vec![
+                "amend",
+                "--project",
+                "nonexistent-project-xyz",
+                "--body",
+                "should fail",
+            ])
+            .expect("ralph amend should execute");
+
+        assert!(
+            !output.status.success(),
+            "amend with nonexistent project should fail with non-zero exit"
+        );
+
+        // No queue directory should be created for the nonexistent project
+        let orphan_queue_dir = h
+            .project_dir("nonexistent-project-xyz")
+            .join("amendment-queue");
+        assert_path_not_exists(&orphan_queue_dir);
+    })
+}
+
+fn amend_invalid_priority_creates_no_queue_files(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init workspace");
+        h.create_project("amend-no-queue-pri", "Amend No Queue Pri", "test prompt")
+            .expect("create project");
+
+        let output = h
+            .ralph(vec![
+                "amend",
+                "--project",
+                "amend-no-queue-pri",
+                "--body",
+                "should not be enqueued",
+                "--priority",
+                "INVALID",
+            ])
+            .expect("ralph amend should execute");
+
+        assert!(
+            !output.status.success(),
+            "invalid priority should cause non-zero exit"
+        );
+
+        // No queue files should be created
+        let queue_dir = h.project_dir("amend-no-queue-pri").join("amendment-queue");
+        if queue_dir.exists() {
+            let json_count = fs::read_dir(&queue_dir)
+                .expect("read queue dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext == "json")
+                        && !e
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".tmp-")
+                })
+                .count();
+            assert_eq!(
+                json_count, 0,
+                "no published .json queue files should exist after invalid priority"
+            );
+        }
+    })
+}
+
+fn amend_missing_body_file_creates_no_queue_files(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        h.init_workspace().expect("init workspace");
+        h.create_project("amend-no-queue-file", "Amend No Queue File", "test prompt")
+            .expect("create project");
+
+        let output = h
+            .ralph(vec![
+                "amend",
+                "--project",
+                "amend-no-queue-file",
+                "--body",
+                "@/nonexistent/path/to/body.txt",
+            ])
+            .expect("ralph amend should execute");
+
+        assert!(
+            !output.status.success(),
+            "missing body file should cause non-zero exit"
+        );
+
+        // No queue files should be created
+        let queue_dir = h
+            .project_dir("amend-no-queue-file")
+            .join("amendment-queue");
+        if queue_dir.exists() {
+            let json_count = fs::read_dir(&queue_dir)
+                .expect("read queue dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext == "json")
+                        && !e
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".tmp-")
+                })
+                .count();
+            assert_eq!(
+                json_count, 0,
+                "no published .json queue files should exist after missing body file"
+            );
+        }
     })
 }
 
