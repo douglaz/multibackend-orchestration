@@ -34,7 +34,8 @@ use crate::project::artifacts::{
 };
 use crate::project::amendments::{
     drain_amendment_queue, enqueue_amendment, format_external_amendments_for_prompt,
-    pending_amendment_count, AmendmentPriority, AmendmentRequest, AmendmentSource,
+    pending_amendment_count, rollback_drained_amendments, AmendmentPriority, AmendmentRequest,
+    AmendmentSource,
 };
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
@@ -601,6 +602,7 @@ impl Orchestrator {
                         registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
                     let drained_amendments = drain_amendment_queue(&project_dir)?;
+                    let drained_for_rollback = drained_amendments.clone();
                     let planner_amendments = if effective.amendments.unify_final_review {
                         drained_amendments
                             .into_iter()
@@ -629,7 +631,8 @@ impl Orchestrator {
                         &feature_backends.implementer,
                         &project_dir,
                         &external_amendments_text,
-                    )?;
+                    )
+                    .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
 
                     // Session reuse: exercise role policy for planner (will warn+skip for v1)
                     let _planner_session_id = resolve_session_for_role(
@@ -674,7 +677,8 @@ impl Orchestrator {
                     &self.cancel,
                     self.max_backend_retries,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
                     let planner_decision = _retry_result.parsed;
                     debug!(loop = loop_number, "planner responded");
 
@@ -694,7 +698,8 @@ impl Orchestrator {
                                     kind: ArtifactKind::Spec,
                                     body: &body,
                                 },
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
 
                             let spec_rel = artifact_relative_path(&project_dir, &spec_path);
                             state.prompt_hash_at_loop_start = prompt_hash;
@@ -720,7 +725,8 @@ impl Orchestrator {
                                     last_attempt.loop_number,
                                     "completion",
                                     "final-review-exit-restart.md",
-                                )?
+                                )
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?
                                 .is_some();
                                 let has_completed_feature_after = state
                                     .loops
@@ -730,24 +736,34 @@ impl Orchestrator {
                                             && l.artifacts.impl_notes.is_some()
                                     });
                                 if has_restart && !has_completed_feature_after {
-                                    return Err(RalphError::Orchestration(
-                                        "planner requested completion without addressing final review amendments"
-                                            .to_owned(),
+                                    return Err(rollback_drained_amendments(
+                                        &project_dir,
+                                        &drained_for_rollback,
+                                        RalphError::Orchestration(
+                                            "planner requested completion without addressing final review amendments"
+                                                .to_owned(),
+                                        ),
                                     ));
                                 }
                             }
-                            let pending = pending_amendment_count(&project_dir)?;
+                            let pending = pending_amendment_count(&project_dir)
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
                             if pending > 0 {
-                                return Err(RalphError::Orchestration(format!(
-                                    "planner requested completion but {pending} amendment(s) are still pending in the queue"
-                                )));
+                                return Err(rollback_drained_amendments(
+                                    &project_dir,
+                                    &drained_for_rollback,
+                                    RalphError::Orchestration(format!(
+                                        "planner requested completion but {pending} amendment(s) are still pending in the queue"
+                                    )),
+                                ));
                             }
                             info!(loop = loop_number, "planner requested project completion");
                             let base_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
                                 &role_overrides,
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
                             // Resolve effective completers from the panel config.
                             // Optional backends are skipped inside resolve_completion_panel;
                             // required-backend failures and min-completer violations propagate.
@@ -756,7 +772,8 @@ impl Orchestrator {
                                     &effective.workflow.completion_backends,
                                     effective.workflow.completion_min_completers,
                                 )
-                                .await?;
+                                .await
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
                             let completion_backends = CompletionLoopBackends::new(
                                 base_backends.planner.clone(),
                                 effective_completers,
@@ -772,7 +789,8 @@ impl Orchestrator {
                                     kind: ArtifactKind::TerminationRequest,
                                     body: &body,
                                 },
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, e))?;
 
                             let termination_rel =
                                 artifact_relative_path(&project_dir, &termination_path);

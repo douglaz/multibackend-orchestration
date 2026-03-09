@@ -4,8 +4,8 @@ use chrono::Utc;
 use std::fs;
 
 use crate::project::amendments::{
-    enqueue_amendment, pending_amendment_count, AmendmentPriority, AmendmentRequest,
-    AmendmentSource,
+    drain_amendment_queue, enqueue_amendment, pending_amendment_count, AmendmentPriority,
+    AmendmentRequest, AmendmentSource,
 };
 use crate::validate::assertions::{
     assert_exit_code, assert_file_exists, assert_path_not_exists, assert_stderr_contains,
@@ -78,6 +78,14 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "amendments::unify_mirroring_enqueues_final_review_amendments",
             func: unify_mirroring_enqueues_final_review_amendments,
+        },
+        ConformanceTest {
+            name: "amendments::planning_failure_preserves_drained_amendments",
+            func: planning_failure_preserves_drained_amendments,
+        },
+        ConformanceTest {
+            name: "amendments::quick_dev_failure_preserves_drained_amendments",
+            func: quick_dev_failure_preserves_drained_amendments,
         },
     ]
 }
@@ -589,6 +597,131 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
                 "late guard must not rename .json to .inflight; found {inflight_count} .inflight file(s)"
             );
         }
+    })
+}
+
+/// Verify that amendments drained during the planning phase are re-enqueued
+/// when the planner backend fails, preserving original fields.
+fn planning_failure_preserves_drained_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-plan-rollback";
+        h.init_workspace().expect("init workspace");
+
+        let mock = h
+            .write_stable_mock_script(
+                "amend-plan-rollback.sh",
+                &planning_failure_mock_script(),
+            )
+            .expect("write planner failure mock");
+        h.setup_mock_backends_stable(&mock)
+            .expect("setup mock backends");
+
+        h.create_project(
+            project_id,
+            "Plan Rollback Test",
+            "planning rollback test prompt",
+        )
+        .expect("create project");
+        h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
+            .expect("disable prompt review");
+
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-ROLLBACK-001",
+            "rollback test body",
+        );
+
+        let output = h
+            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .expect("ralph run should execute");
+        assert_exit_code(&output, 1);
+
+        // Amendments should be preserved in the queue after planner failure
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert!(
+            pending > 0,
+            "amendment should be re-enqueued after planner failure, got pending={pending}"
+        );
+
+        // Verify original fields are preserved by draining and inspecting
+        let drained =
+            drain_amendment_queue(&h.project_dir(project_id)).expect("drain re-enqueued items");
+        assert_eq!(drained.len(), 1, "expected exactly 1 re-enqueued amendment");
+        assert_eq!(drained[0].id, "EXT-ROLLBACK-001");
+        assert_eq!(drained[0].body, "rollback test body");
+        assert_eq!(drained[0].priority, AmendmentPriority::P2);
+        assert_eq!(drained[0].source, AmendmentSource::Cli);
+    })
+}
+
+/// Verify that amendments drained during quick-dev PlanAndImplement are
+/// re-enqueued when the implementer backend fails, preserving original fields.
+fn quick_dev_failure_preserves_drained_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "amend-qd-rollback";
+        h.init_workspace().expect("init workspace");
+
+        let impl_mock = h
+            .write_stable_mock_script(
+                "amend-qd-rollback-impl.sh",
+                &quick_dev_failure_implementer_mock_script(),
+            )
+            .expect("write quick-dev failure implementer mock");
+        let rev_mock = h
+            .write_stable_mock_script(
+                "amend-qd-rollback-rev.sh",
+                &quick_dev_failure_reviewer_mock_script(),
+            )
+            .expect("write quick-dev failure reviewer mock");
+        h.setup_separate_mock_backends(&impl_mock, &rev_mock)
+            .expect("setup separate mock backends");
+
+        h.create_project(
+            project_id,
+            "Quick Dev Rollback Test",
+            "quick dev rollback test prompt",
+        )
+        .expect("create project");
+
+        enqueue_external_amendment(
+            h,
+            project_id,
+            "EXT-QD-ROLLBACK-001",
+            "quick dev rollback test body",
+        );
+
+        let output = h
+            .ralph([
+                "quick-dev-run",
+                "--project",
+                project_id,
+                "--implementer-backend",
+                "claude",
+                "--reviewer-backend",
+                "codex",
+                "--skip-commit",
+            ])
+            .expect("quick-dev-run should execute");
+        assert_exit_code(&output, 1);
+
+        // Amendments should be preserved in the queue after implementer failure
+        let pending =
+            pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
+        assert!(
+            pending > 0,
+            "amendment should be re-enqueued after quick-dev failure, got pending={pending}"
+        );
+
+        // Verify original fields are preserved
+        let drained =
+            drain_amendment_queue(&h.project_dir(project_id)).expect("drain re-enqueued items");
+        assert_eq!(drained.len(), 1, "expected exactly 1 re-enqueued amendment");
+        assert_eq!(drained[0].id, "EXT-QD-ROLLBACK-001");
+        assert_eq!(drained[0].body, "quick dev rollback test body");
+        assert_eq!(drained[0].priority, AmendmentPriority::P2);
+        assert_eq!(drained[0].source, AmendmentSource::Cli);
     })
 }
 
@@ -1290,6 +1423,51 @@ else
   echo "unrecognized prompt" >&2
   exit 1
 fi
+"###
+    .to_owned()
+}
+
+/// Mock script that fails when invoked as a planner.
+fn planning_failure_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "You are a software architect planning features for a project." <<< "$INPUT"; then
+  echo "simulated planner failure for rollback test" >&2
+  exit 1
+fi
+echo "unexpected prompt" >&2
+exit 1
+"###
+    .to_owned()
+}
+
+/// Mock script for quick-dev implementer that fails during PlanAndImplement.
+fn quick_dev_failure_implementer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if grep -q "quick-dev plan-and-implement phase" <<< "$INPUT"; then
+  echo "simulated quick-dev implementer failure for rollback test" >&2
+  exit 1
+fi
+echo "quick-dev implementer: unexpected prompt" >&2
+exit 1
+"###
+    .to_owned()
+}
+
+/// Dummy reviewer mock for quick-dev rollback test (never actually called since
+/// implementer fails first, but required for setup_separate_mock_backends).
+fn quick_dev_failure_reviewer_mock_script() -> String {
+    r###"#!/usr/bin/env bash
+set -euo pipefail
+echo "quick-dev reviewer: unexpected call" >&2
+exit 1
 "###
     .to_owned()
 }
