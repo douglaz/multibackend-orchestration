@@ -225,3 +225,82 @@ Beyond the stray files above, the implementation is correct, safe, and complete.
 ### Reviewer
 claude
 
+
+## Round 5
+
+### Amendment: AMQ-STEM-RACE-002
+
+### Problem
+Drain currently deletes any `.json` whose stem matches a previously processed `.inflight` ([`#L197`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L197)-[`#L208`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L208), [`#L254`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L254)).  
+This is lossy under concurrency: a new enqueue can legally publish `<stem>.json` while `<stem>.inflight` exists, since enqueue only collision-checks destination `.json` ([`#L147`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L147)-[`#L152`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L152)).  
+Result: legitimate new amendment can be silently deleted. Existing test bakes this assumption in ([`#L750`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L750)).
+
+### Proposed Change
+Do not drop `.json` by stem alone. Drop only when proven duplicate (for example same inode/content), otherwise process as distinct.  
+Also treat matching `.inflight` as occupied when choosing enqueue filename suffix to reduce collisions.  
+Replace the current same-stem test with a regression that uses same stem + different payload and verifies no loss.
+
+### Affected Files
+- [`src/project/amendments.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs) - fix drain dedupe and enqueue collision handling; update tests.
+
+### Reviewer
+codex
+
+### Amendment: AMQ-UTF8-READ-001
+
+### Problem
+Malformed non-UTF8 queue files are treated as fatal I/O errors instead of quarantined malformed input.  
+`read_and_parse_inflight` uses `fs::read_to_string` ([`#L492`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L492)); invalid UTF-8 becomes `ReadFailed` and aborts drain via rollback path ([`#L246`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs#L246)).  
+That violates the “malformed files must not fail orchestration; quarantine and continue” requirement.
+
+### Proposed Change
+Read bytes (`fs::read`) and parse with `serde_json::from_slice`; classify decode/parse/validation failures as malformed (quarantine), not fatal.  
+Keep only true filesystem read failures (permission, device I/O, etc.) as fatal.  
+Add a unit test with invalid UTF-8 JSON bytes to verify quarantine + continued drain.
+
+### Affected Files
+- [`src/project/amendments.rs`](/tmp/ralph-daemon-data/douglaz/multibackend-orchestration/.ralph/daemon/worktrees/douglaz-multibackend-orchestration-194/src/project/amendments.rs) - fix classification path and add regression test.
+
+### Reviewer
+codex
+
+### Amendment: STRAY-IMPL-NOTES-001
+
+### Problem
+The file `20260309T190541Z-impl-notes.md` at the repository root is a committed stray implementation artifact from loop 12 (`commit 6885d06`). It contains implementation notes from the loop-12 amendment round and should have been cleaned up by `remove_stray_impl_artifacts()` during the implementing→reviewing transition. The ISO-basic timestamp pattern (`YYYYMMDDTHHMMSSZ-`) detection added in `src/git/commit.rs` was specifically designed to catch files like this, yet the file persisted because it was committed before that detection logic existed and no subsequent cleanup pass ran against already-tracked files.
+
+This file is not part of the project's source code — it is an ephemeral artifact that should not ship with the branch.
+
+### Proposed Change
+`[P3]` Remove the file `20260309T190541Z-impl-notes.md` from the repository via `git rm`.
+
+### Affected Files
+- `20260309T190541Z-impl-notes.md` - delete from repository
+
+---
+
+## Summary
+
+The implementation is **correct, safe, and well-structured** across all major concerns. Specific verification:
+
+**Data Model** (`src/project/amendments.rs`): `AmendmentRequest`, `AmendmentPriority` (default P2 via `#[default]`), `AmendmentSource` (kebab-case serde) — all match spec. Validation rejects empty `id`/`body`.
+
+**Atomic Handoff** (`enqueue_amendment`): Uses `create_new(true)` for temp file uniqueness, `hard_link` for collision-safe publish (no silent overwrite), `sync_all` before rename. Suffix loop handles collisions correctly. Temp and final files are in the same directory (same filesystem), so hard_link always works.
+
+**Crash-Safe Drain** (`drain_amendment_queue`): Claims `.json` → `.inflight` via hard_link, reads, deletes on success. `.inflight` sorts before `.json` lexicographically, ensuring the `completed_inflight_stems` dedup correctly handles the crash-recovery case where both exist. `InflightReadOutcome` properly separates I/O failures (fatal → rollback) from content failures (quarantine → continue).
+
+**Mid-Drain Rollback** (`rollback_mid_drain`): Re-enqueues all previously-drained items on fatal error. The `drained_for_rollback` clone in the orchestrator captures all items *before* the unify_final_review filter, ensuring final-review-sourced items are also restored.
+
+**Completion Guards**: Planning-phase guard via `pending_amendment_count` (read-only, no drain). Late guard at the final success return path in the completing phase catches amendments arriving during completing/final-review. Neither guard mutates queue state.
+
+**Quick-Dev Integration**: Drain-then-rollback pattern correctly splits `persist_destination_and_checkpoint` into `persist_quick_dev_state` + `save_state_to_disk` (rollback-eligible) + `checkpoint_if_enabled` (post-durable, no rollback). This prevents duplicate replay after durable persistence.
+
+**Unify Final-Review**: Config merge precedence (project → global) is correct. Mirroring enqueues accepted amendments with `source=FinalReview`. Planning-phase dedupe filters these out of `external_amendments` text. Config CRUD (get/set at both scopes) is wired correctly.
+
+**CLI** (`src/cli/amend.rs`): Priority validation, `@path` body expansion, default ID generation, project existence check — all correct.
+
+**Tests**: 32+ unit tests in amendments.rs, 3 integration tests in `tests/amend_cli.rs`, 20 conformance tests in `src/validate/tests_amendments.rs` covering all spec acceptance criteria. Mock scripts verify prompt content injection (grep for amendment IDs/bodies in prompt text). The `quick_dev_checkpoint_failure_no_rollback_after_durable_success` test exercises the split-persist invariant by corrupting the git index.
+
+### Reviewer
+claude
+
