@@ -4380,6 +4380,8 @@ async fn run_final_review_phase(
                     Ok(path) => {
                         info!(
                             id = %amendment.id,
+                            source = "final-review",
+                            source_detail = %amendment.reviewer_backend,
                             path = %path.display(),
                             "mirrored accepted final-review amendment to queue"
                         );

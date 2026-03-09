@@ -899,12 +899,23 @@ fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestRes
         // Verify the orchestrator mirroring code path ran by checking
         // for the info-level log emitted by run_final_review_phase.
         let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
-        let mirrored = stderr
+        let mirror_line = stderr
             .lines()
-            .any(|l| l.contains("mirrored accepted final-review amendment to queue"));
+            .find(|l| l.contains("mirrored accepted final-review amendment to queue"));
         assert!(
-            mirrored,
+            mirror_line.is_some(),
             "expected orchestrator to log mirroring of accepted final-review amendment"
+        );
+
+        // Verify mirrored amendment metadata: id, source, source_detail
+        let ml = mirror_line.unwrap();
+        assert!(
+            ml.contains("FR-MIRROR-001"),
+            "mirror log should contain amendment id FR-MIRROR-001, got: {ml}"
+        );
+        assert!(
+            ml.contains("source=final-review") || ml.contains("source=\"final-review\""),
+            "mirror log should contain source=final-review, got: {ml}"
         );
 
         // The mirrored amendment should have been drained by the planner
@@ -1012,6 +1023,42 @@ elif grep -q "You are a project completion validator." <<< "$INPUT"; then
 
 The project satisfies all requirements:
 - Mock requirement: satisfied
+EOF
+elif grep -q "You are a technical evaluator assessing proposed amendments from final reviewers." <<< "$INPUT"; then
+  cat <<'EOF'
+# Planner Positions
+
+## FR-MIRROR-001
+
+### Position
+ACCEPT
+
+### Rationale
+The amendment identifies a genuine improvement.
+EOF
+elif grep -q "You are a reviewer voting on proposed amendments after considering the planner's positions." <<< "$INPUT"; then
+  cat <<'EOF'
+# Vote Results
+
+## FR-MIRROR-001
+
+### Vote
+ACCEPT
+
+### Rationale
+Agreed with planner position.
+EOF
+elif grep -q "You are the arbiter resolving disputed amendments where reviewers and planner disagree." <<< "$INPUT"; then
+  cat <<'EOF'
+# Arbiter Ruling
+
+## FR-MIRROR-001
+
+### Ruling
+ACCEPT
+
+### Rationale
+Amendment is valid.
 EOF
 elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
   COUNT=0
