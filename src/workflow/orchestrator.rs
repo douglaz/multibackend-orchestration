@@ -2795,6 +2795,14 @@ impl Orchestrator {
             }
 
             if state.status == ProjectStatus::Completed {
+                // Late guard: reject completion if amendments arrived during
+                // completing/final-review phases.
+                let late_pending = pending_amendment_count(&project_dir)?;
+                if late_pending > 0 {
+                    return Err(RalphError::Orchestration(format!(
+                        "completion blocked: {late_pending} amendment(s) arrived in the queue during completing/final-review"
+                    )));
+                }
                 // Final checkpoint: commit any uncommitted completion artifacts.
                 if let Err(err) = checkpoint_phase_transition(
                     &self.workspace.root,
