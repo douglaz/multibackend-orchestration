@@ -519,11 +519,6 @@ fn write_mock_gh(h: &RalphHarness, body: &str) -> crate::Result<String> {
     Ok(format!("{base}:{existing}"))
 }
 
-fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
-    let script = h.write_mock_script("mock_ralph", &mock_scripts::daemon_mock_ralph_script())?;
-    Ok(script.to_string_lossy().into_owned())
-}
-
 /// Verify that `daemon start` creates PRD lifecycle labels at startup.
 ///
 /// The mock gh logs every `label create` call. We verify that all 6 PRD labels
@@ -570,7 +565,6 @@ exit 1
         );
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .ralph_env(
@@ -581,7 +575,7 @@ exit 1
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -652,7 +646,6 @@ fn prd_ready_conflict_in_claim_path(h: &RalphHarness) -> TestResult {
 
         let gh_path =
             write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_script()).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -665,7 +658,6 @@ fn prd_ready_conflict_in_claim_path(h: &RalphHarness) -> TestResult {
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -893,7 +885,6 @@ exit 0
         );
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         // Run first daemon tick
         let output = dh
@@ -905,7 +896,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -1072,7 +1063,6 @@ exit 0
         );
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -1083,7 +1073,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -1198,7 +1188,6 @@ exit 0
 "#
         );
         let gh_path_missing = write_mock_gh(&dh_missing, &gh_script_missing).expect("mock gh");
-        let ralph_path_missing = write_daemon_mock_ralph(&dh_missing).expect("mock ralph");
 
         let output_missing = dh_missing
             .daemon_env(
@@ -1209,10 +1198,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path_missing),
-                    ("RALPH_DAEMON_BIN", &ralph_path_missing),
-                ],
+                &[("PATH", &gh_path_missing)],
             )
             .expect("daemon start");
         assert_exit_code(&output_missing, 0);
@@ -1313,7 +1299,6 @@ exit 0
 "#
         );
         let gh_path_present = write_mock_gh(&dh_present, &gh_script_present).expect("mock gh");
-        let ralph_path_present = write_daemon_mock_ralph(&dh_present).expect("mock ralph");
 
         let output_present = dh_present
             .daemon_env(
@@ -1324,10 +1309,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path_present),
-                    ("RALPH_DAEMON_BIN", &ralph_path_present),
-                ],
+                &[("PATH", &gh_path_present)],
             )
             .expect("daemon start");
         assert_exit_code(&output_present, 0);
@@ -1536,7 +1518,6 @@ exit 0
         );
 
         let gh_path = write_mock_gh(&dh, &gh_script).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -1547,7 +1528,7 @@ exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .expect("daemon start should execute");
         assert_exit_code(&output, 0);
@@ -1662,7 +1643,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -1673,7 +1653,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -1763,7 +1743,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -1774,7 +1753,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -1862,7 +1841,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -1873,7 +1851,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -1960,7 +1938,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let _output = dh
             .daemon_env(
@@ -1971,7 +1948,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         // Daemon may return 0 even if individual issue fails (it logs the error)
@@ -2064,7 +2041,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -2075,7 +2051,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -2162,7 +2138,6 @@ case "$1" in
 esac; exit 0
 "#;
         let gh_path = write_mock_gh(&dh, gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let _output = dh
             .daemon_env(
@@ -2173,7 +2148,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
 
@@ -2274,7 +2249,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Run 3 daemon ticks — each should fail the approval transition
         for tick in 1..=3 {
@@ -2287,7 +2261,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -2395,7 +2369,6 @@ case "$1" in
 esac; exit 0
 "#;
         let gh_path = write_mock_gh(&dh, gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -2406,7 +2379,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -2478,7 +2451,6 @@ case "$1" in
 esac; exit 0
 "#;
         let gh_path = write_mock_gh(&dh, gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -2489,7 +2461,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -2582,7 +2554,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let output = dh
             .daemon_env(
@@ -2593,7 +2564,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         assert_exit_code(&output, 0);
@@ -2687,7 +2658,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         for tick in 1..=3u32 {
             let _output = dh
@@ -2699,7 +2669,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -2805,7 +2775,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         for tick in 1..=3u32 {
             let _output = dh
@@ -2817,7 +2786,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -2905,7 +2874,6 @@ esac; exit 0
 "#
         .replace("__LABEL_LOG__", &label_log_str);
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         let state_path = dh
             .temp_dir
@@ -2922,7 +2890,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -3044,7 +3012,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Tick 1: label add fails — state stays AwaitingFeedback
         let _output = dh
@@ -3056,7 +3023,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
 
@@ -3162,7 +3129,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Tick 1: cleanup failure should keep the issue retryable.
         let _output = dh
@@ -3174,7 +3140,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         let state_tick_1: InteractivePrdState =
@@ -3209,7 +3175,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                &[("PATH", &gh_path)],
             )
             .unwrap();
         let state_tick_2: InteractivePrdState =
@@ -3412,7 +3378,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Run 3 daemon ticks — each should fail because the backend produces
         // an incomplete spec missing 4 of 6 required sections.
@@ -3426,7 +3391,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -3566,7 +3531,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Run 3 daemon ticks — each should fail because the backend produces
         // an incomplete revision missing 4 of 6 required sections.
@@ -3580,7 +3544,7 @@ esac; exit 0
                         "acme/widgets",
                         "--single-iteration",
                     ],
-                    &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+                    &[("PATH", &gh_path)],
                 )
                 .unwrap();
 
@@ -3708,7 +3672,6 @@ esac; exit 0
 "#
         .replace("__LABEL_LOG__", &label_log_str);
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
@@ -3720,11 +3683,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
-                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-                ],
+                &[("PATH", &gh_path), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
             )
             .unwrap();
 
@@ -3925,7 +3884,6 @@ esac; exit 0
 "#
         );
         let gh_path = write_mock_gh(&dh, &gh_script).unwrap();
-        let ralph_path = write_daemon_mock_ralph(&dh).unwrap();
 
         // Inject save failure via env var — deterministic regardless of privilege level
         let _output = dh
@@ -3937,11 +3895,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
-                    ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-                ],
+                &[("PATH", &gh_path), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
             )
             .unwrap();
 
@@ -5519,7 +5473,6 @@ esac
 /// Returns daemon process output plus the captured `--idea` payload.
 struct PrdDoneDaemonRun {
     output: std::process::Output,
-    captured_idea: String,
 }
 
 fn run_prd_done_daemon(harness: &RalphHarness, gh_script: &str) -> PrdDoneDaemonRun {
@@ -5537,13 +5490,8 @@ fn run_prd_done_daemon(harness: &RalphHarness, gh_script: &str) -> PrdDoneDaemon
     let existing_path = std::env::var("PATH").unwrap_or_default();
     let gh_path = format!("{gh_dir}:{existing_path}");
 
-    let captured_idea_path = dh.temp_dir.path().join("captured-idea.txt");
-    let ralph_script = mock_scripts::daemon_mock_ralph_capturing_script(&captured_idea_path);
-    let ralph_path_obj = dh
-        .write_mock_script("mock_ralph", &ralph_script)
-        .expect("write mock ralph");
-    let ralph_path = ralph_path_obj.to_string_lossy().into_owned();
-
+    // Dispatch is now in-process (no subprocess to capture args).
+    // Observable behavior is verified via stderr logs.
     let output = dh
         .daemon_env(
             [
@@ -5553,16 +5501,11 @@ fn run_prd_done_daemon(harness: &RalphHarness, gh_script: &str) -> PrdDoneDaemon
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &gh_path), ("RALPH_DAEMON_BIN", &ralph_path)],
+            &[("PATH", &gh_path)],
         )
         .expect("daemon start should execute");
 
-    let captured_idea = fs::read_to_string(&captured_idea_path).unwrap_or_default();
-
-    PrdDoneDaemonRun {
-        output,
-        captured_idea,
-    }
+    PrdDoneDaemonRun { output }
 }
 
 /// PRD-done issue dispatches with approved spec and logs success message.
@@ -5595,9 +5538,12 @@ fn prd_done_dispatch_uses_approved_spec(harness: &RalphHarness) -> TestResult {
             stderr.contains("prd-done: using approved spec"),
             "expected 'prd-done: using approved spec' in stderr, got:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, spec_body,
-            "dispatch should receive exact approved spec body"
+        // Verify the task was dispatched in-process (no child process to
+        // capture args; the approved-spec log above confirms the correct idea
+        // was extracted, and the dispatch log confirms it was actually sent).
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-10 starting fresh with"),
+            "expected dispatch log for issue 10 in stderr, got:\n{stderr}"
         );
 
         // Also verify the pure parser still produces correct output
@@ -5649,9 +5595,11 @@ fn prd_done_mixed_labels_not_blocked(harness: &RalphHarness) -> TestResult {
             stderr.contains("prd-done: using approved spec"),
             "mixed labels with prd-done should dispatch with approved spec, stderr:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, spec_body,
-            "mixed-label dispatch should use approved spec"
+        // Verify the task was dispatched in-process (approved-spec log above
+        // confirms the correct idea was extracted for the mixed-label case).
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-20 starting fresh with"),
+            "expected dispatch log for issue 20 in stderr, got:\n{stderr}"
         );
 
         // Also verify the label helper directly
@@ -5696,9 +5644,12 @@ fn prd_done_missing_markers_fallback(harness: &RalphHarness) -> TestResult {
             !stderr.contains("prd-done: using approved spec"),
             "should not use approved spec when markers are missing, stderr:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, "Missing markers issue\n\nFallback body.",
-            "fallback dispatch should use compose_raw_idea(title, body)"
+        // With in-process dispatch, the idea is passed directly to the task
+        // (no subprocess arg capture). The fallback warning above confirms
+        // compose_raw_idea was used. Verify the task was actually dispatched.
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-30 starting fresh with"),
+            "expected dispatch log for issue 30 in stderr, got:\n{stderr}"
         );
     })
 }
@@ -5809,9 +5760,12 @@ esac
             stderr.contains("approved spec not found, falling back"),
             "expected fallback warning when comments API fails, stderr:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, "API fail issue\n\nAPI fail body.",
-            "comments API failure should fallback to compose_raw_idea(title, body)"
+        // With in-process dispatch, the idea is passed directly to the task
+        // (no subprocess arg capture). The fallback warning above confirms
+        // compose_raw_idea was used. Verify the task was actually dispatched.
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-40 starting fresh with"),
+            "expected dispatch log for issue 40 in stderr, got:\n{stderr}"
         );
     })
 }
@@ -5856,9 +5810,12 @@ fn prd_done_user_spoof_ignored(harness: &RalphHarness) -> TestResult {
             stderr.contains("prd-done: using approved spec"),
             "should dispatch with bot-authored approved spec despite user spoof, stderr:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, real_spec,
-            "spoofed user marker must not affect dispatched idea"
+        // With in-process dispatch, the idea is passed directly to the task.
+        // The parser-level assertions below verify the correct spec is extracted;
+        // the approved-spec log above confirms it was used for dispatch.
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-50 starting fresh with"),
+            "expected dispatch log for issue 50 in stderr, got:\n{stderr}"
         );
 
         // Also verify at parser level
@@ -5928,9 +5885,12 @@ fn prd_done_highest_revision_wins(harness: &RalphHarness) -> TestResult {
             stderr.contains("prd-done: using approved spec"),
             "expected approved spec dispatch for highest revision, stderr:\n{stderr}"
         );
-        assert_eq!(
-            run.captured_idea, spec_v3,
-            "highest approved revision should be dispatched as raw idea"
+        // With in-process dispatch, the idea is passed directly to the task.
+        // The parser-level assertions below verify v3 is the highest revision;
+        // the approved-spec log above confirms the correct spec was used.
+        assert!(
+            stderr.contains("dispatch: task acme-widgets-60 starting fresh with"),
+            "expected dispatch log for issue 60 in stderr, got:\n{stderr}"
         );
 
         // Verify parser selects v3

@@ -137,14 +137,6 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
         ))
     })?;
 
-    // Resolve ralph binary path
-    let ralph_bin = match std::env::var("RALPH_DAEMON_BIN") {
-        Ok(path) if !path.is_empty() => PathBuf::from(path),
-        _ => std::env::current_exe().map_err(|err| {
-            RalphError::Orchestration(format!("cannot determine ralph binary path: {err}"))
-        })?,
-    };
-
     let mut deprecation_warned = false;
 
     let mut repo_configs: Vec<DaemonRuntimeConfig> = Vec::new();
@@ -246,7 +238,6 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             labels,
             single_iteration: args.single_iteration,
             verbose: args.verbose,
-            ralph_bin: ralph_bin.clone(),
             repo_root: repo_dir,
             refinement_enabled: daemon_cfg.refinement_enabled,
             refinement_backend: daemon_cfg.refinement_backend,
@@ -266,6 +257,7 @@ async fn execute_start(args: DaemonStartArgs) -> Result<()> {
             prd_shutdown_timeout_secs: daemon_cfg.prd_shutdown_timeout_secs,
             git_bin,
             gh_bin,
+            max_backend_retries: daemon_cfg.max_backend_retries,
         };
 
         let daemon_lock = DaemonLock::acquire(&runtime_config.repo_root)?;
@@ -397,7 +389,7 @@ async fn execute_abort(args: DaemonAbortArgs) -> Result<()> {
     }
 
     // Swap label: in-progress -> failed (no PID info available from CLI)
-    crate::daemon::abort_task_by_labels(&owner, &repo_name, issue_number, None, None).await?;
+    crate::daemon::abort_task_by_labels(&owner, &repo_name, issue_number, None).await?;
 
     println!("aborted issue {slug}#{issue_number}");
     Ok(())

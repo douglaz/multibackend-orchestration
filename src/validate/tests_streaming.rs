@@ -292,10 +292,7 @@ fn timeout_cleanup(h: &RalphHarness) -> TestResult {
         .expect("create_project failed");
 
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "1"])
             .expect("ralph run should execute");
         assert_exit_code(&output, 1);
 
@@ -424,10 +421,7 @@ fn hanging_stall_timeout(h: &RalphHarness) -> TestResult {
 
         let start = Instant::now();
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "1"])
             .expect("ralph run should execute");
         let elapsed = start.elapsed();
         assert_exit_code(&output, 1);
@@ -652,10 +646,7 @@ fn codex_hanging_stall_timeout(h: &RalphHarness) -> TestResult {
         // run, since state is written during execution)
         let start = Instant::now();
         let output = h
-            .ralph_env(
-                ["run", "--loops", "1"],
-                &[("RALPH_MAX_BACKEND_RETRIES", "1")],
-            )
+            .ralph(["run", "--loops", "1", "--max-backend-retries", "1"])
             .expect("ralph run should execute");
         let elapsed = start.elapsed();
         assert_exit_code(&output, 1);

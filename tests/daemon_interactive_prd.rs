@@ -382,19 +382,6 @@ exit 0
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let mock_ralph = h
-        .write_mock_script(
-            "mock_ralph",
-            r#"#!/bin/sh
-case "$1" in
-  auto) exit 0 ;;
-  *) exit 1 ;;
-esac
-"#,
-        )
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
-
     let output = h
         .daemon_env(
             [
@@ -404,7 +391,7 @@ esac
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start should execute");
     assert_exit_code(&output, 0);
@@ -609,14 +596,6 @@ exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script(
-            "mock_ralph",
-            "#!/bin/sh\ncase \"$1\" in\n  auto) exit 0 ;;\n  *) exit 1 ;;\nesac\n",
-        )
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
-
     let output = h
         .daemon_env(
             [
@@ -626,7 +605,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start should execute");
     assert_exit_code(&output, 0);
@@ -802,10 +781,6 @@ exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let output = h
         .daemon_env(
@@ -816,7 +791,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start should execute");
     assert_exit_code(&output, 0);
@@ -974,10 +949,6 @@ exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let output = h
         .daemon_env(
@@ -988,7 +959,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start");
     assert_exit_code(&output, 0);
@@ -1142,10 +1113,6 @@ exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let output = h
         .daemon_env(
@@ -1156,7 +1123,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start");
     assert_exit_code(&output, 0);
@@ -1398,10 +1365,6 @@ exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Tick 1: Pending -> AwaitingAnswers
     fs::write(&tick_file, "1").expect("write tick 1");
@@ -1414,7 +1377,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("tick 1");
     assert_exit_code(&output, 0);
@@ -1439,7 +1402,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("tick 2");
     assert_exit_code(&output, 0);
@@ -1465,7 +1428,7 @@ exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("tick 3");
     assert_exit_code(&output, 0);
@@ -1581,10 +1544,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let output = h
         .daemon_env(
@@ -1595,7 +1554,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start");
     assert_exit_code(&output, 0);
@@ -1702,10 +1661,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Run 3 ticks — each should fail due to bot-login error
     for tick in 1..=3 {
@@ -1718,7 +1673,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+                &[("PATH", &path_env)],
             )
             .expect("daemon start");
 
@@ -1853,10 +1808,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Run 3 ticks — each should fail due to bot-login error
     for tick in 1..=3 {
@@ -1869,7 +1820,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+                &[("PATH", &path_env)],
             )
             .expect("daemon start");
 
@@ -1974,10 +1925,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let state_path = h
         .temp_dir
@@ -1995,7 +1942,7 @@ esac; exit 0
                     "acme/widgets",
                     "--single-iteration",
                 ],
-                &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+                &[("PATH", &path_env)],
             )
             .expect("daemon start");
 
@@ -2152,10 +2099,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Run 1 tick — label add fails, state should NOT be Done
     let _output = h
@@ -2167,7 +2110,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start");
 
@@ -2289,10 +2232,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Tick 1: active-label removal fails post-save; state should be reverted
     // to AwaitingFeedback so retry logic can run on the next tick.
@@ -2305,7 +2244,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start tick 1");
 
@@ -2342,7 +2281,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start tick 2");
 
@@ -2445,10 +2384,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     // Inject save failure via env var — deterministic regardless of privilege level
     // Run one tick — save should fail, state should remain AwaitingFeedback
@@ -2461,11 +2396,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[
-                ("PATH", &path_env),
-                ("RALPH_DAEMON_BIN", &mock_ralph_str),
-                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-            ],
+            &[("PATH", &path_env), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
         )
         .expect("daemon start");
 
@@ -2631,10 +2562,6 @@ esac; exit 0
         gh_path.parent().expect("parent").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
 
     let output = h
         .daemon_env(
@@ -2645,7 +2572,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[("PATH", &path_env), ("RALPH_DAEMON_BIN", &mock_ralph_str)],
+            &[("PATH", &path_env)],
         )
         .expect("daemon start");
     assert_exit_code(&output, 0);
@@ -2777,11 +2704,6 @@ esac; exit 0
     h.setup_mock_backends_stable(&fail_backend)
         .expect("setup fail backends");
 
-    let mock_ralph = h
-        .write_mock_script("mock_ralph", "#!/bin/sh\nexit 0\n")
-        .expect("write mock ralph");
-    let mock_ralph_str = mock_ralph.to_string_lossy().into_owned();
-
     // Inject save failure via env var — deterministic regardless of privilege level.
     // Run one tick — backend error pushes error_count to 3, transition_to_failed
     // tries to save but fails, state should remain non-terminal
@@ -2794,11 +2716,7 @@ esac; exit 0
                 "acme/widgets",
                 "--single-iteration",
             ],
-            &[
-                ("PATH", &path_env),
-                ("RALPH_DAEMON_BIN", &mock_ralph_str),
-                ("RALPH_TEST_INJECT_SAVE_FAILURE", "1"),
-            ],
+            &[("PATH", &path_env), ("RALPH_TEST_INJECT_SAVE_FAILURE", "1")],
         )
         .expect("daemon start");
 

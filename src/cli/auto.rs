@@ -1,20 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
+use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use super::init;
 use super::parse_positive_u32;
-use crate::backend::{BackendRegistry, BackendRegistryTmuxConfig};
-use crate::cli::backend_spec;
+use crate::daemon::tasks::{self, AutoTaskParams};
 use crate::error::RalphError;
-use crate::prd::quick::{QuickPrdOptions, QuickPrdPipeline};
-use crate::project::lifecycle::{create_project, CreateProjectOptions, PromptSource};
-use crate::workflow::orchestrator::{Orchestrator, RunOptions};
 use crate::workspace::Workspace;
 use crate::Result;
 
 const MAX_PROJECT_ID_LEN: usize = 40;
-const MAX_PROJECT_NAME_LEN: usize = 60;
 
 #[derive(Debug, Args)]
 pub struct AutoArgs {
@@ -70,6 +67,10 @@ pub struct AutoArgs {
     /// daemon to isolate each worktree's configuration.
     #[arg(long = "workspace-root")]
     pub workspace_root: Option<PathBuf>,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Defaults to 3 when omitted.
+    #[arg(long = "max-backend-retries")]
+    pub max_backend_retries: Option<u8>,
 }
 
 fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
@@ -80,8 +81,10 @@ fn parse_non_empty_idea(value: &str) -> std::result::Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-fn truncate_idea_for_name(idea: &str) -> String {
-    idea.chars().take(MAX_PROJECT_NAME_LEN).collect()
+/// Slugify an idea string into a project ID.
+/// Public for use by `daemon::tasks`.
+pub fn slugify_idea_public(idea: &str) -> String {
+    slugify_idea(idea)
 }
 
 fn slugify_idea(idea: &str) -> String {
@@ -110,7 +113,7 @@ fn slugify_idea(idea: &str) -> String {
     slug
 }
 
-fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
+fn ensure_workspace(workspace_root: Option<&PathBuf>, fallback_cwd: &Path) -> Result<Workspace> {
     if let Some(root) = workspace_root {
         let ralph_dir = root.join(".ralph");
         if ralph_dir.join("ralph.toml").is_file() {
@@ -121,10 +124,12 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
         return Ok(workspace);
     }
 
-    match Workspace::discover() {
+    // Discover from fallback_cwd (not ambient CWD) so this function is
+    // hermetic with respect to the caller's chosen root.
+    match Workspace::discover_from(fallback_cwd) {
         Ok(workspace) => Ok(workspace),
         Err(RalphError::WorkspaceNotFound) => {
-            let workspace = init::create_workspace(&std::env::current_dir()?.join(".ralph"))?;
+            let workspace = init::create_workspace(&fallback_cwd.join(".ralph"))?;
             eprintln!("initialized workspace at .ralph");
             Ok(workspace)
         }
@@ -133,205 +138,74 @@ fn ensure_workspace(workspace_root: Option<&PathBuf>) -> Result<Workspace> {
 }
 
 pub async fn execute(args: AutoArgs) -> Result<()> {
-    let AutoArgs {
-        idea,
-        spec_writer,
-        spec_reviewer,
-        max_spec_revisions,
-        project_id,
-        backend,
-        planner_backend,
-        implementer_backend,
-        reviewer_backend,
-        qa_backend,
-        completer_backend,
-        skip_commit,
-        skip_prompt_review,
-        tmux,
-        no_tmux,
-        dry_run,
-        pr_url,
-        workspace_root,
-    } = args;
-
-    let idea = idea.trim().to_owned();
+    let idea = args.idea.trim().to_owned();
     if idea.is_empty() {
         return Err(RalphError::Validation(
             "--idea must not be empty".to_owned(),
         ));
     }
 
-    let workspace = ensure_workspace(workspace_root.as_ref())?;
+    // Resolve CWD once at the CLI boundary for workspace fallback.
+    let cwd = std::env::current_dir()?;
 
-    let writer_spec = if spec_writer.trim().is_empty() {
-        workspace.config.workspace.daemon_prd_writer_backend.clone()
-    } else {
-        spec_writer
-    };
-    let reviewer_spec = if spec_reviewer.trim().is_empty() {
+    // Ensure workspace exists and resolve workspace_root for the task.
+    let workspace = ensure_workspace(args.workspace_root.as_ref(), &cwd)?;
+    let workspace_root = args.workspace_root.unwrap_or_else(|| {
         workspace
-            .config
-            .workspace
-            .daemon_prd_reviewer_backend
-            .clone()
+            .root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| workspace.root.clone())
+    });
+
+    let spec_writer = if args.spec_writer.trim().is_empty() {
+        None
     } else {
-        spec_reviewer
+        Some(args.spec_writer)
+    };
+    let spec_reviewer = if args.spec_reviewer.trim().is_empty() {
+        None
+    } else {
+        Some(args.spec_reviewer)
     };
 
-    println!("Running quick-prd phase...");
-    println!("  idea: {idea}");
-    println!("  writer backend: {writer_spec}");
-    println!("  reviewer backend: {reviewer_spec}");
-    println!("  max revisions: {max_spec_revisions}");
+    let dispatch = tasks::cli_stderr_dispatch();
+    let result = tasks::run_auto_task(AutoTaskParams {
+        workspace_root,
+        idea,
+        project_id: args.project_id,
+        pr_url: args.pr_url,
+        cancel: CancellationToken::new(),
+        max_backend_retries: args.max_backend_retries,
+        spec_writer,
+        spec_reviewer,
+        max_spec_revisions: args.max_spec_revisions,
+        backend: args.backend,
+        planner_backend: args.planner_backend,
+        implementer_backend: args.implementer_backend,
+        reviewer_backend: args.reviewer_backend,
+        qa_backend: args.qa_backend,
+        completer_backend: args.completer_backend,
+        tmux: args.tmux.or(args.no_tmux),
+        skip_commit: args.skip_commit,
+        skip_prompt_review: args.skip_prompt_review,
+        dry_run: args.dry_run,
+    })
+    .with_subscriber(dispatch)
+    .await?;
 
-    let mut registry = BackendRegistry::new(
-        &workspace.config,
-        BackendRegistryTmuxConfig {
-            enabled: false,
-            session_name: workspace.config.workspace.tmux_session.clone(),
-            window_keep_seconds: workspace.config.workspace.tmux_window_keep_seconds,
-        },
-    );
-    registry.set_cwd(Some(std::env::current_dir()?));
-
-    backend_spec::validate_backend_spec(&writer_spec, &workspace.config)?;
-    backend_spec::validate_backend_spec(&reviewer_spec, &workspace.config)?;
-
-    let writer = registry.get_or_create_for_spec(&writer_spec)?;
-    let reviewer = registry.get_or_create_for_spec(&reviewer_spec)?;
-    writer.health_check().await?;
-    reviewer.health_check().await?;
-
-    let quick_prd = QuickPrdPipeline::new(
-        writer,
-        reviewer,
-        QuickPrdOptions {
-            idea: idea.clone(),
-            writer_spec: writer_spec.clone(),
-            reviewer_spec: reviewer_spec.clone(),
-            max_revisions: max_spec_revisions,
-            dry_run: false,
-        },
-    );
-    let quick_prd_result = quick_prd.run().await?;
-
-    println!("Quick-prd completed.");
-    println!("  spec: {}", quick_prd_result.spec_path.display());
-    println!("  cache: {}", quick_prd_result.cache_dir.display());
-    println!("  revisions: {}", quick_prd_result.revision_count);
-    println!("  {}", quick_prd_result.summary);
-
-    if dry_run {
-        let spec = std::fs::read_to_string(&quick_prd_result.spec_path)?;
-        println!();
-        println!("{spec}");
-        return Ok(());
-    }
-
-    if let Some(spec) = backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = planner_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = implementer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = reviewer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = qa_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-    if let Some(spec) = completer_backend.as_deref() {
-        backend_spec::validate_backend_spec(spec, &workspace.config)?;
-    }
-
-    let project_id = project_id.unwrap_or_else(|| slugify_idea(&idea));
-    if project_id.is_empty() {
-        return Err(RalphError::Validation(
-            "derived project id from --idea is empty; pass --project-id".to_owned(),
-        ));
-    }
-    let project_name = truncate_idea_for_name(&idea);
-
-    println!();
-    println!("Creating project...");
-    create_project(
-        &workspace,
-        CreateProjectOptions {
-            id: project_id.clone(),
-            name: project_name,
-            source: PromptSource::File(quick_prd_result.spec_path),
-            starting_backend: backend.clone(),
-        },
-    )?;
-    println!("  project id: {project_id}");
-    println!("  project created");
-
-    println!();
-    println!("Running orchestration until completion...");
-    let workspace = ensure_workspace(workspace_root.as_ref())?;
-    let mut orchestrator = Orchestrator::new(workspace);
-    let run_result = orchestrator
-        .run(RunOptions {
-            project: Some(project_id),
-            loops: None,
-            until_review: false,
-            until_complete: true,
-            dry_run: false,
-            backend,
-            planner_backend,
-            implementer_backend,
-            reviewer_backend,
-            qa_backend,
-            completer_backend,
-            tmux: tmux.or(no_tmux),
-            on_prompt_change: None,
-            skip_commit,
-            skip_prompt_review,
-            pr_url,
-        })
-        .await?;
-    println!("{}", run_result.summary);
-
+    println!("{}", result.summary);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
-
     use clap::Parser;
     use tempfile::tempdir;
 
     use super::{ensure_workspace, slugify_idea};
     use crate::cli::{Cli, Commands};
     use crate::config::GlobalConfig;
-
-    fn cwd_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct CwdGuard {
-        original: PathBuf,
-    }
-
-    impl CwdGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let original = std::env::current_dir().expect("get current dir");
-            std::env::set_current_dir(path).expect("set current dir");
-            Self { original }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.original);
-        }
-    }
 
     #[test]
     fn test_slugify_idea_basic() {
@@ -439,11 +313,10 @@ mod tests {
 
     #[test]
     fn ensure_workspace_creates_workspace_when_missing() {
-        let _cwd_guard = cwd_lock().lock().expect("cwd lock");
         let temp = tempdir().expect("temp dir");
-        let _guard = CwdGuard::set(temp.path());
+        let fallback_cwd = temp.path();
 
-        let workspace = ensure_workspace(None).expect("workspace should be created");
+        let workspace = ensure_workspace(None, fallback_cwd).expect("workspace should be created");
         let workspace_root = temp.path().join(".ralph");
 
         assert_eq!(workspace.root, workspace_root);
@@ -457,9 +330,10 @@ mod tests {
     fn ensure_workspace_with_explicit_root_creates_workspace() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path().to_path_buf();
+        let fallback_cwd = temp.path();
 
-        let workspace =
-            ensure_workspace(Some(&root)).expect("workspace should be created at explicit root");
+        let workspace = ensure_workspace(Some(&root), fallback_cwd)
+            .expect("workspace should be created at explicit root");
         let ralph_dir = root.join(".ralph");
 
         assert_eq!(workspace.root, ralph_dir);
@@ -472,13 +346,14 @@ mod tests {
     fn ensure_workspace_with_explicit_root_loads_existing() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path().to_path_buf();
+        let fallback_cwd = temp.path();
 
         // Create a workspace first
         let _ = crate::cli::init::create_workspace(&root.join(".ralph")).expect("create workspace");
 
         // Loading it again should succeed without re-creating
-        let workspace =
-            ensure_workspace(Some(&root)).expect("workspace should load from explicit root");
+        let workspace = ensure_workspace(Some(&root), fallback_cwd)
+            .expect("workspace should load from explicit root");
         assert_eq!(workspace.root, root.join(".ralph"));
     }
 }

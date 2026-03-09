@@ -8,6 +8,10 @@ use std::time::Instant;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use tracing::warn;
+
+use tokio_util::sync::CancellationToken;
+
 use crate::backend::Backend;
 use crate::error::RalphError;
 use crate::prd::gaps::extract_fenced_json;
@@ -217,14 +221,20 @@ const MAX_SECTION_RETRIES: u8 = 2;
 /// Runs a review backend call with up to 3 parse attempts.
 /// On parse failure, retries with a strict reformat prompt requesting a single fenced JSON block.
 /// Returns an error if all 3 attempts fail (no silent fallback).
+///
+/// The `cancel` token enables cooperative shutdown of backend subprocesses
+/// (SIGTERM→grace→SIGKILL) instead of immediate SIGKILL via `KillOnDrop`.
 pub async fn run_review_with_retry(
     backend: Arc<dyn Backend>,
     prompt: String,
+    cancel: &CancellationToken,
 ) -> Result<ReviewFeedback> {
     let mut current_prompt = prompt;
 
     for attempt in 1..=3_u8 {
-        let raw = backend.execute(&current_prompt).await?;
+        let raw = backend
+            .execute_with_cancel(&current_prompt, None, cancel)
+            .await?;
         match parse_review_feedback(&raw) {
             Ok(feedback) => return Ok(feedback),
             Err(parse_error) => {
@@ -281,6 +291,10 @@ pub struct QuickPrdPipeline {
     writer: Arc<dyn Backend>,
     reviewer: Arc<dyn Backend>,
     options: QuickPrdOptions,
+    /// Cancellation token for cooperative shutdown of backend subprocesses.
+    /// When cancelled, backend calls use SIGTERM→grace→SIGKILL instead of
+    /// immediate SIGKILL via `KillOnDrop`.
+    cancel: CancellationToken,
 }
 
 impl QuickPrdPipeline {
@@ -293,14 +307,28 @@ impl QuickPrdPipeline {
             writer,
             reviewer,
             options,
+            cancel: CancellationToken::new(),
         }
     }
 
-    pub async fn run(self) -> Result<QuickPrdResult> {
-        self.run_in(std::env::current_dir()?).await
+    /// Create a pipeline with a cancellation token for cooperative shutdown.
+    pub fn with_cancel(
+        writer: Arc<dyn Backend>,
+        reviewer: Arc<dyn Backend>,
+        options: QuickPrdOptions,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            writer,
+            reviewer,
+            options,
+            cancel,
+        }
     }
 
-    async fn run_in(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
+    /// Run the quick-prd pipeline in the given working directory.
+    /// The `working_dir` should be the repo root (parent of `.ralph/`).
+    pub async fn run(self, working_dir: PathBuf) -> Result<QuickPrdResult> {
         let started_at = now_iso8601();
         let idea_hash = sha256_hex(&self.options.idea)[..12].to_owned();
 
@@ -338,9 +366,10 @@ impl QuickPrdPipeline {
                 ],
             );
 
-            // Run review with retry
+            // Run review with retry (cancel-aware for cooperative subprocess shutdown)
             let review_start = Instant::now();
-            let feedback = run_review_with_retry(self.reviewer.clone(), review_prompt).await?;
+            let feedback =
+                run_review_with_retry(self.reviewer.clone(), review_prompt, &self.cancel).await?;
             review_times_secs.push(review_start.elapsed().as_secs_f64());
 
             // Cache review
@@ -364,9 +393,12 @@ impl QuickPrdPipeline {
                 ],
             );
 
-            // Run revision
+            // Run revision (cancel-aware for cooperative subprocess shutdown)
             let revision_start = Instant::now();
-            let revised = self.writer.execute(&revision_prompt).await?;
+            let revised = self
+                .writer
+                .execute_with_cancel(&revision_prompt, None, &self.cancel)
+                .await?;
             revision_times_secs.push(revision_start.elapsed().as_secs_f64());
 
             // Section-check revision output; reject if all sections missing
@@ -376,7 +408,7 @@ impl QuickPrdPipeline {
             fs::write(cache_dir.join(format!("revision-{n}.md")), &cleaned)?;
 
             if missing.len() >= REQUIRED_SECTIONS.len() {
-                eprintln!("warning: revision {n} has no valid sections, keeping previous spec");
+                warn!("revision {n} has no valid sections, keeping previous spec");
             } else {
                 current_spec = cleaned;
             }
@@ -430,7 +462,10 @@ impl QuickPrdPipeline {
     /// Runs the draft step with up to MAX_SECTION_RETRIES retries for missing sections.
     async fn run_draft_with_section_retry(&self, prompt: &str) -> Result<String> {
         for attempt in 0..=MAX_SECTION_RETRIES {
-            let raw = self.writer.execute(prompt).await?;
+            let raw = self
+                .writer
+                .execute_with_cancel(prompt, None, &self.cancel)
+                .await?;
             let (cleaned, missing) = check_spec_sections(&raw);
 
             if missing.is_empty() || attempt == MAX_SECTION_RETRIES {
@@ -578,9 +613,13 @@ mod tests {
             vec!["no json here".to_string(), mock_approved_review()],
         ));
 
-        let feedback = run_review_with_retry(backend.clone(), "review this".to_string())
-            .await
-            .expect("should succeed on retry");
+        let feedback = run_review_with_retry(
+            backend.clone(),
+            "review this".to_string(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed on retry");
         assert!(feedback.approved);
         assert!(feedback.issues.is_empty());
         assert_eq!(backend.call_count().await, 2);
@@ -594,9 +633,13 @@ mod tests {
             vec!["bad1".to_string(), "bad2".to_string(), "bad3".to_string()],
         ));
 
-        let err = run_review_with_retry(backend.clone(), "review this".to_string())
-            .await
-            .expect_err("should fail after 3 attempts");
+        let err = run_review_with_retry(
+            backend.clone(),
+            "review this".to_string(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("should fail after 3 attempts");
         assert!(matches!(err, RalphError::QuickPrdFailed(_)));
         assert_eq!(backend.call_count().await, 3);
     }
@@ -621,7 +664,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed");
 
@@ -659,7 +702,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed");
 
@@ -704,7 +747,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer.clone(), reviewer, options);
         let result = pipeline
-            .run_in(working_dir.clone())
+            .run(working_dir.clone())
             .await
             .expect("pipeline should succeed with best-effort");
 
@@ -749,7 +792,7 @@ mod tests {
 
         let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
         let result = pipeline
-            .run_in(temp.path().to_path_buf())
+            .run(temp.path().to_path_buf())
             .await
             .expect("pipeline should succeed");
 

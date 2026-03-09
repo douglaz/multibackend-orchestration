@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::fs;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use super::tmux::{self, TmuxCommandRunner};
@@ -38,6 +41,10 @@ pub struct TmuxBackend<R: TmuxCommandRunner = tmux::RealTmuxRunner> {
     runner: R,
     window_keep_seconds: u64,
     shared_context: SharedTmuxContext,
+    /// Tracks the currently active tmux window ID so that `execute_with_cancel`
+    /// can perform explicit synchronous cleanup instead of relying solely on
+    /// the fire-and-forget `TmuxWindowGuard::drop()`.
+    active_window: Arc<Mutex<Option<String>>>,
 }
 
 impl<R: TmuxCommandRunner> TmuxBackend<R> {
@@ -54,6 +61,7 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             runner,
             window_keep_seconds,
             shared_context,
+            active_window: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -120,13 +128,25 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         let mut parts: Vec<String> = Vec::new();
 
-        // Prepend env var exports
+        // Strip daemon-only env vars so tmux backend subprocesses
+        // don't inherit them (mirrors CliBackend::execute_streaming).
+        for var in super::SANITIZED_ENV_VARS {
+            parts.push(format!("unset {};", shell_escape(var)));
+        }
+
+        // Prepend env var exports, skipping any that were just sanitized
+        // so a configured CLAUDECODE (or future sanitized var) cannot be
+        // re-introduced after the unset above.
+        // Keys are emitted unquoted (validated as safe shell identifiers);
+        // values are single-quote escaped.
         for (key, val) in self.inner.env() {
-            parts.push(format!(
-                "export {}={};",
-                shell_escape(key),
-                shell_escape(val)
-            ));
+            if super::SANITIZED_ENV_VARS.contains(&key.as_str()) {
+                continue;
+            }
+            if !is_valid_shell_identifier(key) {
+                continue;
+            }
+            parts.push(format!("export {}={};", key, shell_escape(val)));
         }
 
         // cat prompt | command args 2>stderr | tee output; echo ${PIPESTATUS[1]} > exit
@@ -144,6 +164,35 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
         ));
 
         parts.join(" ")
+    }
+
+    /// Explicitly kill the active tmux window and poll `has_window` for up to
+    /// 5 seconds to confirm termination. Called by `execute_with_cancel` on
+    /// cancellation so the caller can rely on the window being gone when
+    /// `Cancelled` is returned. The `TmuxWindowGuard::drop()` remains as a
+    /// fallback in case this method is never reached.
+    async fn cancel_active_window(&self) {
+        let window_id = self.active_window.lock().await.take();
+        let Some(window_id) = window_id else { return };
+
+        tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+
+        // Poll until the window is confirmed gone, up to 5s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tmux::has_window(&self.runner, &self.session_name, &window_id).await {
+                Ok(false) => break,
+                _ if tokio::time::Instant::now() >= deadline => {
+                    debug!(
+                        session = %self.session_name,
+                        window = %window_id,
+                        "tmux cancel cleanup: window still exists after 5s deadline"
+                    );
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
     }
 
     /// Execute the tmux-backed command and return raw stdout, stderr, and exit
@@ -206,6 +255,14 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
             tmux::create_window_with_retry(&self.runner, &self.session_name, &label, &shell_cmd)
                 .await?;
 
+        // Guard: kill the window if this future is dropped (e.g. due to
+        // cancellation). Disarmed in normal cleanup paths below.
+        let mut window_guard = TmuxWindowGuard::new(self.session_name.clone(), window_id.clone());
+
+        // Publish the active window ID so execute_with_cancel can perform
+        // explicit synchronous cleanup on cancellation.
+        *self.active_window.lock().await = Some(window_id.clone());
+
         // 3b. Enable remain-on-exit so the window stays visible after the command
         // process exits. Without this, the window closes immediately on exit and
         // users cannot inspect it during the retention period.
@@ -250,6 +307,9 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
                 // Best-effort cleanup after classification
                 tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+                // Window cleaned up explicitly — disarm the drop guard and clear active window.
+                window_guard.disarm();
+                *self.active_window.lock().await = None;
 
                 if window_alive {
                     // Window still alive — this is a genuine idle timeout.
@@ -300,6 +360,9 @@ impl<R: TmuxCommandRunner> TmuxBackend<R> {
 
         // 7. Best-effort window cleanup
         tmux::kill_window_best_effort(&self.runner, &self.session_name, &window_id).await;
+        // Window cleaned up explicitly — disarm the drop guard and clear active window.
+        window_guard.disarm();
+        *self.active_window.lock().await = None;
 
         // 8. Read captured stdout before interpreting exit code so we can
         // persist artifacts even for non-zero exits.
@@ -360,6 +423,47 @@ struct TmuxRawOutput {
     stderr: Vec<u8>,
 }
 
+/// RAII guard that kills a tmux window on drop. Used inside `execute_raw()`
+/// to ensure windows are cleaned up when the future is cancelled (e.g. via
+/// `tokio::select!`). Spawns a background thread for the blocking kill-window
+/// command so that the Drop impl is non-blocking.
+struct TmuxWindowGuard {
+    session_name: String,
+    window_id: Option<String>,
+}
+
+impl TmuxWindowGuard {
+    fn new(session_name: String, window_id: String) -> Self {
+        Self {
+            session_name,
+            window_id: Some(window_id),
+        }
+    }
+
+    /// Disarm the guard so Drop becomes a no-op (normal cleanup already handled).
+    fn disarm(&mut self) {
+        self.window_id = None;
+    }
+}
+
+impl Drop for TmuxWindowGuard {
+    fn drop(&mut self) {
+        if let Some(window_id) = self.window_id.take() {
+            let session = self.session_name.clone();
+            // Spawn a background thread to kill the window. We cannot call
+            // async functions from Drop, so we use a synchronous tmux command.
+            std::thread::spawn(move || {
+                let target = format!("{session}:{window_id}");
+                let _ = std::process::Command::new(tmux::tmux_bin())
+                    .args(["kill-window", "-t", &target])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            });
+        }
+    }
+}
+
 /// RAII guard that removes a list of temp files on drop.
 struct TempFileGuard {
     paths: Vec<PathBuf>,
@@ -377,6 +481,18 @@ impl Drop for TempFileGuard {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Returns true if `s` is a valid POSIX shell identifier (used for env var
+/// names in `export`). Must start with a letter or underscore, followed by
+/// alphanumeric or underscore characters.
+fn is_valid_shell_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Shell-escape a string by wrapping in single quotes and escaping embedded
@@ -440,6 +556,32 @@ impl<R: TmuxCommandRunner> Backend for TmuxBackend<R> {
         }
 
         Ok(String::from_utf8_lossy(&raw.stdout).to_string())
+    }
+
+    /// Cancel-aware execution for tmux backends.
+    ///
+    /// When the cancellation token fires, the `execute_with_log` future is
+    /// dropped. The `TmuxWindowGuard` inside `execute_raw()` fires as a
+    /// fallback, but we explicitly kill the window and wait (bounded) for
+    /// confirmation before returning, so the caller can rely on the tmux
+    /// window being gone when this method returns.
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        tokio::select! {
+            result = self.execute_with_log(prompt, log_writer) => result,
+            _ = cancel.cancelled() => {
+                // Dropping the execute_with_log future triggers
+                // TmuxWindowGuard::drop() as a fallback. Perform explicit
+                // synchronous cleanup so the window is confirmed gone before
+                // we return.
+                self.cancel_active_window().await;
+                Err(RalphError::Cancelled)
+            }
+        }
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -599,8 +741,50 @@ mod tests {
         );
 
         assert!(
-            cmd.contains("export 'MY_VAR'='hello world'"),
+            cmd.contains("export MY_VAR='hello world'"),
             "missing env export: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_shell_command_filters_sanitized_env_vars() {
+        // A backend configured with CLAUDECODE in its env must NOT export it,
+        // because the unset at the top of the command would be undone.
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDECODE".to_owned(), "1".to_owned());
+        env.insert("SAFE_VAR".to_owned(), "ok".to_owned());
+        let cli = CliBackend::new(
+            "test-backend",
+            "mycommand".to_owned(),
+            vec![],
+            Duration::from_secs(60),
+            env,
+        );
+        let runner = MockTmuxRunner::default();
+        let backend = make_backend(cli, "ralph", runner);
+
+        let cmd = backend.build_shell_command(
+            Path::new("/tmp/p.txt"),
+            Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
+            Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
+        );
+
+        // The unset must be present
+        assert!(
+            cmd.contains("unset 'CLAUDECODE'"),
+            "missing unset for sanitized var: {cmd}"
+        );
+        // The sanitized var must NOT be re-exported
+        assert!(
+            !cmd.contains("export 'CLAUDECODE'"),
+            "sanitized var CLAUDECODE was re-exported: {cmd}"
+        );
+        // Non-sanitized vars should still be exported
+        assert!(
+            cmd.contains("export SAFE_VAR='ok'"),
+            "missing export for non-sanitized var: {cmd}"
         );
     }
 
@@ -994,6 +1178,58 @@ mod tests {
         assert_eq!(shell_escape("it's"), "'it'\\''s'");
     }
 
+    // --- Shell identifier validation ---
+
+    #[test]
+    fn valid_shell_identifiers() {
+        assert!(is_valid_shell_identifier("FOO"));
+        assert!(is_valid_shell_identifier("_BAR"));
+        assert!(is_valid_shell_identifier("MY_VAR_123"));
+        assert!(is_valid_shell_identifier("a"));
+    }
+
+    #[test]
+    fn invalid_shell_identifiers() {
+        assert!(!is_valid_shell_identifier(""));
+        assert!(!is_valid_shell_identifier("1FOO"));
+        assert!(!is_valid_shell_identifier("MY-VAR"));
+        assert!(!is_valid_shell_identifier("MY VAR"));
+        assert!(!is_valid_shell_identifier("FOO;BAR"));
+    }
+
+    #[test]
+    fn build_shell_command_skips_invalid_env_key() {
+        let mut env = BTreeMap::new();
+        env.insert("GOOD_VAR".to_owned(), "ok".to_owned());
+        env.insert("BAD-VAR".to_owned(), "bad".to_owned());
+        let cli = CliBackend::new(
+            "test",
+            "cmd".to_owned(),
+            vec![],
+            Duration::from_secs(10),
+            env,
+        );
+        let runner = MockTmuxRunner::default();
+        let backend = make_backend(cli, "ralph", runner);
+
+        let cmd = backend.build_shell_command(
+            Path::new("/tmp/p.txt"),
+            Path::new("/tmp/o.txt"),
+            Path::new("/tmp/se.txt"),
+            Path::new("/tmp/e.txt"),
+            &TmuxExecutionContext::default(),
+        );
+
+        assert!(
+            cmd.contains("export GOOD_VAR='ok'"),
+            "valid key should be exported: {cmd}"
+        );
+        assert!(
+            !cmd.contains("BAD-VAR"),
+            "invalid key should be skipped: {cmd}"
+        );
+    }
+
     // --- Name delegation ---
 
     #[test]
@@ -1057,5 +1293,108 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[2][0], "kill-window");
         assert!(calls[2].contains(&"test-killwin:5".to_owned()));
+    }
+
+    // --- Cancellation cleanup test ---
+
+    #[tokio::test]
+    async fn cancel_kills_window_synchronously_before_returning() {
+        // Responses:
+        // 1. has-session (ensure_session)
+        // 2. create stderr file (no tmux call)
+        // 3. new-window (create_window_with_retry → create_window)
+        // 4. kill-window (cancel_active_window → kill_window_best_effort)
+        // 5. list-windows (cancel_active_window → has_window → returns missing)
+        let runner = MockTmuxRunner::with_responses(vec![
+            Ok(String::new()),    // has-session
+            Ok("7\n".to_owned()), // create_window returns window id
+            Ok(String::new()),    // kill-window (from cancel_active_window)
+            // has_window (list-windows) → window gone
+            Err(RalphError::BackendCommandFailed {
+                backend: "tmux".to_owned(),
+                details: "can't find window: 7".to_owned(),
+            }),
+        ]);
+
+        let cli = CliBackend::new(
+            "cancel-test",
+            "sleep".to_owned(),
+            vec!["9999".to_owned()],
+            Duration::from_secs(300), // long timeout so it doesn't time out
+            BTreeMap::new(),
+        );
+        let backend = TmuxBackend::new(
+            cli,
+            "test-cancel".to_owned(),
+            runner.clone(),
+            0,
+            test_shared_ctx(),
+        );
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        // Spawn a task that cancels shortly after the prompt file appears
+        // (meaning execute_raw has started and created the window).
+        let canceller = tokio::spawn(async move {
+            let tmp_dir = std::env::temp_dir();
+            loop {
+                if let Ok(mut entries) = tokio::fs::read_dir(&tmp_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with("ralph-test-cancel-") && name.ends_with("-prompt.txt") {
+                            // Small delay to let execute_raw reach wait_for_exit
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            cancel_clone.cancel();
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let result = backend
+            .execute_with_cancel("test prompt", None, &cancel)
+            .await;
+        canceller.await.unwrap();
+
+        // Must return Cancelled
+        assert!(
+            matches!(&result, Err(RalphError::Cancelled)),
+            "expected Cancelled, got: {result:?}"
+        );
+
+        // Verify kill-window was called with the correct target
+        let calls = runner.calls().await;
+        let kill_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.first().map(|s| s.as_str()) == Some("kill-window"))
+            .collect();
+        assert!(
+            !kill_calls.is_empty(),
+            "kill-window should have been called on cancel; calls: {calls:?}"
+        );
+        assert!(
+            kill_calls[0].contains(&"test-cancel:7".to_owned()),
+            "kill-window target mismatch: {:?}",
+            kill_calls[0]
+        );
+
+        // Verify has_window poll was called (list-windows)
+        let list_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| c.first().map(|s| s.as_str()) == Some("list-windows"))
+            .collect();
+        assert!(
+            !list_calls.is_empty(),
+            "has_window poll should have been called; calls: {calls:?}"
+        );
+
+        // active_window should be cleared
+        assert!(
+            backend.active_window.lock().await.is_none(),
+            "active_window should be None after cancellation"
+        );
     }
 }

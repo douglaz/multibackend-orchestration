@@ -14,8 +14,8 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: concurrent_dispatch_two_issues,
         },
         ConformanceTest {
-            name: "daemon_concurrency::partial_dispatch_rollback",
-            func: partial_dispatch_rollback,
+            name: "daemon_concurrency::drain_terminates_all_tasks_uniformly",
+            func: drain_terminates_all_tasks_uniformly,
         },
         ConformanceTest {
             name: "daemon_concurrency::single_iteration_prd_inline_only",
@@ -26,16 +26,28 @@ pub fn tests() -> Vec<ConformanceTest> {
             func: concurrent_rebase_dispatch_no_lock_contention,
         },
         ConformanceTest {
-            name: "daemon_concurrency::dispatch_failure_explicit_markers",
-            func: dispatch_failure_explicit_markers,
+            name: "daemon_concurrency::drain_marks_all_tasks_failed",
+            func: drain_marks_all_tasks_failed,
         },
         ConformanceTest {
             name: "daemon_concurrency::concurrent_dispatch_evidence",
             func: concurrent_dispatch_evidence,
         },
         ConformanceTest {
-            name: "daemon_concurrency::completion_failure_terminalization",
-            func: completion_failure_terminalization,
+            name: "daemon_concurrency::drain_cancellation_terminalization",
+            func: drain_cancellation_terminalization,
+        },
+        ConformanceTest {
+            name: "daemon_concurrency::execution_failure_terminalization",
+            func: execution_failure_terminalization,
+        },
+        ConformanceTest {
+            name: "daemon_concurrency::mixed_outcome_claim_isolation",
+            func: mixed_outcome_claim_isolation,
+        },
+        ConformanceTest {
+            name: "daemon_concurrency::per_task_log_isolation",
+            func: per_task_log_isolation,
         },
     ]
 }
@@ -60,13 +72,45 @@ fn write_daemon_mock_gh_concurrency(h: &RalphHarness) -> crate::Result<String> {
     write_mock_gh(h, &mock_scripts::daemon_mock_gh_concurrency_script())
 }
 
-fn write_mock_ralph(h: &RalphHarness, body: &str) -> crate::Result<String> {
-    let script = h.write_mock_script("mock_ralph", body)?;
-    Ok(script.to_string_lossy().into_owned())
-}
-
-fn write_daemon_mock_ralph(h: &RalphHarness) -> crate::Result<String> {
-    write_mock_ralph(h, &mock_scripts::daemon_mock_ralph_script())
+/// Like `enable_fast_daemon_refinement` but uses a backend that writes
+/// per-invocation start/end nanosecond timestamps to `barrier_dir`, enabling
+/// callers to assert temporal overlap across concurrent task executions.
+fn enable_timed_daemon_refinement(
+    h: &RalphHarness,
+    barrier_dir: &std::path::Path,
+) -> crate::Result<()> {
+    let barrier_dir_str = barrier_dir.to_string_lossy();
+    let script_body = format!(
+        r#"#!/bin/sh
+BARRIER_DIR="{barrier_dir_str}"
+mkdir -p "$BARRIER_DIR"
+START=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+echo "$START" > "$BARRIER_DIR/task_$$.start"
+# Sleep briefly so concurrent tasks have an overlap window
+sleep 0.3
+END=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
+echo "$END" > "$BARRIER_DIR/task_$$.end"
+printf 'TITLE: Refined task execution\n'
+printf '---\n'
+printf 'Refined task body with explicit steps.\n'
+"#
+    );
+    let refine_script = h.write_mock_script("mock_refine_timed.sh", &script_body)?;
+    let refine_script_str = refine_script.to_string_lossy().into_owned();
+    h.ralph_ok([
+        "config",
+        "set",
+        "backends.claude.command",
+        &refine_script_str,
+    ])?;
+    h.ralph_ok(["config", "set", "backends.claude.args", "[]"])?;
+    h.ralph_ok([
+        "config",
+        "set",
+        "workspace.daemon_refinement_enabled",
+        "true",
+    ])?;
+    Ok(())
 }
 
 fn enable_fast_daemon_refinement(h: &RalphHarness) -> crate::Result<()> {
@@ -132,7 +176,6 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
         let issues = r#"[{"number":200,"title":"issue A","labels":[{"name":"ralph:ready"}],"body":"body A"},{"number":201,"title":"issue B","labels":[{"name":"ralph:ready"}],"body":"body B"}]"#;
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -147,18 +190,18 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
             )
             .expect("daemon start should execute");
 
-        let combined = combined_output(&output);
-
+        // Daemon must exit successfully in single-iteration mode
         assert_exit_code(&output, 0);
 
-        // Both issues should have been dispatched
+        let combined = combined_output(&output);
+
+        // Both issues should have been dispatched (in-process)
         assert!(
             combined.contains("dispatched task acme-widgets-200")
                 || combined.contains("dispatch: task acme-widgets-200"),
@@ -170,31 +213,44 @@ fn concurrent_dispatch_two_issues(h: &RalphHarness) -> TestResult {
             "issue 201 should be dispatched: {combined}"
         );
 
-        // Check label log for claim operations on both issues
-        if label_log.exists() {
-            let log_content = fs::read_to_string(&label_log).expect("read label log");
-            // Both issues should have in-progress claims
-            assert!(
-                log_content.contains("200") || combined.contains("200"),
-                "issue 200 should appear in label operations or output: {log_content}"
-            );
-            assert!(
-                log_content.contains("201") || combined.contains("201"),
-                "issue 201 should appear in label operations or output: {log_content}"
-            );
-        }
+        // Label log must exist — if it doesn't, label transitions never happened
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display(),
+        );
+
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        // Both issues should have in-progress claims
+        assert!(
+            log_content.contains("200"),
+            "issue 200 should appear in label operations: {log_content}"
+        );
+        assert!(
+            log_content.contains("201"),
+            "issue 201 should appear in label operations: {log_content}"
+        );
     })
 }
 
-/// Verifies that when dispatch_task fails for one issue in a batch, only
-/// that issue is rolled back to ralph:failed while the other issue proceeds.
+/// Verifies that drain-induced cancellation uniformly terminalizes all
+/// dispatched tasks with independent label transitions.
 ///
-/// Asserts per-issue outcomes:
-/// - Issue 300: dispatched successfully, no rollback labels applied
-/// - Issue 301: dispatch fails, rolled back with ralph:in-progress removed
-///   and ralph:failed added
-/// - The successful issue (300) is NOT affected by the 301 failure
-fn partial_dispatch_rollback(h: &RalphHarness) -> TestResult {
+/// Two issues are claimed and dispatched as concurrent in-process tasks.
+/// In single-iteration mode, drain_all_children cancels all tasks and each
+/// reaches terminal state independently with its own label transitions.
+///
+/// NOTE: Both tasks receive the same cancellation treatment (both fail),
+/// so this test proves uniform drain behavior, not partial rollback or
+/// sibling isolation. See `execution_failure_terminalization` for
+/// execution-error failures and `mixed_outcome_claim_isolation` for
+/// claim-level isolation.
+///
+/// Asserts:
+/// - Both issues are dispatched (in-process)
+/// - Both issues reach terminal state with independent label transitions
+/// - Each issue's label transitions reference only its own issue number
+fn drain_terminates_all_tasks_uniformly(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
@@ -203,25 +259,9 @@ fn partial_dispatch_rollback(h: &RalphHarness) -> TestResult {
         let label_log = dh.temp_dir.path().join("partial_rollback_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
-        // Two issues: 300 will be a normal issue, 301 will fail dispatch
-        // We mock ralph to fail for issue 301 by checking the task_id
         let issues = r#"[{"number":300,"title":"good issue","labels":[{"name":"ralph:ready"}],"body":"good body"},{"number":301,"title":"bad issue","labels":[{"name":"ralph:ready"}],"body":"bad body"}]"#;
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-
-        // Mock ralph that succeeds for issue 300 but fails for issue 301
-        let mock_ralph_body = r#"#!/bin/sh
-# Check if this is for issue 301 — fail immediately
-for arg in "$@"; do
-    case "$arg" in
-        *issue-301*) exit 1 ;;
-    esac
-done
-# Success for all others
-sleep 0.1
-exit 0
-"#;
-        let ralph_path = write_mock_ralph(&dh, mock_ralph_body).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -236,7 +276,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                 ],
@@ -245,17 +284,16 @@ exit 0
 
         let combined = combined_output(&output);
 
-        // Issue 300 should be dispatched successfully
+        // Both issues should be dispatched (in-process)
         assert!(
             combined.contains("dispatched task acme-widgets-300")
                 || combined.contains("dispatch: task acme-widgets-300"),
             "issue 300 should be dispatched: {combined}"
         );
-
-        // Issue 301 should show dispatch failure in daemon output
         assert!(
-            combined.contains("failed to dispatch issue #301") || combined.contains("301"),
-            "issue 301 dispatch failure should be logged: {combined}"
+            combined.contains("dispatched task acme-widgets-301")
+                || combined.contains("dispatch: task acme-widgets-301"),
+            "issue 301 should be dispatched: {combined}"
         );
 
         // Verify per-issue label transitions in the label log
@@ -268,7 +306,6 @@ exit 0
         let log_lines: Vec<&str> = log_content.lines().collect();
 
         // Both issues should have been claimed: ready -> in-progress
-        // (remove ralph:ready + add ralph:in-progress for each)
         assert!(
             log_lines.iter().any(|l| l.contains("300")
                 && l.contains("--add-label")
@@ -282,30 +319,20 @@ exit 0
             "issue 301 should have been claimed (add ralph:in-progress): {log_content}"
         );
 
-        // Issue 301 should have rollback: in-progress -> failed
-        // This means remove ralph:in-progress AND add ralph:failed specifically for 301
+        // Both issues should reach terminal state independently.
+        // In single-iteration mode, drain_all_children cancels in-process
+        // tasks, producing ralph:failed for each.
         assert!(
-            log_lines.iter().any(|l| l.contains("301")
-                && l.contains("--remove-label")
-                && l.contains("ralph:in-progress")),
-            "issue 301 should have rollback (remove ralph:in-progress): {log_content}"
+            log_lines.iter().any(|l| l.contains("300")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
+            "issue 300 should reach terminal state (ralph:failed): {log_content}"
         );
         assert!(
             log_lines.iter().any(|l| l.contains("301")
                 && l.contains("--add-label")
                 && l.contains("ralph:failed")),
-            "issue 301 should have rollback (add ralph:failed): {log_content}"
-        );
-
-        // Issue 300 should NOT have any ralph:failed label added — the
-        // sibling failure must not cause rollback of successfully dispatched
-        // issues.
-        let issue_300_failed = log_lines
-            .iter()
-            .any(|l| l.contains("300") && l.contains("--add-label") && l.contains("ralph:failed"));
-        assert!(
-            !issue_300_failed,
-            "issue 300 should NOT be rolled back to ralph:failed (sibling isolation invariant): {log_content}"
+            "issue 301 should reach terminal state (ralph:failed): {log_content}"
         );
     })
 }
@@ -340,7 +367,6 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
         let issues = r#"[]"#;
 
         let gh_path = write_daemon_mock_gh_concurrency(&dh).expect("write mock gh");
-        let ralph_path = write_daemon_mock_ralph(&dh).expect("write mock ralph");
 
         let output = dh
             .daemon_env(
@@ -353,7 +379,6 @@ fn single_iteration_prd_inline_only(h: &RalphHarness) -> TestResult {
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                     ("MOCK_PRD_TICK_LOG", &prd_tick_log_str),
@@ -462,15 +487,6 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
             &mock_scripts::daemon_mock_gh_bounded_concurrency_script(),
         )
         .expect("write mock gh");
-        // Use long-running mock ralph so child stays alive across iterations.
-        let ralph_script = dh
-            .write_mock_script(
-                "mock_ralph",
-                &mock_scripts::daemon_mock_ralph_long_running_script(),
-            )
-            .expect("write mock ralph");
-        let ralph_path = ralph_script.to_string_lossy().into_owned();
-
         // Disable PRD to keep the test focused on rebase + dispatch.
         // PRD config keys are rejected by `config set` CLI; write TOML directly.
         // Insert immediately after the [workspace] header so the key stays in
@@ -510,12 +526,10 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
             ])
             .current_dir(dh.data_dir())
             .env("PATH", &gh_path)
-            .env("RALPH_DAEMON_BIN", &ralph_path)
             .env("MOCK_GH_ISSUES", issues)
             .env("MOCK_GH_LABEL_LOG", &label_log_str)
             .env("MOCK_GH_ISSUE_LIST_COUNTER", &issue_counter_str)
             .env("MOCK_REBASE_ATTEMPT_LOG", &rebase_log_str)
-            .env("MOCK_RALPH_SLEEP_SECS", "30")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -573,18 +587,24 @@ fn concurrent_rebase_dispatch_no_lock_contention(h: &RalphHarness) -> TestResult
     })
 }
 
-/// Verifies deterministic dispatch-failure markers and per-issue label
-/// rollback using the dispatch-failure mock GH script.
+/// Verifies that drain marks all cancelled tasks as failed with
+/// deterministic per-task failure markers.
 ///
-/// Two issues are claimed: 500 succeeds dispatch, 501 fails. The mock GH
-/// logs explicit `dispatch-failure:<issue>` markers to a side-channel file
-/// when it detects a `ralph:in-progress -> ralph:failed` label swap.
+/// Two issues are claimed and dispatched as in-process tasks. In
+/// single-iteration mode, drain_all_children cancels all tasks and each
+/// reaches terminal ralph:failed state. The mock GH logs explicit
+/// `dispatch-failure:<issue>` markers when it detects a label swap to
+/// ralph:failed.
+///
+/// NOTE: Both tasks are cancelled during drain (same outcome). This test
+/// proves each task independently produces its failure marker. See
+/// `execution_failure_terminalization` for the execution-error path and
+/// `mixed_outcome_claim_isolation` for mixed claim outcomes.
 ///
 /// Asserts:
-/// - Issue 500 was dispatched successfully
-/// - Issue 501 produced a `dispatch-failure:501` marker in the failure log
-/// - Issue 500 did NOT produce a dispatch-failure marker (sibling isolation)
-fn dispatch_failure_explicit_markers(h: &RalphHarness) -> TestResult {
+/// - Both issues were dispatched (in-process)
+/// - Each issue produced its own dispatch-failure marker in the failure log
+fn drain_marks_all_tasks_failed(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
@@ -601,18 +621,6 @@ fn dispatch_failure_explicit_markers(h: &RalphHarness) -> TestResult {
         let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_dispatch_failure_script())
             .expect("write mock gh");
 
-        // Mock ralph that fails for issue 501
-        let mock_ralph_body = r#"#!/bin/sh
-for arg in "$@"; do
-    case "$arg" in
-        *issue-501*) exit 1 ;;
-    esac
-done
-sleep 0.1
-exit 0
-"#;
-        let ralph_path = write_mock_ralph(&dh, mock_ralph_body).expect("write mock ralph");
-
         let output = dh
             .daemon_env(
                 [
@@ -626,7 +634,6 @@ exit 0
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
                     ("MOCK_DISPATCH_FAILURE_LOG", &failure_log_str),
@@ -636,14 +643,20 @@ exit 0
 
         let combined = combined_output(&output);
 
-        // Issue 500 should be dispatched successfully
+        // Both issues should be dispatched (in-process)
         assert!(
             combined.contains("dispatched task acme-widgets-500")
                 || combined.contains("dispatch: task acme-widgets-500"),
             "issue 500 should be dispatched: {combined}"
         );
+        assert!(
+            combined.contains("dispatched task acme-widgets-501")
+                || combined.contains("dispatch: task acme-widgets-501"),
+            "issue 501 should be dispatched: {combined}"
+        );
 
-        // Failure log should contain dispatch-failure marker for issue 501
+        // Failure log should contain dispatch-failure markers for both issues
+        // (both reach terminal ralph:failed via drain_all_children cancellation)
         assert!(
             failure_log.exists(),
             "dispatch failure log should exist at {}: {combined}",
@@ -654,42 +667,33 @@ exit 0
             failure_content.contains("dispatch-failure:501"),
             "dispatch-failure:501 marker expected in failure log: {failure_content}"
         );
-
-        // Issue 500 should NOT have a dispatch-failure marker (sibling isolation)
         assert!(
-            !failure_content.contains("dispatch-failure:500"),
-            "issue 500 must NOT produce a dispatch-failure marker (sibling isolation): {failure_content}"
+            failure_content.contains("dispatch-failure:500"),
+            "dispatch-failure:500 marker expected in failure log: {failure_content}"
         );
     })
 }
 
-/// Verifies concurrent dispatch by checking for overlapping execution
-/// intervals across multiple issues.
+/// Verifies concurrent in-process dispatch of multiple issues.
 ///
-/// Uses `daemon_mock_ralph_concurrency_evidence_script` which logs
-/// `START:<issue>:<epoch_ms>` and `END:<issue>:<epoch_ms>` markers.
-/// Two issues dispatched concurrently should produce overlapping intervals
-/// (i.e., START of one issue before END of the other).
+/// Two issues are dispatched as concurrent tokio tasks. Concurrency is
+/// proven by asserting temporal overlap: the timed mock backend records
+/// per-invocation start/end nanosecond timestamps, and the test verifies
+/// that at least two backend invocations were alive at the same time
+/// (i.e., one started before the other ended).
 fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
-        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
 
-        let evidence_log = dh.temp_dir.path().join("dispatch_evidence.log");
-        let evidence_log_str = evidence_log.to_string_lossy().into_owned();
+        let barrier_dir = dh.temp_dir.path().join("concurrency_barrier");
+        fs::create_dir_all(&barrier_dir).expect("create barrier dir");
+        enable_timed_daemon_refinement(&dh, &barrier_dir)
+            .expect("configure timed refinement backend for test");
 
         let issues = r#"[{"number":600,"title":"concurrent A","labels":[{"name":"ralph:ready"}],"body":"body A"},{"number":601,"title":"concurrent B","labels":[{"name":"ralph:ready"}],"body":"body B"}]"#;
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
-
-        let ralph_script = dh
-            .write_mock_script(
-                "mock_ralph",
-                &mock_scripts::daemon_mock_ralph_concurrency_evidence_script(),
-            )
-            .expect("write mock ralph");
-        let ralph_path = ralph_script.to_string_lossy().into_owned();
 
         let output = dh
             .daemon_env(
@@ -702,107 +706,149 @@ fn concurrent_dispatch_evidence(h: &RalphHarness) -> TestResult {
                     "--max-concurrent",
                     "4",
                 ],
-                &[
-                    ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
-                    ("MOCK_GH_ISSUES", issues),
-                    ("MOCK_DISPATCH_EVIDENCE_LOG", &evidence_log_str),
-                ],
+                &[("PATH", &gh_path), ("MOCK_GH_ISSUES", issues)],
             )
             .expect("daemon start should execute");
 
         let combined = combined_output(&output);
 
-        // Both issues should be dispatched
+        // Both issues should be dispatched as in-process tasks
         assert!(
-            combined.contains("dispatched task acme-widgets-600")
+            combined.contains("dispatched task acme-widgets-600 (in-process)")
                 || combined.contains("dispatch: task acme-widgets-600"),
-            "issue 600 should be dispatched: {combined}"
+            "issue 600 should be dispatched (in-process): {combined}"
         );
         assert!(
-            combined.contains("dispatched task acme-widgets-601")
+            combined.contains("dispatched task acme-widgets-601 (in-process)")
                 || combined.contains("dispatch: task acme-widgets-601"),
-            "issue 601 should be dispatched: {combined}"
+            "issue 601 should be dispatched (in-process): {combined}"
         );
 
-        // Parse concurrency evidence log for overlapping intervals
+        // Both tasks should reach terminal state
         assert!(
-            evidence_log.exists(),
-            "dispatch evidence log should exist at {}: {combined}",
-            evidence_log.display()
+            combined.contains("acme-widgets-600 completed")
+                || combined.contains("collect: task acme-widgets-600"),
+            "issue 600 should reach terminal state: {combined}"
         );
-        let evidence = fs::read_to_string(&evidence_log).expect("read evidence log");
+        assert!(
+            combined.contains("acme-widgets-601 completed")
+                || combined.contains("collect: task acme-widgets-601"),
+            "issue 601 should reach terminal state: {combined}"
+        );
 
-        // Parse START/END markers into (issue, timestamp) pairs
-        let mut starts: Vec<(String, u64)> = Vec::new();
-        let mut ends: Vec<(String, u64)> = Vec::new();
-        for line in evidence.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 3 {
-                let marker = parts[0];
-                let issue = parts[1].to_owned();
-                if let Ok(ts) = parts[2].parse::<u64>() {
-                    match marker {
-                        "START" => starts.push((issue, ts)),
-                        "END" => ends.push((issue, ts)),
-                        _ => {}
-                    }
+        // --- Concurrency evidence: timestamp overlap ---
+        // Collect (start, end) intervals from the timed mock backend.
+        // Each backend invocation writes task_<pid>.start and task_<pid>.end
+        // files with nanosecond timestamps. True concurrency requires that
+        // at least two intervals overlap (A.start < B.end AND B.start < A.end).
+        let mut intervals: Vec<(u128, u128)> = Vec::new();
+        for entry in fs::read_dir(&barrier_dir).expect("read barrier dir") {
+            let entry = entry.expect("read dir entry");
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".start") {
+                let pid = name_str.trim_end_matches(".start");
+                let end_file = barrier_dir.join(format!("{pid}.end"));
+                if end_file.exists() {
+                    let start_ns: u128 = fs::read_to_string(entry.path())
+                        .expect("read start timestamp")
+                        .trim()
+                        .parse()
+                        .expect("parse start timestamp");
+                    let end_ns: u128 = fs::read_to_string(&end_file)
+                        .expect("read end timestamp")
+                        .trim()
+                        .parse()
+                        .expect("parse end timestamp");
+                    intervals.push((start_ns, end_ns));
                 }
             }
         }
 
-        // We should have markers for at least 2 issues
         assert!(
-            starts.len() >= 2,
-            "expected at least 2 START markers, got {}: {evidence}",
-            starts.len()
-        );
-        assert!(
-            ends.len() >= 2,
-            "expected at least 2 END markers, got {}: {evidence}",
-            ends.len()
+            intervals.len() >= 2,
+            "expected at least 2 timed backend invocations, got {}; \
+             barrier_dir contents: {:?}\n{combined}",
+            intervals.len(),
+            fs::read_dir(&barrier_dir)
+                .map(|rd| rd
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
         );
 
-        // Check for overlapping intervals: START_A <= END_B && START_B <= END_A
-        // We use <= (not <) because second-level timestamp granularity means
-        // two truly concurrent tasks may share the same timestamp.
+        // Check for at least one pair with temporal overlap
         let mut found_overlap = false;
-        for (i, (issue_a, start_a)) in starts.iter().enumerate() {
-            for (j, (issue_b, start_b)) in starts.iter().enumerate() {
-                if i == j || issue_a == issue_b {
-                    continue;
-                }
-                // Find END times for these issues
-                let end_a = ends.iter().find(|(iss, _)| iss == issue_a).map(|(_, t)| *t);
-                let end_b = ends.iter().find(|(iss, _)| iss == issue_b).map(|(_, t)| *t);
-                if let (Some(ea), Some(eb)) = (end_a, end_b) {
-                    if *start_a <= eb && *start_b <= ea {
-                        found_overlap = true;
-                    }
+        'outer: for i in 0..intervals.len() {
+            for j in (i + 1)..intervals.len() {
+                let (a_start, a_end) = intervals[i];
+                let (b_start, b_end) = intervals[j];
+                // Overlap: A started before B ended AND B started before A ended
+                if a_start < b_end && b_start < a_end {
+                    found_overlap = true;
+                    break 'outer;
                 }
             }
         }
-
         assert!(
             found_overlap,
-            "expected overlapping execution intervals proving concurrent dispatch. \
-             starts={starts:?} ends={ends:?} evidence={evidence}"
+            "no temporal overlap detected among {} backend invocations; \
+             intervals (start_ns, end_ns): {intervals:?}\n\
+             This indicates tasks ran sequentially, not concurrently.\n{combined}",
+            intervals.len(),
         );
+
+        // Secondary sanity: log ordering (both dispatches before any terminal)
+        let last_dispatch_pos = ["acme-widgets-600", "acme-widgets-601"]
+            .iter()
+            .filter_map(|id| {
+                combined
+                    .find(&format!("dispatched task {id} (in-process)"))
+                    .or_else(|| combined.find(&format!("dispatch: task {id}")))
+            })
+            .max();
+
+        let first_terminal_pos = ["acme-widgets-600", "acme-widgets-601"]
+            .iter()
+            .filter_map(|id| {
+                combined
+                    .find(&format!("collect: task {id}"))
+                    .or_else(|| {
+                        combined.find(&format!(
+                            "complete-task-terminal: preserving worktree for {id}"
+                        ))
+                    })
+                    .or_else(|| combined.find(&format!("verbose: task terminal task_id={id}")))
+            })
+            .min();
+
+        if let (Some(last_dispatch), Some(first_terminal)) = (last_dispatch_pos, first_terminal_pos)
+        {
+            assert!(
+                last_dispatch < first_terminal,
+                "concurrency ordering violated: last dispatch at byte {last_dispatch} \
+                 but first terminal at byte {first_terminal} — \
+                 both dispatches must precede any terminal event.\n{combined}"
+            );
+        }
     })
 }
 
-/// Verifies that when a child process exits with failure, the issue is
-/// terminalized to `ralph:failed` and does not remain stuck as
-/// `ralph:in-progress`.
+/// Verifies that drain-induced cancellation in single-iteration mode
+/// correctly terminalizes in-progress tasks to `ralph:failed`.
 ///
 /// Strategy:
-/// - Dispatch one issue with `MOCK_RALPH_EXIT_CODE=1` so the child fails
-///   immediately.
-/// - In single-iteration mode, `collect_children` discovers the exit status,
-///   calls `complete_task`, and swaps `ralph:in-progress` -> `ralph:failed`.
-/// - Assert the label log contains the `ralph:failed` terminal transition
-///   for this specific issue.
-fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
+/// - Dispatch one issue as an in-process task.
+/// - In single-iteration mode, `drain_all_children` cancels all active
+///   tasks' `CancellationToken`s, causing them to return `Err(Cancelled)`.
+/// - `collect_children` picks up the cancelled task and transitions
+///   `ralph:in-progress` -> `ralph:failed`.
+/// - Assert the label log contains the `ralph:failed` terminal transition.
+///
+/// NOTE: This test exercises the *cancellation* failure path (via drain),
+/// not a true backend execution failure. See
+/// `execution_failure_terminalization` for the execution failure path.
+fn drain_cancellation_terminalization(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
         dh.init_workspace().expect("init failed");
@@ -815,14 +861,6 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
 
-        let ralph_script = dh
-            .write_mock_script(
-                "mock_ralph",
-                &mock_scripts::daemon_mock_ralph_exit_code_script(),
-            )
-            .expect("write mock ralph");
-        let ralph_path = ralph_script.to_string_lossy().into_owned();
-
         let output = dh
             .daemon_env(
                 [
@@ -836,10 +874,8 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
                 ],
                 &[
                     ("PATH", &gh_path),
-                    ("RALPH_DAEMON_BIN", &ralph_path),
                     ("MOCK_GH_ISSUES", issues),
                     ("MOCK_GH_LABEL_LOG", &label_log_str),
-                    ("MOCK_RALPH_EXIT_CODE", "1"),
                 ],
             )
             .expect("daemon start should execute");
@@ -884,6 +920,397 @@ fn completion_failure_terminalization(h: &RalphHarness) -> TestResult {
         assert!(
             combined.contains("ralph:failed"),
             "daemon output should indicate terminal failed state: {combined}"
+        );
+    })
+}
+
+/// Verifies that a genuine backend execution failure (non-zero exit)
+/// causes the issue to be terminalized to `ralph:failed` through the
+/// normal `collect_children` path — not via drain-induced cancellation.
+///
+/// Strategy:
+/// - Configure the `claude` backend to a script that always exits 1.
+/// - Run the daemon in continuous mode so `collect_children` naturally
+///   discovers the failed task without `drain_all_children` masking the
+///   failure signal.
+/// - The in-process task fails during quick-prd (BackendCommandFailed)
+///   because the backend exits non-zero.
+/// - Assert `"collect: task ... failed:"` appears in output (the execution
+///   failure path, not the `"cancelled"` path).
+/// - Assert the label log contains `ralph:failed` for the issue.
+fn execution_failure_terminalization(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // Configure claude backend to always fail (exit 1).
+        // Health check (which::which) still passes because the script exists.
+        let fail_script = dh
+            .write_mock_script("fail_backend.sh", "#!/bin/sh\nexit 1\n")
+            .expect("write fail script");
+        let fail_script_str = fail_script.to_string_lossy().into_owned();
+        dh.ralph_ok(["config", "set", "backends.claude.command", &fail_script_str])
+            .expect("set failing backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set backend args");
+        // Refinement will fail gracefully (non-fatal), falling back to raw idea.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "true",
+        ])
+        .expect("enable refinement");
+
+        // Disable PRD to keep the test focused on execution failure.
+        {
+            let config_path = dh.repo_root.join(".ralph").join("ralph.toml");
+            let mut toml_content = fs::read_to_string(&config_path).unwrap_or_default();
+            if let Some(pos) = toml_content.find("[workspace]") {
+                let insert_pos = toml_content[pos..]
+                    .find('\n')
+                    .map(|p| pos + p + 1)
+                    .unwrap_or(toml_content.len());
+                toml_content.insert_str(insert_pos, "daemon_prd_enabled = false\n");
+            } else {
+                toml_content.push_str("\n[workspace]\ndaemon_prd_enabled = false\n");
+            }
+            fs::write(&config_path, toml_content).expect("write config to disable PRD");
+        }
+
+        let label_log = dh.temp_dir.path().join("exec_fail_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issue_counter = dh.temp_dir.path().join("exec_fail_counter");
+        let issue_counter_str = issue_counter.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":750,"title":"will fail from execution","labels":[{"name":"ralph:ready"}],"body":"fail body"}]"#;
+
+        let gh_path = write_mock_gh(
+            &dh,
+            &mock_scripts::daemon_mock_gh_bounded_concurrency_script(),
+        )
+        .expect("write mock gh");
+
+        let data_dir_str = dh.data_dir().to_string_lossy().into_owned();
+
+        // Continuous mode: collect_children discovers the failed task
+        // naturally, without drain_all_children cancellation.
+        let child = Command::new(&dh.ralph_bin)
+            .args([
+                "daemon",
+                "start",
+                "--data-dir",
+                &data_dir_str,
+                "--repo",
+                "acme/widgets",
+                "--max-concurrent",
+                "1",
+                "--poll-seconds",
+                "1",
+            ])
+            .current_dir(dh.data_dir())
+            .env("PATH", &gh_path)
+            .env("MOCK_GH_ISSUES", issues)
+            .env("MOCK_GH_LABEL_LOG", &label_log_str)
+            .env("MOCK_GH_ISSUE_LIST_COUNTER", &issue_counter_str)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn daemon in continuous mode");
+
+        // Wait for: dispatch (iteration 1) + task failure + collection
+        // (iteration 2). 8 seconds is generous for poll_seconds=1.
+        std::thread::sleep(std::time::Duration::from_secs(8));
+
+        // SIGTERM to stop the daemon gracefully
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+
+        let output = child.wait_with_output().expect("wait for daemon output");
+        let combined = combined_output(&output);
+
+        // 1. Issue 750 should have been dispatched
+        assert!(
+            combined.contains("dispatched task acme-widgets-750")
+                || combined.contains("dispatch: task acme-widgets-750"),
+            "issue 750 should be dispatched: {combined}"
+        );
+
+        // 2. Task should fail from execution error (not cancellation).
+        // collect_children logs "collect: task ... failed: {err}" for
+        // execution errors and "collect: task ... cancelled" for
+        // CancellationToken-induced failures.
+        assert!(
+            combined.contains("collect: task acme-widgets-750 failed:"),
+            "issue 750 should fail from execution error path \
+             (\"collect: task ... failed:\"), not cancellation: {combined}"
+        );
+
+        // 3. Should NOT show "cancelled" for this task (it was a real failure)
+        assert!(
+            !combined.contains("collect: task acme-widgets-750 cancelled"),
+            "issue 750 failure should NOT be from cancellation: {combined}"
+        );
+
+        // 4. Label log should have ralph:failed for issue 750
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display()
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.lines().any(|l| l.contains("750")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
+            "issue 750 should have terminal ralph:failed label: {log_content}"
+        );
+    })
+}
+
+/// Verifies mixed-outcome isolation: one issue fails to claim while
+/// the sibling is claimed, dispatched, and reaches terminal state
+/// independently.
+///
+/// Uses a mock GH script where `MOCK_GH_CLAIM_FAIL_ISSUE=901` causes
+/// the label claim (`ralph:ready` -> `ralph:in-progress`) to fail for
+/// issue 901, while issue 900 proceeds normally.
+///
+/// Asserts:
+/// 1. Issue 900 is dispatched (in-process) — the claim succeeded
+/// 2. Issue 901 is NOT dispatched — the claim failed
+/// 3. Issue 900 reaches terminal state independently
+/// 4. Label log contains `ralph:in-progress` claim for issue 900 only
+/// 5. Issue 901's claim failure does not cause a rollback or label
+///    transition (no `ralph:failed` for 901 — it was never claimed)
+fn mixed_outcome_claim_isolation(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        enable_fast_daemon_refinement(&dh).expect("configure fast refinement backend for test");
+
+        let label_log = dh.temp_dir.path().join("mixed_outcome_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issues = r#"[{"number":900,"title":"good issue","labels":[{"name":"ralph:ready"}],"body":"good body"},{"number":901,"title":"fail claim","labels":[{"name":"ralph:ready"}],"body":"fail body"}]"#;
+
+        let gh_path = write_mock_gh(&dh, &mock_scripts::daemon_mock_gh_mixed_outcome_script())
+            .expect("write mock gh");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                    "--max-concurrent",
+                    "4",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                    ("MOCK_GH_CLAIM_FAIL_ISSUE", "901"),
+                ],
+            )
+            .expect("daemon start should execute");
+
+        let combined = combined_output(&output);
+
+        // 1. Issue 900 should be dispatched (claim succeeded)
+        assert!(
+            combined.contains("dispatched task acme-widgets-900")
+                || combined.contains("dispatch: task acme-widgets-900"),
+            "issue 900 should be dispatched: {combined}"
+        );
+
+        // 2. Issue 901 should NOT be dispatched (claim failed)
+        assert!(
+            !combined.contains("dispatched task acme-widgets-901")
+                && !combined.contains("dispatch: task acme-widgets-901"),
+            "issue 901 should NOT be dispatched (claim failed): {combined}"
+        );
+
+        // 3. Issue 900 should reach terminal state
+        assert!(
+            combined.contains("collect: task acme-widgets-900")
+                || combined.contains("acme-widgets-900 completed"),
+            "issue 900 should reach terminal state: {combined}"
+        );
+
+        // 4. Verify label log isolation
+        assert!(
+            label_log.exists(),
+            "label log should exist at {}: {combined}",
+            label_log.display()
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let log_lines: Vec<&str> = log_content.lines().collect();
+
+        // Issue 900 should have been claimed (add ralph:in-progress)
+        assert!(
+            log_lines.iter().any(|l| l.contains("900")
+                && l.contains("--add-label")
+                && l.contains("ralph:in-progress")),
+            "issue 900 should have been claimed: {log_content}"
+        );
+
+        // 5. Issue 901 should NOT have ralph:failed — it was never
+        //    successfully claimed, so no rollback label swap occurs.
+        assert!(
+            !log_lines.iter().any(|l| l.contains("901")
+                && l.contains("--add-label")
+                && l.contains("ralph:failed")),
+            "issue 901 should NOT have ralph:failed (never claimed): {log_content}"
+        );
+
+        // Issue 901's claim failure is logged but does not affect 900
+        assert!(
+            combined.contains("failed to claim issue #901") || combined.contains("claim failure"),
+            "claim failure for 901 should be logged: {combined}"
+        );
+    })
+}
+
+/// Validates per-task log isolation for concurrent in-process daemon tasks.
+///
+/// Dispatches two issues concurrently.  Each in-process task emits a
+/// deterministic `RALPH_TASK_STARTED` tracing marker (with its unique
+/// project_id) at the very start of the entry point, before any async work
+/// or cancellation checks.  The per-task tracing subscriber routes each
+/// task's output to its own log file.
+///
+/// Asserts:
+/// - Both task log files exist
+/// - Each log file contains the deterministic `RALPH_TASK_STARTED` marker
+///   with its own task's project_id
+/// - No cross-task contamination occurs (no other task's project_id appears)
+fn per_task_log_isolation(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh = RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+
+        // A simple no-op backend — we don't rely on backend output for markers.
+        // The deterministic RALPH_TASK_STARTED tracing markers emitted by the
+        // task entry points (before any backend invocation) are sufficient.
+        let script_body = r#"#!/bin/sh
+printf 'TITLE: noop\n---\nnoop refinement\n'
+"#;
+        let refine_script = dh
+            .write_mock_script("mock_log_isolation.sh", script_body)
+            .expect("write mock log-isolation script");
+        let refine_script_str = refine_script.to_string_lossy().into_owned();
+        dh.ralph_ok([
+            "config",
+            "set",
+            "backends.claude.command",
+            &refine_script_str,
+        ])
+        .expect("set backend command");
+        dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+            .expect("set backend args");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_refinement_enabled",
+            "true",
+        ])
+        .expect("enable daemon refinement");
+
+        let label_log = dh.temp_dir.path().join("log_isolation_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        // Two concurrent issues
+        let issues = r#"[{"number":800,"title":"log test A","labels":[{"name":"ralph:ready"}],"body":"log isolation A"},{"number":801,"title":"log test B","labels":[{"name":"ralph:ready"}],"body":"log isolation B"}]"#;
+
+        let gh_path = write_daemon_mock_gh(&dh).expect("write mock gh");
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                    "--max-concurrent",
+                    "4",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start should execute");
+        assert_exit_code(&output, 0);
+
+        let combined = combined_output(&output);
+
+        // Both issues should be dispatched
+        assert!(
+            combined.contains("dispatched task acme-widgets-800")
+                || combined.contains("dispatch: task acme-widgets-800"),
+            "issue 800 should be dispatched: {combined}"
+        );
+        assert!(
+            combined.contains("dispatched task acme-widgets-801")
+                || combined.contains("dispatch: task acme-widgets-801"),
+            "issue 801 should be dispatched: {combined}"
+        );
+
+        // Locate task log files: <repo_root>/.ralph/tmp/logs/<task_id>.log
+        let log_dir = dh.repo_root.join(".ralph").join("tmp").join("logs");
+        let log_800 = log_dir.join("acme-widgets-800.log");
+        let log_801 = log_dir.join("acme-widgets-801.log");
+
+        assert!(
+            log_800.exists(),
+            "task log for issue 800 should exist at {}: {combined}",
+            log_800.display()
+        );
+        assert!(
+            log_801.exists(),
+            "task log for issue 801 should exist at {}: {combined}",
+            log_801.display()
+        );
+
+        let content_800 = fs::read_to_string(&log_800).expect("read log 800");
+        let content_801 = fs::read_to_string(&log_801).expect("read log 801");
+
+        // Each log file must contain the deterministic RALPH_TASK_STARTED
+        // marker emitted at the very start of the task entry point.
+        assert!(
+            content_800.contains("RALPH_TASK_STARTED"),
+            "log 800 should contain RALPH_TASK_STARTED marker; content:\n{content_800}"
+        );
+        assert!(
+            content_801.contains("RALPH_TASK_STARTED"),
+            "log 801 should contain RALPH_TASK_STARTED marker; content:\n{content_801}"
+        );
+
+        // Each log must contain its own project_id (issue-800 / issue-801).
+        assert!(
+            content_800.contains("issue-800"),
+            "log 800 should contain its own project_id (issue-800); content:\n{content_800}"
+        );
+        assert!(
+            content_801.contains("issue-801"),
+            "log 801 should contain its own project_id (issue-801); content:\n{content_801}"
+        );
+
+        // Cross-contamination check: neither log should contain the
+        // other task's project_id.
+        assert!(
+            !content_800.contains("issue-801"),
+            "cross-contamination: issue-801 found in log 800.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
+        );
+        assert!(
+            !content_801.contains("issue-800"),
+            "cross-contamination: issue-800 found in log 801.\nlog 800:\n{content_800}\nlog 801:\n{content_801}"
         );
     })
 }

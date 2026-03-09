@@ -1354,134 +1354,6 @@ esac
     .to_owned()
 }
 
-/// Mock `ralph` script for daemon tests that simulates `ralph auto` execution.
-/// It simply exits successfully immediately.
-pub fn daemon_mock_ralph_script() -> String {
-    r###"#!/bin/sh
-# Mock ralph for daemon child process tests.
-# When called as `ralph auto <idea>`, just succeed immediately.
-case "$1" in
-  auto)
-    exit 0
-    ;;
-  *)
-    # Pass through other commands to real ralph
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
-/// Mock `ralph` script for daemon tests that captures the `--idea` argument
-/// to a caller-provided file, then exits successfully.
-pub fn daemon_mock_ralph_capturing_script(idea_output_path: &Path) -> String {
-    let quoted_output = shell_single_quote(&idea_output_path.to_string_lossy());
-    format!(
-        r###"#!/bin/sh
-case "$1" in
-  auto)
-    shift
-    idea=""
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "--idea" ]; then
-        shift
-        idea="${{1:-}}"
-        break
-      fi
-      shift
-    done
-    printf '%s' "$idea" > {quoted_output}
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    )
-}
-
-/// Mock `ralph` script that creates a commit in the worktree before exiting,
-/// so `has_diff` detects divergence from the base branch.
-pub fn daemon_mock_ralph_with_commit_script() -> String {
-    r###"#!/bin/sh
-case "$1" in
-  auto)
-    # Set up a local bare remote so git push works from the worktree
-    bare_dir="$(pwd)/../_bare_remote.git"
-    if [ ! -d "$bare_dir" ]; then
-      git init --bare "$bare_dir" --quiet 2>/dev/null
-    fi
-    git remote remove origin 2>/dev/null
-    git remote add origin "$bare_dir"
-
-    # Create a file and commit it so the branch diverges from base
-    echo "mock change" > ralph_daemon_change.txt
-    git add ralph_daemon_change.txt
-    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
-/// Mock `ralph` script that switches the worktree to a different branch before
-/// creating a commit. Simulates how the orchestrator switches to a project
-/// branch during `ralph auto`.
-pub fn daemon_mock_ralph_with_branch_switch_script() -> String {
-    r###"#!/bin/sh
-case "$1" in
-  auto)
-    # Set up a local bare remote so git push works from the worktree
-    bare_dir="$(pwd)/../_bare_remote.git"
-    if [ ! -d "$bare_dir" ]; then
-      git init --bare "$bare_dir" --quiet 2>/dev/null
-    fi
-    git remote remove origin 2>/dev/null
-    git remote add origin "$bare_dir"
-
-    # Switch to a different branch (simulating orchestrator behavior)
-    git checkout -b ralph/mock-project-branch 2>/dev/null
-
-    # Create a file and commit it so the branch diverges from base
-    echo "mock change" > ralph_daemon_change.txt
-    git add ralph_daemon_change.txt
-    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
-/// Mock `ralph` script that exits with non-zero for testing failure paths.
-pub fn daemon_mock_ralph_fail_script() -> String {
-    r###"#!/bin/sh
-case "$1" in
-  auto)
-    exit 1
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
 /// Mock `gh` script that returns an existing PR URL from `pr list --head`,
 /// succeeds on `pr edit`, and logs `pr edit` and `pr create` calls via files.
 ///
@@ -1566,45 +1438,6 @@ case "$1" in
   repo) printf 'acme/widgets\n' ; exit 0 ;;
 esac
 exit 1
-"###
-    .to_owned()
-}
-
-/// Mock `ralph` script that creates a commit but makes `git diff --stat`
-/// fail against the base branch, exercising the diff-stat fallback path.
-/// It achieves this by removing the origin remote so diff_stat cannot
-/// find a base branch, but `has_diff` still returns true via the
-/// merge-base-less fallback.
-pub fn daemon_mock_ralph_with_commit_no_diffstat_script() -> String {
-    r###"#!/bin/sh
-case "$1" in
-  auto)
-    # Set up a local bare remote so git push works
-    bare_dir="$(pwd)/../_bare_remote.git"
-    if [ ! -d "$bare_dir" ]; then
-      git init --bare "$bare_dir" --quiet 2>/dev/null
-    fi
-    git remote remove origin 2>/dev/null
-    git remote add origin "$bare_dir"
-
-    # Create a file and commit
-    echo "mock change" > ralph_daemon_change.txt
-    git add ralph_daemon_change.txt
-    git -c user.email="daemon@test" -c user.name="Daemon" commit -m "daemon: mock change" --quiet 2>/dev/null
-
-    # Remove symbolic-ref to break diff --stat base detection
-    git symbolic-ref --delete refs/remotes/origin/HEAD 2>/dev/null
-    # Remove origin/main and origin/master refs to prevent fallback detection
-    git update-ref -d refs/remotes/origin/main 2>/dev/null
-    git update-ref -d refs/remotes/origin/master 2>/dev/null
-
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
 "###
     .to_owned()
 }
@@ -2979,28 +2812,6 @@ fi
     )
 }
 
-/// Mock `ralph` script for daemon concurrency tests that simulates a
-/// long-running child task. Sleeps for `MOCK_RALPH_SLEEP_SECS` seconds
-/// (default: 10) before exiting, keeping the child alive across daemon
-/// iterations so that `auto_rebase_phase` can observe active children.
-pub fn daemon_mock_ralph_long_running_script() -> String {
-    r###"#!/bin/sh
-# Mock ralph that sleeps for a configurable duration.
-# Env: MOCK_RALPH_SLEEP_SECS - seconds to sleep (default 10)
-case "$1" in
-  auto)
-    sleep "${MOCK_RALPH_SLEEP_SECS:-10}"
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
 /// Mock `gh` script for daemon bounded continuous-mode concurrency tests.
 ///
 /// Like `daemon_mock_gh_concurrency_script` but uses a counter file
@@ -3395,50 +3206,6 @@ case "$1" in
     ;;
   *)
     echo "mock gh: unhandled command: $1" >&2
-    exit 1
-    ;;
-esac
-"###
-    .to_owned()
-}
-
-/// Mock `ralph` script that logs dispatch start/end timestamps to a
-/// concurrency evidence file. Each invocation appends two lines:
-/// `START:<issue_number>:<epoch_ms>` and `END:<issue_number>:<epoch_ms>`.
-///
-/// If overlapping START/END intervals are observed across different issues,
-/// the test can prove concurrent execution occurred.
-///
-/// Environment variables:
-/// - `MOCK_DISPATCH_EVIDENCE_LOG` — file to append start/end markers
-pub fn daemon_mock_ralph_concurrency_evidence_script() -> String {
-    r###"#!/bin/sh
-# Extract issue number from arguments (match *issue-<N>* pattern)
-issue=""
-for arg in "$@"; do
-  case "$arg" in
-    *issue-*) issue="$(echo "$arg" | sed 's/.*issue-\([0-9]*\).*/\1/')" ;;
-  esac
-done
-
-epoch_ms() {
-  python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null || date +%s000
-}
-
-case "$1" in
-  auto)
-    if [ -n "${MOCK_DISPATCH_EVIDENCE_LOG:-}" ] && [ -n "$issue" ]; then
-      echo "START:${issue}:$(epoch_ms)" >> "$MOCK_DISPATCH_EVIDENCE_LOG"
-    fi
-    # Brief sleep to create an overlapping window for concurrency detection
-    sleep 0.3
-    if [ -n "${MOCK_DISPATCH_EVIDENCE_LOG:-}" ] && [ -n "$issue" ]; then
-      echo "END:${issue}:$(epoch_ms)" >> "$MOCK_DISPATCH_EVIDENCE_LOG"
-    fi
-    exit 0
-    ;;
-  *)
-    echo "mock ralph: unhandled command: $1" >&2
     exit 1
     ;;
 esac
@@ -3950,19 +3717,141 @@ fi
     .to_owned()
 }
 
-/// Mock `ralph` script for completion-failure tests. Exits immediately
-/// with success or failure based on `MOCK_RALPH_EXIT_CODE` (default 0).
+/// Mock GH script for mixed-outcome dispatch isolation tests.
+///
+/// Behaves like `daemon_mock_gh_script()` but makes the label claim for a
+/// specific issue number (`MOCK_GH_CLAIM_FAIL_ISSUE`) fail with exit 1.
+/// All other issues are claimed normally.
 ///
 /// Environment variables:
-/// - `MOCK_RALPH_EXIT_CODE` — exit code to return on `auto` (default 0)
-pub fn daemon_mock_ralph_exit_code_script() -> String {
+/// - `MOCK_GH_ISSUES` — JSON array of issues for `issue list`
+/// - `MOCK_GH_LABEL_LOG` — file to log label operations
+/// - `MOCK_GH_CLAIM_FAIL_ISSUE` — issue number whose claim should fail
+pub fn daemon_mock_gh_mixed_outcome_script() -> String {
     r###"#!/bin/sh
+# Mock gh for mixed-outcome dispatch isolation tests.
+# MOCK_GH_CLAIM_FAIL_ISSUE: issue number whose claim should fail.
+
 case "$1" in
-  auto)
-    exit "${MOCK_RALPH_EXIT_CODE:-0}"
+  issue)
+    case "$2" in
+      list)
+        has_prd=0
+        for arg in "$@"; do
+          case "$arg" in
+            ralph:prd|ralph:prd-active) has_prd=1 ;;
+          esac
+        done
+        if [ "$has_prd" = "1" ] && [ -n "${MOCK_PRD_TICK_LOG:-}" ]; then
+          echo "prd-tick" >> "$MOCK_PRD_TICK_LOG"
+        fi
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        # Fail the claim for the specific issue
+        if [ -n "${MOCK_GH_CLAIM_FAIL_ISSUE:-}" ]; then
+          has_add_inprogress=0
+          issue_num=""
+          prev=""
+          for arg in "$@"; do
+            if [ "$prev" = "--add-label" ] && [ "$arg" = "ralph:in-progress" ]; then
+              has_add_inprogress=1
+            fi
+            case "$arg" in
+              [0-9]*) issue_num="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          if [ "$has_add_inprogress" = "1" ] && [ "$issue_num" = "$MOCK_GH_CLAIM_FAIL_ISSUE" ]; then
+            echo "mock gh: simulated claim failure for issue $issue_num" >&2
+            exit 1
+          fi
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then
+            want_labels=1
+          fi
+          if [ "$arg" = "title,body" ]; then
+            want_title_body=1
+          fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled issue subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf '' ; exit 0 ;;
+      create) printf 'https://github.com/mock/repo/pull/1\n' ; exit 0 ;;
+      view) printf '' ; exit 0 ;;
+      edit) exit 0 ;;
+      comment) exit 0 ;;
+      *)
+        echo "mock gh: unhandled pr subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    echo "mock gh: unhandled api subcommand: $2" >&2
+    exit 1
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *)
+        echo "mock gh: unhandled label subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      view) exit 0 ;;
+      *)
+        echo "mock gh: unhandled repo subcommand: $2" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
-    echo "mock ralph: unhandled command: $1" >&2
+    echo "mock gh: unhandled command: $1" >&2
     exit 1
     ;;
 esac

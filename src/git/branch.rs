@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use tracing::warn;
+
 use crate::error::RalphError;
 use crate::git::{ensure_git_repo, run_git, run_git_status};
 use crate::Result;
@@ -176,7 +178,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
     if !has_remote_base && fetch_ok {
         if let Some(detected) = detect_remote_default_branch(repo_root) {
             if detected != base_branch {
-                eprintln!(
+                warn!(
                     "sync_project_branch: configured base_branch '{base_branch}' not found on remote; \
                      using detected default branch '{detected}' for issue {issue_number}"
                 );
@@ -262,7 +264,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
 
         if !local_base_exists {
             // Create the local base branch from the current HEAD (bootstrap commit).
-            eprintln!(
+            warn!(
                 "sync_project_branch: empty remote and no local '{base_branch}' branch; \
                  creating from HEAD for issue {issue_number}"
             );
@@ -277,21 +279,21 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
         // Push the base branch to origin to establish the remote default branch.
         match run_git(repo_root, &["push", "-u", "origin", base_branch]) {
             Ok(_) => {
-                eprintln!(
+                warn!(
                     "sync_project_branch: pushed '{base_branch}' to origin for issue {issue_number}"
                 );
                 // Re-check: the remote base should now exist after push.
                 has_remote_base = remote_ref_exists(repo_root, remote_base_branch)?;
             }
             Err(push_err) => {
-                eprintln!(
+                warn!(
                     "sync_project_branch: failed to push '{base_branch}' to origin \
                      for issue {issue_number}: {push_err}; continuing with local base"
                 );
             }
         }
     } else {
-        eprintln!(
+        warn!(
             "sync_project_branch: no remote base branch and fetch failed; \
              using local {base_branch} for issue {issue_number}"
         );
@@ -335,7 +337,7 @@ pub fn sync_project_branch(repo_root: &Path, issue_number: u32, base_branch: &st
         if local_base_exists {
             base_branch.to_owned()
         } else {
-            eprintln!(
+            warn!(
                 "sync_project_branch: local base branch '{base_branch}' not found; \
                  falling back to HEAD for issue {issue_number}"
             );

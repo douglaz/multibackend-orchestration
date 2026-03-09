@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tracing::warn;
 
 use crate::config::GlobalConfig;
 use crate::error::RalphError;
@@ -23,6 +24,12 @@ pub struct Workspace {
 impl Workspace {
     pub fn discover() -> Result<Self> {
         let root = discovery::discover_workspace_root(None)?;
+        Self::load(root)
+    }
+
+    /// Discover a workspace by walking up from `start` instead of ambient CWD.
+    pub fn discover_from(start: &Path) -> Result<Self> {
+        let root = discovery::discover_workspace_root(Some(start))?;
         Self::load(root)
     }
 
@@ -124,7 +131,7 @@ impl Workspace {
             let state = match reconstruct_project_state(self, &project_id) {
                 Ok(state) => state,
                 Err(err) => {
-                    eprintln!(
+                    warn!(
                         "warning: skipping project directory '{}' because state derivation failed: {}",
                         path.display(),
                         err

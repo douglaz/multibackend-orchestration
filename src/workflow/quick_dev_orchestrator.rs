@@ -4,8 +4,10 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::max_backend_retries;
 use crate::backend::{parse_backend_spec, Backend, BackendRegistry, BackendRegistryTmuxConfig};
 use crate::config::{resolve_effective_config, EffectiveConfig, RunWorkflowOverrides};
 use crate::error::RalphError;
@@ -50,6 +52,10 @@ pub struct QuickDevRunOptions {
     pub skip_commit: bool,
     pub max_review_iterations: Option<u32>,
     pub max_final_review_retries: Option<u32>,
+    /// Cancellation token for cooperative shutdown.
+    pub cancel: CancellationToken,
+    /// Maximum number of backend timeout retries per invocation.
+    pub max_backend_retries: Option<u8>,
 }
 
 const DEFAULT_MAX_REVIEW_ITERATIONS: u32 = 30;
@@ -67,14 +73,19 @@ pub struct OrchestrationResult {
 
 pub struct QuickDevOrchestrator {
     workspace: Workspace,
+    cancel: CancellationToken,
 }
 
 impl QuickDevOrchestrator {
     pub fn new(workspace: Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            cancel: CancellationToken::new(),
+        }
     }
 
     pub async fn run(&mut self, options: QuickDevRunOptions) -> Result<OrchestrationResult> {
+        self.cancel = options.cancel.clone();
         let project_id = self
             .workspace
             .resolve_project_id(options.project.as_deref())?;
@@ -112,6 +123,7 @@ impl QuickDevOrchestrator {
                 window_keep_seconds: effective.global.workspace.tmux_window_keep_seconds,
             },
         );
+        registry.set_cwd(self.workspace.root.parent().map(|p| p.to_path_buf()));
 
         // Health check both backends
         let _impl_backend = registry.get_or_create_for_role(&implementer_spec, "implementer")?;
@@ -213,6 +225,7 @@ impl QuickDevOrchestrator {
                 max_final_review_retries,
                 options.skip_commit,
                 repo_root.as_deref(),
+                options.max_backend_retries,
             )
             .await;
 
@@ -237,6 +250,7 @@ impl QuickDevOrchestrator {
         max_final_review_retries: u32,
         skip_commit: bool,
         repo_root: Option<&Path>,
+        max_backend_retries: Option<u8>,
     ) -> Result<OrchestrationResult> {
         let mut current_qd_phase = starting_phase;
         let mut review_iteration: u32 = state.quick_dev_review_iteration;
@@ -292,6 +306,9 @@ impl QuickDevOrchestrator {
 
         // Phase machine loop (bounded by configured limits)
         for _step in 0..max_transitions {
+            if self.cancel.is_cancelled() {
+                return Err(RalphError::Cancelled);
+            }
             // Persist current phase state before executing phase action.
             // This ensures that if the process crashes during the backend call,
             // resume starts from the current phase (not an earlier one).
@@ -337,6 +354,8 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -430,6 +449,8 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
+                        &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -593,6 +614,8 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
 
@@ -711,6 +734,8 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(implementer_spec, "implementer")
                             .as_secs(),
+                        &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
                     let impl_decision = parse_quick_final_review_output(&impl_raw)?;
@@ -754,6 +779,8 @@ impl QuickDevOrchestrator {
                         registry
                             .timeout_for_role(reviewer_spec, "reviewer")
                             .as_secs(),
+                        &self.cancel,
+                        max_backend_retries,
                     )
                     .await?;
                     let rev_decision = parse_quick_final_review_output(&rev_raw)?;
@@ -1400,21 +1427,80 @@ async fn execute_backend(
     prompt: &str,
     log_writer: &mut LogWriter,
     timeout_secs: u64,
+    cancel: &CancellationToken,
+    max_retries_configured: Option<u8>,
 ) -> Result<String> {
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        backend.execute_with_log(prompt, Some(log_writer)),
-    )
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(_) => Err(RalphError::BackendTimeout {
-            backend: backend.name().to_owned(),
-            idle_seconds: timeout_secs,
-            timeout_kind: crate::error::TimeoutKind::Walltime,
-        }),
+    if cancel.is_cancelled() {
+        return Err(RalphError::Cancelled);
     }
+
+    let max_retries = max_backend_retries(max_retries_configured);
+
+    for attempt in 1..=max_retries {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            backend.execute_with_cancel(prompt, Some(log_writer), cancel),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) => return Ok(output),
+            Ok(Err(RalphError::Cancelled)) => return Err(RalphError::Cancelled),
+            Ok(Err(RalphError::BackendTimeout {
+                backend: ref be,
+                idle_seconds,
+                timeout_kind,
+            })) => {
+                if attempt >= max_retries {
+                    return Err(RalphError::BackendTimeout {
+                        backend: be.clone(),
+                        idle_seconds,
+                        timeout_kind,
+                    });
+                }
+                let backoff = 2_u64.pow((attempt - 1) as u32);
+                tracing::warn!(
+                    backend = %backend.name(),
+                    attempt = attempt,
+                    idle_seconds = idle_seconds,
+                    timeout_kind = ?timeout_kind,
+                    backoff_secs = backoff,
+                    "backend timeout, retrying..."
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {},
+                    _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+                }
+            }
+            Ok(Err(other)) => return Err(other),
+            Err(_) => {
+                if attempt >= max_retries {
+                    return Err(RalphError::BackendTimeout {
+                        backend: backend.name().to_owned(),
+                        idle_seconds: timeout_secs,
+                        timeout_kind: crate::error::TimeoutKind::Walltime,
+                    });
+                }
+                let backoff = 2_u64.pow((attempt - 1) as u32);
+                tracing::warn!(
+                    backend = %backend.name(),
+                    attempt = attempt,
+                    backoff_secs = backoff,
+                    "walltime timeout, retrying..."
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {},
+                    _ = cancel.cancelled() => return Err(RalphError::Cancelled),
+                }
+            }
+        }
+    }
+
+    Err(RalphError::BackendTimeout {
+        backend: backend.name().to_owned(),
+        idle_seconds: timeout_secs,
+        timeout_kind: crate::error::TimeoutKind::Walltime,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,6 +1540,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(
             Some("eff-impl".to_owned()),
@@ -1474,6 +1562,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(
             Some("eff-impl".to_owned()),
@@ -1494,6 +1584,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1511,6 +1603,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1528,6 +1622,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective =
             make_test_effective(None, Some("eff-rev".to_owned()), "starting".to_owned());
@@ -1545,6 +1641,8 @@ mod tests {
             skip_commit: false,
             max_review_iterations: None,
             max_final_review_retries: None,
+            cancel: CancellationToken::new(),
+            max_backend_retries: None,
         };
         let effective = make_test_effective(None, None, "starting".to_owned());
         let err = resolve_reviewer_backend(&options, &effective).unwrap_err();
@@ -1899,6 +1997,7 @@ mod tests {
                 prd_max_revisions: 0,
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
+                max_backend_retries: None,
             },
             global: GlobalConfig::default(),
             project: None,

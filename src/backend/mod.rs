@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, Notify};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::config::global::BackendEnabled;
@@ -31,6 +32,54 @@ use crate::Result;
 use self::tmux::RealTmuxRunner;
 use self::tmux_backend::{TmuxBackend, TmuxExecutionContext};
 
+/// Environment variables that must be stripped from backend subprocess
+/// environments. Prevents in-process daemon tasks from leaking daemon-only
+/// env vars (e.g. `CLAUDECODE`) to backend child processes.
+pub const SANITIZED_ENV_VARS: &[&str] = &["CLAUDECODE"];
+
+/// Emergency guard that SIGKILL-s a child process group on drop.
+///
+/// This is a last-resort fallback for unexpected future drops (e.g. task
+/// abort). Normal cancellation and timeout paths call `kill_and_reap_child`
+/// directly for cooperative SIGTERM → SIGKILL shutdown and **disarm** this
+/// guard before returning.
+///
+/// The drop is non-blocking: it sends SIGKILL immediately and does a
+/// non-blocking waitpid to reap the leader zombie.
+struct KillOnDrop(Option<u32>);
+
+impl KillOnDrop {
+    /// Disarm the guard so Drop becomes a no-op.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// Grace period before escalating from SIGTERM to SIGKILL.
+const KILL_GRACE_SECONDS: u64 = 5;
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0 {
+            if let Ok(raw) = i32::try_from(pgid) {
+                if raw == 0 {
+                    return; // Never kill our own process group
+                }
+                // Emergency path: SIGKILL immediately. The normal cancellation
+                // path already performed cooperative SIGTERM → wait → SIGKILL
+                // via `kill_and_reap_child` before disarming this guard.
+                // If we reach here, the future was dropped without cleanup
+                // (e.g. task abort), so hard-kill is appropriate.
+                // SAFETY: Sending signals to a process group is safe.
+                unsafe {
+                    libc::kill(-(raw), libc::SIGKILL);
+                    libc::waitpid(raw, std::ptr::null_mut(), libc::WNOHANG);
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait Backend: Send + Sync {
     fn name(&self) -> &str;
@@ -41,6 +90,32 @@ pub trait Backend: Send + Sync {
         _log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
         self.execute(prompt).await
+    }
+    /// Execute with cancellation support. On cancellation, backend
+    /// subprocesses are killed and reaped before returning `Cancelled`.
+    ///
+    /// The default implementation races `execute_with_log` against the
+    /// cancellation token. Backends that spawn subprocesses (e.g.
+    /// `CliBackend`) override this to perform synchronous cleanup so that
+    /// backend processes are guaranteed dead before this method returns.
+    ///
+    /// **WARNING**: When the cancel branch wins the `select!`, the
+    /// `execute_with_log` future is dropped. If that future has spawned
+    /// a child process, dropping the future does NOT kill the child.
+    /// Backends that spawn subprocesses MUST override this method to
+    /// perform explicit child process cleanup on cancellation (see
+    /// `CliBackend::execute_streaming` for the reference implementation
+    /// with `KillOnDrop` guard).
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        tokio::select! {
+            result = self.execute_with_log(prompt, log_writer) => result,
+            _ = cancel.cancelled() => Err(RalphError::Cancelled),
+        }
     }
     async fn health_check(&self) -> Result<()>;
 }
@@ -460,6 +535,7 @@ impl CliBackend {
         &self,
         prompt: &str,
         mut log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
     ) -> Result<String> {
         // Compute effective args: if an invocation context is set, use
         // effective_args() for session-aware arg rewriting and/or JSON output
@@ -493,6 +569,11 @@ impl CliBackend {
             .stderr(std::process::Stdio::piped())
             .envs(self.env.clone());
 
+        // Strip daemon-only env vars so backend subprocesses don't inherit them.
+        for var in SANITIZED_ENV_VARS {
+            cmd.env_remove(var);
+        }
+
         // Place the child in its own process group so that
         // `kill(-(pid), SIGKILL)` reliably terminates it and all its
         // descendants on timeout.
@@ -515,6 +596,12 @@ impl CliBackend {
                     resolved_command.display()
                 ),
             })?;
+
+        // Guard: kill the child's process group if this future is dropped
+        // (e.g. due to cancellation via tokio::select!). Disarmed on
+        // successful completion.
+        let spawned_pgid = child.id();
+        let mut kill_guard = KillOnDrop(spawned_pgid);
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await.map_err(|err| {
@@ -606,6 +693,7 @@ impl CliBackend {
             Completed(Result<(std::process::ExitStatus, Vec<u8>)>),
             TimedOut,
             WatchdogFailed(String),
+            Cancelled,
         }
 
         let mut watchdog_cancel_error: Option<String> = None;
@@ -663,20 +751,33 @@ impl CliBackend {
                         }
                     }
                 }
+                _ = cancel.cancelled() => ExecutionOutcome::Cancelled,
             };
 
-            if let ExecutionOutcome::Completed(_) = execution_outcome {
+            // Cancel the watchdog unless it already completed on its own.
+            if matches!(
+                execution_outcome,
+                ExecutionOutcome::Completed(_) | ExecutionOutcome::Cancelled
+            ) {
                 let _ = watchdog_cancel_tx.send(());
                 if let Err(err) = watchdog_handle.await {
-                    watchdog_cancel_error =
-                        Some(format!("watchdog task failed during cancellation: {err}"));
+                    if !matches!(execution_outcome, ExecutionOutcome::Cancelled) {
+                        watchdog_cancel_error =
+                            Some(format!("watchdog task failed during cancellation: {err}"));
+                    }
                 }
             }
 
             execution_outcome
         };
 
+        // NOTE: kill_guard remains armed here. It is disarmed in each
+        // outcome branch below only after the child is confirmed dead or
+        // explicitly reaped. This ensures that if cancellation drops this
+        // future mid-cleanup, the guard's Drop fires SIGKILL as a fallback.
+
         if let Some(details) = watchdog_cancel_error {
+            // Guard stays armed — drop will kill the child.
             return Err(RalphError::BackendCommandFailed {
                 backend: self.name.clone(),
                 details,
@@ -685,9 +786,33 @@ impl CliBackend {
 
         match execution_outcome {
             ExecutionOutcome::Completed(Ok((status, captured_stdout))) => {
-                let stderr_bytes = self.collect_stderr(stderr_handle).await?;
-
+                // Guard stays armed while we drain stderr. If cancellation
+                // drops this future mid-drain, KillOnDrop fires SIGKILL on
+                // the process group, cleaning up any surviving descendants.
+                let stderr_bytes = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.collect_stderr(stderr_handle),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_elapsed) => {
+                        // Stderr drain timed out — descendants may be holding
+                        // the pipe open. Kill the process group to unblock.
+                        warn!(
+                            backend = %self.name,
+                            "stderr drain timed out after 5s, killing process group"
+                        );
+                        self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                        Vec::new()
+                    }
+                };
                 if !status.success() {
+                    // Backend exited non-zero — kill the process group to
+                    // clean up any detached descendants before disarming.
+                    self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                    kill_guard.disarm();
+
                     let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
                     // Some backends (e.g. codex) report errors via stdout JSON
                     // rather than stderr. When stderr is empty, include stdout
@@ -703,6 +828,10 @@ impl CliBackend {
                     });
                 }
 
+                // Success path — all async cleanup done, safe to disarm
+                // with no further .await between here and return.
+                kill_guard.disarm();
+
                 let raw = String::from_utf8_lossy(&captured_stdout).to_string();
                 // Normalize structured output (stream-json NDJSON, single-object JSON)
                 // to plain text so all callers receive clean content regardless of
@@ -713,12 +842,16 @@ impl CliBackend {
                 Ok(normalized)
             }
             ExecutionOutcome::Completed(Err(err)) => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 Err(err)
             }
             ExecutionOutcome::TimedOut => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 if let Some(writer) = log_writer.as_mut() {
                     writer.write_timeout_footer(&chrono::Utc::now().to_rfc3339());
@@ -731,23 +864,87 @@ impl CliBackend {
                 })
             }
             ExecutionOutcome::WatchdogFailed(details) => {
-                self.kill_and_reap_child(&mut child).await;
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                // Child is now dead — safe to disarm.
+                kill_guard.disarm();
                 let _ = self.collect_stderr(stderr_handle).await;
                 Err(RalphError::BackendCommandFailed {
                     backend: self.name.clone(),
                     details,
                 })
             }
+            ExecutionOutcome::Cancelled => {
+                // Synchronous cancellation cleanup: kill the backend process
+                // group and wait for it to die before returning. This
+                // guarantees no backend processes outlive the task.
+                self.kill_and_reap_child(&mut child, spawned_pgid).await;
+                kill_guard.disarm();
+                // Best-effort drain of stderr (bounded to avoid stalling).
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    self.collect_stderr(stderr_handle),
+                )
+                .await;
+                Err(RalphError::Cancelled)
+            }
         }
     }
 
-    async fn kill_and_reap_child(&self, child: &mut tokio::process::Child) {
-        // Kill the entire process group (child used setsid(), so its PID is
-        // the group leader). This ensures descendant processes like `sleep`
-        // are also terminated, preventing them from holding pipes open.
-        if let Some(pid) = child.id() {
+    async fn kill_and_reap_child(
+        &self,
+        child: &mut tokio::process::Child,
+        spawned_pgid: Option<u32>,
+    ) {
+        // Two-stage termination for the entire process group (child used
+        // setsid(), so its PID is the group leader). Send SIGTERM first
+        // for cooperative shutdown, then escalate to SIGKILL after a 5s
+        // grace period if the process group is still alive.
+        //
+        // Track group liveness via kill(-pgid, 0) combined with
+        // child.try_wait() to reap the leader zombie.  Using only
+        // child.wait() would miss descendants that ignore SIGTERM but
+        // whose leader exits; using only kill(-pgid, 0) without reaping
+        // would see zombies as alive.
+        //
+        // Use the stored `spawned_pgid` (captured at spawn time) rather than
+        // `child.id()` because `child.id()` may return `None` after the
+        // child has been reaped via `child.wait()`.
+        if let Some(pid) = spawned_pgid.or(child.id()) {
+            let Ok(raw_pid) = i32::try_from(pid) else {
+                warn!(
+                    backend = %self.name,
+                    pid = pid,
+                    "pid overflows i32, cannot send signal to process group"
+                );
+                // Fall through to best-effort reap below.
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return;
+            };
+            // Stage 1: SIGTERM the entire process group.
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(-raw_pid, libc::SIGTERM);
+            }
+            // Poll group liveness over the grace period.
+            let grace = Duration::from_secs(KILL_GRACE_SECONDS);
+            let deadline = tokio::time::Instant::now() + grace;
+            let group_dead = loop {
+                // Reap leader zombie via tokio so kill(-pgid, 0) is accurate.
+                let _ = child.try_wait();
+                let group_alive = unsafe { libc::kill(-raw_pid, 0) } == 0;
+                if !group_alive {
+                    break true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            if !group_dead {
+                // Stage 2: Grace period expired — hard kill the entire group.
+                unsafe {
+                    libc::kill(-raw_pid, libc::SIGKILL);
+                }
             }
         } else if let Err(err) = child.kill().await {
             if err.kind() != std::io::ErrorKind::InvalidInput {
@@ -758,6 +955,7 @@ impl CliBackend {
                 );
             }
         }
+        // Best-effort reap of the leader process.
         if let Err(err) = child.wait().await {
             warn!(
                 backend = %self.name,
@@ -775,7 +973,8 @@ impl Backend for CliBackend {
     }
 
     async fn execute(&self, prompt: &str) -> Result<String> {
-        self.execute_streaming(prompt, None).await
+        self.execute_streaming(prompt, None, &CancellationToken::new())
+            .await
     }
 
     async fn execute_with_log(
@@ -783,7 +982,17 @@ impl Backend for CliBackend {
         prompt: &str,
         log_writer: Option<&mut LogWriter>,
     ) -> Result<String> {
-        self.execute_streaming(prompt, log_writer).await
+        self.execute_streaming(prompt, log_writer, &CancellationToken::new())
+            .await
+    }
+
+    async fn execute_with_cancel(
+        &self,
+        prompt: &str,
+        log_writer: Option<&mut LogWriter>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        self.execute_streaming(prompt, log_writer, cancel).await
     }
 
     async fn health_check(&self) -> Result<()> {
@@ -2314,5 +2523,370 @@ done
             .assign_feature_backends(5, "claude", &no_overrides)
             .expect("should recalculate");
         assert!(registry.is_backend_available(&recalc.implementer));
+    }
+
+    // -----------------------------------------------------------------------
+    // Environment sanitization — CLAUDECODE stripped from backend subprocess
+    // -----------------------------------------------------------------------
+
+    /// Mutex that guards process-global env mutations in tests so parallel
+    /// test execution doesn't race on `set_var`/`remove_var`.
+    fn env_test_mutex() -> &'static std::sync::Mutex<()> {
+        static MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII guard that restores an env var to its previous state on drop.
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn cli_backend_strips_claudecode_from_subprocess_env() {
+        let _env_lock = env_test_mutex().lock().expect("env mutex");
+
+        let temp = tempdir().expect("tempdir");
+        // Script consumes stdin first to avoid broken-pipe timing issues,
+        // then prints whether CLAUDECODE was visible.
+        let script_path = write_executable_script(
+            temp.path(),
+            "env-check.sh",
+            r#"#!/bin/sh
+cat >/dev/null
+if [ -n "$CLAUDECODE" ]; then
+    echo "LEAKED:$CLAUDECODE"
+else
+    echo "SANITIZED"
+fi
+"#,
+        );
+
+        // Set CLAUDECODE in process env; EnvGuard restores on drop.
+        let _guard = EnvGuard::set("CLAUDECODE", "should-be-stripped");
+
+        let backend = CliBackend::new(
+            "env-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(5),
+            std::collections::BTreeMap::new(),
+        );
+
+        let output = Backend::execute_with_log(&backend, "ignored", None)
+            .await
+            .expect("backend should succeed");
+
+        assert!(
+            output.contains("SANITIZED"),
+            "CLAUDECODE should be stripped from backend subprocess environment, got: {output}"
+        );
+        assert!(
+            !output.contains("LEAKED"),
+            "CLAUDECODE was leaked to backend subprocess, got: {output}"
+        );
+    }
+
+    /// Validates the two-stage termination behavior (SIGTERM → 5s → SIGKILL)
+    /// in `kill_and_reap_child`. A stubborn subprocess traps SIGTERM and
+    /// ignores it, forcing the code to escalate to SIGKILL after the grace
+    /// period.
+    #[tokio::test]
+    async fn kill_and_reap_child_sends_sigterm_then_sigkill_after_grace() {
+        let temp = tempdir().expect("tempdir");
+        let sigterm_marker = temp.path().join("got-sigterm");
+        // Script that traps SIGTERM (writes a marker file) but refuses to exit,
+        // forcing the caller to escalate to SIGKILL.
+        let script_path = write_executable_script(
+            temp.path(),
+            "stubborn.sh",
+            &format!(
+                r#"#!/bin/sh
+trap 'echo yes > "{marker}"' TERM
+cat >/dev/null
+# Busy-wait forever after stdin closes — only SIGKILL can stop us.
+while true; do sleep 0.1; done
+"#,
+                marker = sigterm_marker.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "sigterm-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(30), // large timeout — we kill manually
+            BTreeMap::new(),
+        );
+
+        // Spawn the child the same way execute_streaming does.
+        let mut cmd = tokio::process::Command::new(&backend.command);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn stubborn child");
+        let pgid = child.id();
+
+        // Close stdin so the script reaches the busy-wait loop.
+        drop(child.stdin.take());
+        // Brief wait for the trap to be installed.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let start = Instant::now();
+        backend.kill_and_reap_child(&mut child, pgid).await;
+        let elapsed = start.elapsed();
+
+        // The SIGTERM marker file must exist — proves SIGTERM was sent first.
+        assert!(
+            sigterm_marker.exists(),
+            "SIGTERM marker file should exist — kill_and_reap_child must send SIGTERM before SIGKILL"
+        );
+
+        // The total time should be at least ~5s (grace period) because the
+        // stubborn process ignores SIGTERM and only dies to SIGKILL.
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "expected at least ~5s grace period before SIGKILL, got {elapsed:?}"
+        );
+        // But not excessively long — should be near 5s, not 30s.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "kill_and_reap_child took too long ({elapsed:?}), should complete near the 5s grace period"
+        );
+    }
+
+    /// Regression test: parent exits on SIGTERM but a child descendant ignores
+    /// it.  `kill_and_reap_child` must send SIGKILL to the process group when
+    /// descendants survive the leader, ensuring no orphaned processes.
+    #[tokio::test]
+    async fn kill_and_reap_child_kills_descendants_that_survive_leader() {
+        let temp = tempdir().expect("tempdir");
+        let child_pid_file = temp.path().join("child-pid");
+        // Parent spawns a background child that ignores SIGTERM, then the
+        // parent itself exits immediately on SIGTERM.
+        let script_path = write_executable_script(
+            temp.path(),
+            "parent-exits-child-stays.sh",
+            &format!(
+                r#"#!/bin/sh
+# Child: ignore SIGTERM and busy-wait forever
+(
+    trap '' TERM
+    echo $$ > "{child_pid}"
+    while true; do sleep 0.1; done
+) &
+# Parent: exit gracefully on SIGTERM
+trap 'exit 0' TERM
+cat >/dev/null
+while true; do sleep 0.1; done
+"#,
+                child_pid = child_pid_file.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "descendant-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(30),
+            BTreeMap::new(),
+        );
+
+        let mut cmd = tokio::process::Command::new(&backend.command);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn parent");
+        let pgid = child.id();
+
+        // Close stdin so the parent reaches the busy-wait loop.
+        drop(child.stdin.take());
+        // Wait for the child process to write its PID.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let child_pid_str =
+            std::fs::read_to_string(&child_pid_file).expect("child pid file should exist");
+        let descendant_pid: i32 = child_pid_str
+            .trim()
+            .parse()
+            .expect("child pid should be a valid number");
+
+        // Verify the descendant is alive before cleanup.
+        assert_eq!(
+            unsafe { libc::kill(descendant_pid, 0) },
+            0,
+            "descendant process should be alive before cleanup"
+        );
+
+        let start = Instant::now();
+        backend.kill_and_reap_child(&mut child, pgid).await;
+        let elapsed = start.elapsed();
+
+        // The descendant must be dead after kill_and_reap_child.
+        let descendant_alive = unsafe { libc::kill(descendant_pid, 0) } == 0;
+        assert!(
+            !descendant_alive,
+            "descendant process {descendant_pid} should be dead after kill_and_reap_child"
+        );
+
+        // Should complete within the grace period + margin.  The leader exits
+        // immediately on SIGTERM, but the group stays alive until SIGKILL
+        // escalation after ~5s.
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "expected group-level grace period before SIGKILL, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "kill_and_reap_child took too long ({elapsed:?})"
+        );
+    }
+
+    /// Regression: when a backend exits non-zero after spawning a detached
+    /// descendant that closes stdio quickly, the descendant process group must
+    /// still be killed.  Previously `kill_guard.disarm()` was called before
+    /// checking `status.success()`, so the guard couldn't clean up.
+    #[tokio::test]
+    async fn nonzero_exit_with_detached_child_kills_process_group() {
+        let temp = tempdir().expect("tempdir");
+        let child_pid_file = temp.path().join("detached-child-pid");
+        // Backend script: spawns a detached child that writes its PID and
+        // busy-waits forever, then the parent immediately exits 1.
+        let script_path = write_executable_script(
+            temp.path(),
+            "nonzero-detached.sh",
+            &format!(
+                r#"#!/bin/sh
+# Read and discard stdin to satisfy the protocol
+cat >/dev/null &
+# Spawn a detached child that outlives the parent
+(
+    echo $$ > "{child_pid}"
+    trap '' TERM
+    while true; do sleep 0.1; done
+) &
+# Brief wait for the child to write its PID
+sleep 0.2
+exit 1
+"#,
+                child_pid = child_pid_file.display()
+            ),
+        );
+
+        let backend = CliBackend::new(
+            "nonzero-detached-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(10),
+            BTreeMap::new(),
+        );
+
+        let result = Backend::execute_with_log(&backend, "ignored", None).await;
+        assert!(result.is_err(), "backend should fail with non-zero exit");
+
+        // Give the child a moment to write its PID if it hasn't yet
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        if child_pid_file.exists() {
+            let pid_str = std::fs::read_to_string(&child_pid_file).expect("read child pid file");
+            if let Ok(descendant_pid) = pid_str.trim().parse::<i32>() {
+                // The descendant must be dead — killed via process group
+                // cleanup on the non-zero exit path.
+                let alive = unsafe { libc::kill(descendant_pid, 0) } == 0;
+                assert!(
+                    !alive,
+                    "detached descendant {descendant_pid} should be dead after non-zero backend exit"
+                );
+            }
+        }
+    }
+
+    /// Verifies that `kill_and_reap_child` uses the `spawned_pgid` parameter
+    /// to perform group-level cleanup even when `child.id()` returns `None`
+    /// (i.e. after the child has already been reaped via `wait()`).
+    ///
+    /// Spawns a stubborn process (traps SIGTERM), waits for it to exit
+    /// naturally (via stdin EOF), then calls `kill_and_reap_child` with
+    /// `child.id()` as `None` but a valid `spawned_pgid`.  The function
+    /// must not panic and must attempt group-level signal delivery.
+    #[tokio::test]
+    async fn kill_and_reap_child_uses_stored_pgid_after_leader_exit() {
+        let temp = tempdir().expect("tempdir");
+        // Simple script: consume stdin, then exit 0.
+        let script_path = write_executable_script(
+            temp.path(),
+            "exits-on-stdin-close.sh",
+            "#!/bin/sh\ncat >/dev/null\nexit 0\n",
+        );
+
+        let backend = CliBackend::new(
+            "stored-pgid-test",
+            script_path.to_string_lossy().to_string(),
+            vec![],
+            Duration::from_secs(30),
+            BTreeMap::new(),
+        );
+
+        let mut cmd = tokio::process::Command::new(&backend.command);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn");
+        let stored_pgid = child.id();
+        assert!(stored_pgid.is_some(), "child should have a PID at spawn");
+
+        // Close stdin → child exits naturally.
+        drop(child.stdin.take());
+        let _ = child.wait().await;
+
+        // After wait(), child.id() should be None.
+        assert!(
+            child.id().is_none(),
+            "child.id() should be None after wait()"
+        );
+
+        // Call kill_and_reap_child with stored_pgid but child.id() == None.
+        // This must not panic and should use the stored PGID for group signal.
+        backend.kill_and_reap_child(&mut child, stored_pgid).await;
+
+        // Also verify the fallback path: when spawned_pgid is also None,
+        // it falls through to the `else` branch safely.
+        backend.kill_and_reap_child(&mut child, None).await;
     }
 }

@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 fn git_ok(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -312,6 +313,8 @@ fn run_options(project_id: &str) -> RunOptions {
         skip_commit: false,
         skip_prompt_review: false,
         pr_url: None,
+        cancel: CancellationToken::new(),
+        max_backend_retries: None,
     }
 }
 

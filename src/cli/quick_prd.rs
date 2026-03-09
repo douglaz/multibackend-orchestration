@@ -106,8 +106,14 @@ pub async fn execute(args: QuickPrdArgs) -> Result<()> {
         dry_run: args.dry_run,
     };
 
+    let repo_root = workspace
+        .root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| workspace.root.clone());
+
     let pipeline = QuickPrdPipeline::new(writer, reviewer, options);
-    let result = pipeline.run().await?;
+    let result = pipeline.run(repo_root).await?;
 
     if !non_interactive {
         println!("Quick PRD pipeline completed!");

@@ -405,7 +405,6 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         labels: vec!["ralph:ready".to_owned()],
         single_iteration: true,
         verbose: false,
-        ralph_bin: repo_root.join("ralph-unused"),
         repo_root: repo_root.to_path_buf(),
         refinement_enabled: false,
         refinement_backend: "claude".to_owned(),
@@ -425,6 +424,7 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
         prd_shutdown_timeout_secs: 60,
         git_bin: "git".to_owned(),
         gh_bin: "gh".to_owned(),
+        max_backend_retries: None,
     }
 }
 

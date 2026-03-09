@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,7 +21,7 @@ use crate::daemon::interactive_prd::{self, PrdPollConfig};
 use crate::daemon::process;
 use crate::daemon::refine;
 use crate::daemon::worktree;
-use crate::daemon::{format_task_id, ChildHandle};
+use crate::daemon::{format_task_id, TaskHandle};
 use crate::error::RalphError;
 use crate::Result;
 
@@ -37,8 +38,6 @@ pub struct DaemonRuntimeConfig {
     pub single_iteration: bool,
     /// When true, emit runtime diagnostics to stderr.
     pub verbose: bool,
-    /// Path to the ralph binary for spawning daemon child commands.
-    pub ralph_bin: PathBuf,
     /// Root of the git repository (for worktree operations).
     pub repo_root: PathBuf,
     /// Prompt refinement feature toggle.
@@ -80,6 +79,9 @@ pub struct DaemonRuntimeConfig {
     pub git_bin: String,
     /// Executable used for GitHub CLI invocations in interactive PRD.
     pub gh_bin: String,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Threaded through to task params so orchestrators use a consistent value.
+    pub max_backend_retries: Option<u8>,
 }
 
 pub async fn spawn_blocking_op<T, F>(op: F) -> Result<T>
@@ -757,7 +759,7 @@ fn print_log_tail(task_id: &str, log_file: &Path) {
 
 /// Run the daemon loop: reconcile, then poll/claim/dispatch/collect.
 ///
-/// All task state is in-memory (`children: HashMap<u32, ChildHandle>`).
+/// All task state is in-memory (`children: HashMap<u32, TaskHandle>`).
 /// GitHub lifecycle labels are the only durable task lifecycle source of truth.
 pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
     if let Err(err) = validate_daemon_branch_format(&config.global_config.git.branch_format) {
@@ -820,7 +822,7 @@ pub async fn run(config: &DaemonRuntimeConfig) -> Result<()> {
         };
 
     // Phase 3: Main loop with in-memory child tracking
-    let mut children: HashMap<u32, ChildHandle> = HashMap::new();
+    let mut children: HashMap<u32, TaskHandle> = HashMap::new();
     let mut iteration: u64 = 0;
 
     loop {
@@ -1012,7 +1014,7 @@ enum DispatchOutcome {
     /// Dispatch succeeded — caller inserts the handle into `children`.
     Success {
         issue_number: u32,
-        handle: Box<ChildHandle>,
+        handle: Box<TaskHandle>,
     },
     /// Dispatch returned an error — per-issue rollback needed.
     Failure { issue_number: u32, detail: String },
@@ -1038,7 +1040,7 @@ enum CompletionOutcome {
 /// Poll for new issues, filter, claim, and dispatch.
 async fn poll_and_claim(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     slots: u32,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
@@ -1355,7 +1357,7 @@ async fn dispatch_task(
     raw_idea: &str,
     issue_labels: &[String],
     repo_root_lock: &Arc<Semaphore>,
-) -> Result<ChildHandle> {
+) -> Result<TaskHandle> {
     let task_id = format_task_id(&config.owner, &config.repo, issue_number);
     let project_id = format!("issue-{issue_number}");
     let branch_name = crate::git::branch::resolve_branch_name(
@@ -1538,64 +1540,120 @@ async fn dispatch_task(
         pr_url.as_deref().unwrap_or("none")
     );
 
-    // Spawn child process — branch by `ralph:quick` label for quick-dev flow
+    // Spawn in-process task — branch by `ralph:quick` label for quick-dev flow
     let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
-    let spawned = {
-        let ralph_bin = config.ralph_bin.clone();
-        let wt = wt_path.clone();
-        let idea_clone = idea.clone();
+    let cancel_token = CancellationToken::new();
+    let wt = wt_path.clone();
+
+    let join_handle = {
+        let cancel = cancel_token.clone();
         match (is_quick, resume_existing_project) {
             (true, true) => {
                 eprintln!(
-                    "dispatch: task {task_id} resuming with ralph quick-dev-run --project {project_id} pr_url={}",
+                    "dispatch: task {task_id} resuming with quick-dev-run --project {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_quick_dev_run(
-                    &ralph_bin,
-                    &wt,
-                    &project_id,
+                let params = super::tasks::QuickDevRunTaskParams {
+                    workspace_root: wt,
+                    project: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                    max_backend_retries: config.max_backend_retries,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    skip_commit: false,
+                    max_review_iterations: None,
+                    max_final_review_retries: None,
+                };
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_quick_dev_run_task(params),
                     &log_path,
-                    pr_url.as_deref(),
-                )
-                .await?
+                )?
             }
             (true, false) => {
                 eprintln!(
-                    "dispatch: task {task_id} starting fresh with ralph quick-dev-auto --project-id {project_id} pr_url={}",
+                    "dispatch: task {task_id} starting fresh with quick-dev-auto --project-id {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_quick_dev_auto(
-                    &ralph_bin,
-                    &wt,
-                    &idea_clone,
+                let params = super::tasks::QuickDevAutoTaskParams {
+                    workspace_root: wt,
+                    idea: idea.clone(),
+                    project_id: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                    max_backend_retries: config.max_backend_retries,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    skip_commit: false,
+                    max_review_iterations: None,
+                    max_final_review_retries: None,
+                };
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_quick_dev_auto_task(params),
                     &log_path,
-                    Some(&project_id),
-                    pr_url.as_deref(),
-                )
-                .await?
+                )?
             }
             (false, true) => {
                 eprintln!(
-                    "dispatch: task {task_id} resuming with ralph run --project {project_id} pr_url={}",
+                    "dispatch: task {task_id} resuming with run --project {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_run(&ralph_bin, &wt, &project_id, &log_path, pr_url.as_deref())
-                    .await?
+                let params = super::tasks::RunTaskParams {
+                    workspace_root: wt,
+                    project: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                    max_backend_retries: config.max_backend_retries,
+                    loops: None,
+                    until_review: false,
+                    until_complete: true,
+                    dry_run: false,
+                    backend: None,
+                    planner_backend: None,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    qa_backend: None,
+                    completer_backend: None,
+                    tmux: None,
+                    on_prompt_change: None,
+                    skip_commit: false,
+                    skip_prompt_review: false,
+                };
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_run_task(params),
+                    &log_path,
+                )?
             }
             (false, false) => {
                 eprintln!(
-                    "dispatch: task {task_id} starting fresh with ralph auto --project-id {project_id} pr_url={}",
+                    "dispatch: task {task_id} starting fresh with auto --project-id {project_id} pr_url={}",
                     pr_url.as_deref().unwrap_or("none")
                 );
-                process::spawn_ralph_auto(
-                    &ralph_bin,
-                    &wt,
-                    &idea_clone,
+                let params = super::tasks::AutoTaskParams {
+                    workspace_root: wt,
+                    idea: idea.clone(),
+                    project_id: Some(project_id.clone()),
+                    pr_url: pr_url.clone(),
+                    cancel,
+                    max_backend_retries: config.max_backend_retries,
+                    spec_writer: None,
+                    spec_reviewer: None,
+                    max_spec_revisions: 1,
+                    backend: None,
+                    planner_backend: None,
+                    implementer_backend: None,
+                    reviewer_backend: None,
+                    qa_backend: None,
+                    completer_backend: None,
+                    tmux: None,
+                    skip_commit: false,
+                    skip_prompt_review: false,
+                    dry_run: false,
+                };
+                super::tasks::spawn_inprocess_task(
+                    || super::tasks::run_auto_task(params),
                     &log_path,
-                    Some(&project_id),
-                    pr_url.as_deref(),
-                )
-                .await?
+                )?
             }
         }
     };
@@ -1646,12 +1704,12 @@ async fn dispatch_task(
         None
     };
 
-    eprintln!("dispatched task {task_id} (pid={})", spawned.pid);
+    eprintln!("dispatched task {task_id} (in-process)");
 
-    Ok(ChildHandle {
-        pid: spawned.pid,
-        pgid: spawned.pgid,
-        child: spawned.child,
+    Ok(TaskHandle {
+        join_handle,
+        cancel_token,
+        aborted_externally: Arc::new(AtomicBool::new(false)),
         watcher_cancel,
         watcher_handle,
         draft_pr_cancel,
@@ -1710,48 +1768,46 @@ async fn await_watcher_with_timeout_impl(
     }
 }
 
+/// Derive a terminal label from the result of awaiting a task's `JoinHandle`.
+///
+/// - `Ok(Ok(_))` → `"ralph:completed"` (task succeeded)
+/// - `Ok(Err(Cancelled))` → `"ralph:failed"` (cooperative cancellation)
+/// - `Ok(Err(_))` → `"ralph:failed"` (task error)
+/// - `Err(JoinError)` → `"ralph:failed"` (task panicked)
+fn derive_terminal_label(
+    result: &std::result::Result<
+        crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+        tokio::task::JoinError,
+    >,
+) -> &'static str {
+    match result {
+        Ok(Ok(_)) => "ralph:completed",
+        Ok(Err(_)) => "ralph:failed",
+        Err(_) => "ralph:failed",
+    }
+}
+
 /// Collect finished children and transition them to terminal states via labels.
 async fn collect_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
-    // Stage 1: Sequential child status scan
+    // Stage 1: Sequential task status scan via JoinHandle::is_finished()
     let mut finished: Vec<(u32, &'static str)> = Vec::new();
     let mut still_running = 0u32;
 
     for (issue_number, handle) in children.iter_mut() {
-        match handle.child.try_wait() {
-            Ok(Some(status)) => {
-                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
-                if config.verbose {
-                    let exit_code = status
-                        .code()
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "signal".to_owned());
-                    eprintln!(
-                        "verbose: child terminal task_id={task_id} pid={} exit_status={} exit_code={exit_code}",
-                        handle.pid, status
-                    );
-                }
-                let terminal_label = if status.success() {
-                    "ralph:completed"
-                } else {
-                    "ralph:failed"
-                };
-                finished.push((*issue_number, terminal_label));
+        if handle.join_handle.is_finished() {
+            let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
+            if config.verbose {
+                eprintln!("verbose: task terminal task_id={task_id}");
             }
-            Ok(None) => {
-                still_running = still_running.saturating_add(1);
-            }
-            Err(err) => {
-                let task_id = format_task_id(&config.owner, &config.repo, *issue_number);
-                eprintln!(
-                    "warning: failed to check child for {task_id} (pid={} pgid={}): {err}",
-                    handle.pid, handle.pgid
-                );
-                finished.push((*issue_number, "ralph:failed"));
-            }
+            // We cannot await the join handle yet because we only have &mut.
+            // Mark as finished; we'll resolve the Result in stage 2.
+            finished.push((*issue_number, "pending_resolve"));
+        } else {
+            still_running = still_running.saturating_add(1);
         }
     }
 
@@ -1759,14 +1815,40 @@ async fn collect_children(
         eprintln!("verbose: child collection still_running={still_running}");
     }
 
-    // Stage 2: Per-child teardown (sequential: watcher_cancel -> watcher_join -> draft_pr_cancel -> draft_pr_join)
-    // and print_log_tail for failed children
-    let mut completion_tasks: Vec<(u32, String, &'static str)> = Vec::new();
-    for (issue_number, terminal_label) in finished {
+    // Stage 2: Per-task teardown — resolve JoinHandle result to determine
+    // terminal label, then tear down watchers.
+    let mut completion_tasks: Vec<(u32, String, &'static str, bool)> = Vec::new();
+    for (issue_number, _) in finished {
         let task_id = format_task_id(&config.owner, &config.repo, issue_number);
         let Some(mut handle) = children.remove(&issue_number) else {
             continue;
         };
+
+        // Resolve the task result from the JoinHandle.
+        let join_result = (&mut handle.join_handle).await;
+        let was_externally_aborted = handle
+            .aborted_externally
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let terminal_label = if was_externally_aborted {
+            eprintln!("collect: task {task_id} was externally aborted, forcing ralph:failed");
+            "ralph:failed"
+        } else {
+            derive_terminal_label(&join_result)
+        };
+        match &join_result {
+            Ok(Err(ref err)) => {
+                if matches!(err, RalphError::Cancelled) {
+                    eprintln!("collect: task {task_id} cancelled");
+                } else {
+                    eprintln!("collect: task {task_id} failed: {err}");
+                }
+            }
+            Err(join_err) => {
+                eprintln!("collect: task {task_id} panicked: {join_err}");
+            }
+            _ => {}
+        }
+
         handle.watcher_cancel.cancel();
         if let Some(join_handle) = handle.watcher_handle.take() {
             await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
@@ -1778,7 +1860,12 @@ async fn collect_children(
         if terminal_label == "ralph:failed" {
             print_log_tail(&task_id, &handle.log_file);
         }
-        completion_tasks.push((issue_number, task_id, terminal_label));
+        completion_tasks.push((
+            issue_number,
+            task_id,
+            terminal_label,
+            was_externally_aborted,
+        ));
     }
 
     // Stage 3: Run complete_task concurrently across finished children via JoinSet.
@@ -1791,14 +1878,22 @@ async fn collect_children(
     }
 
     let mut complete_set: JoinSet<CompletionOutcome> = JoinSet::new();
-    for (issue_number, task_id, terminal_label) in completion_tasks {
+    for (issue_number, task_id, terminal_label, externally_aborted) in completion_tasks {
         let config = config.clone();
         let repo_root_lock = repo_root_lock.clone();
         let tid = task_id.clone();
         complete_set.spawn(async move {
             // Inner spawn isolates panics so issue_number is preserved.
             let inner = tokio::spawn(async move {
-                complete_task(&config, issue_number, &tid, terminal_label, &repo_root_lock).await;
+                complete_task(
+                    &config,
+                    issue_number,
+                    &tid,
+                    terminal_label,
+                    externally_aborted,
+                    &repo_root_lock,
+                )
+                .await;
             });
             match inner.await {
                 Ok(()) => CompletionOutcome::Done {
@@ -1860,7 +1955,7 @@ async fn collect_children(
 /// `ralph:in-progress`.
 async fn kill_aborted_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     _repo_root_lock: &Arc<Semaphore>,
 ) {
     let issue_numbers: Vec<u32> = children.keys().cloned().collect();
@@ -1918,35 +2013,52 @@ async fn kill_aborted_children(
         }
     }
 
-    // Apply kill decisions sequentially against children
+    // Cancel aborted tasks — cooperative cancellation via token.
+    // Also cancel watchers immediately so they stop acting while the
+    // task winds down.  Don't remove from children map; let
+    // collect_children() observe the JoinHandle completion on the next
+    // cycle.
     for issue_number in to_kill {
-        if let Some(mut handle) = children.remove(&issue_number) {
+        if let Some(handle) = children.get(&issue_number) {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
-            crate::daemon::process::terminate_process_group(handle.pgid, Duration::from_secs(10))
-                .await;
+            handle
+                .aborted_externally
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            handle.cancel_token.cancel();
             handle.watcher_cancel.cancel();
-            if let Some(join_handle) = handle.watcher_handle.take() {
-                await_watcher_with_timeout(join_handle, "artifact watcher", &task_id).await;
-            }
             handle.draft_pr_cancel.cancel();
-            if let Some(join_handle) = handle.draft_pr_handle.take() {
-                await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
-            }
-            eprintln!(
-                "abort-check: killed {task_id} (pid={} pgid={})",
-                handle.pid, handle.pgid
-            );
+            eprintln!("abort-check: cancelled task {task_id} (externally aborted)");
         }
     }
 }
 
-/// Wait until all active children have exited.
+/// Wait until all active tasks have exited.
 async fn drain_all_children(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(7200);
+    drain_all_children_with_deadline(config, children, repo_root_lock, Duration::from_secs(7200))
+        .await;
+}
+
+/// Inner implementation with a configurable drain deadline (testable).
+async fn drain_all_children_with_deadline(
+    config: &DaemonRuntimeConfig,
+    children: &mut HashMap<u32, TaskHandle>,
+    repo_root_lock: &Arc<Semaphore>,
+    drain_timeout: Duration,
+) {
+    // Cancel all tasks and their watchers to initiate cooperative shutdown.
+    // Cancelling watcher tokens here prevents side effects (e.g. draft-PR
+    // creation) from racing with task teardown during the drain period.
+    for handle in children.values() {
+        handle.cancel_token.cancel();
+        handle.watcher_cancel.cancel();
+        handle.draft_pr_cancel.cancel();
+    }
+
+    let deadline = tokio::time::Instant::now() + drain_timeout;
 
     while !children.is_empty() && tokio::time::Instant::now() < deadline {
         collect_children(config, children, repo_root_lock).await;
@@ -1956,21 +2068,26 @@ async fn drain_all_children(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Force-kill remaining children
+    // Force-abort remaining tasks.  We abort the JoinHandle, then await
+    // it with a bounded timeout so we only mark the task as failed after
+    // the task has actually stopped executing.  This prevents labelling a
+    // task as terminal while it is still mutating git state.
     if !children.is_empty() {
         let remaining: Vec<u32> = children.keys().cloned().collect();
         for issue_number in remaining {
             let task_id = format_task_id(&config.owner, &config.repo, issue_number);
             if let Some(mut handle) = children.remove(&issue_number) {
-                eprintln!(
-                    "warning: force-killing child for {task_id} (pid={} pgid={}, drain timeout)",
-                    handle.pid, handle.pgid
-                );
-                if let Err(err) = handle.child.kill().await {
-                    eprintln!("warning: failed to kill child for {task_id}: {err}");
-                }
-                if let Err(err) = handle.child.wait().await {
-                    eprintln!("warning: failed to wait child for {task_id}: {err}");
+                eprintln!("warning: force-aborting task {task_id} (drain timeout)");
+                handle.join_handle.abort();
+                // Wait for the aborted task to actually resolve (up to 10s).
+                // abort() is cooperative — it only takes effect at .await
+                // points.  This bounded wait ensures we don't label the task
+                // as failed while it is still running blocking code.
+                match tokio::time::timeout(Duration::from_secs(10), &mut handle.join_handle).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        eprintln!("warning: task {task_id} did not resolve within 10s after abort");
+                    }
                 }
                 handle.watcher_cancel.cancel();
                 if let Some(join_handle) = handle.watcher_handle.take() {
@@ -1980,15 +2097,46 @@ async fn drain_all_children(
                 if let Some(join_handle) = handle.draft_pr_handle.take() {
                     await_watcher_with_timeout(join_handle, "draft PR watcher", &task_id).await;
                 }
+
+                // Panic-isolate complete_task so that a panic in one task's
+                // completion does not prevent subsequent tasks from completing
+                // (matching the pattern used in collect_children).
+                let config_clone = config.clone();
+                let repo_root_lock_clone = repo_root_lock.clone();
+                let tid = task_id.clone();
+                let externally_aborted = handle
+                    .aborted_externally
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let inner = tokio::spawn(async move {
+                    complete_task(
+                        &config_clone,
+                        issue_number,
+                        &tid,
+                        "ralph:failed",
+                        externally_aborted,
+                        &repo_root_lock_clone,
+                    )
+                    .await;
+                });
+                if let Err(join_err) = inner.await {
+                    eprintln!(
+                        "warning: complete_task panicked for {task_id} during drain: {join_err}"
+                    );
+                    if let Err(rollback_err) = github::swap_lifecycle_label(
+                        &config.owner,
+                        &config.repo,
+                        issue_number,
+                        "ralph:in-progress",
+                        "ralph:failed",
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "warning: drain panic rollback failed for {task_id}: {rollback_err}"
+                        );
+                    }
+                }
             }
-            complete_task(
-                config,
-                issue_number,
-                &task_id,
-                "ralph:failed",
-                repo_root_lock,
-            )
-            .await;
         }
     }
 }
@@ -2037,6 +2185,7 @@ async fn complete_task(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    externally_aborted: bool,
     repo_root_lock: &Arc<Semaphore>,
 ) {
     for attempt in 1..=COMPLETE_TASK_MAX_ATTEMPTS {
@@ -2045,6 +2194,7 @@ async fn complete_task(
             issue_number,
             task_id,
             terminal_label,
+            externally_aborted,
             repo_root_lock,
         )
         .await
@@ -2073,11 +2223,16 @@ async fn complete_task_attempt(
     issue_number: u32,
     task_id: &str,
     terminal_label: &str,
+    externally_aborted: bool,
     repo_root_lock: &Arc<Semaphore>,
 ) -> Result<()> {
     // Post completion comment (best-effort, idempotent)
     {
-        let phase = terminal_label.trim_start_matches("ralph:");
+        let phase = if externally_aborted {
+            "aborted"
+        } else {
+            terminal_label.trim_start_matches("ralph:")
+        };
         let comment_body = format!("Task `{task_id}` finished with status: **{phase}**.");
         github::post_idempotent_comment(
             &config.owner,
@@ -2090,8 +2245,8 @@ async fn complete_task_attempt(
         .await?;
     }
 
-    // PR flow (only on success)
-    if terminal_label == "ralph:completed" {
+    // PR flow (only on success, never for externally aborted tasks)
+    if terminal_label == "ralph:completed" && !externally_aborted {
         // Resolve actual worktree branch for PR creation
         let workspace_root = config.workspace_root.clone();
         let wt_path = worktree::task_worktree_path(&workspace_root, task_id);
@@ -2102,15 +2257,31 @@ async fn complete_task_attempt(
         }
     }
 
-    // Swap lifecycle label: in-progress -> terminal (required)
-    github::swap_lifecycle_label(
-        &config.owner,
-        &config.repo,
-        issue_number,
-        "ralph:in-progress",
-        terminal_label,
-    )
-    .await?;
+    // Swap lifecycle label: in-progress -> terminal.
+    // When externally aborted, the label was already changed outside the
+    // daemon (e.g. `ralph:in-progress` removed).  Skip the swap to avoid
+    // error-looping on a label that no longer exists.
+    if externally_aborted {
+        // Best-effort: ensure terminal label is present even if external
+        // actor only removed in-progress without adding failed.
+        if let Err(err) =
+            github::add_label_with_retry(&config.owner, &config.repo, issue_number, terminal_label)
+                .await
+        {
+            eprintln!(
+                "warning: failed to ensure {terminal_label} for externally aborted {task_id}: {err}"
+            );
+        }
+    } else {
+        github::swap_lifecycle_label(
+            &config.owner,
+            &config.repo,
+            issue_number,
+            "ralph:in-progress",
+            terminal_label,
+        )
+        .await?;
+    }
 
     // Worktree cleanup
     cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
@@ -2209,7 +2380,7 @@ enum RebaseOutcome {
 
 async fn auto_rebase_phase(
     config: &DaemonRuntimeConfig,
-    children: &mut HashMap<u32, ChildHandle>,
+    children: &mut HashMap<u32, TaskHandle>,
     repo_root_lock: &Arc<Semaphore>,
 ) {
     if !config.auto_rebase_enabled {
@@ -2227,12 +2398,22 @@ async fn auto_rebase_phase(
     for issue_number in &issue_numbers {
         let (branch, last_rebase_at, last_failure_sha, cached_pr_url) =
             match children.get(issue_number) {
-                Some(h) => (
-                    h.branch.clone(),
-                    h.last_rebase_at,
-                    h.last_rebase_failure_sha.clone(),
-                    h.pr_url.clone(),
-                ),
+                Some(h) => {
+                    // Skip tasks that are externally aborted or already cancelling —
+                    // they should not trigger rebase activity.
+                    if h.aborted_externally
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        || h.cancel_token.is_cancelled()
+                    {
+                        continue;
+                    }
+                    (
+                        h.branch.clone(),
+                        h.last_rebase_at,
+                        h.last_rebase_failure_sha.clone(),
+                        h.pr_url.clone(),
+                    )
+                }
                 None => continue,
             };
 
@@ -2262,7 +2443,7 @@ async fn auto_rebase_phase(
 
         let branch = &branch;
 
-        // Use cached PR URL from ChildHandle when available; fall back to API.
+        // Use cached PR URL from TaskHandle when available; fall back to API.
         let pr_url = if let Some(url) = cached_pr_url {
             url
         } else {
@@ -2758,9 +2939,23 @@ fn execute_rebase_fetch(worktree_path: &Path, timeout: Duration) -> Result<()> {
 pub(crate) fn extract_project_ref(branch: &str) -> Option<String> {
     let mut parts = branch.split('/');
     let prefix = parts.next()?;
-    let project_id = parts.next()?;
-    if prefix == "ralph" && !project_id.is_empty() && parts.next().is_none() {
-        Some(project_id.to_owned())
+    if prefix != "ralph" {
+        return None;
+    }
+    let second = parts.next()?;
+    if second.is_empty() {
+        return None;
+    }
+    // Handle both `ralph/{project_id}` and `ralph/daemon/{task_id}` formats.
+    if second == "daemon" {
+        let task_id = parts.next()?;
+        if !task_id.is_empty() && parts.next().is_none() {
+            return Some(task_id.to_owned());
+        }
+        return None;
+    }
+    if parts.next().is_none() {
+        Some(second.to_owned())
     } else {
         None
     }
@@ -3095,7 +3290,7 @@ fn write_body_file(body: &str) -> Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        await_watcher_with_timeout_impl, build_pr_body, build_pr_title,
+        await_watcher_with_timeout_impl, build_pr_body, build_pr_title, derive_terminal_label,
         detect_final_prompt_artifact, detect_quick_prd_artifact, extract_issue_body,
         extract_original_title, extract_project_ref, newest_by_mtime,
         post_artifact_comments_with_client, should_close_no_diff_draft_pr,
@@ -3108,7 +3303,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
@@ -3164,6 +3359,14 @@ mod tests {
     }
 
     #[test]
+    fn extract_project_ref_daemon_format() {
+        assert_eq!(
+            extract_project_ref("ralph/daemon/acme-widgets-901"),
+            Some("acme-widgets-901".to_owned())
+        );
+    }
+
+    #[test]
     fn extract_original_title_empty() {
         assert_eq!(extract_original_title(""), None);
     }
@@ -3178,6 +3381,8 @@ mod tests {
         assert_eq!(extract_project_ref("main"), None);
         assert_eq!(extract_project_ref("feature/foo"), None);
         assert_eq!(extract_project_ref("ralph/"), None);
+        assert_eq!(extract_project_ref("ralph/daemon/"), None);
+        assert_eq!(extract_project_ref("ralph/daemon/a/b"), None);
     }
 
     #[test]
@@ -3209,6 +3414,35 @@ mod tests {
         assert!(body.contains("Issue body context here"));
         assert!(body.contains("Project Ref: `my-project`"));
         assert!(body.contains("Automated PR for task `acme-widgets-1`."));
+    }
+
+    #[test]
+    fn build_pr_body_full_metadata_assembly() {
+        // Verify the full PR metadata assembly with all fields populated,
+        // matching the format that would be submitted to GitHub.
+        // Branch format is "ralph/{project_ref}" for project ref extraction.
+        let body = build_pr_body(
+            "ralph/issue-901",
+            Some(" src/main.rs | 10 +++++-----\n 1 file changed, 5 insertions(+), 5 deletions(-)"),
+            Some("E2E PR metadata verification issue."),
+            "acme-widgets-901",
+            901,
+        );
+        assert!(body.contains("Automated PR for task `acme-widgets-901`."));
+        assert!(body.contains("Closes #901"));
+        assert!(body.contains("src/main.rs | 10 +++++-----"));
+        assert!(body.contains("1 file changed, 5 insertions(+), 5 deletions(-)"));
+        assert!(body.contains("E2E PR metadata verification issue."));
+        assert!(body.contains("Project Ref: `issue-901`"));
+        // Verify the body does NOT contain raw error messages
+        assert!(!body.contains("unavailable"));
+    }
+
+    #[test]
+    fn build_pr_title_daemon_task_format() {
+        // The daemon assembles the title as "ralph: {task_id}".
+        let title = build_pr_title("ralph: acme-widgets-901");
+        assert_eq!(title, "ralph: acme-widgets-901");
     }
 
     #[test]
@@ -3788,6 +4022,277 @@ mod tests {
                 .filter(|c| c.phase == "final-prompt")
                 .count(),
             1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // collect_children result mapping via derive_terminal_label
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn derive_terminal_label_ok_result_is_completed() {
+        use crate::workflow::orchestrator::OrchestrationResult;
+        let result: std::result::Result<
+            crate::Result<OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Ok(OrchestrationResult {
+            summary: "done".to_owned(),
+            loop_number: Some(1),
+        }));
+        assert_eq!(derive_terminal_label(&result), "ralph:completed");
+    }
+
+    #[test]
+    fn derive_terminal_label_cancelled_is_failed() {
+        let result: std::result::Result<
+            crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Err(RalphError::Cancelled));
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    #[test]
+    fn derive_terminal_label_error_is_failed() {
+        let result: std::result::Result<
+            crate::Result<crate::workflow::orchestrator::OrchestrationResult>,
+            tokio::task::JoinError,
+        > = Ok(Err(RalphError::Orchestration("boom".to_owned())));
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    #[tokio::test]
+    async fn derive_terminal_label_panic_join_error_is_failed() {
+        // Spawn a task that panics, then check the JoinError maps to failed.
+        let handle = tokio::spawn(async {
+            panic!("simulated task panic");
+            #[allow(unreachable_code)]
+            Ok::<crate::workflow::orchestrator::OrchestrationResult, crate::error::RalphError>(
+                crate::workflow::orchestrator::OrchestrationResult {
+                    summary: String::new(),
+                    loop_number: None,
+                },
+            )
+        });
+        let result = handle.await;
+        assert!(result.is_err(), "should be JoinError from panic");
+        assert_eq!(derive_terminal_label(&result), "ralph:failed");
+    }
+
+    // -----------------------------------------------------------------------
+    // drain_all_children timeout-abort behavior
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drain_all_children_aborts_stuck_tasks_after_timeout() {
+        use super::{drain_all_children, DaemonRuntimeConfig};
+        use crate::daemon::TaskHandle;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        // Create a config with short poll interval (drain uses 7200s by default;
+        // we'll test that stuck tasks are eventually aborted).
+        let config = DaemonRuntimeConfig {
+            owner: "test".to_owned(),
+            repo: "repo".to_owned(),
+            base_branch: "main".to_owned(),
+            poll_seconds: 1,
+            max_concurrent: 1,
+            labels: vec![],
+            single_iteration: true,
+            verbose: false,
+            repo_root: PathBuf::from("/tmp/test-drain"),
+            refinement_enabled: false,
+            refinement_backend: "claude".to_owned(),
+            global_config: crate::config::GlobalConfig::default(),
+            auto_rebase_enabled: false,
+            rebase_interval_seconds: 300,
+            max_rebases_per_cycle: 0,
+            rebase_timeout_seconds: 60,
+            rebase_agent_backend: "none".to_owned(),
+            workspace_root: PathBuf::from("/tmp/test-drain/.ralph"),
+            prd_enabled: false,
+            prd_question_backends: vec![],
+            prd_writer_backend: "claude".to_owned(),
+            prd_reviewer_backend: "claude".to_owned(),
+            prd_max_revisions: 1,
+            prd_backend_timeout_secs: 60,
+            prd_shutdown_timeout_secs: 10,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
+            max_backend_retries: None,
+        };
+
+        let cancel = CancellationToken::new();
+        let cancel_inner = cancel.clone();
+
+        // Spawn a task that blocks until cancelled (simulating a stuck task).
+        let handle = tokio::spawn(async move {
+            cancel_inner.cancelled().await;
+            Err::<crate::workflow::orchestrator::OrchestrationResult, _>(RalphError::Cancelled)
+        });
+
+        let mut children: HashMap<u32, TaskHandle> = HashMap::new();
+        children.insert(
+            999,
+            TaskHandle {
+                join_handle: handle,
+                cancel_token: cancel,
+                aborted_externally: Arc::new(AtomicBool::new(false)),
+                watcher_cancel: CancellationToken::new(),
+                watcher_handle: None,
+                draft_pr_cancel: CancellationToken::new(),
+                draft_pr_handle: None,
+                branch: "ralph/test".to_owned(),
+                log_file: PathBuf::from("/tmp/test-drain.log"),
+                last_rebase_at: None,
+                last_rebase_failure_sha: None,
+                pr_url: None,
+            },
+        );
+
+        let repo_root_lock = Arc::new(Semaphore::new(1));
+
+        // drain_all_children should cancel the token and then collect the task.
+        // We use a timeout to ensure this test doesn't hang.
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            drain_all_children(&config, &mut children, &repo_root_lock),
+        )
+        .await;
+
+        assert!(result.is_ok(), "drain_all_children should complete");
+        assert!(
+            children.is_empty(),
+            "all children should be drained after drain_all_children"
+        );
+    }
+
+    /// Verifies the force-abort path in `drain_all_children_with_deadline`.
+    /// Spawns a genuinely non-cooperative task that blocks a thread (not
+    /// just an async sleep) and ignores cancellation.  With a short drain
+    /// deadline, the function must escalate to `join_handle.abort()` and
+    /// remove the task from the map.  We also assert that no post-drain
+    /// side-effects occur (the task does not continue writing after abort).
+    #[tokio::test]
+    async fn drain_all_children_force_aborts_non_cooperative_task() {
+        use super::{drain_all_children_with_deadline, DaemonRuntimeConfig};
+        use crate::daemon::TaskHandle;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let config = DaemonRuntimeConfig {
+            owner: "test".to_owned(),
+            repo: "repo".to_owned(),
+            base_branch: "main".to_owned(),
+            poll_seconds: 1,
+            max_concurrent: 1,
+            labels: vec![],
+            single_iteration: true,
+            verbose: false,
+            repo_root: PathBuf::from("/tmp/test-drain-abort"),
+            refinement_enabled: false,
+            refinement_backend: "claude".to_owned(),
+            global_config: crate::config::GlobalConfig::default(),
+            auto_rebase_enabled: false,
+            rebase_interval_seconds: 300,
+            max_rebases_per_cycle: 0,
+            rebase_timeout_seconds: 60,
+            rebase_agent_backend: "none".to_owned(),
+            workspace_root: PathBuf::from("/tmp/test-drain-abort/.ralph"),
+            prd_enabled: false,
+            prd_question_backends: vec![],
+            prd_writer_backend: "claude".to_owned(),
+            prd_reviewer_backend: "claude".to_owned(),
+            prd_max_revisions: 1,
+            prd_backend_timeout_secs: 60,
+            prd_shutdown_timeout_secs: 10,
+            git_bin: "git".to_owned(),
+            gh_bin: "gh".to_owned(),
+            max_backend_retries: None,
+        };
+
+        // Counter that the task increments; if it continues running after
+        // drain completes, the counter will keep growing.
+        let side_effect_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter_clone = side_effect_counter.clone();
+
+        // Spawn a non-cooperative task: alternates between a blocking
+        // thread sleep (genuinely non-cooperative — abort cannot preempt
+        // it) and an .await point where abort can take effect.
+        let handle = tokio::spawn(async move {
+            loop {
+                counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Genuine blocking sleep — not abort-cooperative.
+                tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(Duration::from_millis(50));
+                })
+                .await
+                .ok();
+            }
+            // Unreachable but satisfies the return type.
+            #[allow(unreachable_code)]
+            Ok::<crate::workflow::orchestrator::OrchestrationResult, _>(
+                crate::workflow::orchestrator::OrchestrationResult {
+                    summary: String::new(),
+                    loop_number: None,
+                },
+            )
+        });
+
+        let cancel = CancellationToken::new();
+        let mut children: HashMap<u32, TaskHandle> = HashMap::new();
+        children.insert(
+            888,
+            TaskHandle {
+                join_handle: handle,
+                cancel_token: cancel,
+                aborted_externally: Arc::new(AtomicBool::new(false)),
+                watcher_cancel: CancellationToken::new(),
+                watcher_handle: None,
+                draft_pr_cancel: CancellationToken::new(),
+                draft_pr_handle: None,
+                branch: "ralph/test-abort".to_owned(),
+                log_file: PathBuf::from("/tmp/test-drain-abort.log"),
+                last_rebase_at: None,
+                last_rebase_failure_sha: None,
+                pr_url: None,
+            },
+        );
+
+        let repo_root_lock = Arc::new(Semaphore::new(1));
+
+        // Use a very short drain deadline so the non-cooperative task hits
+        // the force-abort path (deadline expires, then join_handle.abort()).
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            drain_all_children_with_deadline(
+                &config,
+                &mut children,
+                &repo_root_lock,
+                Duration::from_millis(500), // short deadline forces abort path
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "drain_all_children_with_deadline should complete within outer timeout"
+        );
+        assert!(
+            children.is_empty(),
+            "all children should be drained (force-aborted) after drain deadline"
+        );
+
+        // Snapshot the counter, wait, and verify it does not advance —
+        // proving the task is truly stopped, not just removed from the map.
+        let snapshot = side_effect_counter.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = side_effect_counter.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            snapshot, after,
+            "task should not produce side effects after force-abort (counter advanced from {snapshot} to {after})"
         );
     }
 }

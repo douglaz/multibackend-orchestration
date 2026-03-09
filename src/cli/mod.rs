@@ -1,4 +1,4 @@
-mod auto;
+pub(crate) mod auto;
 mod backend;
 pub(crate) mod backend_spec;
 mod config;
@@ -157,6 +157,10 @@ pub struct RunArgs {
     /// PR URL to pass through to the orchestration context.
     #[arg(long = "pr-url")]
     pub pr_url: Option<String>,
+    /// Maximum number of backend timeout retries per invocation.
+    /// Defaults to 3 when omitted.
+    #[arg(long = "max-backend-retries")]
+    pub max_backend_retries: Option<u8>,
     /// Workspace root directory. When set, config is loaded from this
     /// directory instead of walking up the directory tree. Used by the
     /// daemon to isolate each worktree's configuration.

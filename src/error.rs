@@ -135,6 +135,9 @@ pub enum RalphError {
 
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+
+    #[error("task cancelled")]
+    Cancelled,
 }
 
 impl RalphError {
@@ -175,7 +178,8 @@ impl RalphError {
             | RalphError::PrdMissingInfo
             | RalphError::PrdCacheMismatch(_)
             | RalphError::TomlEncode(_)
-            | RalphError::Unsupported(_) => false,
+            | RalphError::Unsupported(_)
+            | RalphError::Cancelled => false,
             RalphError::Orchestration(message) => {
                 let lower = message.to_ascii_lowercase();
                 lower.contains("timeout")
@@ -209,6 +213,7 @@ impl RalphError {
             Self::PrdMissingInfo => 12,
             Self::QuickPrdFailed(_) => 13,
             Self::InteractivePrdFailed(_) => 14,
+            Self::Cancelled => 15,
             _ => 1,
         }
     }
