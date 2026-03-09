@@ -246,6 +246,53 @@ where
     Ok(drained)
 }
 
+/// Re-enqueue previously drained amendments back to the queue.
+/// Returns a list of amendment IDs that could not be re-enqueued.
+/// Successfully re-enqueued items remain queued even if later items fail.
+pub fn re_enqueue_amendments(
+    project_dir: &Path,
+    amendments: &[AmendmentRequest],
+) -> Vec<String> {
+    let mut failed_ids = Vec::new();
+    for req in amendments {
+        if let Err(err) = enqueue_amendment(project_dir, req) {
+            warn!(
+                id = %req.id,
+                error = %err,
+                "failed to re-enqueue amendment during rollback"
+            );
+            failed_ids.push(req.id.clone());
+        }
+    }
+    failed_ids
+}
+
+/// Attempt to re-enqueue drained amendments after a phase failure.
+/// Returns the original error if all amendments are restored.
+/// Returns a combined error (original + unrestored IDs) on partial failure.
+pub fn rollback_drained_amendments(
+    project_dir: &Path,
+    drained: &[AmendmentRequest],
+    phase_error: RalphError,
+) -> RalphError {
+    if drained.is_empty() {
+        return phase_error;
+    }
+    let failed_ids = re_enqueue_amendments(project_dir, drained);
+    if failed_ids.is_empty() {
+        warn!(
+            count = drained.len(),
+            "re-enqueued drained amendments after phase failure"
+        );
+        phase_error
+    } else {
+        RalphError::Orchestration(format!(
+            "{phase_error}; amendment rollback partially failed, could not restore IDs: [{}]",
+            failed_ids.join(", ")
+        ))
+    }
+}
+
 pub fn pending_amendment_count(project_dir: &Path) -> Result<usize> {
     let queue_dir = amendment_queue_dir(project_dir);
     if !queue_dir.exists() {
@@ -879,6 +926,56 @@ mod tests {
         assert!(out.contains("priority: P0"));
         assert!(out.contains("source: cli (manual)"));
         assert!(out.contains("Please add retry logic."));
+    }
+
+    #[test]
+    fn re_enqueue_restores_items_to_queue() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+
+        let reqs = vec![
+            sample_request("EXT-1", "first body"),
+            sample_request("EXT-2", "second body"),
+        ];
+
+        let failed = re_enqueue_amendments(project_dir, &reqs);
+        assert!(failed.is_empty(), "all items should be re-enqueued");
+
+        let drained = drain_amendment_queue(project_dir).expect("drain");
+        assert_eq!(drained.len(), 2);
+        let ids: Vec<_> = drained.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"EXT-1"));
+        assert!(ids.contains(&"EXT-2"));
+    }
+
+    #[test]
+    fn re_enqueue_preserves_original_fields() {
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path();
+
+        let req = AmendmentRequest {
+            id: "EXT-ORIG".to_owned(),
+            body: "original body".to_owned(),
+            priority: AmendmentPriority::P1,
+            source: AmendmentSource::FinalReview,
+            source_detail: Some("claude(opus)".to_owned()),
+            created_at: Utc
+                .with_ymd_and_hms(2026, 3, 9, 12, 0, 0)
+                .single()
+                .expect("valid datetime"),
+        };
+
+        let failed = re_enqueue_amendments(project_dir, &[req.clone()]);
+        assert!(failed.is_empty());
+
+        let drained = drain_amendment_queue(project_dir).expect("drain");
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, req.id);
+        assert_eq!(drained[0].body, req.body);
+        assert_eq!(drained[0].priority, req.priority);
+        assert_eq!(drained[0].source, req.source);
+        assert_eq!(drained[0].source_detail, req.source_detail);
+        assert_eq!(drained[0].created_at, req.created_at);
     }
 
     fn sample_request(id: &str, body: &str) -> AmendmentRequest {

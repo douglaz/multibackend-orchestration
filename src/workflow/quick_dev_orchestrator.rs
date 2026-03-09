@@ -22,7 +22,9 @@ use crate::project::artifacts::{
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
     ProjectScopedArtifactWriteInput,
 };
-use crate::project::amendments::{drain_amendment_queue, format_external_amendments_for_prompt};
+use crate::project::amendments::{
+    drain_amendment_queue, format_external_amendments_for_prompt, rollback_drained_amendments,
+};
 use crate::project::lifecycle::reconstruct_project_state;
 use crate::project::load_project_config_if_exists;
 use crate::project::state::{Phase, ProjectState, ProjectStatus, QuickDevPhase};
@@ -343,6 +345,7 @@ impl QuickDevOrchestrator {
                         prompt.push_str(&feedback);
                     }
                     let drained_amendments = drain_amendment_queue(project_dir)?;
+                    let drained_for_rollback = drained_amendments.clone();
                     if !drained_amendments.is_empty() {
                         info!(
                             loop_number,
@@ -356,7 +359,8 @@ impl QuickDevOrchestrator {
                     }
 
                     let impl_backend =
-                        registry.get_or_create_for_role(implementer_spec, "implementer")?;
+                        registry.get_or_create_for_role(implementer_spec, "implementer")
+                            .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
 
                     let mut impl_log =
                         LogWriter::open(log_dir, project_id, Some(loop_number), "quick-dev-impl");
@@ -370,7 +374,8 @@ impl QuickDevOrchestrator {
                         &self.cancel,
                         max_backend_retries,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
 
                     // Write artifact
                     write_artifact(
@@ -384,7 +389,8 @@ impl QuickDevOrchestrator {
                             kind: ArtifactKind::QuickDevPlanImplement,
                             body: &raw,
                         },
-                    )?;
+                    )
+                    .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
 
                     // Transition: PlanAndImplement -> CodexReview
                     review_iteration = 0;
@@ -403,7 +409,8 @@ impl QuickDevOrchestrator {
                         effective.workflow.auto_commit,
                         skip_commit,
                         effective.global.git.sign_commits,
-                    )?;
+                    )
+                    .map_err(|e| rollback_drained_amendments(project_dir, &drained_for_rollback, e))?;
 
                     current_qd_phase = QuickDevPhase::CodexReview;
                 }
