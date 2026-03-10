@@ -116,6 +116,8 @@ CRITICAL FORMAT REQUIREMENTS:
 - Include ALL required H2 sections
 - No preamble or commentary before the H1
 
+`<TS>` is a 14-digit timestamp in `YYYYMMDDHHMMSS` format (digits only, no separators).
+
 If this is the first implementation pass, output `<TS>-impl-notes.md` in this format:
 
 # Implementation Notes
