@@ -1127,6 +1127,33 @@ async fn poll_and_claim(
             continue;
         }
 
+        // Skip issues owned by pr_review_phase: if a resume-pending marker or
+        // staged PR-review amendments exist, pr_review_phase exclusively owns
+        // this issue.  Without this guard, a failed PR-review resume that rolls
+        // back to ralph:ready would let the claim path immediately re-dispatch
+        // as DispatchOrigin::Claim in the same iteration, bypassing the
+        // resume-only safety path.
+        if !config.pr_review_whitelist.is_empty() {
+            let task_id =
+                super::format_task_id(&config.owner, &config.repo, issue.number);
+            if super::pr_review::has_resume_pending_marker(
+                &config.workspace_root,
+                &task_id,
+            ) || super::pr_review::has_staged_amendments(
+                &config.workspace_root,
+                &task_id,
+            ) {
+                if config.verbose {
+                    eprintln!(
+                        "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
+                         owned by pr_review_phase",
+                        issue.number
+                    );
+                }
+                continue;
+            }
+        }
+
         // Claim: ready -> in-progress
         if let Err(err) = github::swap_lifecycle_label(
             &config.owner,
@@ -2671,6 +2698,37 @@ async fn pr_review_phase(
                 continue;
             }
         };
+
+        // Multi-lifecycle normalization: if the issue has more than one
+        // lifecycle label, normalize to ralph:failed and skip this cycle.
+        // This prevents resuming from an ambiguous state and mirrors the
+        // same policy used in the claim flow (poll_and_claim).
+        let lifecycle = github::classify_lifecycle_labels(&labels);
+        if lifecycle.len() > 1 {
+            match github::normalize_multi_lifecycle_labels(
+                &config.owner,
+                &config.repo,
+                candidate.issue_number,
+                &lifecycle,
+            )
+            .await
+            {
+                Ok(true) => {
+                    eprintln!(
+                        "pr-review: normalized multi-lifecycle issue #{} to ralph:failed, skipping",
+                        candidate.issue_number
+                    );
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    eprintln!(
+                        "warning: failed to normalize multi-lifecycle labels on #{} during PR review: {err}",
+                        candidate.issue_number
+                    );
+                }
+            }
+            continue;
+        }
 
         // Resume projects labeled ralph:completed, or ralph:ready only when a
         // resume-pending marker exists (restart-drift: label was swapped to

@@ -3396,7 +3396,8 @@ exit 0
 
     #[test]
     fn parse_pull_comments_filters_replies() {
-        // One top-level inline comment + one reply; only top-level should pass.
+        // One top-level inline comment + one reply; call the production
+        // parse_pull_comments function to verify reply filtering.
         let json = r#"[
             {
                 "id": 100,
@@ -3416,17 +3417,14 @@ exit 0
                 "in_reply_to_id": 100
             }
         ]"#;
-        let parsed: Vec<super::RawPullComment> = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.len(), 2);
-
-        // Filter the same way fetch_pr_review_comments does
-        let top_level: Vec<_> = parsed
-            .iter()
-            .filter(|c| c.in_reply_to_id.is_none())
-            .collect();
-        assert_eq!(top_level.len(), 1, "only top-level comment should be kept");
-        assert_eq!(top_level[0].id, 100);
-        assert_eq!(top_level[0].user.as_ref().unwrap().login, "alice");
+        let comments = super::parse_pull_comments(json, 1);
+        assert_eq!(comments.len(), 1, "only top-level comment should be kept");
+        assert_eq!(comments[0].id, 100);
+        assert_eq!(comments[0].author, "alice");
+        assert_eq!(
+            comments[0].endpoint,
+            super::CommentEndpoint::PullComment
+        );
     }
 
     #[test]

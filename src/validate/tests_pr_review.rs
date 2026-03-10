@@ -61,6 +61,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::partial_swap_failure_clears_marker_on_rollback",
             func: partial_swap_failure_clears_marker_on_rollback,
         },
+        ConformanceTest {
+            name: "pr_review::ready_with_marker_skipped_by_claim",
+            func: ready_with_marker_skipped_by_claim,
+        },
+        ConformanceTest {
+            name: "pr_review::multi_lifecycle_normalized_in_pr_review",
+            func: multi_lifecycle_normalized_in_pr_review,
+        },
     ]
 }
 
@@ -1065,10 +1073,9 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
     })
 }
 
-/// Regression test: when a normal `ralph:ready` claim dispatch runs (not a
-/// PR-review resume), staged PR-review amendments must NOT be drained or
-/// purged.  They should remain in the staging directory for a future
-/// PrReviewResume dispatch to pick up.
+/// Regression test: when a `ralph:ready` issue has staged PR-review amendments,
+/// the claim phase must skip it entirely (pr_review_phase exclusively owns it).
+/// Staged amendments must remain in the staging directory untouched.
 fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let dh =
@@ -1110,8 +1117,8 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
 
         let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        // Issue has ralph:ready label — this triggers a normal Claim dispatch,
-        // NOT a PrReviewResume.
+        // Issue has ralph:ready label — claim phase would normally dispatch it,
+        // but the staged PR-review amendments guard prevents this.
         let issues_json = r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
 
         let output = dh
@@ -1135,16 +1142,23 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
             .expect("daemon start");
         assert_exit_code(&output, 0);
 
-        // Staged amendments must still be present — Claim dispatch must not
-        // drain or purge them.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Claim phase must NOT dispatch this issue — pr_review_phase owns it.
+        assert!(
+            !stderr.contains("dispatched task acme-widgets-42 via claim"),
+            "claim phase should NOT dispatch issue with staged PR-review amendments, got: {stderr}"
+        );
+
+        // Staged amendments must still be present.
         assert!(
             has_staged_amendments(&ws_root, "acme-widgets-42"),
-            "staged amendments should NOT have been drained by normal Claim dispatch"
+            "staged amendments should NOT have been drained"
         );
         let remaining = count_json_files(&staging_dir);
         assert_eq!(
             remaining, 1,
-            "expected 1 staged amendment to survive Claim dispatch, got {remaining}"
+            "expected 1 staged amendment to survive, got {remaining}"
         );
     })
 }
@@ -1499,6 +1513,225 @@ fn partial_swap_failure_clears_marker_on_rollback(h: &RalphHarness) -> TestResul
         assert!(
             has_staged_amendments(&ws_root, "acme-widgets-42"),
             "staged amendments must be preserved after swap failure"
+        );
+    })
+}
+
+/// Regression test: when a PR-review resume fails and rolls back to
+/// `ralph:ready`, the same loop's claim phase must NOT re-claim and dispatch
+/// the issue as `DispatchOrigin::Claim`.  The resume-pending marker prevents
+/// the claim phase from taking ownership.
+fn ready_with_marker_skipped_by_claim(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+
+        // Create a branch WITHOUT project files (no prompt.md) so the
+        // PrReviewResume dispatch fails fast, rolling back to ralph:ready.
+        let branch = "ralph/issue-42";
+        let branch_out = Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&dh.repo_root)
+            .output()
+            .expect("git branch");
+        assert!(
+            branch_out.status.success(),
+            "git branch failed: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+
+        // Set resume-pending marker (simulates a previous cycle's marker).
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
+        // Pre-stage an amendment so pr_review_phase finds this task.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has ralph:ready (simulating rollback after failed resume).
+        // It also appears in the issue list so the claim phase would see it.
+        let issues_json = r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+
+        let label_log = dh.temp_dir.path().join("claim_bypass.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues_json),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The claim phase must NOT have dispatched this issue — the
+        // resume-pending marker should have made the claim guard skip it.
+        // Only pr_review_phase should attempt dispatch.
+        assert!(
+            !stderr.contains("dispatched task acme-widgets-42 via claim"),
+            "claim phase should NOT have dispatched issue with resume-pending marker; stderr: {stderr}"
+        );
+
+        // Staged amendments must survive.
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved"
+        );
+    })
+}
+
+/// Regression test: when pr_review_phase encounters an issue with multiple
+/// lifecycle labels, it should normalize to ralph:failed and skip that cycle
+/// rather than resuming from an ambiguous state.
+fn multi_lifecycle_normalized_in_pr_review(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment so pr_review_phase finds this task.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "P2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let label_log = dh.temp_dir.path().join("multi_lifecycle.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has BOTH ralph:completed and ralph:ready — ambiguous multi-lifecycle state.
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:ready"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // pr_review_phase should have normalized the multi-lifecycle state.
+        assert!(
+            stderr.contains("pr-review: normalized multi-lifecycle issue #42"),
+            "stderr should log multi-lifecycle normalization, got: {stderr}"
+        );
+
+        // Should NOT have attempted a resume dispatch.
+        assert!(
+            !stderr.contains("pr-review: dispatched task"),
+            "should not dispatch when lifecycle is ambiguous, got: {stderr}"
+        );
+
+        // Staged amendments survive (normalization skips, doesn't drain).
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should survive normalization skip"
+        );
+
+        // Verify label log shows normalization (remove of non-failed labels, add of ralph:failed).
+        assert!(
+            label_log.exists(),
+            "label log should exist after normalization"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:failed"),
+            "label log should show ralph:failed being added, got: {log_content}"
         );
     })
 }
