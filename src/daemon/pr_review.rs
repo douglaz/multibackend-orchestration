@@ -277,9 +277,20 @@ pub fn reset_project_state_for_resume(
     let json = serde_json::to_string_pretty(&state).map_err(|err| {
         RalphError::Orchestration(format!("failed to serialize reset project state: {err}"))
     })?;
-    fs::write(&state_path, json).map_err(|err| {
+
+    // Atomic write via temp-file + rename to avoid leaving a truncated/corrupt
+    // state.json if the process crashes mid-write.
+    let tmp_path = state_path.with_extension("json.tmp");
+    fs::write(&tmp_path, &json).map_err(|err| {
         RalphError::Orchestration(format!(
-            "failed to write reset project state {}: {err}",
+            "failed to write reset project state tmp {}: {err}",
+            tmp_path.display()
+        ))
+    })?;
+    fs::rename(&tmp_path, &state_path).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to rename reset project state {} -> {}: {err}",
+            tmp_path.display(),
             state_path.display()
         ))
     })?;
@@ -439,6 +450,7 @@ fn extract_issue_number_from_task_id(task_id: &str, owner: &str, repo: &str) -> 
 pub struct PrReviewPollResult {
     pub task_id: String,
     pub issue_number: u32,
+    pub pr_number: u32,
     pub new_amendment_count: u32,
 }
 
@@ -566,14 +578,27 @@ pub async fn poll_pr_reviews(
 
             // Convert to amendment and stage.
             let amendment = comment_to_amendment(comment, task_info.pr_number);
-            stage_amendment(&config.workspace_root, &task_info.task_id, &amendment)?;
+            if let Err(err) = stage_amendment(&config.workspace_root, &task_info.task_id, &amendment) {
+                eprintln!(
+                    "warning: failed to stage PR review amendment for {} comment {}: {err}",
+                    task_info.task_id, comment.id
+                );
+                continue;
+            }
 
             state.processed_keys.insert(key);
             new_count += 1;
 
             // Persist dedup state incrementally after each staged amendment so
             // that a crash/error after staging won't cause re-enqueue next cycle.
-            state.save(&config.workspace_root, &task_info.task_id)?;
+            if let Err(err) = state.save(&config.workspace_root, &task_info.task_id) {
+                eprintln!(
+                    "warning: failed to persist PR review dedup state for {}: {err}",
+                    task_info.task_id
+                );
+                // Continue processing — worst case a crash will re-enqueue
+                // this comment, but we don't abort the entire poll cycle.
+            }
 
             info!(
                 task_id = %task_info.task_id,
@@ -589,6 +614,7 @@ pub async fn poll_pr_reviews(
             results.push(PrReviewPollResult {
                 task_id: task_info.task_id.clone(),
                 issue_number: task_info.issue_number,
+                pr_number: task_info.pr_number,
                 new_amendment_count: new_count,
             });
         }

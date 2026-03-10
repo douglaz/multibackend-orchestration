@@ -2507,7 +2507,13 @@ async fn pr_review_phase(
     let mut pr_open_cache: HashMap<u32, bool> = HashMap::new();
 
     let poll_results =
-        super::pr_review::poll_pr_reviews(config, children, &mut pr_open_cache).await?;
+        match super::pr_review::poll_pr_reviews(config, children, &mut pr_open_cache).await {
+            Ok(results) => results,
+            Err(err) => {
+                eprintln!("warning: PR review polling failed, continuing with staged amendments: {err}");
+                Vec::new()
+            }
+        };
 
     // Build the set of task_ids that received new amendments this cycle.
     let newly_staged: std::collections::HashSet<String> = poll_results
@@ -2534,15 +2540,10 @@ async fn pr_review_phase(
     // populated the cache).
     let mut candidates: Vec<DispatchCandidate> = Vec::new();
     for r in &poll_results {
-        let pr_num = all_tasks
-            .iter()
-            .find(|t| t.task_id == r.task_id)
-            .map(|t| t.pr_number)
-            .unwrap_or(0);
         candidates.push(DispatchCandidate {
             task_id: r.task_id.clone(),
             issue_number: r.issue_number,
-            pr_number: pr_num,
+            pr_number: r.pr_number,
         });
     }
 
@@ -2687,14 +2688,21 @@ async fn pr_review_phase(
                     candidate.task_id
                 );
                 // Revert label swap on dispatch failure.
-                let _ = github::swap_lifecycle_label(
+                if let Err(rollback_err) = github::swap_lifecycle_label(
                     &config.owner,
                     &config.repo,
                     candidate.issue_number,
                     "ralph:in-progress",
                     from_label,
                 )
-                .await;
+                .await
+                {
+                    eprintln!(
+                        "warning: pr-review dispatch rollback failed for {} (issue #{}): {rollback_err}; \
+                         issue may be stuck in ralph:in-progress — will be recovered at next daemon restart",
+                        candidate.task_id, candidate.issue_number
+                    );
+                }
             }
         }
     }

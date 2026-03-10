@@ -512,47 +512,54 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
             "stderr should log resume attempt for quick-dev project"
         );
 
-        // After dispatch, the project state inside the worktree should be reset.
-        // Find the worktree directory.
-        let worktrees_dir = ws_root.join("daemon").join("worktrees");
-        if worktrees_dir.exists() {
-            // Look for the worktree that contains issue-55
-            for entry in fs::read_dir(&worktrees_dir)
-                .unwrap_or_else(|_| panic!("read worktrees dir"))
-                .filter_map(|e| e.ok())
-            {
-                let state_path = entry
-                    .path()
-                    .join(".ralph")
-                    .join("projects")
-                    .join("issue-55")
-                    .join("state.json");
-                if state_path.exists() {
-                    let content =
-                        fs::read_to_string(&state_path).expect("read worktree state.json");
-                    let loaded: serde_json::Value =
-                        serde_json::from_str(&content).expect("parse state");
-                    assert_eq!(
-                        loaded["status"], "in_progress",
-                        "status should be reset to in_progress"
-                    );
-                    assert_eq!(
-                        loaded["quick_dev_phase"], "plan_and_implement",
-                        "quick_dev_phase should be plan_and_implement"
-                    );
-                    assert_eq!(
-                        loaded["current_phase"], "implementing",
-                        "current_phase should be implementing"
-                    );
-                    return; // found and verified
-                }
-            }
-        }
-
-        // If worktree wasn't found, check stderr for dispatch attempt as minimum.
+        // Verify dispatch was completed successfully.
         assert!(
             stderr.contains("pr-review: dispatched task"),
-            "dispatch should have been attempted even if worktree is hard to locate"
+            "stderr should confirm task was dispatched"
+        );
+
+        // After dispatch, the project state inside the worktree must be reset.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        assert!(
+            worktrees_dir.exists(),
+            "worktrees directory must exist after dispatch"
+        );
+
+        let mut found_state = false;
+        for entry in fs::read_dir(&worktrees_dir)
+            .unwrap_or_else(|_| panic!("read worktrees dir"))
+            .filter_map(|e| e.ok())
+        {
+            let state_path = entry
+                .path()
+                .join(".ralph")
+                .join("projects")
+                .join("issue-55")
+                .join("state.json");
+            if state_path.exists() {
+                let content =
+                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let loaded: serde_json::Value =
+                    serde_json::from_str(&content).expect("parse state");
+                assert_eq!(
+                    loaded["status"], "in_progress",
+                    "status should be reset to in_progress"
+                );
+                assert_eq!(
+                    loaded["quick_dev_phase"], "plan_and_implement",
+                    "quick_dev_phase should be plan_and_implement"
+                );
+                assert_eq!(
+                    loaded["current_phase"], "implementing",
+                    "current_phase should be implementing"
+                );
+                found_state = true;
+                break;
+            }
+        }
+        assert!(
+            found_state,
+            "state.json must exist in worktree after dispatch and contain reset state"
         );
     })
 }
@@ -658,13 +665,15 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         );
 
         // Verify label was reverted (completed → in-progress → completed).
-        if label_log.exists() {
-            let log_content = fs::read_to_string(&label_log).expect("read label log");
-            assert!(
-                log_content.contains("ralph:completed"),
-                "label should be reverted to ralph:completed after dispatch failure, got: {log_content}"
-            );
-        }
+        assert!(
+            label_log.exists(),
+            "label log must exist to verify rollback occurred"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:completed"),
+            "label should be reverted to ralph:completed after dispatch failure, got: {log_content}"
+        );
     })
 }
 
@@ -751,53 +760,62 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
             "stderr should log resume attempt for quick-dev project with stale counters"
         );
 
-        // After dispatch, check the project state inside the worktree.
-        let worktrees_dir = ws_root.join("daemon").join("worktrees");
-        if worktrees_dir.exists() {
-            for entry in fs::read_dir(&worktrees_dir)
-                .unwrap_or_else(|_| panic!("read worktrees dir"))
-                .filter_map(|e| e.ok())
-            {
-                let state_path = entry
-                    .path()
-                    .join(".ralph")
-                    .join("projects")
-                    .join("issue-60")
-                    .join("state.json");
-                if state_path.exists() {
-                    let content =
-                        fs::read_to_string(&state_path).expect("read worktree state.json");
-                    let loaded: serde_json::Value =
-                        serde_json::from_str(&content).expect("parse state");
-                    assert_eq!(
-                        loaded["status"], "in_progress",
-                        "status should be reset to in_progress"
-                    );
-                    assert_eq!(
-                        loaded["quick_dev_phase"], "plan_and_implement",
-                        "quick_dev_phase should be plan_and_implement"
-                    );
-                    assert_eq!(
-                        loaded["quick_dev_review_iteration"], 0,
-                        "quick_dev_review_iteration must be reset to 0, not stale value"
-                    );
-                    assert_eq!(
-                        loaded["quick_dev_final_review_attempts"], 0,
-                        "quick_dev_final_review_attempts must be reset to 0, not stale value"
-                    );
-                    assert_eq!(
-                        loaded["phase_iteration"], 1,
-                        "phase_iteration must be normalized to 1"
-                    );
-                    return; // found and verified
-                }
-            }
-        }
-
-        // If worktree wasn't found, check stderr for dispatch attempt as minimum.
+        // Verify dispatch was completed successfully.
         assert!(
             stderr.contains("pr-review: dispatched task"),
-            "dispatch should have been attempted even if worktree is hard to locate"
+            "stderr should confirm task was dispatched"
+        );
+
+        // After dispatch, the project state inside the worktree must be reset.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        assert!(
+            worktrees_dir.exists(),
+            "worktrees directory must exist after dispatch"
+        );
+
+        let mut found_state = false;
+        for entry in fs::read_dir(&worktrees_dir)
+            .unwrap_or_else(|_| panic!("read worktrees dir"))
+            .filter_map(|e| e.ok())
+        {
+            let state_path = entry
+                .path()
+                .join(".ralph")
+                .join("projects")
+                .join("issue-60")
+                .join("state.json");
+            if state_path.exists() {
+                let content =
+                    fs::read_to_string(&state_path).expect("read worktree state.json");
+                let loaded: serde_json::Value =
+                    serde_json::from_str(&content).expect("parse state");
+                assert_eq!(
+                    loaded["status"], "in_progress",
+                    "status should be reset to in_progress"
+                );
+                assert_eq!(
+                    loaded["quick_dev_phase"], "plan_and_implement",
+                    "quick_dev_phase should be plan_and_implement"
+                );
+                assert_eq!(
+                    loaded["quick_dev_review_iteration"], 0,
+                    "quick_dev_review_iteration must be reset to 0, not stale value"
+                );
+                assert_eq!(
+                    loaded["quick_dev_final_review_attempts"], 0,
+                    "quick_dev_final_review_attempts must be reset to 0, not stale value"
+                );
+                assert_eq!(
+                    loaded["phase_iteration"], 1,
+                    "phase_iteration must be normalized to 1"
+                );
+                found_state = true;
+                break;
+            }
+        }
+        assert!(
+            found_state,
+            "state.json must exist in worktree after dispatch and contain reset state with cleared counters"
         );
     })
 }
