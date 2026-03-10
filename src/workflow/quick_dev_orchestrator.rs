@@ -283,6 +283,7 @@ impl QuickDevOrchestrator {
             .unwrap_or_default();
 
         let mut last_review_feedback = String::new();
+        let mut last_final_review_feedback = String::new();
         let mut pending_pre_commit_feedback: Option<String> = None;
 
         // When resuming at ApplyFixes, reconstruct reviewer feedback from the
@@ -291,6 +292,10 @@ impl QuickDevOrchestrator {
         // and persists on disk across process restarts.
         if matches!(current_qd_phase, QuickDevPhase::ApplyFixes) {
             last_review_feedback = load_latest_review_feedback(project_dir, loop_number, loop_slug);
+        }
+        if matches!(current_qd_phase, QuickDevPhase::PlanAndImplement) {
+            last_final_review_feedback =
+                load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
         }
 
         // Compute a safe upper bound on phase transitions from the configured
@@ -330,6 +335,7 @@ impl QuickDevOrchestrator {
                         effective,
                         &prompt_content,
                         &spec_content,
+                        &last_final_review_feedback,
                         &git_diff,
                     )?;
 
@@ -656,6 +662,7 @@ impl QuickDevOrchestrator {
                 }
 
                 QuickDevPhase::FinalReview => {
+                    last_final_review_feedback.clear();
                     // Guard-at-entry: if resuming with final_review_attempts
                     // already at the limit, skip both backend calls and
                     // force-complete immediately.
@@ -959,7 +966,10 @@ impl QuickDevOrchestrator {
                         });
                     }
 
-                    // Issues found: increment counter and check guard
+                    // Issues found: capture the handoff before re-entering
+                    // PlanAndImplement, then increment the retry counter.
+                    last_final_review_feedback =
+                        load_latest_final_review_feedback(project_dir, loop_number, loop_slug);
                     final_review_attempts += 1;
 
                     // Persist incremented counter immediately for crash-safety
@@ -1188,17 +1198,62 @@ fn compute_phase_iteration(phase: &QuickDevPhase, review_iteration: u32) -> u32 
 /// resuming at the `ApplyFixes` phase after a process restart.
 fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: &str) -> String {
     let suffix = ArtifactKind::QuickDevCodexReview { satisfied: false }.file_name();
+    load_latest_artifact_body(project_dir, loop_number, loop_slug, &suffix)
+}
+
+/// Load the most recent quick-dev final-review issue artifacts and format them
+/// into a closure-oriented handoff for the next PlanAndImplement round.
+fn load_latest_final_review_feedback(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+) -> String {
+    let mut sections = Vec::new();
+
+    for role in ["implementer", "reviewer"] {
+        let suffix = ArtifactKind::QuickDevFinalReview {
+            role: role.to_owned(),
+            complete: false,
+        }
+        .file_name();
+        let body = load_latest_artifact_body(project_dir, loop_number, loop_slug, &suffix);
+        if body.trim().is_empty() {
+            continue;
+        }
+
+        let label = if role == "implementer" {
+            "Implementer Final Review Findings"
+        } else {
+            "Reviewer Final Review Findings"
+        };
+        sections.push(format!("### {label}\n{body}"));
+    }
+
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "This implementation round was reopened by final review. Close every item below before treating the project as complete.\n\
+             For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n{}",
+            sections.join("\n\n")
+        )
+    }
+}
+
+fn load_latest_artifact_body(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+    suffix: &str,
+) -> String {
     let artifact_rel =
-        match resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &suffix) {
+        match resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, suffix) {
             Ok(Some(rel)) => rel,
             _ => return String::new(),
         };
     let artifact_path = project_dir.join(&artifact_rel);
     match fs::read_to_string(&artifact_path) {
-        Ok(content) => {
-            // Strip frontmatter (between leading `---` lines) to get the body.
-            strip_backend_frontmatter(&content)
-        }
+        Ok(content) => strip_backend_frontmatter(&content),
         Err(_) => String::new(),
     }
 }
@@ -1331,6 +1386,7 @@ fn build_plan_implement_prompt(
     effective: &EffectiveConfig,
     prompt_content: &str,
     spec_content: &str,
+    final_review_handoff: &str,
     git_diff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
@@ -1339,6 +1395,14 @@ fn build_plan_implement_prompt(
         QUICK_DEV_IMPLEMENTER_GUARDRAILS.to_owned(),
     );
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
+    vars.insert(
+        "final_review_handoff".to_owned(),
+        if final_review_handoff.trim().is_empty() {
+            "None.".to_owned()
+        } else {
+            final_review_handoff.to_owned()
+        },
+    );
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("current_diff".to_owned(), git_diff.to_owned());
     build_quick_dev_plan_implement_prompt(&effective.templates.quick_dev_plan_implement, &vars)
@@ -1509,7 +1573,9 @@ async fn execute_backend(
 
 const QUICK_DEV_IMPLEMENTER_GUARDRAILS: &str = r#"- Keep edits scoped to this loop's feature and acceptance criteria.
 - In review responses, address each required change explicitly.
-- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits."#;
+- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits.
+- When re-entering after final review, treat the handoff as a closure checklist: fix each finding or cite exact evidence it is already satisfied.
+- Re-check adjacent invariants on touched paths (callers, error/rollback/panic/retry behavior, state transitions, and tests) instead of patching only the reported symptom."#;
 
 const QUICK_DEV_REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
 - Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop."#;
@@ -1906,6 +1972,51 @@ mod tests {
         assert_eq!(loaded.phase_iteration, 3);
         assert_eq!(loaded.quick_dev_review_iteration, 3);
         assert_eq!(loaded.quick_dev_final_review_attempts, 1);
+    }
+
+    #[test]
+    fn load_latest_final_review_feedback_combines_roles() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path();
+        let loop_dir = project_dir.join("loops/001-quick-dev");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nImplementer issue body\n",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
+        )
+        .unwrap();
+
+        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
+        assert!(handoff.contains("Implementer Final Review Findings"));
+        assert!(handoff.contains("Implementer issue body"));
+        assert!(handoff.contains("Reviewer Final Review Findings"));
+        assert!(handoff.contains("Reviewer issue body"));
+    }
+
+    #[test]
+    fn build_plan_implement_prompt_includes_final_review_handoff() {
+        let effective = make_test_effective(
+            Some("claude".to_owned()),
+            Some("codex".to_owned()),
+            "claude".to_owned(),
+        );
+        let prompt = build_plan_implement_prompt(
+            &effective,
+            "master prompt",
+            "spec body",
+            "final review handoff body",
+            "diff body",
+        )
+        .unwrap();
+
+        assert!(prompt.contains("final review handoff body"));
+        assert!(prompt.contains("Fix the root cause, not just the reported symptom"));
     }
 
     // Helper to build a minimal EffectiveConfig for testing
