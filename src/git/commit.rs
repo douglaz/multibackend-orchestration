@@ -1023,11 +1023,8 @@ mod tests {
         let repo = temp.path();
 
         // ISO-basic timestamped stray files
-        fs::write(
-            repo.join("20260309T165947Z-impl-notes.md"),
-            "stray notes\n",
-        )
-        .expect("write iso-basic stray notes");
+        fs::write(repo.join("20260309T165947Z-impl-notes.md"), "stray notes\n")
+            .expect("write iso-basic stray notes");
         fs::write(
             repo.join("20260309T165947Z-impl-response-001.md"),
             "stray response\n",

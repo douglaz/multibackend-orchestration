@@ -11,6 +11,7 @@ pub mod harness;
 pub mod mock_scripts;
 pub mod runner;
 
+mod tests_amendments;
 mod tests_auto_init;
 mod tests_backend_exec;
 mod tests_commands;
@@ -41,7 +42,6 @@ mod tests_sessions;
 mod tests_stray_cleanup;
 mod tests_streaming;
 mod tests_tail;
-mod tests_amendments;
 mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
