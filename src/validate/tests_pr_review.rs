@@ -679,11 +679,13 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         );
 
         // Verify label was reverted (completed → in-progress → completed).
-        // The forward swap logs: `edit ... --remove-label ralph:completed --add-label ralph:in-progress`
-        // The rollback swap logs: `edit ... --remove-label ralph:in-progress --add-label ralph:completed`
-        // We must assert the rollback as a distinct second transition by checking
-        // for `--add-label ralph:completed` (not just any mention of ralph:completed,
-        // which the forward transition also contains via --remove-label).
+        // swap_lifecycle_label performs two separate `gh issue edit` calls
+        // (remove then add), so we get 4 log lines total for a forward + rollback:
+        //   1. --remove-label ralph:completed
+        //   2. --add-label ralph:in-progress
+        //   3. --remove-label ralph:in-progress
+        //   4. --add-label ralph:completed
+        // Assert the expected operations appear in order rather than at fixed indices.
         assert!(
             label_log.exists(),
             "label log must exist to verify rollback occurred"
@@ -691,20 +693,23 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         let log_content = fs::read_to_string(&label_log).expect("read label log");
         let lines: Vec<&str> = log_content.lines().collect();
         assert!(
-            lines.len() >= 2,
-            "label log should have at least 2 entries (forward + rollback), got {} lines: {log_content}",
+            lines.len() >= 4,
+            "label log should have at least 4 entries (remove+add for forward, remove+add for rollback), got {} lines: {log_content}",
             lines.len()
         );
-        assert!(
-            lines[0].contains("--add-label ralph:in-progress"),
-            "first label operation should be forward swap (add in-progress), got: {}",
-            lines[0]
-        );
-        assert!(
-            lines[1].contains("--add-label ralph:completed"),
-            "second label operation should be rollback (add completed), got: {}",
-            lines[1]
-        );
+        // Forward swap: remove completed, then add in-progress.
+        let fwd_remove = lines.iter().position(|l| l.contains("--remove-label") && l.contains("ralph:completed"));
+        let fwd_add = lines.iter().position(|l| l.contains("--add-label") && l.contains("ralph:in-progress"));
+        assert!(fwd_remove.is_some(), "forward swap should remove ralph:completed, got: {log_content}");
+        assert!(fwd_add.is_some(), "forward swap should add ralph:in-progress, got: {log_content}");
+        assert!(fwd_remove.unwrap() < fwd_add.unwrap(), "remove completed must precede add in-progress");
+        // Rollback swap: remove in-progress, then add completed.
+        let rb_remove = lines.iter().rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
+        let rb_add = lines.iter().rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
+        assert!(rb_remove.is_some(), "rollback swap should remove ralph:in-progress, got: {log_content}");
+        assert!(rb_add.is_some(), "rollback swap should add ralph:completed, got: {log_content}");
+        assert!(rb_remove.unwrap() < rb_add.unwrap(), "remove in-progress must precede add completed in rollback");
+        assert!(fwd_add.unwrap() < rb_remove.unwrap(), "forward swap must complete before rollback begins");
     })
 }
 
@@ -1165,6 +1170,8 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
         );
 
         // Verify label was rolled back (completed → in-progress → completed).
+        // swap_lifecycle_label does two separate `gh issue edit` calls (remove then add),
+        // so forward + rollback yields 4 log lines.
         assert!(
             label_log.exists(),
             "label log must exist to verify rollback occurred"
@@ -1172,15 +1179,16 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
         let log_content = fs::read_to_string(&label_log).expect("read label log");
         let lines: Vec<&str> = log_content.lines().collect();
         assert!(
-            lines.len() >= 2,
-            "label log should have at least 2 entries (forward + rollback), got {} lines: {log_content}",
+            lines.len() >= 4,
+            "label log should have at least 4 entries (remove+add for forward, remove+add for rollback), got {} lines: {log_content}",
             lines.len()
         );
-        assert!(
-            lines[1].contains("--add-label ralph:completed"),
-            "second label operation should be rollback (add completed), got: {}",
-            lines[1]
-        );
+        // Rollback must add ralph:completed after removing ralph:in-progress.
+        let rb_remove = lines.iter().rposition(|l| l.contains("--remove-label") && l.contains("ralph:in-progress"));
+        let rb_add = lines.iter().rposition(|l| l.contains("--add-label") && l.contains("ralph:completed"));
+        assert!(rb_remove.is_some(), "rollback should remove ralph:in-progress, got: {log_content}");
+        assert!(rb_add.is_some(), "rollback should add ralph:completed, got: {log_content}");
+        assert!(rb_remove.unwrap() < rb_add.unwrap(), "remove in-progress must precede add completed in rollback");
     })
 }
 

@@ -641,18 +641,36 @@ pub async fn poll_pr_reviews(
                 continue;
             }
 
-            state.processed_keys.insert(key);
+            state.processed_keys.insert(key.clone());
             new_count += 1;
 
             // Persist dedup state incrementally after each staged amendment so
             // that a crash/error after staging won't cause re-enqueue next cycle.
             if let Err(err) = state.save(&config.workspace_root, &task_info.task_id) {
                 eprintln!(
-                    "warning: failed to persist PR review dedup state for {}: {err}",
+                    "warning: failed to persist PR review dedup state for {}: {err}; \
+                     reverting staged amendment to avoid dedup violation",
                     task_info.task_id
                 );
-                // Continue processing — worst case a crash will re-enqueue
-                // this comment, but we don't abort the entire poll cycle.
+                // Revert: remove the staged file and in-memory key so the
+                // comment retries cleanly on the next poll cycle without
+                // duplicate-enqueue risk (the staged file would survive a
+                // later purge while the durable dedup state never recorded it).
+                state.processed_keys.remove(&key);
+                new_count -= 1;
+                let staged_filename = format!(
+                    "{}.json",
+                    crate::project::amendments::sanitize_id(&amendment.id),
+                );
+                let staged_path = staging_dir(&config.workspace_root, &task_info.task_id)
+                    .join(staged_filename);
+                if let Err(rm_err) = fs::remove_file(&staged_path) {
+                    eprintln!(
+                        "warning: failed to remove staged amendment {}: {rm_err}",
+                        staged_path.display()
+                    );
+                }
+                continue;
             }
 
             info!(
