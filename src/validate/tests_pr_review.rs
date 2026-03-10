@@ -31,6 +31,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::quick_dev_resume_resets_phase",
             func: quick_dev_resume_resets_phase,
         },
+        ConformanceTest {
+            name: "pr_review::dispatch_failure_preserves_staged_amendments",
+            func: dispatch_failure_preserves_staged_amendments,
+        },
     ]
 }
 
@@ -545,6 +549,105 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
     })
 }
 
+/// Set up a completed project with staged amendments, then run a daemon tick
+/// where dispatch will fail (mock gh `repo clone` returns error).  Assert that
+/// staged amendments are preserved and the label is reverted to `ralph:completed`.
+fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        // Use a mock gh that makes `repo clone` fail, causing dispatch to error.
+        let gh_path = write_dispatch_failure_mock_gh(&dh).expect("write failing mock gh");
+
+        let label_log = dh.temp_dir.path().join("fail_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify dispatch failure was logged.
+        assert!(
+            stderr.contains("warning: failed to dispatch task"),
+            "stderr should indicate dispatch failure, got: {stderr}"
+        );
+
+        // Staged amendments must survive the failed dispatch.
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved after dispatch failure"
+        );
+
+        // Verify label was reverted (completed → in-progress → completed).
+        if label_log.exists() {
+            let log_content = fs::read_to_string(&label_log).expect("read label log");
+            assert!(
+                log_content.contains("ralph:completed"),
+                "label should be reverted to ralph:completed after dispatch failure, got: {log_content}"
+            );
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -864,4 +967,145 @@ fn setup_mock_backend(dh: &RalphHarness) {
     .expect("set openrouter backend");
     dh.ralph_ok(["config", "set", "backends.openrouter.args", "[]"])
         .expect("set openrouter args");
+}
+
+/// Write a mock gh script identical to `write_pr_review_mock_gh` except that
+/// `repo clone` returns an error, causing `dispatch_task` to fail.
+fn write_dispatch_failure_mock_gh(h: &RalphHarness) -> crate::Result<String> {
+    let script = h.write_mock_script(
+        "gh",
+        r###"#!/bin/sh
+# Mock gh that fails on repo clone to simulate dispatch failure.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then want_labels=1; fi
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *) echo "mock gh: unhandled issue subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf ''; exit 0 ;;
+      create) printf 'https://github.com/acme/widgets/pull/1\n'; exit 0 ;;
+      edit) exit 0 ;;
+      *) echo "mock gh: unhandled pr subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  api)
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+    endpoint="$2"
+    has_jq=0
+    for arg in "$@"; do
+      if [ "$arg" = "--jq" ]; then has_jq=1; fi
+    done
+    case "$endpoint" in
+      repos/*/pulls/*/comments)
+        if [ -n "${MOCK_GH_PR_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_PR_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/issues/*/comments)
+        if [ -n "${MOCK_GH_ISSUE_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUE_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*/reviews)
+        if [ -n "${MOCK_GH_REVIEWS:-}" ]; then
+          printf '%s' "$MOCK_GH_REVIEWS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*)
+        if [ "$has_jq" = "1" ]; then
+          printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
+          exit 0
+        fi
+        printf '{"state":"%s"}' "${MOCK_GH_PR_STATE:-open}"
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled api endpoint: $endpoint" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *) echo "mock gh: unhandled label subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        # Fail on clone to simulate dispatch failure.
+        echo "mock gh: simulated clone failure" >&2
+        exit 1
+        ;;
+      view) printf 'acme/widgets\n'; exit 0 ;;
+      *) echo "mock gh: unhandled repo subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###,
+    )?;
+    let base = script
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    Ok(format!("{base}:{existing}"))
 }

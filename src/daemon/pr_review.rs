@@ -106,7 +106,9 @@ pub fn stage_amendment(
 }
 
 /// Drain all staged amendments for a task into the project's amendment-queue
-/// inside the worktree.
+/// inside the worktree.  Files are **copied** (not moved) so that they survive
+/// a dispatch failure — call [`purge_staged_amendments`] after the task spawn
+/// succeeds to remove the originals.
 ///
 /// Returns the number of amendments drained.
 pub fn drain_staged_amendments(
@@ -154,19 +156,26 @@ pub fn drain_staged_amendments(
                 dst.display()
             ))
         })?;
-        fs::remove_file(&src).map_err(|err| {
-            RalphError::Orchestration(format!(
-                "failed to remove staged amendment {}: {err}",
-                src.display()
-            ))
-        })?;
         count += 1;
     }
 
-    // Clean up empty staging dir
-    let _ = fs::remove_dir(&src_dir);
-
     Ok(count)
+}
+
+/// Remove staged amendment files for a task after a successful dispatch.
+/// This is the counterpart to [`drain_staged_amendments`] and must only be
+/// called once the task spawn has succeeded.
+pub fn purge_staged_amendments(workspace_root: &Path, task_id: &str) {
+    let src_dir = staging_dir(workspace_root, task_id);
+    if !src_dir.exists() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(&src_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    let _ = fs::remove_dir(&src_dir);
 }
 
 /// Check if there are any staged amendments for a task.
@@ -740,10 +749,10 @@ mod tests {
         stage_amendment(ws_root, task_id, &amendment).expect("stage");
         assert!(has_staged_amendments(ws_root, task_id));
 
-        // Drain
+        // Drain (copies without deleting — staged files survive for retry)
         let count = drain_staged_amendments(ws_root, task_id, &project_dir).expect("drain");
         assert_eq!(count, 1);
-        assert!(!has_staged_amendments(ws_root, task_id));
+        assert!(has_staged_amendments(ws_root, task_id), "drain is copy-only");
 
         // Verify amendment landed in queue
         let queue_dir = project_dir.join("amendment-queue");
@@ -756,6 +765,10 @@ mod tests {
         let content = fs::read_to_string(entries[0].path()).expect("read amendment");
         let loaded: AmendmentRequest = serde_json::from_str(&content).expect("parse");
         assert_eq!(loaded.id, "PR-42-pull_comment-100");
+
+        // Purge clears staged files after successful spawn
+        purge_staged_amendments(ws_root, task_id);
+        assert!(!has_staged_amendments(ws_root, task_id));
     }
 
     #[test]
@@ -948,6 +961,53 @@ mod tests {
         // Drain should work into the project dir
         let count = drain_staged_amendments(ws_root, task_id, project_dir).expect("drain");
         assert_eq!(count, 1, "staged amendment should be drainable after reset");
+    }
+
+    #[test]
+    fn drain_preserves_staged_files_until_purge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "acme-widgets-99";
+
+        // Stage an amendment.
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-1".to_string(),
+            body: "fix it".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#1".to_string()),
+            created_at: Utc::now(),
+        };
+        stage_amendment(ws_root, task_id, &amendment).expect("stage");
+        assert!(has_staged_amendments(ws_root, task_id));
+
+        // Drain into a project directory — should copy, NOT delete.
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let count = drain_staged_amendments(ws_root, task_id, &project_dir).expect("drain");
+        assert_eq!(count, 1);
+
+        // Staged files must still exist after drain (copy-only).
+        assert!(
+            has_staged_amendments(ws_root, task_id),
+            "staged amendments must survive drain (not deleted until purge)"
+        );
+
+        // Amendment queue should have the file.
+        let queue_dir = project_dir.join("amendment-queue");
+        assert!(queue_dir.exists());
+        let queue_count = fs::read_dir(&queue_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(queue_count, 1);
+
+        // Now purge — should remove staged files.
+        purge_staged_amendments(ws_root, task_id);
+        assert!(
+            !has_staged_amendments(ws_root, task_id),
+            "staged amendments should be gone after purge"
+        );
     }
 
     #[test]

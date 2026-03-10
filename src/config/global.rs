@@ -1416,6 +1416,9 @@ pub(crate) fn set_global_config_value(
             crate::daemon::rebase_agent::parse_rebase_agent_backend(raw_value)?;
             config.workspace.daemon_rebase_agent_backend = raw_value.trim().to_owned();
         }
+        "workspace.daemon_pr_review_whitelist" => {
+            config.workspace.daemon_pr_review_whitelist = cfg_parse_string_list(raw_value)?;
+        }
         "workflow.max_review_iterations" => {
             config.workflow.max_review_iterations = cfg_parse_u32(raw_value, key)?;
         }
@@ -3644,6 +3647,41 @@ planner_state_in_prompt = "summary"
         // File should be unchanged.
         let result = std::fs::read_to_string(&path).expect("read");
         assert_eq!(result, original, "file should be untouched on error");
+    }
+
+    #[test]
+    fn set_global_config_value_daemon_pr_review_whitelist_roundtrip() {
+        let mut config = GlobalConfig::default();
+        assert!(config.workspace.daemon_pr_review_whitelist.is_empty());
+
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_pr_review_whitelist",
+            r#"["alice","bob"]"#,
+        )
+        .expect("set whitelist should succeed");
+
+        assert_eq!(
+            config.workspace.daemon_pr_review_whitelist,
+            vec!["alice".to_owned(), "bob".to_owned()]
+        );
+
+        // Roundtrip through TOML serialization.
+        let toml_str = toml::to_string(&config).expect("serialize");
+        let reparsed: GlobalConfig = toml::from_str(&toml_str).expect("deserialize roundtrip");
+        assert_eq!(
+            reparsed.workspace.daemon_pr_review_whitelist,
+            vec!["alice".to_owned(), "bob".to_owned()]
+        );
+
+        // Setting to empty list should clear.
+        set_global_config_value(
+            &mut config,
+            "workspace.daemon_pr_review_whitelist",
+            "[]",
+        )
+        .expect("set empty whitelist should succeed");
+        assert!(config.workspace.daemon_pr_review_whitelist.is_empty());
     }
 
     #[test]

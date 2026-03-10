@@ -1751,6 +1751,11 @@ async fn dispatch_task(
         None
     };
 
+    // Staged amendment files were copied (not moved) during drain — now that
+    // spawn succeeded, purge the originals so they are not re-drained on a
+    // future cycle.
+    super::pr_review::purge_staged_amendments(&config.workspace_root, &task_id);
+
     eprintln!("dispatched task {task_id} (in-process)");
 
     Ok(TaskHandle {
