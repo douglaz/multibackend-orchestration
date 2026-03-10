@@ -528,8 +528,9 @@ fn completion_guard_rejects_with_pending_amendments(h: &RalphHarness) -> TestRes
 }
 
 /// Verify that an amendment arriving during the completing/final-review window
-/// (after the planning-phase guard passes) is caught by the late guard
-/// immediately before the successful completion return.
+/// (after the planning-phase guard passes) causes the late guard to reopen
+/// planning instead of finalizing completion.  On the next planning pass the
+/// amendment is drained and the project completes successfully.
 fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "amend-late-guard";
@@ -566,37 +567,25 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
                 "--skip-commit",
             ])
             .expect("ralph run should execute");
-        assert_exit_code(&output, 1);
+
+        // The late guard reopens planning; on the second pass the amendment is
+        // drained and completion succeeds.
+        assert_exit_code(&output, 0);
 
         let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
         assert!(
-            stderr.contains("completion blocked:")
-                && stderr
-                    .contains("amendment(s) arrived in the queue during completing/final-review"),
-            "late guard should block completion with descriptive error, got stderr: {stderr}"
+            stderr
+                .contains("amendments arrived during completing/final-review; reopening planning"),
+            "late guard should log reopening message, got stderr: {stderr}"
         );
 
+        // Amendment should have been consumed (drained during 2nd planning pass)
         let pending =
             pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
-        assert!(
-            pending > 0,
-            "late guard should not drain or mutate pending amendment queue"
+        assert_eq!(
+            pending, 0,
+            "amendment should be consumed after late guard reopens planning, got pending={pending}"
         );
-
-        // Verify no .json files were renamed to .inflight (guard must not
-        // drain or mutate queue files).
-        let queue_dir = h.project_dir(project_id).join("amendment-queue");
-        if queue_dir.exists() {
-            let inflight_count = fs::read_dir(&queue_dir)
-                .expect("read queue dir")
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "inflight"))
-                .count();
-            assert_eq!(
-                inflight_count, 0,
-                "late guard must not rename .json to .inflight; found {inflight_count} .inflight file(s)"
-            );
-        }
     })
 }
 

@@ -362,7 +362,12 @@ impl QuickDevOrchestrator {
                     let impl_backend = registry
                         .get_or_create_for_role(implementer_spec, "implementer")
                         .map_err(|e| {
-                            rollback_drained_amendments(project_dir, &drained_for_rollback, e)
+                            rollback_drained_amendments(
+                                project_dir,
+                                &drained_for_rollback,
+                                &deferred_inflight,
+                                e,
+                            )
                         })?;
 
                     let mut impl_log =
@@ -379,7 +384,12 @@ impl QuickDevOrchestrator {
                     )
                     .await
                     .map_err(|e| {
-                        rollback_drained_amendments(project_dir, &drained_for_rollback, e)
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
                     })?;
 
                     // Write artifact
@@ -396,7 +406,12 @@ impl QuickDevOrchestrator {
                         },
                     )
                     .map_err(|e| {
-                        rollback_drained_amendments(project_dir, &drained_for_rollback, e)
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
                     })?;
 
                     // Transition: PlanAndImplement -> CodexReview
@@ -413,7 +428,12 @@ impl QuickDevOrchestrator {
                         final_review_attempts,
                     );
                     save_state_to_disk(state, project_dir).map_err(|e| {
-                        rollback_drained_amendments(project_dir, &drained_for_rollback, e)
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
                     })?;
 
                     // Durable success: state is persisted.  Safe to clean up

@@ -438,13 +438,17 @@ pub fn re_enqueue_amendments(project_dir: &Path, amendments: &[AmendmentRequest]
 }
 
 /// Attempt to re-enqueue drained amendments after a phase failure.
+/// Also cleans up any inflight files that were deferred for cleanup,
+/// since the re-enqueued amendments will create new `.json` files.
 /// Returns the original error if all amendments are restored.
 /// Returns a combined error (original + unrestored IDs) on partial failure.
 pub fn rollback_drained_amendments(
     project_dir: &Path,
     drained: &[AmendmentRequest],
+    inflight_paths: &[PathBuf],
     phase_error: RalphError,
 ) -> RalphError {
+    cleanup_drained_inflight_files(inflight_paths);
     if drained.is_empty() {
         return phase_error;
     }
