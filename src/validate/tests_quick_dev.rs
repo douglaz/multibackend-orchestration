@@ -831,6 +831,16 @@ fn resume_from_plan_and_implement_includes_final_review_handoff(h: &RalphHarness
         )
         .expect("write reviewer final-review artifact");
 
+        let final_review_template = h
+            .temp_dir
+            .path()
+            .join("qd-final-handoff-final-review-template.md");
+        fs::write(
+            &final_review_template,
+            "You are a final reviewer auditing a completed project for correctness, safety, and robustness.\n\nQUICK_DEV_FINAL_REVIEW_TEST_MARKER\n\n{{system_guardrails}}\n",
+        )
+        .expect("write final review template");
+
         let capture_prompt = h.temp_dir.path().join("qd-final-handoff-prompt.txt");
         let capture_script = format!(
             r#"#!/usr/bin/env bash
@@ -839,11 +849,16 @@ set -euo pipefail
 prompt="$(cat)"
 capture_file="{}"
 
-if ! grep -q "final reviewer auditing" <<< "$prompt" && [ ! -f "$capture_file" ]; then
+is_final_review_prompt=0
+if [[ "$prompt" == *"QUICK_DEV_FINAL_REVIEW_TEST_MARKER"* ]]; then
+  is_final_review_prompt=1
+fi
+
+if [[ $is_final_review_prompt -eq 0 ]] && [ ! -f "$capture_file" ]; then
   printf '%s' "$prompt" > "$capture_file"
 fi
 
-if grep -q "final reviewer auditing" <<< "$prompt"; then
+if [[ $is_final_review_prompt -eq 1 ]]; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -888,6 +903,14 @@ fi
             "--global".to_owned(),
         ])
         .expect("set capture implementer command");
+        h.ralph_ok(vec![
+            "config".to_owned(),
+            "set".to_owned(),
+            "templates.final_reviewer".to_owned(),
+            final_review_template.to_string_lossy().into_owned(),
+            "--global".to_owned(),
+        ])
+        .expect("set final review template");
 
         let output = h
             .ralph([

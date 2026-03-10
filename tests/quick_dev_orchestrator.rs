@@ -1186,6 +1186,15 @@ async fn resume_from_plan_and_implement_includes_final_review_handoff() {
     )
     .expect("write reviewer final-review artifact");
 
+    let final_review_template = _temp
+        .path()
+        .join("quick_dev_final_review_capture_template.md");
+    fs::write(
+        &final_review_template,
+        "You are a final reviewer auditing a completed project for correctness, safety, and robustness.\n\nQUICK_DEV_FINAL_REVIEW_TEST_MARKER\n\n{{system_guardrails}}\n",
+    )
+    .expect("write final review template");
+
     let capture_script = _temp.path().join("mock_impl_final_handoff_capture.sh");
     let capture_wrapper = _temp
         .path()
@@ -1197,11 +1206,16 @@ set -euo pipefail
 prompt="$(cat)"
 
 capture_file="{}"
-if [[ "$prompt" != *"final reviewer auditing"* ]] && [[ ! -f "$capture_file" ]]; then
+is_final_review_prompt=0
+if [[ "$prompt" == *"QUICK_DEV_FINAL_REVIEW_TEST_MARKER"* ]]; then
+    is_final_review_prompt=1
+fi
+
+if [[ $is_final_review_prompt -eq 0 ]] && [[ ! -f "$capture_file" ]]; then
     echo "$prompt" > "$capture_file"
 fi
 
-if [[ "$prompt" == *"final reviewer auditing"* ]]; then
+if [[ $is_final_review_prompt -eq 1 ]]; then
     cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -1235,6 +1249,7 @@ fi
 
     let mut workspace = Workspace::load(workspace_root.clone()).expect("load workspace");
     workspace.config.backends.claude.command = capture_wrapper.to_string_lossy().to_string();
+    workspace.config.templates.final_reviewer = final_review_template.to_string_lossy().to_string();
     workspace.save_config().expect("save config");
 
     let workspace = Workspace::load(workspace_root).expect("reload workspace");
