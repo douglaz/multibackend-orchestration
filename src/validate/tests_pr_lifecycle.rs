@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use super::*;
 
@@ -429,10 +429,7 @@ fn daemon_config(repo_root: &Path) -> crate::daemon::runtime::DaemonRuntimeConfi
     }
 }
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use super::env_lock;
 
 struct PathEnvGuard {
     original_path: String,

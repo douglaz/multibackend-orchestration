@@ -288,6 +288,7 @@ impl QuickDevOrchestrator {
 
         let mut last_review_feedback = String::new();
         let mut pending_pre_commit_feedback: Option<String> = None;
+        let mut pending_final_review_handoff: Option<String> = None;
 
         // When resuming at ApplyFixes, reconstruct reviewer feedback from the
         // latest changes-requested artifact so the apply-fixes prompt is not
@@ -295,6 +296,15 @@ impl QuickDevOrchestrator {
         // and persists on disk across process restarts.
         if matches!(current_qd_phase, QuickDevPhase::ApplyFixes) {
             last_review_feedback = load_latest_review_feedback(project_dir, loop_number, loop_slug);
+        }
+
+        // When resuming at PlanAndImplement after a final-review reloop,
+        // reconstruct the final-review findings so the implementer knows
+        // exactly what to fix.
+        if matches!(current_qd_phase, QuickDevPhase::PlanAndImplement) && final_review_attempts > 0
+        {
+            pending_final_review_handoff =
+                load_final_review_findings(project_dir, loop_number, loop_slug);
         }
 
         // Compute a safe upper bound on phase transitions from the configured
@@ -330,11 +340,14 @@ impl QuickDevOrchestrator {
                     info!(loop_number, "quick-dev: PlanAndImplement phase");
 
                     let git_diff = current_git_diff(&self.workspace.root)?;
+                    let final_review_handoff =
+                        pending_final_review_handoff.take().unwrap_or_default();
                     let mut prompt = build_plan_implement_prompt(
                         effective,
                         &prompt_content,
                         &spec_content,
                         &git_diff,
+                        &final_review_handoff,
                     )?;
 
                     // If re-entering after a pre-commit failure, append the
@@ -1103,6 +1116,12 @@ impl QuickDevOrchestrator {
 
                     review_iteration = 0;
                     current_qd_phase = QuickDevPhase::PlanAndImplement;
+
+                    // Capture final-review findings so the next
+                    // PlanAndImplement prompt tells the implementer what
+                    // specifically needs to be fixed.
+                    pending_final_review_handoff =
+                        Some(format_final_review_handoff(&impl_body, &rev_body));
                 }
             }
         }
@@ -1263,6 +1282,63 @@ fn load_latest_review_feedback(project_dir: &Path, loop_number: u32, loop_slug: 
     }
 }
 
+/// Format final-review findings from both reviewers into the content for the
+/// `{{final_review_handoff}}` template variable.
+fn format_final_review_handoff(impl_body: &str, rev_body: &str) -> String {
+    let mut handoff = String::from(
+        "This implementation round was reopened by final review. Close every item below before treating the project as complete.\n\
+         For each finding, either change code/tests or cite exact evidence that it is already satisfied.\n\n\
+         ### Reviewer Final Review Findings\n",
+    );
+    handoff.push_str(rev_body);
+    handoff.push_str("\n\n### Implementer Final Review Findings\n");
+    handoff.push_str(impl_body);
+    handoff
+}
+
+/// Load final-review findings from disk when resuming at PlanAndImplement
+/// after a FinalReview -> PlanAndImplement reloop.  This ensures the handoff
+/// survives process restarts.
+fn load_final_review_findings(
+    project_dir: &Path,
+    loop_number: u32,
+    loop_slug: &str,
+) -> Option<String> {
+    // Try to load findings from both the reviewer and implementer final-review
+    // artifacts.  The "issues" variants are written when the review finds problems.
+    let rev_suffix = ArtifactKind::QuickDevFinalReview {
+        role: "reviewer".to_owned(),
+        complete: false,
+    }
+    .file_name();
+    let impl_suffix = ArtifactKind::QuickDevFinalReview {
+        role: "implementer".to_owned(),
+        complete: false,
+    }
+    .file_name();
+
+    let rev_body = resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &rev_suffix)
+        .ok()
+        .flatten()
+        .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
+        .map(|c| strip_backend_frontmatter(&c))
+        .unwrap_or_default();
+
+    let impl_body =
+        resolve_artifact_path_by_suffix(project_dir, loop_number, loop_slug, &impl_suffix)
+            .ok()
+            .flatten()
+            .and_then(|rel| fs::read_to_string(project_dir.join(&rel)).ok())
+            .map(|c| strip_backend_frontmatter(&c))
+            .unwrap_or_default();
+
+    if rev_body.is_empty() && impl_body.is_empty() {
+        return None;
+    }
+
+    Some(format_final_review_handoff(&impl_body, &rev_body))
+}
+
 /// Persist project state to `state.json` using atomic write semantics:
 /// 1. Write to a temporary file in the same directory.
 /// 2. Flush + fsync the temp file to ensure data reaches disk.
@@ -1392,6 +1468,7 @@ fn build_plan_implement_prompt(
     prompt_content: &str,
     spec_content: &str,
     git_diff: &str,
+    final_review_handoff: &str,
 ) -> Result<String> {
     let mut vars = BTreeMap::new();
     vars.insert(
@@ -1401,6 +1478,10 @@ fn build_plan_implement_prompt(
     vars.insert("feature_spec".to_owned(), spec_content.to_owned());
     vars.insert("master_prompt".to_owned(), prompt_content.to_owned());
     vars.insert("current_diff".to_owned(), git_diff.to_owned());
+    vars.insert(
+        "final_review_handoff".to_owned(),
+        final_review_handoff.to_owned(),
+    );
     build_quick_dev_plan_implement_prompt(&effective.templates.quick_dev_plan_implement, &vars)
 }
 
@@ -1569,7 +1650,9 @@ async fn execute_backend(
 
 const QUICK_DEV_IMPLEMENTER_GUARDRAILS: &str = r#"- Keep edits scoped to this loop's feature and acceptance criteria.
 - In review responses, address each required change explicitly.
-- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits."#;
+- If a required change is already satisfied, cite concrete evidence (files/tests) instead of unrelated edits.
+- When re-entering after final review, treat the handoff as a closure checklist: fix each finding or cite exact evidence it is already satisfied.
+- Re-check adjacent invariants on touched paths (callers, error/rollback/panic/retry behavior, state transitions, and tests) instead of patching only the reported symptom."#;
 
 const QUICK_DEV_REVIEWER_GUARDRAILS: &str = r#"- Treat `.ralph/**` as orchestration runtime state; it is out of scope for feature review.
 - Focus on acceptance criteria and actual behavior, not whether code was first introduced in this loop."#;
@@ -2067,5 +2150,51 @@ mod tests {
             global: GlobalConfig::default(),
             project: None,
         }
+    }
+
+    #[test]
+    fn format_final_review_handoff_includes_both_bodies() {
+        let result = format_final_review_handoff("impl findings here", "reviewer findings here");
+        assert!(result.contains("### Reviewer Final Review Findings"));
+        assert!(result.contains("reviewer findings here"));
+        assert!(result.contains("### Implementer Final Review Findings"));
+        assert!(result.contains("impl findings here"));
+        assert!(result.contains("reopened by final review"));
+    }
+
+    #[test]
+    fn load_final_review_findings_returns_none_when_no_artifacts() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_final_review_findings_reconstructs_from_artifacts() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let loop_dir = tmp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        // Write reviewer issues artifact
+        std::fs::write(
+            loop_dir.join("quick-dev-final-review-reviewer-issues.md"),
+            "---\nrole: reviewer\n---\nreviewer bug report",
+        )
+        .expect("write reviewer artifact");
+
+        // Write implementer issues artifact
+        std::fs::write(
+            loop_dir.join("quick-dev-final-review-implementer-issues.md"),
+            "---\nrole: implementer\n---\nimpl bug report",
+        )
+        .expect("write impl artifact");
+
+        let result = load_final_review_findings(tmp.path(), 1, "demo");
+        assert!(result.is_some());
+        let handoff = result.unwrap();
+        assert!(handoff.contains("reviewer bug report"));
+        assert!(handoff.contains("impl bug report"));
+        assert!(handoff.contains("### Reviewer Final Review Findings"));
+        assert!(handoff.contains("### Implementer Final Review Findings"));
     }
 }

@@ -8,8 +8,8 @@
   "prompt_review_completed": true,
   "parent_project": null,
   "current_loop": 15,
-  "current_phase": "final_review",
-  "quick_dev_phase": "final_review",
+  "current_phase": "reviewing",
+  "quick_dev_phase": "codex_review",
   "phase_iteration": 1,
   "status": "in_progress",
   "loops": [
@@ -45,6 +45,6 @@
     "records": []
   },
   "pr_url": "https://github.com/douglaz/multibackend-orchestration/pull/202",
-  "quick_dev_review_iteration": 2,
-  "quick_dev_final_review_attempts": 9
+  "quick_dev_review_iteration": 0,
+  "quick_dev_final_review_attempts": 10
 }

@@ -47,6 +47,17 @@ mod tests_validate_flags;
 
 pub use runner::{ConformanceTest, TestResult, TestRunner};
 
+/// Process-wide mutex for env-var mutations in validate tests.
+///
+/// The validate runner executes tests in parallel via `thread::scope`, and
+/// `std::env::set_var` is process-global.  All test modules that mutate env
+/// vars (`PATH`, `RALPH_E2E_GH_LOG`, etc.) must acquire this shared lock to
+/// prevent cross-module races.
+pub(crate) fn env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[derive(Debug, Args, Clone)]
 pub struct ValidateArgs {
     #[arg(long, value_name = "PATH")]

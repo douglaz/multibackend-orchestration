@@ -8,9 +8,11 @@ use crate::validate::assertions::{
 };
 use crate::validate::harness::RalphHarness;
 use crate::validate::mock_scripts::{
-    quick_dev_final_review_always_issues_script, quick_dev_final_review_issues_once_script,
-    quick_dev_implementer_mock_script, quick_dev_reviewer_always_reject_script,
-    quick_dev_reviewer_mock_script, quick_dev_reviewer_reject_once_script,
+    quick_dev_final_review_always_issues_script,
+    quick_dev_final_review_issues_once_logging_script,
+    quick_dev_final_review_issues_once_script, quick_dev_implementer_mock_script,
+    quick_dev_reviewer_always_reject_script, quick_dev_reviewer_mock_script,
+    quick_dev_reviewer_reject_once_script,
 };
 use crate::validate::runner::{ConformanceTest, TestResult};
 
@@ -103,6 +105,10 @@ pub fn tests() -> Vec<ConformanceTest> {
         ConformanceTest {
             name: "quick_dev::transition_boundary_resume_persists_destination",
             func: transition_boundary_resume_persists_destination,
+        },
+        ConformanceTest {
+            name: "quick_dev::final_review_handoff_injected_on_reloop",
+            func: final_review_handoff_injected_on_reloop,
         },
     ]
 }
@@ -1702,5 +1708,74 @@ fn transition_boundary_resume_persists_destination(h: &RalphHarness) -> TestResu
 
         let state = load_state_json(h, project_id);
         assert_eq!(state["status"].as_str().unwrap(), "completed");
+    })
+}
+
+/// When final review finds issues and reloops to PlanAndImplement, the
+/// implementer prompt on re-entry must contain the final review findings
+/// (the "Final Review Handoff" section).
+fn final_review_handoff_injected_on_reloop(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let project_id = "qd-fr-handoff-001";
+
+        let fr_state_file = h.temp_dir.path().join("qd-fr-state-handoff");
+        let fr_state_str = fr_state_file.to_string_lossy().into_owned();
+
+        let prompt_log_file = h.temp_dir.path().join("qd-prompt-log-handoff");
+        let prompt_log_str = prompt_log_file.to_string_lossy().into_owned();
+
+        let impl_count_file = h.temp_dir.path().join("qd-impl-count-handoff");
+        let impl_count_str = impl_count_file.to_string_lossy().into_owned();
+
+        setup_quick_dev(
+            h,
+            project_id,
+            &quick_dev_final_review_issues_once_logging_script(),
+            &quick_dev_final_review_issues_once_logging_script(),
+        );
+
+        let output = h
+            .ralph_env(
+                [
+                    "quick-dev-run",
+                    "--project",
+                    project_id,
+                    "--implementer-backend",
+                    "claude",
+                    "--reviewer-backend",
+                    "codex",
+                    "--skip-commit",
+                    "--max-final-review-retries",
+                    "3",
+                ],
+                &[
+                    ("QUICK_DEV_FR_STATE_FILE", &fr_state_str),
+                    ("QUICK_DEV_PROMPT_LOG", &prompt_log_str),
+                    ("QUICK_DEV_IMPL_COUNT", &impl_count_str),
+                ],
+            )
+            .expect("quick-dev-run should execute");
+
+        assert_exit_code(&output, 0);
+        assert_stdout_contains(&output, "quick-dev completed successfully");
+
+        // The prompt log should exist (written on the second PlanAndImplement call)
+        assert_file_exists(&prompt_log_file);
+
+        // The logged prompt must contain the final review handoff
+        let prompt_content =
+            fs::read_to_string(&prompt_log_file).expect("read prompt log");
+        assert!(
+            prompt_content.contains("Final Review Handoff"),
+            "re-entry prompt must contain 'Final Review Handoff'; prompt:\n{prompt_content}"
+        );
+        assert!(
+            prompt_content.contains("Reviewer Final Review Findings"),
+            "re-entry prompt must contain reviewer findings section"
+        );
+        assert!(
+            prompt_content.contains("Mock issue requiring re-implementation"),
+            "re-entry prompt must contain the actual final review issue text"
+        );
     })
 }

@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use super::*;
@@ -512,10 +511,7 @@ fn write_mock_gh_path(h: &RalphHarness, body: &str) -> crate::Result<String> {
     Ok(format!("{base}:{existing}"))
 }
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use super::env_lock;
 
 struct PathEnvGuard {
     original_path: String,

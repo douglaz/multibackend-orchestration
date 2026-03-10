@@ -42,6 +42,13 @@ fn default_quick_dev_plan_implement_template() -> &'static str {
 
 Produce a practical implementation for the requested work, keeping scope tight and aligned to the specification.
 
+If the Final Review Handoff section contains findings, treat it as blocking closure work, not background context:
+- Map each finding to a concrete code/test change, or cite exact evidence that it is already satisfied.
+- Fix the root cause, not just the reported symptom.
+- Re-check adjacent invariants on touched paths: callers, rollback/error/panic/retry paths, state transitions, and regression tests.
+- Add or tighten tests for every real bug fix when feasible.
+- In your response, briefly explain how each open finding was closed.
+
 CRITICAL FORMAT REQUIREMENTS:
 - Return markdown body only (no YAML frontmatter)
 - Your response MUST begin with an H1 as the VERY FIRST LINE
@@ -54,6 +61,9 @@ CRITICAL FORMAT REQUIREMENTS:
 
 ## Feature Specification
 {{feature_spec}}
+
+## Final Review Handoff
+{{final_review_handoff}}
 
 ## Master Prompt
 {{master_prompt}}
