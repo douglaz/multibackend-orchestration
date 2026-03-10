@@ -186,7 +186,7 @@ fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
         let amendment = serde_json::json!({
             "id": "PR-99-issue_comment-1",
             "body": "fix the auth bug",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#99/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
@@ -386,7 +386,7 @@ fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
             let amendment = serde_json::json!({
                 "id": format!("PR-{pr_num}-issue_comment-1"),
                 "body": "fix it",
-                "priority": "p2",
+                "priority": "P2",
                 "source": "pr-review",
                 "source_detail": format!("pr#{pr_num}/issue_comment#1"),
                 "created_at": "2024-01-01T00:00:00Z"
@@ -476,7 +476,7 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
         let amendment = serde_json::json!({
             "id": "PR-77-issue_comment-1",
             "body": "fix it",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#77/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
@@ -610,7 +610,7 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         let amendment = serde_json::json!({
             "id": "PR-99-issue_comment-1",
             "body": "fix the auth bug",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#99/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
@@ -754,7 +754,7 @@ fn quick_dev_resume_clears_stale_counters(h: &RalphHarness) -> TestResult {
         let amendment = serde_json::json!({
             "id": "PR-80-issue_comment-1",
             "body": "fix it",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#80/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
@@ -897,7 +897,7 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
         let amendment = serde_json::json!({
             "id": "PR-99-issue_comment-1",
             "body": "fix the auth bug",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#99/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
@@ -1023,7 +1023,7 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
         let amendment = serde_json::json!({
             "id": "PR-99-issue_comment-500",
             "body": "fix the auth bug",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#99/issue_comment#500",
             "created_at": "2024-01-01T00:00:00Z"
@@ -1120,7 +1120,7 @@ fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResu
         let amendment = serde_json::json!({
             "id": "PR-99-issue_comment-1",
             "body": "fix the auth bug",
-            "priority": "p2",
+            "priority": "P2",
             "source": "pr-review",
             "source_detail": "pr#99/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
