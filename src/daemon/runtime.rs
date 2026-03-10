@@ -1493,6 +1493,16 @@ async fn dispatch_task(
 
     if resume_existing_project {
         eprintln!("dispatch: event=project_resume task_id={task_id} project_id={project_id}");
+    } else if origin == DispatchOrigin::PrReviewResume {
+        // PrReviewResume dispatches MUST resume an existing project.  If the
+        // project state is missing or corrupt (no prompt.md on the branch),
+        // fall back would start a fresh implementation cycle with a placeholder
+        // prompt — which is never correct.  Fail fast so pr_review_phase can
+        // roll back the label swap and preserve staged amendments.
+        return Err(RalphError::Orchestration(format!(
+            "PrReviewResume dispatch for {task_id} cannot resume: project state not found in worktree \
+             (prompt.md missing on branch {branch_name}); aborting to preserve staged amendments"
+        )));
     } else {
         let legacy_slug_branch = {
             let wt = wt_path.clone();
@@ -2398,6 +2408,13 @@ async fn complete_task_attempt(
         .await?;
     }
 
+    // Clear resume-pending marker now that the task has reached a terminal
+    // state.  This is the durable source-of-truth: the marker persists from
+    // pr_review_phase through dispatch and task execution, and is only cleared
+    // here — ensuring crash recovery at any earlier point can still detect the
+    // in-flight resume.
+    super::pr_review::clear_resume_pending_marker(&config.workspace_root, task_id);
+
     // Worktree cleanup
     cleanup_worktree_for_terminal_state(config, task_id, terminal_label, repo_root_lock).await;
 
@@ -2553,7 +2570,16 @@ async fn pr_review_phase(
         if newly_staged.contains(&task_info.task_id) {
             continue; // already a candidate from poll_results
         }
-        if super::pr_review::has_staged_amendments(&config.workspace_root, &task_info.task_id) {
+        // A task qualifies for re-dispatch if it has staged amendments OR a
+        // resume-pending marker.  The marker case covers crash-after-dispatch:
+        // staged files were purged but the task never reached terminal
+        // completion, so the marker is the durable recovery signal.
+        if super::pr_review::has_staged_amendments(&config.workspace_root, &task_info.task_id)
+            || super::pr_review::has_resume_pending_marker(
+                &config.workspace_root,
+                &task_info.task_id,
+            )
+        {
             candidates.push(DispatchCandidate {
                 task_id: task_info.task_id.clone(),
                 issue_number: task_info.issue_number,
@@ -2700,10 +2726,10 @@ async fn pr_review_phase(
         {
             Ok(handle) => {
                 children.insert(candidate.issue_number, handle);
-                super::pr_review::clear_resume_pending_marker(
-                    &config.workspace_root,
-                    &candidate.task_id,
-                );
+                // NOTE: resume-pending marker is intentionally NOT cleared here.
+                // It persists until terminal completion (complete_task) so that a
+                // daemon crash after dispatch but before amendment consumption
+                // can still be recovered on restart.
                 eprintln!(
                     "pr-review: dispatched task {} for PR review amendments",
                     candidate.task_id

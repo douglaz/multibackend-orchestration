@@ -49,6 +49,14 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::claim_dispatch_does_not_drain_staged",
             func: claim_dispatch_does_not_drain_staged,
         },
+        ConformanceTest {
+            name: "pr_review::resume_blocks_fresh_dispatch_on_missing_project",
+            func: resume_blocks_fresh_dispatch_on_missing_project,
+        },
+        ConformanceTest {
+            name: "pr_review::crash_after_dispatch_recovers_via_marker",
+            func: crash_after_dispatch_recovers_via_marker,
+        },
     ]
 }
 
@@ -671,14 +679,31 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         );
 
         // Verify label was reverted (completed → in-progress → completed).
+        // The forward swap logs: `edit ... --remove-label ralph:completed --add-label ralph:in-progress`
+        // The rollback swap logs: `edit ... --remove-label ralph:in-progress --add-label ralph:completed`
+        // We must assert the rollback as a distinct second transition by checking
+        // for `--add-label ralph:completed` (not just any mention of ralph:completed,
+        // which the forward transition also contains via --remove-label).
         assert!(
             label_log.exists(),
             "label log must exist to verify rollback occurred"
         );
         let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let lines: Vec<&str> = log_content.lines().collect();
         assert!(
-            log_content.contains("ralph:completed"),
-            "label should be reverted to ralph:completed after dispatch failure, got: {log_content}"
+            lines.len() >= 2,
+            "label log should have at least 2 entries (forward + rollback), got {} lines: {log_content}",
+            lines.len()
+        );
+        assert!(
+            lines[0].contains("--add-label ralph:in-progress"),
+            "first label operation should be forward swap (add in-progress), got: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("--add-label ralph:completed"),
+            "second label operation should be rollback (add completed), got: {}",
+            lines[1]
         );
     })
 }
@@ -1033,6 +1058,230 @@ fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
         assert_eq!(
             remaining, 1,
             "expected 1 staged amendment to survive Claim dispatch, got {remaining}"
+        );
+    })
+}
+
+/// Regression test: PrReviewResume dispatch must fail fast when the project
+/// state is missing (no prompt.md on the branch) instead of falling through
+/// to a fresh dispatch with a placeholder prompt.  Assert that the label is
+/// rolled back and staged amendments are preserved.
+fn resume_blocks_fresh_dispatch_on_missing_project(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+
+        // Create a branch WITHOUT project files (no prompt.md) so that
+        // should_resume_issue_project returns false.
+        let branch = "ralph/issue-42";
+        let branch_out = Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&dh.repo_root)
+            .output()
+            .expect("git branch");
+        assert!(
+            branch_out.status.success(),
+            "git branch failed: {}",
+            String::from_utf8_lossy(&branch_out.stderr)
+        );
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let label_log = dh.temp_dir.path().join("no_resume_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify dispatch failure was logged (PrReviewResume refuses fresh dispatch).
+        assert!(
+            stderr.contains("warning: failed to dispatch task")
+                || stderr.contains("PrReviewResume dispatch"),
+            "stderr should indicate PrReviewResume dispatch failure, got: {stderr}"
+        );
+
+        // Staged amendments must survive the failed dispatch.
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments must be preserved when PrReviewResume fails due to missing project"
+        );
+
+        // Verify label was rolled back (completed → in-progress → completed).
+        assert!(
+            label_log.exists(),
+            "label log must exist to verify rollback occurred"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        let lines: Vec<&str> = log_content.lines().collect();
+        assert!(
+            lines.len() >= 2,
+            "label log should have at least 2 entries (forward + rollback), got {} lines: {log_content}",
+            lines.len()
+        );
+        assert!(
+            lines[1].contains("--add-label ralph:completed"),
+            "second label operation should be rollback (add completed), got: {}",
+            lines[1]
+        );
+    })
+}
+
+/// Regression test: when a daemon crashes after dispatch succeeds (staged files
+/// purged) but before the task reaches terminal completion, the resume-pending
+/// marker should still cause re-dispatch on next startup.
+fn crash_after_dispatch_recovers_via_marker(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Simulate crash-after-dispatch: resume-pending marker exists but
+        // staged amendments have been purged (drain+purge happened before crash).
+        // No staged amendments.
+        assert!(
+            !has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "precondition: no staged amendments"
+        );
+
+        // Set the resume-pending marker — the durable recovery signal.
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
+        let label_log = dh.temp_dir.path().join("crash_recovery_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has ralph:ready label — simulating post-restart reconciliation
+        // (the in-progress label from the previous dispatch was reconciled to
+        // ralph:ready on startup).
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:ready"},{"name":"ralph:pr-review"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify pr_review_phase picked up the task via marker (not staged amendments).
+        assert!(
+            stderr.contains("pr-review: resuming ralph:ready task"),
+            "stderr should log resume of ralph:ready task via marker, got: {stderr}"
+        );
+
+        // Verify dispatch was attempted.
+        assert!(
+            stderr.contains("pr-review: dispatched task"),
+            "stderr should confirm task was dispatched for crash recovery, got: {stderr}"
+        );
+
+        // Verify label swap occurred (ready → in-progress).
+        assert!(
+            label_log.exists(),
+            "label log should exist after label swap"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:in-progress"),
+            "label log should contain ralph:in-progress swap, got: {log_content}"
+        );
+
+        // After single-iteration completes (task reaches terminal state),
+        // the resume-pending marker should be cleared.
+        assert!(
+            !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker should be cleared after task reaches terminal state"
         );
     })
 }
