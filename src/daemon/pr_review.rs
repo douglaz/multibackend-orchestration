@@ -154,7 +154,12 @@ pub fn drain_staged_amendments(
                 dst.display()
             ))
         })?;
-        let _ = fs::remove_file(&src);
+        fs::remove_file(&src).map_err(|err| {
+            RalphError::Orchestration(format!(
+                "failed to remove staged amendment {}: {err}",
+                src.display()
+            ))
+        })?;
         count += 1;
     }
 
@@ -215,8 +220,9 @@ pub fn reset_project_state_for_resume(
     state["status"] = serde_json::Value::String("in_progress".to_string());
 
     if is_quick {
-        state["quick_dev_phase"] = serde_json::Value::String("codex_review".to_string());
-        state["current_phase"] = serde_json::Value::String("reviewing".to_string());
+        state["quick_dev_phase"] =
+            serde_json::Value::String("plan_and_implement".to_string());
+        state["current_phase"] = serde_json::Value::String("implementing".to_string());
     }
 
     let json = serde_json::to_string_pretty(&state).map_err(|err| {
@@ -497,6 +503,10 @@ pub async fn poll_pr_reviews(
             state.processed_keys.insert(key);
             new_count += 1;
 
+            // Persist dedup state incrementally after each staged amendment so
+            // that a crash/error after staging won't cause re-enqueue next cycle.
+            state.save(&config.workspace_root, &task_info.task_id)?;
+
             info!(
                 task_id = %task_info.task_id,
                 pr = task_info.pr_number,
@@ -507,9 +517,7 @@ pub async fn poll_pr_reviews(
             );
         }
 
-        // Persist updated dedup state.
         if new_count > 0 {
-            state.save(&config.workspace_root, &task_info.task_id)?;
             results.push(PrReviewPollResult {
                 task_id: task_info.task_id.clone(),
                 issue_number: task_info.issue_number,
@@ -841,8 +849,8 @@ mod tests {
         let content = fs::read_to_string(project_dir.join("state.json")).expect("read");
         let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
         assert_eq!(loaded["status"], "in_progress");
-        assert_eq!(loaded["quick_dev_phase"], "codex_review");
-        assert_eq!(loaded["current_phase"], "reviewing");
+        assert_eq!(loaded["quick_dev_phase"], "plan_and_implement");
+        assert_eq!(loaded["current_phase"], "implementing");
     }
 
     #[test]
@@ -884,6 +892,62 @@ mod tests {
 
         let results = discover_tasks_with_prs(ws_root, "acme", "widgets");
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn reset_quick_dev_enters_plan_and_implement() {
+        // Verify that quick-dev resume sets plan_and_implement phase,
+        // which is the phase that actually drains amendments.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path();
+
+        let state = serde_json::json!({
+            "project_id": "issue-42",
+            "project_name": "test",
+            "status": "completed",
+            "current_phase": "completing",
+            "quick_dev_phase": null,
+            "current_loop": 1,
+            "phase_iteration": 1,
+            "prompt_file": "prompt.md",
+            "parent_project": null,
+            "loops": [],
+            "completion_attempts": [],
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            project_dir.join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .expect("write state");
+
+        // Stage an amendment
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+        stage_amendment(ws_root, task_id, &amendment).expect("stage");
+
+        // Reset for quick-dev
+        reset_project_state_for_resume(project_dir, true).expect("reset");
+
+        let content = fs::read_to_string(project_dir.join("state.json")).expect("read");
+        let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
+
+        // Must be plan_and_implement so amendments are drained in PlanAndImplement phase
+        assert_eq!(loaded["quick_dev_phase"], "plan_and_implement");
+        assert_eq!(loaded["current_phase"], "implementing");
+        assert_eq!(loaded["status"], "in_progress");
+
+        // Drain should work into the project dir
+        let count = drain_staged_amendments(ws_root, task_id, project_dir).expect("drain");
+        assert_eq!(count, 1, "staged amendment should be drainable after reset");
     }
 
     #[test]

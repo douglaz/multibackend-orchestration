@@ -2498,15 +2498,30 @@ async fn pr_review_phase(
     struct DispatchCandidate {
         task_id: String,
         issue_number: u32,
+        pr_number: u32,
     }
 
-    let mut candidates: Vec<DispatchCandidate> = poll_results
-        .iter()
-        .map(|r| DispatchCandidate {
+    // Per-cycle cache for PR open state to avoid duplicate API calls.
+    let mut pr_open_cache: HashMap<u32, bool> = HashMap::new();
+
+    // poll_results candidates are known-open (poll_pr_reviews already checked).
+    let mut candidates: Vec<DispatchCandidate> = Vec::new();
+    for r in &poll_results {
+        // Cache the open state — poll_pr_reviews only processes open PRs.
+        let pr_num = all_tasks
+            .iter()
+            .find(|t| t.task_id == r.task_id)
+            .map(|t| t.pr_number)
+            .unwrap_or(0);
+        if pr_num > 0 {
+            pr_open_cache.insert(pr_num, true);
+        }
+        candidates.push(DispatchCandidate {
             task_id: r.task_id.clone(),
             issue_number: r.issue_number,
-        })
-        .collect();
+            pr_number: pr_num,
+        });
+    }
 
     for task_info in &all_tasks {
         if newly_staged.contains(&task_info.task_id) {
@@ -2516,6 +2531,7 @@ async fn pr_review_phase(
             candidates.push(DispatchCandidate {
                 task_id: task_info.task_id.clone(),
                 issue_number: task_info.issue_number,
+                pr_number: task_info.pr_number,
             });
         }
     }
@@ -2529,6 +2545,37 @@ async fn pr_review_phase(
         // Skip if already running.
         if children.contains_key(&candidate.issue_number) {
             continue;
+        }
+
+        // Gate dispatch on PR still being open (use cache to avoid duplicate calls).
+        if candidate.pr_number > 0 {
+            let is_open = match pr_open_cache.get(&candidate.pr_number) {
+                Some(&cached) => cached,
+                None => {
+                    let open = match github::is_pr_open(
+                        &config.owner,
+                        &config.repo,
+                        candidate.pr_number,
+                        &config.gh_bin,
+                    )
+                    .await
+                    {
+                        Ok(o) => o,
+                        Err(err) => {
+                            eprintln!(
+                                "warning: failed to check PR #{} state for {}: {err}",
+                                candidate.pr_number, candidate.task_id
+                            );
+                            continue;
+                        }
+                    };
+                    pr_open_cache.insert(candidate.pr_number, open);
+                    open
+                }
+            };
+            if !is_open {
+                continue;
+            }
         }
 
         // Check capacity.

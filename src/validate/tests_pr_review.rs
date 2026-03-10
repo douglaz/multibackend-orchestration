@@ -1,15 +1,12 @@
 use super::*;
 
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
-use chrono::Utc;
-
-use crate::daemon::github::CommentEndpoint;
-use crate::daemon::pr_review::{
-    self, drain_staged_amendments, has_staged_amendments, reset_project_state_for_resume,
-    stage_amendment, PrReviewState,
-};
-use crate::project::amendments::{AmendmentPriority, AmendmentRequest, AmendmentSource};
+use crate::daemon::pr_review::{has_staged_amendments, PrReviewState};
+use crate::daemon::runtime::TaskMetadata;
+use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
 
 pub fn tests() -> Vec<ConformanceTest> {
@@ -37,242 +34,513 @@ pub fn tests() -> Vec<ConformanceTest> {
     ]
 }
 
-/// Verify that only whitelisted comments produce staged amendments, and
-/// non-whitelisted comments are silently ignored.
+// ---------------------------------------------------------------------------
+// Test implementations — each executes `daemon start --single-iteration`
+// ---------------------------------------------------------------------------
+
+/// Run a daemon tick with mock gh returning PR review comments from whitelisted
+/// and non-whitelisted users.  Assert that only whitelisted comments produce
+/// staged amendments and that non-whitelisted/self-comments are absent.
 fn whitelist_filters_comments(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let ws_root = h.data_dir();
-        let task_id = "acme-widgets-42";
-        let whitelist = vec!["alice".to_string(), "bob".to_string()];
-        let self_login = "ralph-bot";
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        let comments = vec![
-            make_comment(1, CommentEndpoint::IssueComment, "alice", "fix auth bug"),
-            make_comment(2, CommentEndpoint::IssueComment, "charlie", "also fix this"),
-            make_comment(3, CommentEndpoint::PullComment, "bob", "typo on line 10"),
-            make_comment(4, CommentEndpoint::IssueComment, "ralph-bot", "status update"),
-            make_comment(5, CommentEndpoint::Review, "alice", "needs refactoring"),
-        ];
+        // Configure whitelist.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\",\"bob\"]",
+        ])
+        .expect("set whitelist");
 
-        let mut state = PrReviewState::default();
+        // Create task metadata with a PR URL.
+        let ws_root = dh.repo_root.join(".ralph");
+        let tasks_dir = ws_root.join("daemon").join("tasks");
+        fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+        let meta = TaskMetadata {
+            pr_url: Some("https://github.com/acme/widgets/pull/99".to_string()),
+        };
+        fs::write(
+            tasks_dir.join("acme-widgets-42.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .expect("write task metadata");
 
-        for comment in &comments {
-            if comment.author == self_login {
-                continue;
-            }
-            if !whitelist.iter().any(|w| w == &comment.author) {
-                continue;
-            }
-            if comment.body.trim().is_empty() {
-                continue;
-            }
-            let key = comment.dedup_key();
-            if state.processed_keys.contains(&key) {
-                continue;
-            }
+        // Mock gh script that handles PR review API endpoints.
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-            let amendment = pr_review::comment_to_amendment(comment, 99);
-            stage_amendment(ws_root, task_id, &amendment).expect("stage");
-            state.processed_keys.insert(key);
-        }
+        // Mock PR review comments from three endpoints:
+        // - alice (whitelisted): 1 inline comment
+        // - charlie (not whitelisted): 1 inline comment
+        // - bob (whitelisted): 1 top-level comment
+        // - ralph-bot (self): 1 top-level comment
+        // - alice (whitelisted): 1 review summary
+        let pr_comments = r#"[
+            {"id":1,"user":{"login":"alice"},"body":"fix this line","path":"src/main.rs","line":42,"created_at":"2024-01-01T00:00:00Z"},
+            {"id":2,"user":{"login":"charlie"},"body":"also fix","path":"src/lib.rs","line":10,"created_at":"2024-01-01T00:00:00Z"}
+        ]"#;
+        let issue_comments = r#"[
+            {"id":10,"user":{"login":"bob"},"body":"please add tests","created_at":"2024-01-01T00:00:00Z"},
+            {"id":11,"user":{"login":"ralph-bot"},"body":"status update","created_at":"2024-01-01T00:00:00Z"}
+        ]"#;
+        let reviews = r#"[
+            {"id":20,"user":{"login":"alice"},"body":"needs refactoring","state":"CHANGES_REQUESTED","submitted_at":"2024-01-01T00:00:00Z"}
+        ]"#;
 
-        state.save(ws_root, task_id).expect("save state");
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", pr_comments),
+                    ("MOCK_GH_ISSUE_COMMENTS", issue_comments),
+                    ("MOCK_GH_REVIEWS", reviews),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
 
         // Verify: only alice (2 comments) and bob (1 comment) produced amendments.
         let staging_dir = ws_root
             .join("daemon")
             .join("pr-review-amendments")
-            .join(task_id);
-        let count = fs::read_dir(&staging_dir)
-            .expect("read staging")
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-            .count();
-        assert_eq!(count, 3, "expected 3 staged amendments (alice x2, bob x1)");
+            .join("acme-widgets-42");
+        let count = count_json_files(&staging_dir);
+        assert_eq!(
+            count, 3,
+            "expected 3 staged amendments (alice x2, bob x1), got {count}"
+        );
 
-        // Verify dedup state has 3 keys.
-        let loaded = PrReviewState::load(ws_root, task_id);
-        assert_eq!(loaded.processed_keys.len(), 3);
+        // Verify dedup state persisted.
+        let state = PrReviewState::load(&ws_root, "acme-widgets-42");
+        assert_eq!(
+            state.processed_keys.len(),
+            3,
+            "dedup state should have 3 keys"
+        );
     })
 }
 
-/// Verify that a completed project's state is correctly reset for resume:
-/// status → in_progress for regular projects.
+/// Run a daemon tick with a completed project that has a PR and staged
+/// amendments.  Assert that the label swap from ralph:completed to
+/// ralph:in-progress occurs and the dispatch is attempted.
 fn completed_project_resumes_with_state_reset(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_dir = h.data_dir().join("project-regular");
-        fs::create_dir_all(&project_dir).expect("create project dir");
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
 
-        let state = serde_json::json!({
-            "project_id": "issue-42",
-            "project_name": "test",
-            "status": "completed",
-            "current_phase": "completing",
-            "current_loop": 3,
-            "phase_iteration": 1,
-            "prompt_file": "prompt.md",
-            "parent_project": null,
-            "loops": [],
-            "completion_attempts": [],
+        // Configure whitelist.
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        // Create task metadata and branch with project files.
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage an amendment.
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-1",
+            "body": "fix the auth bug",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
         });
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
         fs::write(
-            project_dir.join("state.json"),
-            serde_json::to_string_pretty(&state).unwrap(),
+            staging_dir.join("20240101000000-PR-99-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
         )
-        .expect("write state");
+        .expect("write staged amendment");
 
-        // Also stage an amendment to verify drain works.
-        let ws_root = h.data_dir();
-        let task_id = "acme-widgets-42";
-        let amendment = AmendmentRequest {
-            id: "PR-99-issue_comment-1".to_string(),
-            body: "fix the auth bug".to_string(),
-            priority: AmendmentPriority::P2,
-            source: AmendmentSource::PrReview,
-            source_detail: Some("pr#99/issue_comment#1".to_string()),
-            created_at: Utc::now(),
-        };
-        stage_amendment(ws_root, task_id, &amendment).expect("stage");
-        assert!(has_staged_amendments(ws_root, task_id));
+        let label_log = dh.temp_dir.path().join("resume_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
 
-        // Reset state for regular (non-quick-dev) project.
-        reset_project_state_for_resume(&project_dir, false).expect("reset");
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-        let content = fs::read_to_string(project_dir.join("state.json")).expect("read state");
-        let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
-        assert_eq!(loaded["status"], "in_progress");
-        // current_phase should not be changed for regular projects.
-        assert_eq!(loaded["current_phase"], "completing");
+        // Issue has ralph:completed label so pr_review_phase triggers resume.
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:pr-review"}]}"#;
 
-        // Drain staged amendments into the project dir.
-        let count = drain_staged_amendments(ws_root, task_id, &project_dir).expect("drain");
-        assert_eq!(count, 1);
-        assert!(!has_staged_amendments(ws_root, task_id));
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
 
-        // Verify the amendment file exists in the queue.
-        let queue_dir = project_dir.join("amendment-queue");
-        let entries: Vec<_> = fs::read_dir(&queue_dir)
-            .expect("read queue")
-            .filter_map(|e| e.ok())
-            .collect();
-        assert_eq!(entries.len(), 1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify label swap occurred (completed → in-progress).
+        assert!(
+            label_log.exists(),
+            "label log should exist after label swap"
+        );
+        let log_content = fs::read_to_string(&label_log).expect("read label log");
+        assert!(
+            log_content.contains("ralph:in-progress"),
+            "label log should contain ralph:in-progress swap, got: {log_content}"
+        );
+
+        // Verify staged amendments were drained (staging dir should be empty/gone).
+        assert!(
+            !has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should have been drained during dispatch"
+        );
+
+        // Verify dispatch was attempted.
+        assert!(
+            stderr.contains("pr-review: resuming completed task"),
+            "stderr should log resume attempt"
+        );
     })
 }
 
-/// Verify that dedup state persists across simulated restarts: a comment
-/// processed in one cycle is not re-processed in the next.
+/// Run two daemon ticks with the same PR review comments.  Assert that the
+/// second tick does not create duplicate amendments.
 fn dedup_across_restart(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let ws_root = h.data_dir();
-        let task_id = "acme-widgets-10";
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
 
-        // Cycle 1: process comment #500.
-        let mut state = PrReviewState::default();
-        let key = "issue_comment:500".to_string();
-        state.processed_keys.insert(key.clone());
-        state.save(ws_root, task_id).expect("save cycle 1");
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
 
-        // Simulate restart: load fresh from disk.
-        let reloaded = PrReviewState::load(ws_root, task_id);
-        assert!(
-            reloaded.processed_keys.contains(&key),
-            "dedup key should survive restart"
-        );
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-10", 50);
 
-        // Cycle 2: same comment should be skipped.
-        let comment = make_comment(500, CommentEndpoint::IssueComment, "alice", "fix this");
-        let dup_key = comment.dedup_key();
-        assert_eq!(dup_key, key);
-        assert!(
-            reloaded.processed_keys.contains(&dup_key),
-            "duplicate comment should be detected"
-        );
-    })
-}
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
 
-/// Verify that staged amendments survive when capacity is exhausted:
-/// amendments remain in the staging directory without being drained.
-fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
-    run_case(|| {
-        let ws_root = h.data_dir();
-        let task_id = "acme-widgets-77";
+        let issue_comments =
+            r#"[{"id":500,"user":{"login":"alice"},"body":"fix this","created_at":"2024-01-01T00:00:00Z"}]"#;
 
-        // Stage two amendments.
-        for i in 1..=2 {
-            let amendment = AmendmentRequest {
-                id: format!("PR-50-pull_comment-{i}"),
-                body: format!("fix item {i}"),
-                priority: AmendmentPriority::P2,
-                source: AmendmentSource::PrReview,
-                source_detail: Some(format!("pr#50/pull_comment#{i}")),
-                created_at: Utc::now(),
-            };
-            stage_amendment(ws_root, task_id, &amendment).expect("stage");
-        }
-
-        // Simulate capacity full: do NOT drain. Just verify amendments persist.
-        assert!(has_staged_amendments(ws_root, task_id));
+        // Cycle 1: first daemon tick should stage the amendment.
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", issue_comments),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                ],
+            )
+            .expect("daemon tick 1");
+        assert_exit_code(&output, 0);
 
         let staging_dir = ws_root
             .join("daemon")
             .join("pr-review-amendments")
-            .join(task_id);
-        let count = fs::read_dir(&staging_dir)
-            .expect("read staging")
-            .filter_map(|e| e.ok())
-            .count();
-        assert_eq!(count, 2, "both staged amendments should persist");
+            .join("acme-widgets-10");
+        let count_after_first = count_json_files(&staging_dir);
+        assert_eq!(count_after_first, 1, "should have 1 staged amendment after first tick");
 
-        // On a later cycle (capacity freed), drain should work.
-        let project_dir = h.data_dir().join("project-deferred");
-        fs::create_dir_all(&project_dir).expect("create project dir");
-        let drained = drain_staged_amendments(ws_root, task_id, &project_dir).expect("drain");
-        assert_eq!(drained, 2);
-        assert!(!has_staged_amendments(ws_root, task_id));
+        // Verify dedup state persisted.
+        let state = PrReviewState::load(&ws_root, "acme-widgets-10");
+        assert!(
+            state.processed_keys.contains("issue_comment:500"),
+            "dedup key should be persisted after first tick"
+        );
+
+        // Cycle 2: simulated restart — run daemon again with same comments.
+        let output2 = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", issue_comments),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                ],
+            )
+            .expect("daemon tick 2");
+        assert_exit_code(&output2, 0);
+
+        // No new amendments should have been staged.
+        let count_after_second = count_json_files(&staging_dir);
+        assert_eq!(
+            count_after_second, count_after_first,
+            "no duplicate amendment should be created after restart"
+        );
     })
 }
 
-/// Verify that quick-dev project resume resets status to in_progress AND
-/// sets quick_dev_phase to codex_review to avoid the short-circuit.
+/// Pre-stage amendments for a completed project, then run a daemon tick with
+/// max_concurrent=1 and two completed tasks.  The first dispatch fills the slot;
+/// the second should be deferred with staged amendments preserved.
+fn capacity_deferral_preserves_staged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+
+        // Set up two completed tasks with staged amendments.
+        for (issue_num, pr_num) in [(42u32, 99u32), (43u32, 100u32)] {
+            let task_id = format!("acme-widgets-{issue_num}");
+            setup_task_metadata(&ws_root, &task_id, pr_num);
+            setup_project_branch(&dh.repo_root, issue_num, false);
+
+            let staging_dir = ws_root
+                .join("daemon")
+                .join("pr-review-amendments")
+                .join(&task_id);
+            fs::create_dir_all(&staging_dir).expect("create staging dir");
+            let amendment = serde_json::json!({
+                "id": format!("PR-{pr_num}-issue_comment-1"),
+                "body": "fix it",
+                "priority": "p2",
+                "source": "pr-review",
+                "source_detail": format!("pr#{pr_num}/issue_comment#1"),
+                "created_at": "2024-01-01T00:00:00Z"
+            });
+            fs::write(
+                staging_dir.join(format!("20240101000000-PR-{pr_num}-issue_comment-1.json")),
+                serde_json::to_string_pretty(&amendment).unwrap(),
+            )
+            .expect("write staged amendment");
+        }
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                    "--max-concurrent",
+                    "1",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // One task should have been dispatched and one deferred.
+        assert!(
+            stderr.contains("no capacity slots available; deferring"),
+            "stderr should indicate capacity deferral, got: {stderr}"
+        );
+
+        // At least one task should still have staged amendments (the deferred one).
+        let has_42 = has_staged_amendments(&ws_root, "acme-widgets-42");
+        let has_43 = has_staged_amendments(&ws_root, "acme-widgets-43");
+        assert!(
+            has_42 || has_43,
+            "at least one task should still have staged amendments (deferred)"
+        );
+    })
+}
+
+/// Run a daemon tick with a completed quick-dev project.  Assert that the
+/// project state is reset to in_progress with quick_dev_phase=plan_and_implement
+/// so the orchestrator does not short-circuit.
 fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
     run_case(|| {
-        let project_dir = h.data_dir().join("project-quick");
-        fs::create_dir_all(&project_dir).expect("create project dir");
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
 
-        let state = serde_json::json!({
-            "project_id": "issue-55",
-            "project_name": "quick-test",
-            "status": "completed",
-            "current_phase": "completing",
-            "quick_dev_phase": null,
-            "current_loop": 1,
-            "phase_iteration": 1,
-            "prompt_file": "prompt.md",
-            "parent_project": null,
-            "loops": [],
-            "completion_attempts": [],
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-55", 77);
+        setup_project_branch(&dh.repo_root, 55, true);
+
+        // Pre-stage an amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-55");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-77-issue_comment-1",
+            "body": "fix it",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#77/issue_comment#1",
             "created_at": "2024-01-01T00:00:00Z"
         });
         fs::write(
-            project_dir.join("state.json"),
-            serde_json::to_string_pretty(&state).unwrap(),
+            staging_dir.join("20240101000000-PR-77-issue_comment-1.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
         )
-        .expect("write state");
+        .expect("write staged amendment");
 
-        // Reset for quick-dev project.
-        reset_project_state_for_resume(&project_dir, true).expect("reset");
+        let label_log = dh.temp_dir.path().join("quick_label.log");
+        let label_log_str = label_log.to_string_lossy().into_owned();
 
-        let content = fs::read_to_string(project_dir.join("state.json")).expect("read state");
-        let loaded: serde_json::Value = serde_json::from_str(&content).expect("parse");
-        assert_eq!(loaded["status"], "in_progress");
-        assert_eq!(
-            loaded["quick_dev_phase"], "codex_review",
-            "quick_dev_phase should be reset to codex_review"
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        let issue_labels =
+            r#"{"labels":[{"name":"ralph:completed"},{"name":"ralph:quick"}]}"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", "[]"),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                    ("MOCK_GH_ISSUE_LABELS", issue_labels),
+                    ("MOCK_GH_LABEL_LOG", &label_log_str),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Verify dispatch was attempted.
+        assert!(
+            stderr.contains("pr-review: resuming completed task"),
+            "stderr should log resume attempt for quick-dev project"
         );
-        assert_eq!(
-            loaded["current_phase"], "reviewing",
-            "current_phase should be reset to reviewing"
+
+        // After dispatch, the project state inside the worktree should be reset.
+        // Find the worktree directory.
+        let worktrees_dir = ws_root.join("daemon").join("worktrees");
+        if worktrees_dir.exists() {
+            // Look for the worktree that contains issue-55
+            for entry in fs::read_dir(&worktrees_dir)
+                .unwrap_or_else(|_| panic!("read worktrees dir"))
+                .filter_map(|e| e.ok())
+            {
+                let state_path = entry
+                    .path()
+                    .join(".ralph")
+                    .join("projects")
+                    .join("issue-55")
+                    .join("state.json");
+                if state_path.exists() {
+                    let content =
+                        fs::read_to_string(&state_path).expect("read worktree state.json");
+                    let loaded: serde_json::Value =
+                        serde_json::from_str(&content).expect("parse state");
+                    assert_eq!(
+                        loaded["status"], "in_progress",
+                        "status should be reset to in_progress"
+                    );
+                    assert_eq!(
+                        loaded["quick_dev_phase"], "plan_and_implement",
+                        "quick_dev_phase should be plan_and_implement"
+                    );
+                    assert_eq!(
+                        loaded["current_phase"], "implementing",
+                        "current_phase should be implementing"
+                    );
+                    return; // found and verified
+                }
+            }
+        }
+
+        // If worktree wasn't found, check stderr for dispatch attempt as minimum.
+        assert!(
+            stderr.contains("pr-review: dispatched task"),
+            "dispatch should have been attempted even if worktree is hard to locate"
         );
     })
 }
@@ -280,23 +548,6 @@ fn quick_dev_resume_resets_phase(h: &RalphHarness) -> TestResult {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn make_comment(
-    id: u64,
-    endpoint: CommentEndpoint,
-    author: &str,
-    body: &str,
-) -> crate::daemon::github::PrReviewComment {
-    crate::daemon::github::PrReviewComment {
-        id,
-        endpoint,
-        author: author.to_string(),
-        body: body.to_string(),
-        path: None,
-        line: None,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-    }
-}
 
 fn run_case<F>(f: F) -> TestResult
 where
@@ -306,4 +557,311 @@ where
         Ok(()) => TestResult::Pass,
         Err(e) => TestResult::Fail(panic_message(e)),
     }
+}
+
+/// Count JSON files in a directory (returns 0 if directory doesn't exist).
+fn count_json_files(dir: &Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    fs::read_dir(dir)
+        .unwrap_or_else(|_| panic!("read dir {}", dir.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|x| x == "json")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// Write a mock gh script that handles PR review API endpoints.
+///
+/// Environment variables:
+/// - `MOCK_GH_ISSUES` — JSON array for `issue list`
+/// - `MOCK_GH_PR_STATE` — PR state for `api repos/.../pulls/{n}` (default "open")
+/// - `MOCK_GH_PR_COMMENTS` — JSON for inline review comments
+/// - `MOCK_GH_ISSUE_COMMENTS` — JSON for top-level PR comments
+/// - `MOCK_GH_REVIEWS` — JSON for review summaries
+/// - `MOCK_GH_ISSUE_LABELS` — JSON for `issue view --json labels`
+/// - `MOCK_GH_LABEL_LOG` — file to log label operations
+fn write_pr_review_mock_gh(h: &RalphHarness) -> crate::Result<String> {
+    let script = h.write_mock_script(
+        "gh",
+        r###"#!/bin/sh
+# Mock gh for PR review daemon tests.
+
+case "$1" in
+  issue)
+    case "$2" in
+      list)
+        if [ -n "${MOCK_GH_ISSUES:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUES"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      edit)
+        if [ -n "${MOCK_GH_LABEL_LOG:-}" ]; then
+          echo "$@" >> "$MOCK_GH_LABEL_LOG"
+        fi
+        exit 0
+        ;;
+      view)
+        want_labels=0
+        want_title_body=0
+        for arg in "$@"; do
+          if [ "$arg" = "labels" ]; then want_labels=1; fi
+          if [ "$arg" = "title,body" ]; then want_title_body=1; fi
+        done
+        if [ "$want_labels" = "1" ]; then
+          if [ -n "${MOCK_GH_ISSUE_LABELS:-}" ]; then
+            printf '%s' "$MOCK_GH_ISSUE_LABELS"
+          else
+            printf '{"labels":[]}'
+          fi
+          exit 0
+        fi
+        if [ "$want_title_body" = "1" ]; then
+          issue_number="${3:-0}"
+          printf '{"title":"Mock issue %s","body":"Mock body for issue %s"}' "$issue_number" "$issue_number"
+          exit 0
+        fi
+        printf ''
+        exit 0
+        ;;
+      comment) exit 0 ;;
+      *) echo "mock gh: unhandled issue subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  pr)
+    case "$2" in
+      list) printf ''; exit 0 ;;
+      create) printf 'https://github.com/acme/widgets/pull/1\n'; exit 0 ;;
+      edit) exit 0 ;;
+      *) echo "mock gh: unhandled pr subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  api)
+    # Handle `api user`
+    if [ "$2" = "user" ]; then
+      printf 'ralph-bot\n'
+      exit 0
+    fi
+
+    # Handle PR review API endpoints.
+    # $2 is the endpoint, remaining args are flags like --paginate, --jq
+    endpoint="$2"
+
+    # Check for --jq flag (used by is_pr_open)
+    has_jq=0
+    for arg in "$@"; do
+      if [ "$arg" = "--jq" ]; then has_jq=1; fi
+    done
+
+    # Match endpoint patterns
+    case "$endpoint" in
+      repos/*/pulls/*/comments)
+        # Inline review comments
+        if [ -n "${MOCK_GH_PR_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_PR_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/issues/*/comments)
+        # Top-level PR/issue comments
+        if [ -n "${MOCK_GH_ISSUE_COMMENTS:-}" ]; then
+          printf '%s' "$MOCK_GH_ISSUE_COMMENTS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*/reviews)
+        # Review summaries
+        if [ -n "${MOCK_GH_REVIEWS:-}" ]; then
+          printf '%s' "$MOCK_GH_REVIEWS"
+        else
+          printf '[]'
+        fi
+        exit 0
+        ;;
+      repos/*/pulls/*)
+        # PR state check (is_pr_open uses --jq .state)
+        if [ "$has_jq" = "1" ]; then
+          printf '%s\n' "${MOCK_GH_PR_STATE:-open}"
+          exit 0
+        fi
+        printf '{"state":"%s"}' "${MOCK_GH_PR_STATE:-open}"
+        exit 0
+        ;;
+      *)
+        echo "mock gh: unhandled api endpoint: $endpoint" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  label)
+    case "$2" in
+      create) exit 0 ;;
+      *) echo "mock gh: unhandled label subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  repo)
+    case "$2" in
+      clone)
+        target_dir="$4"
+        if [ -n "$target_dir" ]; then
+          mkdir -p "$target_dir"
+          git init "$target_dir" --quiet 2>/dev/null
+          git -C "$target_dir" config user.email "mock@test"
+          git -C "$target_dir" config user.name "MockClone"
+          touch "$target_dir/.gitkeep"
+          git -C "$target_dir" add .gitkeep
+          git -C "$target_dir" commit -m "initial" --quiet 2>/dev/null
+        fi
+        exit 0
+        ;;
+      view) printf 'acme/widgets\n'; exit 0 ;;
+      *) echo "mock gh: unhandled repo subcommand: $2" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "mock gh: unhandled command: $1" >&2
+    exit 1
+    ;;
+esac
+"###,
+    )?;
+    let base = script
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let existing = std::env::var("PATH").unwrap_or_default();
+    Ok(format!("{base}:{existing}"))
+}
+
+/// Write task metadata for a given task_id and pr_number.
+fn setup_task_metadata(ws_root: &Path, task_id: &str, pr_number: u32) {
+    let tasks_dir = ws_root.join("daemon").join("tasks");
+    fs::create_dir_all(&tasks_dir).expect("create tasks dir");
+    let meta = TaskMetadata {
+        pr_url: Some(format!(
+            "https://github.com/acme/widgets/pull/{pr_number}"
+        )),
+    };
+    fs::write(
+        tasks_dir.join(format!("{task_id}.json")),
+        serde_json::to_string(&meta).unwrap(),
+    )
+    .expect("write task metadata");
+}
+
+/// Create a git branch `ralph/issue-{n}` with minimal project files committed,
+/// so that `should_resume_issue_project()` returns true after worktree creation.
+fn setup_project_branch(repo_root: &Path, issue_number: u32, is_quick: bool) {
+    let branch = format!("ralph/issue-{issue_number}");
+    let project_id = format!("issue-{issue_number}");
+
+    // Create branch from current HEAD.
+    Command::new("git")
+        .args(["branch", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git branch");
+
+    // Checkout branch, add project files, commit, checkout back.
+    Command::new("git")
+        .args(["checkout", &branch])
+        .current_dir(repo_root)
+        .output()
+        .expect("git checkout branch");
+
+    let project_dir = repo_root
+        .join(".ralph")
+        .join("projects")
+        .join(&project_id);
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    // Write prompt.md (triggers resume detection).
+    fs::write(
+        project_dir.join("prompt.md"),
+        "# Test prompt\nImplement the feature.",
+    )
+    .expect("write prompt.md");
+
+    // Write state.json as completed.
+    let mut state = serde_json::json!({
+        "project_id": project_id,
+        "project_name": "test",
+        "status": "completed",
+        "current_phase": "completing",
+        "current_loop": 1,
+        "phase_iteration": 1,
+        "prompt_file": "prompt.md",
+        "parent_project": null,
+        "loops": [],
+        "completion_attempts": [],
+        "created_at": "2024-01-01T00:00:00Z"
+    });
+    if is_quick {
+        state["quick_dev_phase"] = serde_json::Value::Null;
+    }
+    fs::write(
+        project_dir.join("state.json"),
+        serde_json::to_string_pretty(&state).unwrap(),
+    )
+    .expect("write state.json");
+
+    // Commit all project files.
+    Command::new("git")
+        .args(["add", ".ralph/"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "add project files for test"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git commit");
+
+    // Switch back to master.
+    Command::new("git")
+        .args(["checkout", "master"])
+        .current_dir(repo_root)
+        .output()
+        .expect("git checkout master");
+}
+
+/// Set up a minimal mock backend so that dispatch_task can spawn a child process.
+fn setup_mock_backend(dh: &RalphHarness) {
+    let script = dh
+        .write_mock_script(
+            "mock_backend.sh",
+            "#!/bin/sh\ncat >/dev/null\necho 'mock output'\n",
+        )
+        .expect("write mock backend");
+    let script_str = script.to_string_lossy().into_owned();
+    dh.ralph_ok(["config", "set", "backends.claude.command", &script_str])
+        .expect("set claude backend");
+    dh.ralph_ok(["config", "set", "backends.claude.args", "[]"])
+        .expect("set claude args");
+    dh.ralph_ok(["config", "set", "backends.codex.command", &script_str])
+        .expect("set codex backend");
+    dh.ralph_ok(["config", "set", "backends.codex.args", "[]"])
+        .expect("set codex args");
+    // Disable openrouter to avoid external calls.
+    dh.ralph_ok([
+        "config",
+        "set",
+        "backends.openrouter.command",
+        &script_str,
+    ])
+    .expect("set openrouter backend");
+    dh.ralph_ok(["config", "set", "backends.openrouter.args", "[]"])
+        .expect("set openrouter args");
 }

@@ -2273,6 +2273,9 @@ struct RawPullComment {
     path: Option<String>,
     line: Option<u32>,
     created_at: String,
+    /// Non-null when this comment is a reply to another inline comment.
+    /// Replies are out of scope and should be skipped.
+    in_reply_to_id: Option<u64>,
 }
 
 /// Raw JSON shape for `/issues/{n}/comments` (top-level PR comments).
@@ -2329,6 +2332,10 @@ pub async fn fetch_pr_review_comments(
                 ))
             })?;
             for c in parsed {
+                // Skip replies to other inline comments (out of scope).
+                if c.in_reply_to_id.is_some() {
+                    continue;
+                }
                 comments.push(PrReviewComment {
                     id: c.id,
                     endpoint: CommentEndpoint::PullComment,
@@ -3266,6 +3273,41 @@ exit 0
         assert_eq!(parsed[0].body, Some("fix this line".to_string()));
         assert_eq!(parsed[0].path, Some("src/main.rs".to_string()));
         assert_eq!(parsed[0].line, Some(42));
+    }
+
+    #[test]
+    fn parse_pull_comments_filters_replies() {
+        // One top-level inline comment + one reply; only top-level should pass.
+        let json = r#"[
+            {
+                "id": 100,
+                "user": {"login": "alice"},
+                "body": "fix this line",
+                "path": "src/main.rs",
+                "line": 42,
+                "created_at": "2024-01-01T00:00:00Z"
+            },
+            {
+                "id": 101,
+                "user": {"login": "bob"},
+                "body": "I agree with Alice",
+                "path": "src/main.rs",
+                "line": 42,
+                "created_at": "2024-01-01T01:00:00Z",
+                "in_reply_to_id": 100
+            }
+        ]"#;
+        let parsed: Vec<super::RawPullComment> = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        // Filter the same way fetch_pr_review_comments does
+        let top_level: Vec<_> = parsed
+            .iter()
+            .filter(|c| c.in_reply_to_id.is_none())
+            .collect();
+        assert_eq!(top_level.len(), 1, "only top-level comment should be kept");
+        assert_eq!(top_level[0].id, 100);
+        assert_eq!(top_level[0].user.login, "alice");
     }
 
     #[test]
