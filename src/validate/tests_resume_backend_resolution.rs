@@ -649,7 +649,7 @@ elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
 ## Refined Prompt
 No changes.
 EOF
-elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -801,7 +801,7 @@ elif grep -q "You are a project completion validator." <<< "$INPUT"; then
 The project satisfies all requirements:
 - Mock requirement: satisfied
 EOF
-elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   if should_fail "final_reviewer"; then
     echo "forced final reviewer failure for resume test" >&2
     exit 1
@@ -953,7 +953,7 @@ elif grep -q "You are a project completion validator." <<< "$INPUT"; then
 The project satisfies all requirements:
 - Mock requirement: satisfied
 EOF
-elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   if [ -f "$FAIL_MARKER" ]; then
     echo "forced final reviewer failure for resume test" >&2
     exit 1
@@ -1145,7 +1145,7 @@ elif grep -q "You are a prompt reviewer" <<< "$INPUT"; then
 ## Refined Prompt
 No changes.
 EOF
-elif grep -q "You are a final reviewer auditing a completed project for correctness, safety, and robustness." <<< "$INPUT"; then
+elif grep -q "You are a code reviewer. Review" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 

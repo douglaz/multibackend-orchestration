@@ -27,6 +27,11 @@ use crate::git::commit::{
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
+use crate::project::amendments::{
+    cleanup_drained_inflight_files, drain_amendment_queue_deferred, enqueue_amendment,
+    format_external_amendments_for_prompt, pending_amendment_count, rollback_drained_amendments,
+    AmendmentPriority, AmendmentRequest, AmendmentSource,
+};
 use crate::project::artifacts::{
     artifact_relative_path, resolve_artifact_path_by_suffix, slugify_backend, write_artifact,
     write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
@@ -579,6 +584,7 @@ impl Orchestrator {
             let phase_iteration_at_step_start = state.phase_iteration;
             let mut completed_feature_loop_for_checkpoint: Option<u32> = None;
             let mut pending_phase_checkpoint: Option<(Phase, Phase)> = None;
+            let mut deferred_inflight_cleanup: Vec<PathBuf> = Vec::new();
 
             match state.current_phase {
                 Phase::Planning => {
@@ -596,6 +602,29 @@ impl Orchestrator {
                     let planner_backend =
                         registry.get_or_create_for_role(&feature_backends.planner, "planner")?;
 
+                    let (drained_amendments, inflight_paths) =
+                        drain_amendment_queue_deferred(&project_dir)?;
+                    deferred_inflight_cleanup = inflight_paths;
+                    let drained_for_rollback = drained_amendments.clone();
+                    let planner_amendments = if effective.amendments.unify_final_review {
+                        drained_amendments
+                            .into_iter()
+                            .filter(|req| req.source != AmendmentSource::FinalReview)
+                            .collect::<Vec<_>>()
+                    } else {
+                        drained_amendments
+                    };
+                    let external_amendments_text = if planner_amendments.is_empty() {
+                        String::new()
+                    } else {
+                        info!(
+                            loop = loop_number,
+                            count = planner_amendments.len(),
+                            "drained external amendments"
+                        );
+                        format_external_amendments_for_prompt(&planner_amendments)
+                    };
+
                     let planner_prompt = build_planner_prompt(
                         &effective,
                         &state,
@@ -604,7 +633,9 @@ impl Orchestrator {
                         planner_backend.name(),
                         &feature_backends.implementer,
                         &project_dir,
-                    )?;
+                        &external_amendments_text,
+                    )
+                    .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
 
                     // Session reuse: exercise role policy for planner (will warn+skip for v1)
                     let _planner_session_id = resolve_session_for_role(
@@ -649,7 +680,8 @@ impl Orchestrator {
                     &self.cancel,
                     self.max_backend_retries,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
                     let planner_decision = _retry_result.parsed;
                     debug!(loop = loop_number, "planner responded");
 
@@ -669,7 +701,8 @@ impl Orchestrator {
                                     kind: ArtifactKind::Spec,
                                     body: &body,
                                 },
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
 
                             let spec_rel = artifact_relative_path(&project_dir, &spec_path);
                             state.prompt_hash_at_loop_start = prompt_hash;
@@ -695,7 +728,8 @@ impl Orchestrator {
                                     last_attempt.loop_number,
                                     "completion",
                                     "final-review-exit-restart.md",
-                                )?
+                                )
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?
                                 .is_some();
                                 let has_completed_feature_after = state
                                     .loops
@@ -705,18 +739,36 @@ impl Orchestrator {
                                             && l.artifacts.impl_notes.is_some()
                                     });
                                 if has_restart && !has_completed_feature_after {
-                                    return Err(RalphError::Orchestration(
-                                        "planner requested completion without addressing final review amendments"
-                                            .to_owned(),
+                                    return Err(rollback_drained_amendments(
+                                        &project_dir,
+                                        &drained_for_rollback,
+                                        &deferred_inflight_cleanup,
+                                        RalphError::Orchestration(
+                                            "planner requested completion without addressing final review amendments"
+                                                .to_owned(),
+                                        ),
                                     ));
                                 }
+                            }
+                            let pending = pending_amendment_count(&project_dir)
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
+                            if pending > 0 {
+                                return Err(rollback_drained_amendments(
+                                    &project_dir,
+                                    &drained_for_rollback,
+                                    &deferred_inflight_cleanup,
+                                    RalphError::Orchestration(format!(
+                                        "planner requested completion but {pending} amendment(s) are still pending in the queue"
+                                    )),
+                                ));
                             }
                             info!(loop = loop_number, "planner requested project completion");
                             let base_backends = registry.assign_completion_backends(
                                 loop_number,
                                 &effective.workflow.starting_backend,
                                 &role_overrides,
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
                             // Resolve effective completers from the panel config.
                             // Optional backends are skipped inside resolve_completion_panel;
                             // required-backend failures and min-completer violations propagate.
@@ -725,7 +777,8 @@ impl Orchestrator {
                                     &effective.workflow.completion_backends,
                                     effective.workflow.completion_min_completers,
                                 )
-                                .await?;
+                                .await
+                                .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
                             let completion_backends = CompletionLoopBackends::new(
                                 base_backends.planner.clone(),
                                 effective_completers,
@@ -741,7 +794,8 @@ impl Orchestrator {
                                     kind: ArtifactKind::TerminationRequest,
                                     body: &body,
                                 },
-                            )?;
+                            )
+                            .map_err(|e| rollback_drained_amendments(&project_dir, &drained_for_rollback, &deferred_inflight_cleanup, e))?;
 
                             let termination_rel =
                                 artifact_relative_path(&project_dir, &termination_path);
@@ -2724,6 +2778,12 @@ impl Orchestrator {
                 state.current_phase = transitioned_phase;
                 state.phase_iteration = transitioned_iteration;
 
+                // Phase transition is durable — safe to clean up inflight files.
+                if !deferred_inflight_cleanup.is_empty() {
+                    cleanup_drained_inflight_files(&deferred_inflight_cleanup);
+                    deferred_inflight_cleanup.clear();
+                }
+
                 if let Some(loop_number) = completed_feature_loop_for_checkpoint {
                     let repo_root = self.workspace.root.parent().ok_or_else(|| {
                         RalphError::Orchestration("workspace root has no parent path".to_owned())
@@ -2775,6 +2835,26 @@ impl Orchestrator {
                     self.workspace.config.git.sign_commits,
                 ) {
                     warn!("failed to checkpoint completion artifacts: {err}");
+                }
+                // Late guard: if amendments arrived during completing/final-review,
+                // reopen planning instead of finalizing completion. Returning an
+                // error here would leave completion artifacts intact, causing
+                // state reconstruction to re-enter completion on restart and
+                // creating a stuck loop.
+                let late_pending = pending_amendment_count(&project_dir)?;
+                if late_pending > 0 {
+                    info!(
+                        loop = state.current_loop,
+                        late_pending,
+                        "amendments arrived during completing/final-review; reopening planning"
+                    );
+                    logs.push(format!(
+                        "loop {}: {late_pending} amendment(s) arrived during completing/final-review; reopening planning",
+                        state.current_loop
+                    ));
+                    state.current_phase = Phase::Planning;
+                    state.status = ProjectStatus::InProgress;
+                    continue;
                 }
                 return Ok(OrchestrationResult {
                     summary: if logs.is_empty() {
@@ -3268,6 +3348,7 @@ fn build_prompt_review_validator_prompt(
     Ok(rendered)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_planner_prompt(
     effective: &EffectiveConfig,
     state: &ProjectState,
@@ -3276,6 +3357,7 @@ fn build_planner_prompt(
     backend: &str,
     opposite_backend: &str,
     project_dir: &Path,
+    external_amendments: &str,
 ) -> Result<String> {
     let template_source =
         load_template_source(&effective.templates.planner, default_planner_template());
@@ -3321,6 +3403,10 @@ fn build_planner_prompt(
     vars.insert(
         "final_review_amendments".to_owned(),
         amendments_content.clone(),
+    );
+    vars.insert(
+        "external_amendments".to_owned(),
+        external_amendments.to_owned(),
     );
 
     let rendered = render_template_with_fallback(
@@ -3373,6 +3459,15 @@ fn build_planner_prompt(
             &["final_review_amendments"],
             "## Final Review Amendments",
             &amendments_content,
+        );
+    }
+    if !external_amendments.is_empty() {
+        append_section_if_missing(
+            &mut prompt,
+            &template_source,
+            &["external_amendments"],
+            "## External Amendments",
+            external_amendments,
         );
     }
 
@@ -4313,6 +4408,44 @@ async fn run_final_review_phase(
     }
 
     append_final_review_amendments_file(project_dir, round, &amendments, &final_accepted)?;
+
+    // When unify_final_review is enabled, mirror accepted amendments into the
+    // external amendment queue so the planner can process them uniformly.
+    if effective.amendments.unify_final_review {
+        let by_id: HashMap<&str, &FinalReviewAmendment> =
+            amendments.iter().map(|a| (a.id.as_str(), a)).collect();
+        for accepted_id in &final_accepted {
+            if let Some(amendment) = by_id.get(accepted_id.as_str()) {
+                let req = AmendmentRequest {
+                    id: amendment.id.clone(),
+                    body: amendment.body.clone(),
+                    priority: AmendmentPriority::P2,
+                    source: AmendmentSource::FinalReview,
+                    source_detail: Some(amendment.reviewer_backend.clone()),
+                    created_at: Utc::now(),
+                };
+                match enqueue_amendment(project_dir, &req) {
+                    Ok(path) => {
+                        info!(
+                            id = %amendment.id,
+                            source = "final-review",
+                            source_detail = %amendment.reviewer_backend,
+                            path = %path.display(),
+                            "mirrored accepted final-review amendment to queue"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            id = %amendment.id,
+                            error = %e,
+                            "failed to enqueue final-review amendment; continuing"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     write_final_review_exit_artifact(
         project_dir,
         &state.project_id,
@@ -6638,6 +6771,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -6677,6 +6811,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -7335,6 +7470,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7384,6 +7520,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7423,6 +7560,7 @@ mod tests {
             "claude",
             "codex",
             &project_dir,
+            "",
         )
         .expect("build planner prompt");
 
@@ -7466,6 +7604,7 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
@@ -7503,12 +7642,86 @@ mod tests {
             "claude",
             "codex",
             project_dir.as_path(),
+            "",
         )
         .expect("build planner prompt");
 
         assert!(
             !prompt.contains("## Final Review Amendments"),
             "prompt should not contain Final Review Amendments when file is absent"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_includes_external_amendments_when_provided() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+        let external = "### Amendment 1\n- id: EXT-001\n- body:\n  external fix";
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+            external,
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            prompt.contains("## External Amendments"),
+            "prompt should contain External Amendments heading"
+        );
+        assert!(
+            prompt.contains("EXT-001"),
+            "prompt should contain external amendment content"
+        );
+    }
+
+    #[test]
+    fn planner_prompt_omits_external_amendments_when_empty() {
+        let temp = tempdir().expect("temp dir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let effective = resolve_effective_config(
+            temp.path(),
+            &project_dir,
+            GlobalConfig::default(),
+            None,
+            RunWorkflowOverrides::default(),
+        )
+        .expect("resolve effective config");
+        let state = ProjectState::new("demo", "Demo", "hash", None);
+
+        let prompt = build_planner_prompt(
+            &effective,
+            &state,
+            "# Master Prompt Body",
+            1,
+            "claude",
+            "codex",
+            project_dir.as_path(),
+            "",
+        )
+        .expect("build planner prompt");
+
+        assert!(
+            !prompt.contains("## External Amendments"),
+            "prompt should not contain External Amendments when empty"
         );
     }
 

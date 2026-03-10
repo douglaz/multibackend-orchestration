@@ -17,6 +17,10 @@ use crate::git::commit::{
 };
 use crate::git::is_git_repo;
 use crate::output_log::LogWriter;
+use crate::project::amendments::{
+    cleanup_drained_inflight_files, drain_amendment_queue_deferred,
+    format_external_amendments_for_prompt, rollback_drained_amendments,
+};
 use crate::project::artifacts::{
     resolve_artifact_path_by_suffix, resolve_artifact_path_by_suffixes, strip_backend_frontmatter,
     write_artifact, write_project_scoped_artifact, ArtifactKind, ArtifactWriteInput,
@@ -351,9 +355,30 @@ impl QuickDevOrchestrator {
                              reviewer approval. Fix these issues without changing unrelated logic:\n\n");
                         prompt.push_str(&feedback);
                     }
+                    let (drained_amendments, deferred_inflight) =
+                        drain_amendment_queue_deferred(project_dir)?;
+                    let drained_for_rollback = drained_amendments.clone();
+                    if !drained_amendments.is_empty() {
+                        info!(
+                            loop_number,
+                            count = drained_amendments.len(),
+                            "quick-dev: drained external amendments"
+                        );
+                        prompt.push_str("\n\n## External Amendments\n");
+                        prompt
+                            .push_str(&format_external_amendments_for_prompt(&drained_amendments));
+                    }
 
-                    let impl_backend =
-                        registry.get_or_create_for_role(implementer_spec, "implementer")?;
+                    let impl_backend = registry
+                        .get_or_create_for_role(implementer_spec, "implementer")
+                        .map_err(|e| {
+                            rollback_drained_amendments(
+                                project_dir,
+                                &drained_for_rollback,
+                                &deferred_inflight,
+                                e,
+                            )
+                        })?;
 
                     let mut impl_log =
                         LogWriter::open(log_dir, project_id, Some(loop_number), "quick-dev-impl");
@@ -367,7 +392,15 @@ impl QuickDevOrchestrator {
                         &self.cancel,
                         max_backend_retries,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
+                    })?;
 
                     // Write artifact
                     write_artifact(
@@ -381,17 +414,44 @@ impl QuickDevOrchestrator {
                             kind: ArtifactKind::QuickDevPlanImplement,
                             body: &raw,
                         },
-                    )?;
+                    )
+                    .map_err(|e| {
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
+                    })?;
 
                     // Transition: PlanAndImplement -> CodexReview
+                    // Split into two steps so that rollback only applies before
+                    // durable state is persisted.  Once save_state_to_disk
+                    // succeeds, the phase is committed and amendments must NOT
+                    // be re-enqueued (even if the checkpoint commit fails).
                     review_iteration = 0;
-                    persist_destination_and_checkpoint(
+                    persist_quick_dev_state(
                         state,
                         &QuickDevPhase::CodexReview,
                         1,
                         review_iteration,
                         final_review_attempts,
-                        project_dir,
+                    );
+                    save_state_to_disk(state, project_dir).map_err(|e| {
+                        rollback_drained_amendments(
+                            project_dir,
+                            &drained_for_rollback,
+                            &deferred_inflight,
+                            e,
+                        )
+                    })?;
+
+                    // Durable success: state is persisted.  Safe to clean up
+                    // inflight files now that amendments are consumed.
+                    cleanup_drained_inflight_files(&deferred_inflight);
+
+                    // Checkpoint failure must not trigger amendment rollback.
+                    checkpoint_if_enabled(
                         &self.workspace,
                         project_id,
                         loop_number,
@@ -2137,7 +2197,8 @@ mod tests {
     ) -> EffectiveConfig {
         use crate::config::global::GlobalConfig;
         use crate::config::{
-            EffectiveDaemonConfig, EffectiveTemplateConfig, EffectiveWorkflowConfig,
+            EffectiveAmendmentsConfig, EffectiveDaemonConfig, EffectiveTemplateConfig,
+            EffectiveWorkflowConfig,
         };
         use std::path::PathBuf;
 
@@ -2219,6 +2280,9 @@ mod tests {
                 prd_backend_timeout_secs: 0,
                 prd_shutdown_timeout_secs: 0,
                 max_backend_retries: None,
+            },
+            amendments: EffectiveAmendmentsConfig {
+                unify_final_review: false,
             },
             global: GlobalConfig::default(),
             project: None,
