@@ -4,7 +4,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::daemon::pr_review::{has_staged_amendments, PrReviewState};
+use crate::daemon::pr_review::{
+    has_resume_pending_marker, has_staged_amendments, set_resume_pending_marker, PrReviewState,
+};
 use crate::daemon::runtime::TaskMetadata;
 use crate::validate::assertions::assert_exit_code;
 use crate::validate::harness::RalphHarness;
@@ -874,6 +876,12 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
             .save(&ws_root, "acme-widgets-42")
             .expect("save dedup state");
 
+        // Create the resume-pending marker to simulate that the previous
+        // PR-review resume initiated a label swap before the daemon crashed.
+        // Without this marker, runtime gates ralph:ready reactivation.
+        set_resume_pending_marker(&ws_root, "acme-widgets-42")
+            .expect("set resume-pending marker");
+
         let label_log = dh.temp_dir.path().join("drift_label.log");
         let label_log_str = label_log.to_string_lossy().into_owned();
 
@@ -931,6 +939,12 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
         assert!(
             !has_staged_amendments(&ws_root, "acme-widgets-42"),
             "staged amendments should have been drained during dispatch"
+        );
+
+        // Verify resume-pending marker was cleared after successful dispatch.
+        assert!(
+            !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker should be cleared after successful dispatch"
         );
     })
 }
