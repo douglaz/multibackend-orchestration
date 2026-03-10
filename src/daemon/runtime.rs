@@ -3251,13 +3251,10 @@ pub(crate) async fn handle_pr_flow(
         Some(url) => {
             eprintln!("editing existing PR for {task_id}: {url}");
             let body_path = body_file.path().to_path_buf();
-            match github::edit_pr(&url, &title, &body_path).await {
-                Ok(()) => {}
-                Err(err) => {
-                    return Err(RalphError::Orchestration(format!(
-                        "failed to edit PR for {task_id}: {err}"
-                    )));
-                }
+            if let Err(err) = github::edit_pr(&url, &title, &body_path).await {
+                eprintln!(
+                    "warning: failed to edit PR for {task_id} (continuing to mark-ready): {err}"
+                );
             }
 
             if let Some(pr_number) = github::extract_pr_number(&url) {
