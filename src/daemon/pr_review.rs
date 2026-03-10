@@ -272,6 +272,17 @@ pub fn has_staged_amendments(workspace_root: &Path, task_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Remove all staged amendment files for a task.
+///
+/// Used when stale artifacts are detected (e.g. PR closed, task metadata
+/// missing) and the claim path needs to proceed without interference.
+pub fn clear_staged_amendments(workspace_root: &Path, task_id: &str) {
+    let dir = staging_dir(workspace_root, task_id);
+    if dir.exists() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Project state reset for resumed projects
 // ---------------------------------------------------------------------------

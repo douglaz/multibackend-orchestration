@@ -1128,29 +1128,75 @@ async fn poll_and_claim(
         }
 
         // Skip issues owned by pr_review_phase: if a resume-pending marker or
-        // staged PR-review amendments exist, pr_review_phase exclusively owns
-        // this issue.  Without this guard, a failed PR-review resume that rolls
-        // back to ralph:ready would let the claim path immediately re-dispatch
-        // as DispatchOrigin::Claim in the same iteration, bypassing the
+        // staged PR-review amendments exist AND pr_review_phase can actually
+        // own this issue (task metadata with pr_url exists and that PR is
+        // still open), then pr_review_phase exclusively owns this issue.
+        // Without this guard, a failed PR-review resume that rolls back to
+        // ralph:ready would let the claim path immediately re-dispatch as
+        // DispatchOrigin::Claim in the same iteration, bypassing the
         // resume-only safety path.
+        //
+        // However, if task metadata is missing or the PR is closed/merged,
+        // pr_review_phase cannot dispatch this issue — so we must NOT block
+        // the claim path.  In that case we warn and clear stale artifacts.
         if !config.pr_review_whitelist.is_empty() {
             let task_id =
                 super::format_task_id(&config.owner, &config.repo, issue.number);
-            if super::pr_review::has_resume_pending_marker(
+            let has_marker_or_staged = super::pr_review::has_resume_pending_marker(
                 &config.workspace_root,
                 &task_id,
             ) || super::pr_review::has_staged_amendments(
                 &config.workspace_root,
                 &task_id,
-            ) {
-                if config.verbose {
-                    eprintln!(
-                        "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
-                         owned by pr_review_phase",
-                        issue.number
-                    );
+            );
+            if has_marker_or_staged {
+                // Verify pr_review_phase can actually own this issue: task
+                // metadata must exist with a pr_url, and that PR must be open.
+                let meta = load_task_metadata(&config.workspace_root, &task_id);
+                let pr_can_own = if let Some(pr_url) = &meta.pr_url {
+                    if let Some(pr_number) = github::extract_pr_number(pr_url) {
+                        github::is_pr_open(
+                            &config.owner,
+                            &config.repo,
+                            pr_number,
+                            &config.gh_bin,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if pr_can_own {
+                    if config.verbose {
+                        eprintln!(
+                            "verbose: skipping issue #{} — PR-review marker/staged amendments present, \
+                             owned by pr_review_phase",
+                            issue.number
+                        );
+                    }
+                    continue;
                 }
-                continue;
+
+                // pr_review_phase cannot own this issue (no task metadata,
+                // no pr_url, or PR is closed/merged).  Clear stale artifacts
+                // so the issue is not permanently blocked.
+                eprintln!(
+                    "warning: clearing stale PR-review artifacts for issue #{} — \
+                     task metadata missing or PR not open; allowing normal claim dispatch",
+                    issue.number
+                );
+                super::pr_review::clear_resume_pending_marker(
+                    &config.workspace_root,
+                    &task_id,
+                );
+                super::pr_review::clear_staged_amendments(
+                    &config.workspace_root,
+                    &task_id,
+                );
             }
         }
 
@@ -2830,14 +2876,16 @@ async fn pr_review_phase(
             // Label swap failed — no in-flight resume actually started.
             // Only clear the marker when:
             // 1. It was created in this cycle (!has_marker at entry), AND
-            // 2. The original label was confirmed restored (rollback succeeded or
-            //    remove never happened).  If rollback failed, the issue may be
-            //    missing its lifecycle label and the marker must persist so that
-            //    restart recovery can detect the stranded state.
-            let label_restored = swap_err
+            // 2. The original label was *confirmed* restored (Some(true)).
+            //    - None: remove step failed — label *may* be absent due to
+            //      concurrent removal, so we cannot assume it is still present.
+            //    - Some(false): rollback explicitly failed — label is missing.
+            //    In both ambiguous/failed cases, keep the marker so restart
+            //    recovery can detect the stranded state and retry next cycle.
+            let label_confirmed_restored = swap_err
                 .from_label_restored
-                .unwrap_or(true); // None means remove failed, label still present
-            if !has_marker && label_restored {
+                == Some(true);
+            if !has_marker && label_confirmed_restored {
                 super::pr_review::clear_resume_pending_marker(
                     &config.workspace_root,
                     &candidate.task_id,
