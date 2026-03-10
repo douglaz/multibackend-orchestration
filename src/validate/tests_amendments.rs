@@ -326,13 +326,8 @@ fn amend_invalid_priority_creates_no_queue_files(h: &RalphHarness) -> TestResult
                 .expect("read queue dir")
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "json")
-                        && !e
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(".tmp-")
+                    e.path().extension().is_some_and(|ext| ext == "json")
+                        && !e.file_name().to_string_lossy().starts_with(".tmp-")
                 })
                 .count();
             assert_eq!(
@@ -365,21 +360,14 @@ fn amend_missing_body_file_creates_no_queue_files(h: &RalphHarness) -> TestResul
         );
 
         // No queue files should be created
-        let queue_dir = h
-            .project_dir("amend-no-queue-file")
-            .join("amendment-queue");
+        let queue_dir = h.project_dir("amend-no-queue-file").join("amendment-queue");
         if queue_dir.exists() {
             let json_count = fs::read_dir(&queue_dir)
                 .expect("read queue dir")
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "json")
-                        && !e
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(".tmp-")
+                    e.path().extension().is_some_and(|ext| ext == "json")
+                        && !e.file_name().to_string_lossy().starts_with(".tmp-")
                 })
                 .count();
             assert_eq!(
@@ -422,7 +410,14 @@ fn standard_planner_drains_and_injects_amendments(h: &RalphHarness) -> TestResul
             "planner external amendment body",
         );
         let output = h
-            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--loops",
+                "1",
+                "--skip-commit",
+            ])
             .expect("ralph run should execute");
         assert_exit_code(&output, 0);
 
@@ -533,8 +528,9 @@ fn completion_guard_rejects_with_pending_amendments(h: &RalphHarness) -> TestRes
 }
 
 /// Verify that an amendment arriving during the completing/final-review window
-/// (after the planning-phase guard passes) is caught by the late guard
-/// immediately before the successful completion return.
+/// (after the planning-phase guard passes) causes the late guard to reopen
+/// planning instead of finalizing completion.  On the next planning pass the
+/// amendment is drained and the project completes successfully.
 fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarness) -> TestResult {
     run_case(|| {
         let project_id = "amend-late-guard";
@@ -571,40 +567,18 @@ fn late_guard_blocks_completion_after_completing_phase_amendment(h: &RalphHarnes
                 "--skip-commit",
             ])
             .expect("ralph run should execute");
-        assert_exit_code(&output, 1);
 
-        let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
-        assert!(
-            stderr.contains("completion blocked:")
-                && stderr.contains("amendment(s) arrived in the queue during completing/final-review"),
-            "late guard should block completion with descriptive error, got stderr: {stderr}"
-        );
+        // The late guard reopens planning; on the second pass the amendment is
+        // drained and completion succeeds.
+        assert_exit_code(&output, 0);
 
+        // Amendment should have been consumed (drained during 2nd planning pass)
         let pending =
             pending_amendment_count(&h.project_dir(project_id)).expect("pending amendment count");
-        assert!(
-            pending > 0,
-            "late guard should not drain or mutate pending amendment queue"
+        assert_eq!(
+            pending, 0,
+            "amendment should be consumed after late guard reopens planning, got pending={pending}"
         );
-
-        // Verify no .json files were renamed to .inflight (guard must not
-        // drain or mutate queue files).
-        let queue_dir = h.project_dir(project_id).join("amendment-queue");
-        if queue_dir.exists() {
-            let inflight_count = fs::read_dir(&queue_dir)
-                .expect("read queue dir")
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map_or(false, |ext| ext == "inflight")
-                })
-                .count();
-            assert_eq!(
-                inflight_count, 0,
-                "late guard must not rename .json to .inflight; found {inflight_count} .inflight file(s)"
-            );
-        }
     })
 }
 
@@ -616,10 +590,7 @@ fn planning_failure_preserves_drained_amendments(h: &RalphHarness) -> TestResult
         h.init_workspace().expect("init workspace");
 
         let mock = h
-            .write_stable_mock_script(
-                "amend-plan-rollback.sh",
-                &planning_failure_mock_script(),
-            )
+            .write_stable_mock_script("amend-plan-rollback.sh", &planning_failure_mock_script())
             .expect("write planner failure mock");
         h.setup_mock_backends_stable(&mock)
             .expect("setup mock backends");
@@ -633,15 +604,17 @@ fn planning_failure_preserves_drained_amendments(h: &RalphHarness) -> TestResult
         h.ralph_ok(["config", "set", "workflow.prompt_review_enabled", "false"])
             .expect("disable prompt review");
 
-        enqueue_external_amendment(
-            h,
-            project_id,
-            "EXT-ROLLBACK-001",
-            "rollback test body",
-        );
+        enqueue_external_amendment(h, project_id, "EXT-ROLLBACK-001", "rollback test body");
 
         let output = h
-            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--loops",
+                "1",
+                "--skip-commit",
+            ])
             .expect("ralph run should execute");
         assert_exit_code(&output, 1);
 
@@ -860,7 +833,14 @@ fn malformed_queue_file_does_not_fail_orchestration(h: &RalphHarness) -> TestRes
         .expect("write malformed queue file");
 
         let output = h
-            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--loops",
+                "1",
+                "--skip-commit",
+            ])
             .expect("ralph run should execute");
         assert_exit_code(&output, 0);
 
@@ -1101,10 +1081,16 @@ All work is complete.
 - None
 EOF
 elif grep -q "You are a project completion validator." <<< "$INPUT"; then
-  mkdir -p "{queue_dir}"
-  cat > "{queue_dir}/99999999999999-late-arrival.json" <<'EOF'
+  # Only inject the amendment once (first completer call).
+  # Use a marker file to avoid re-injecting on subsequent calls.
+  MARKER="{queue_dir}/.late-guard-injected"
+  if [ ! -f "$MARKER" ]; then
+    mkdir -p "{queue_dir}"
+    cat > "{queue_dir}/99999999999999-late-arrival.json" <<'EOF'
 {{"id":"EXT-LATE-001","body":"amendment injected during completing phase","priority":"P2","source":"cli","source_detail":"validate","created_at":"2026-03-09T00:00:00Z"}}
 EOF
+    touch "$MARKER"
+  fi
   cat <<'EOF'
 # Verdict: COMPLETE
 
@@ -1249,13 +1235,19 @@ fn unify_planner_dedupe_excludes_final_review(h: &RalphHarness) -> TestResult {
         .expect("enqueue final-review amendment");
 
         let output = h
-            .ralph(["run", "--project", project_id, "--loops", "1", "--skip-commit"])
+            .ralph([
+                "run",
+                "--project",
+                project_id,
+                "--loops",
+                "1",
+                "--skip-commit",
+            ])
             .expect("ralph run");
         assert_exit_code(&output, 0);
 
         // Both amendments should be drained (queue empty)
-        let pending =
-            pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
+        let pending = pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
         assert_eq!(pending, 0, "queue should be empty after drain");
     })
 }
@@ -1346,8 +1338,7 @@ fn unify_mirroring_enqueues_final_review_amendments(h: &RalphHarness) -> TestRes
 
         // The mirrored amendment should have been drained by the planner
         // in the restart loop, so the queue should be empty.
-        let pending =
-            pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
+        let pending = pending_amendment_count(&h.project_dir(project_id)).expect("pending count");
         assert_eq!(pending, 0, "queue should be empty after planner drain");
     })
 }

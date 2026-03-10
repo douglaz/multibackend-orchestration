@@ -69,9 +69,7 @@ fn ralph_bin_absolute() -> PathBuf {
 
 /// Set up a temporary git repo with `ralph init` and a project, returning
 /// (temp_dir, repo_root, project_dir).
-fn setup_workspace_with_project(
-    project_id: &str,
-) -> (tempfile::TempDir, PathBuf, PathBuf) {
+fn setup_workspace_with_project(project_id: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let repo_root = temp.path().join("repo");
     fs::create_dir_all(&repo_root).expect("create repo root");
@@ -92,7 +90,11 @@ fn setup_workspace_with_project(
         .current_dir(&repo_root)
         .output()
         .expect("ralph init");
-    assert!(output.status.success(), "ralph init failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "ralph init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Create prompt file and project
     let prompt_path = temp.path().join("prompt.md");
@@ -100,15 +102,23 @@ fn setup_workspace_with_project(
 
     let output = Command::new(&bin)
         .args([
-            "project", "new",
-            "--id", project_id,
-            "--name", "Test Project",
-            "--prompt", &prompt_path.to_string_lossy(),
+            "project",
+            "new",
+            "--id",
+            project_id,
+            "--name",
+            "Test Project",
+            "--prompt",
+            &prompt_path.to_string_lossy(),
         ])
         .current_dir(&repo_root)
         .output()
         .expect("ralph project new");
-    assert!(output.status.success(), "ralph project new failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "ralph project new failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let project_dir = repo_root.join(".ralph").join("projects").join(project_id);
 
@@ -138,10 +148,14 @@ fn amend_cli_enqueues_deserializes_and_drains_successfully() {
     let output = Command::new(&bin)
         .args([
             "amend",
-            "--project", "amend-cli-test",
-            "--body", "Add retry logic to the API client",
-            "--priority", "P1",
-            "--id", "EXT-CLI-001",
+            "--project",
+            "amend-cli-test",
+            "--body",
+            "Add retry logic to the API client",
+            "--priority",
+            "P1",
+            "--id",
+            "EXT-CLI-001",
         ])
         .current_dir(&repo_root)
         .output()
@@ -158,11 +172,20 @@ fn amend_cli_enqueues_deserializes_and_drains_successfully() {
     // Read printed queue path from stdout
     let stdout = String::from_utf8_lossy(&output.stdout);
     let queue_path_str = stdout.trim();
-    assert!(!queue_path_str.is_empty(), "stdout should contain the queue file path");
-    assert!(queue_path_str.ends_with(".json"), "queue path should end with .json: {queue_path_str}");
+    assert!(
+        !queue_path_str.is_empty(),
+        "stdout should contain the queue file path"
+    );
+    assert!(
+        queue_path_str.ends_with(".json"),
+        "queue path should end with .json: {queue_path_str}"
+    );
 
     let queue_path = PathBuf::from(queue_path_str);
-    assert!(queue_path.exists(), "queue file should exist after enqueue: {queue_path_str}");
+    assert!(
+        queue_path.exists(),
+        "queue file should exist after enqueue: {queue_path_str}"
+    );
 
     // Verify produced JSON deserializes correctly
     let raw = fs::read_to_string(&queue_path).expect("read queue file");
@@ -198,9 +221,12 @@ fn amend_cli_multiple_amendments_drain_in_order() {
         let output = Command::new(&bin)
             .args([
                 "amend",
-                "--project", "amend-cli-multi",
-                "--body", &body,
-                "--id", &id,
+                "--project",
+                "amend-cli-multi",
+                "--body",
+                &body,
+                "--id",
+                &id,
             ])
             .current_dir(&repo_root)
             .output()
@@ -233,8 +259,10 @@ fn amend_cli_rejects_nonexistent_project() {
     let output = Command::new(&bin)
         .args([
             "amend",
-            "--project", "nonexistent-project-xyz",
-            "--body", "should fail",
+            "--project",
+            "nonexistent-project-xyz",
+            "--body",
+            "should fail",
         ])
         .current_dir(&repo_root)
         .output()
