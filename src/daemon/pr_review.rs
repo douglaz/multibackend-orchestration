@@ -105,6 +105,11 @@ fn staging_dir(workspace_root: &Path, task_id: &str) -> PathBuf {
 }
 
 /// Write a single amendment to the staging area.
+///
+/// Uses atomic temp-file + rename to prevent partial/corrupt JSON from a
+/// crash mid-write.  If an existing staged file is present, validates that
+/// it contains well-formed JSON before treating it as an idempotent
+/// success; malformed files (from a previous crash) are rewritten atomically.
 pub fn stage_amendment(
     workspace_root: &Path,
     task_id: &str,
@@ -125,19 +130,38 @@ pub fn stage_amendment(
         "{}.json",
         crate::project::amendments::sanitize_id(&amendment.id),
     );
-    let path = dir.join(filename);
+    let path = dir.join(&filename);
 
-    // Idempotent: if already staged for this comment key, skip.
+    // Idempotent: if already staged, validate the existing file is well-formed
+    // JSON.  A crash during a previous write can leave truncated/corrupt data;
+    // in that case we fall through and rewrite atomically.
     if path.exists() {
-        return Ok(());
+        if let Ok(content) = fs::read_to_string(&path) {
+            if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
+                return Ok(());
+            }
+            // Malformed — fall through to rewrite.
+        }
+        // Unreadable or malformed — fall through to rewrite.
     }
 
     let json = serde_json::to_string_pretty(amendment).map_err(|err| {
         RalphError::Orchestration(format!("failed to serialize staged amendment: {err}"))
     })?;
-    fs::write(&path, json).map_err(|err| {
+
+    // Atomic write: temp file in the same directory + rename, so a crash
+    // mid-write leaves only the temp file (not a corrupt target).
+    let tmp_path = dir.join(format!("{filename}.tmp"));
+    fs::write(&tmp_path, &json).map_err(|err| {
         RalphError::Orchestration(format!(
-            "failed to write staged amendment {}: {err}",
+            "failed to write staged amendment tmp {}: {err}",
+            tmp_path.display()
+        ))
+    })?;
+    fs::rename(&tmp_path, &path).map_err(|err| {
+        RalphError::Orchestration(format!(
+            "failed to rename staged amendment {} -> {}: {err}",
+            tmp_path.display(),
             path.display()
         ))
     })?;
@@ -927,6 +951,77 @@ mod tests {
         // Purge clears staged files after successful spawn
         purge_staged_amendments(ws_root, task_id);
         assert!(!has_staged_amendments(ws_root, task_id));
+    }
+
+    #[test]
+    fn stage_amendment_recovers_from_malformed_existing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+
+        // Simulate a crash that left a truncated/corrupt staged file.
+        let dir = staging_dir(ws_root, task_id);
+        fs::create_dir_all(&dir).expect("create staging dir");
+        let filename = format!(
+            "{}.json",
+            crate::project::amendments::sanitize_id(&amendment.id),
+        );
+        fs::write(dir.join(&filename), b"{\"id\": \"PR-42-pull_co").expect("write corrupt");
+
+        // stage_amendment should detect the malformed file and rewrite it.
+        stage_amendment(ws_root, task_id, &amendment).expect("stage over corrupt");
+
+        // Verify the rewritten file is valid JSON.
+        let content = fs::read_to_string(dir.join(&filename)).expect("read");
+        let loaded: AmendmentRequest = serde_json::from_str(&content).expect("parse");
+        assert_eq!(loaded.id, "PR-42-pull_comment-100");
+        assert_eq!(loaded.body, "fix the bug");
+    }
+
+    #[test]
+    fn stage_amendment_skips_valid_existing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws_root = tmp.path();
+        let task_id = "owner-repo-42";
+
+        let amendment = AmendmentRequest {
+            id: "PR-42-pull_comment-100".to_string(),
+            body: "fix the bug".to_string(),
+            priority: AmendmentPriority::P2,
+            source: AmendmentSource::PrReview,
+            source_detail: Some("pr#42/pull_comment#100".to_string()),
+            created_at: Utc::now(),
+        };
+
+        // Stage once.
+        stage_amendment(ws_root, task_id, &amendment).expect("first stage");
+
+        // Record the file content.
+        let dir = staging_dir(ws_root, task_id);
+        let filename = format!(
+            "{}.json",
+            crate::project::amendments::sanitize_id(&amendment.id),
+        );
+        let original = fs::read_to_string(dir.join(&filename)).expect("read");
+
+        // Stage again with a different body — should be idempotent (not overwrite).
+        let amendment2 = AmendmentRequest {
+            body: "different body".to_string(),
+            ..amendment
+        };
+        stage_amendment(ws_root, task_id, &amendment2).expect("second stage");
+
+        let after = fs::read_to_string(dir.join(&filename)).expect("read after");
+        assert_eq!(original, after, "valid existing file should not be overwritten");
     }
 
     #[test]

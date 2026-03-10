@@ -2712,6 +2712,12 @@ async fn pr_review_phase(
                 "warning: failed to swap lifecycle label for {}: {err}",
                 candidate.task_id
             );
+            // Label swap failed — no in-flight resume actually started, so
+            // clear the marker to avoid stale-marker re-dispatch loops.
+            super::pr_review::clear_resume_pending_marker(
+                &config.workspace_root,
+                &candidate.task_id,
+            );
             continue;
         }
 
@@ -2754,6 +2760,16 @@ async fn pr_review_phase(
                         "warning: pr-review dispatch rollback failed for {} (issue #{}): {rollback_err}; \
                          issue may be stuck in ralph:in-progress — will be recovered at next daemon restart",
                         candidate.task_id, candidate.issue_number
+                    );
+                    // Keep marker when rollback fails — restart recovery needs
+                    // it to detect the in-flight resume that got stuck.
+                } else {
+                    // Rollback succeeded — issue is back to its original label
+                    // and no in-flight resume is active.  Clear the marker to
+                    // prevent stale-marker re-dispatch loops.
+                    super::pr_review::clear_resume_pending_marker(
+                        &config.workspace_root,
+                        &candidate.task_id,
                     );
                 }
             }

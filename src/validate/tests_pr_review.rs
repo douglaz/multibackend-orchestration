@@ -710,6 +710,14 @@ fn dispatch_failure_preserves_staged_amendments(h: &RalphHarness) -> TestResult 
         assert!(rb_add.is_some(), "rollback swap should add ralph:completed, got: {log_content}");
         assert!(rb_remove.unwrap() < rb_add.unwrap(), "remove in-progress must precede add completed in rollback");
         assert!(fwd_add.unwrap() < rb_remove.unwrap(), "forward swap must complete before rollback begins");
+
+        // Verify resume-pending marker is cleared after successful rollback.
+        // A stale marker would cause repeated re-dispatch attempts on subsequent
+        // poll cycles even though no in-flight resume is active.
+        assert!(
+            !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
+            "resume-pending marker must be cleared after dispatch failure with successful rollback"
+        );
     })
 }
 
