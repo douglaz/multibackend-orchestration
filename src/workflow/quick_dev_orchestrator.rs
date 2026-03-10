@@ -2062,6 +2062,39 @@ mod tests {
     }
 
     #[test]
+    fn load_latest_final_review_feedback_skips_roles_closed_by_same_timestamp_complete() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path();
+        let loop_dir = project_dir.join("loops/001-quick-dev");
+        fs::create_dir_all(&loop_dir).unwrap();
+
+        fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nStale implementer issue\n",
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        fs::write(
+            loop_dir.join("20260310100000-quick-dev-final-review-implementer-complete.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: NO AMENDMENTS\n\nClosed implementer issue\n",
+        )
+        .unwrap();
+        fs::write(
+            loop_dir.join("20260310100001-quick-dev-final-review-reviewer-issues.md"),
+            "---\nartifact: quick-dev-final-review\n---\n\n# Final Review: AMENDMENTS\n\nReviewer issue body\n",
+        )
+        .unwrap();
+
+        let handoff = load_latest_final_review_feedback(project_dir, 1, "quick-dev");
+        assert!(!handoff.contains("Stale implementer issue"));
+        assert!(!handoff.contains("Implementer Final Review Findings"));
+        assert!(handoff.contains("Reviewer Final Review Findings"));
+        assert!(handoff.contains("Reviewer issue body"));
+    }
+
+    #[test]
     fn build_plan_implement_prompt_includes_final_review_handoff() {
         let effective = make_test_effective(
             Some("claude".to_owned()),

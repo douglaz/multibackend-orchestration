@@ -3434,7 +3434,7 @@ elif grep -q "quick-dev apply-fixes phase" <<< "$INPUT"; then
 EOF
   echo "quick-dev-fixed" >> mock_file.txt
   git add mock_file.txt
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
@@ -3491,7 +3491,7 @@ EOF
 Implementation looks good, no changes needed.
 EOF
   fi
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'
@@ -3531,7 +3531,7 @@ if grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Required Changes
 - Always-reject mock: changes requested every time.
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -3574,7 +3574,7 @@ EOF
 - Fix the initial implementation issue.
 EOF
   fi
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: NO AMENDMENTS
 
@@ -3632,7 +3632,7 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 Implementation satisfactory.
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   count=0
   if [ -f "$STATE" ]; then
     count="$(cat "$STATE")"
@@ -3702,7 +3702,7 @@ elif grep -q "quick-dev reviewer" <<< "$INPUT"; then
 ## Summary
 OK.
 EOF
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   cat <<'EOF'
 # Final Review: AMENDMENTS
 
@@ -3901,7 +3901,7 @@ EOF
   # Create more stray files on second iteration
   echo "stray notes 2" > 20260304130000-impl-notes.md
   echo "stray response 2" > 20260304130000-impl-response-002.md
-elif grep -q "final reviewer auditing" <<< "$INPUT"; then
+elif grep -q "final reviewer auditing" <<< "$INPUT" || grep -q "QUICK_DEV_FINAL_REVIEW_TEST_MARKER" <<< "$INPUT"; then
   result="${QUICK_DEV_FINAL_REVIEW_RESULT:-NO_AMENDMENTS}"
   if [ "$result" = "AMENDMENTS" ]; then
     cat <<'EOF'

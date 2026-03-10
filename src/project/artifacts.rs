@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::util::time::{format_timestamp_yyyymmddhhmmss, now_utc};
 use crate::Result;
@@ -283,7 +284,7 @@ pub fn resolve_artifact_path_by_suffixes(
         Err(err) => return Err(err.into()),
     };
 
-    let mut best: Option<(Option<String>, String)> = None;
+    let mut best: Option<(Option<String>, Option<SystemTime>, String)> = None;
     for entry in read_dir {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -312,31 +313,59 @@ pub fn resolve_artifact_path_by_suffixes(
             continue;
         };
 
+        let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
         let rel = artifact_relative_path(project_dir, &entry.path());
         match &best {
-            None => best = Some((timestamp, rel)),
-            Some((best_ts, best_rel)) => {
-                if is_candidate_better(timestamp.as_deref(), best_ts.as_deref(), &rel, best_rel) {
-                    best = Some((timestamp, rel));
+            None => best = Some((timestamp, modified, rel)),
+            Some((best_ts, best_modified, best_rel)) => {
+                if is_candidate_better(
+                    timestamp.as_deref(),
+                    modified,
+                    best_ts.as_deref(),
+                    *best_modified,
+                    &rel,
+                    best_rel,
+                ) {
+                    best = Some((timestamp, modified, rel));
                 }
             }
         }
     }
 
-    Ok(best.map(|(_, rel)| rel))
+    Ok(best.map(|(_, _, rel)| rel))
 }
 
 fn is_candidate_better(
     candidate_ts: Option<&str>,
+    candidate_modified: Option<SystemTime>,
     best_ts: Option<&str>,
+    best_modified: Option<SystemTime>,
     candidate_rel: &str,
     best_rel: &str,
 ) -> bool {
     match (candidate_ts, best_ts) {
-        (Some(c), Some(b)) => c > b || (c == b && candidate_rel > best_rel),
+        (Some(c), Some(b)) => {
+            c > b
+                || (c == b
+                    && match (candidate_modified, best_modified) {
+                        (Some(candidate), Some(best)) => {
+                            candidate > best || (candidate == best && candidate_rel > best_rel)
+                        }
+                        (Some(_), None) => true,
+                        (None, Some(_)) => false,
+                        (None, None) => candidate_rel > best_rel,
+                    })
+        }
         (Some(_), None) => true,
         (None, Some(_)) => false,
-        (None, None) => candidate_rel > best_rel,
+        (None, None) => match (candidate_modified, best_modified) {
+            (Some(candidate), Some(best)) => {
+                candidate > best || (candidate == best && candidate_rel > best_rel)
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => candidate_rel > best_rel,
+        },
     }
 }
 
@@ -454,6 +483,45 @@ mod tests {
             "older issues",
         )
         .expect("write older issues");
+        std::fs::write(
+            loop_dir.join("20260203060159-quick-dev-final-review-implementer-complete.md"),
+            "newer complete",
+        )
+        .expect("write newer complete");
+
+        let resolved = resolve_artifact_path_by_suffixes(
+            temp.path(),
+            1,
+            "demo",
+            &[
+                "quick-dev-final-review-implementer-issues.md",
+                "quick-dev-final-review-implementer-complete.md",
+            ],
+        )
+        .expect("resolve")
+        .expect("path should exist");
+
+        assert_eq!(
+            resolved,
+            "loops/001-demo/20260203060159-quick-dev-final-review-implementer-complete.md"
+        );
+    }
+
+    #[test]
+    fn resolve_artifact_path_by_suffixes_breaks_same_timestamp_ties_by_modified_time() {
+        let temp = TempDir::new().expect("temp dir");
+        let loop_dir = temp.path().join("loops/001-demo");
+        std::fs::create_dir_all(&loop_dir).expect("create loop dir");
+
+        std::fs::write(
+            loop_dir.join("20260203060159-quick-dev-final-review-implementer-issues.md"),
+            "older issues",
+        )
+        .expect("write older issues");
+
+        // Same-second filename ties need a real write-order signal.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
         std::fs::write(
             loop_dir.join("20260203060159-quick-dev-final-review-implementer-complete.md"),
             "newer complete",
