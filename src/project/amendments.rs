@@ -467,6 +467,12 @@ pub fn rollback_drained_amendments(
     }
 }
 
+/// Count pending amendments in the queue.
+///
+/// Only counts `.json` files (newly enqueued items). `.inflight` files are
+/// excluded because they represent amendments that are currently being
+/// processed by a running drain — they will be recovered on restart if the
+/// process crashes, but should not be counted as "pending" for guard checks.
 pub fn pending_amendment_count(project_dir: &Path) -> Result<usize> {
     let queue_dir = amendment_queue_dir(project_dir);
     if !queue_dir.exists() {
@@ -480,7 +486,7 @@ pub fn pending_amendment_count(project_dir: &Path) -> Result<usize> {
             continue;
         }
         let path = entry.path();
-        if is_queue_file_for_drain(&path) {
+        if has_extension(&path, "json") && !is_temp_queue_file(&path) {
             count += 1;
         }
     }
@@ -1516,11 +1522,20 @@ mod tests {
 
         assert!(result.is_err(), "read I/O error must be fatal");
 
-        // The first item was drained then rolled back; the second is still inflight.
+        // The first item was drained then rolled back as a new .json.
+        // The unreadable item is still .inflight (not counted by
+        // pending_amendment_count which only counts .json).
         let pending = pending_amendment_count(project_dir).expect("pending count");
+        assert_eq!(pending, 1, "rolled-back item should be pending as .json");
+        // A fresh drain should recover both items once permissions are restored.
+        let total_files = fs::read_dir(&queue_dir)
+            .expect("read queue dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| is_queue_file_for_drain(&e.path()))
+            .count();
         assert_eq!(
-            pending, 2,
-            "rolled-back item and unreadable inflight should both be pending"
+            total_files, 2,
+            "rolled-back .json + unreadable .inflight should both be on disk"
         );
     }
 
