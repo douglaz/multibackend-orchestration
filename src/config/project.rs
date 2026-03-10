@@ -18,6 +18,14 @@ pub struct ProjectConfig {
     pub templates: ProjectTemplateOverrides,
     #[serde(default)]
     pub daemon: ProjectDaemonOverrides,
+    #[serde(default)]
+    pub amendments: ProjectAmendmentsOverrides,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectAmendmentsOverrides {
+    pub unify_final_review: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

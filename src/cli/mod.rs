@@ -1,3 +1,4 @@
+mod amend;
 pub(crate) mod auto;
 mod backend;
 pub(crate) mod backend_spec;
@@ -50,6 +51,19 @@ pub enum Commands {
     Rollback(RollbackArgs),
     Config(ConfigArgs),
     Daemon(daemon::DaemonArgs),
+    Amend(AmendArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AmendArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub body: String,
+    #[arg(long, default_value = "P2")]
+    pub priority: String,
+    #[arg(long)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -309,6 +323,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Rollback(args) => rollback::execute(args),
         Commands::Config(args) => config::execute(args),
         Commands::Daemon(args) => daemon::execute(args).await,
+        Commands::Amend(args) => amend::execute(args),
     }
 }
 
@@ -880,5 +895,58 @@ mod tests {
         };
 
         assert_eq!(retrigger_args.issue_number, "acme-widgets-42");
+    }
+
+    #[test]
+    fn parses_amend_with_all_args() {
+        let cli = Cli::parse_from([
+            "ralph",
+            "amend",
+            "--project",
+            "issue-42",
+            "--body",
+            "fix the bug",
+            "--priority",
+            "P1",
+            "--id",
+            "EXT-001",
+        ]);
+        let Commands::Amend(args) = cli.command else {
+            panic!("expected amend command");
+        };
+
+        assert_eq!(args.project.as_deref(), Some("issue-42"));
+        assert_eq!(args.body, "fix the bug");
+        assert_eq!(args.priority, "P1");
+        assert_eq!(args.id.as_deref(), Some("EXT-001"));
+    }
+
+    #[test]
+    fn parses_amend_with_defaults() {
+        let cli = Cli::parse_from(["ralph", "amend", "--body", "fix it"]);
+        let Commands::Amend(args) = cli.command else {
+            panic!("expected amend command");
+        };
+
+        assert!(args.project.is_none());
+        assert_eq!(args.body, "fix it");
+        assert_eq!(args.priority, "P2");
+        assert!(args.id.is_none());
+    }
+
+    #[test]
+    fn parses_amend_with_at_file_body() {
+        let cli = Cli::parse_from(["ralph", "amend", "--body", "@/tmp/body.txt"]);
+        let Commands::Amend(args) = cli.command else {
+            panic!("expected amend command");
+        };
+
+        assert_eq!(args.body, "@/tmp/body.txt");
+    }
+
+    #[test]
+    fn rejects_amend_without_body() {
+        let result = Cli::try_parse_from(["ralph", "amend"]);
+        assert!(result.is_err());
     }
 }
