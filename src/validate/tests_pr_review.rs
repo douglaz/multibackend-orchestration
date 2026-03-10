@@ -45,6 +45,10 @@ pub fn tests() -> Vec<ConformanceTest> {
             name: "pr_review::restart_drift_ready_drains_staged",
             func: restart_drift_ready_drains_staged,
         },
+        ConformanceTest {
+            name: "pr_review::claim_dispatch_does_not_drain_staged",
+            func: claim_dispatch_does_not_drain_staged,
+        },
     ]
 }
 
@@ -945,6 +949,90 @@ fn restart_drift_ready_drains_staged(h: &RalphHarness) -> TestResult {
         assert!(
             !has_resume_pending_marker(&ws_root, "acme-widgets-42"),
             "resume-pending marker should be cleared after successful dispatch"
+        );
+    })
+}
+
+/// Regression test: when a normal `ralph:ready` claim dispatch runs (not a
+/// PR-review resume), staged PR-review amendments must NOT be drained or
+/// purged.  They should remain in the staging directory for a future
+/// PrReviewResume dispatch to pick up.
+fn claim_dispatch_does_not_drain_staged(h: &RalphHarness) -> TestResult {
+    run_case(|| {
+        let dh =
+            RalphHarness::new_daemon(&h.ralph_bin, "acme", "widgets").expect("daemon harness");
+        dh.init_workspace().expect("init failed");
+        setup_mock_backend(&dh);
+
+        dh.ralph_ok([
+            "config",
+            "set",
+            "workspace.daemon_pr_review_whitelist",
+            "[\"alice\"]",
+        ])
+        .expect("set whitelist");
+
+        let ws_root = dh.repo_root.join(".ralph");
+        setup_task_metadata(&ws_root, "acme-widgets-42", 99);
+        setup_project_branch(&dh.repo_root, 42, false);
+
+        // Pre-stage a PR-review amendment.
+        let staging_dir = ws_root
+            .join("daemon")
+            .join("pr-review-amendments")
+            .join("acme-widgets-42");
+        fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let amendment = serde_json::json!({
+            "id": "PR-99-issue_comment-500",
+            "body": "fix the auth bug",
+            "priority": "p2",
+            "source": "pr-review",
+            "source_detail": "pr#99/issue_comment#500",
+            "created_at": "2024-01-01T00:00:00Z"
+        });
+        fs::write(
+            staging_dir.join("20240101000000-PR-99-issue_comment-500.json"),
+            serde_json::to_string_pretty(&amendment).unwrap(),
+        )
+        .expect("write staged amendment");
+
+        let gh_path = write_pr_review_mock_gh(&dh).expect("write mock gh");
+
+        // Issue has ralph:ready label — this triggers a normal Claim dispatch,
+        // NOT a PrReviewResume.
+        let issues_json = r#"[{"number":42,"title":"Test issue","labels":[{"name":"ralph:ready"}]}]"#;
+
+        let output = dh
+            .daemon_env(
+                [
+                    "daemon",
+                    "start",
+                    "--repo",
+                    "acme/widgets",
+                    "--single-iteration",
+                ],
+                &[
+                    ("PATH", &gh_path),
+                    ("MOCK_GH_ISSUES", issues_json),
+                    ("MOCK_GH_PR_STATE", "open"),
+                    ("MOCK_GH_PR_COMMENTS", "[]"),
+                    ("MOCK_GH_ISSUE_COMMENTS", "[]"),
+                    ("MOCK_GH_REVIEWS", "[]"),
+                ],
+            )
+            .expect("daemon start");
+        assert_exit_code(&output, 0);
+
+        // Staged amendments must still be present — Claim dispatch must not
+        // drain or purge them.
+        assert!(
+            has_staged_amendments(&ws_root, "acme-widgets-42"),
+            "staged amendments should NOT have been drained by normal Claim dispatch"
+        );
+        let remaining = count_json_files(&staging_dir);
+        assert_eq!(
+            remaining, 1,
+            "expected 1 staged amendment to survive Claim dispatch, got {remaining}"
         );
     })
 }

@@ -1454,16 +1454,16 @@ async fn dispatch_task(
     };
 
     // Drain any staged PR review amendments into the project's amendment queue.
-    // State reset (status → InProgress, quick_dev_phase reset) is only performed
-    // for PrReviewResume dispatches to avoid mutating legitimately resumable
-    // non-completed projects dispatched via normal Claim flow.
-    let drained_count = {
+    // Both drain and purge are gated to PrReviewResume dispatches only — running
+    // them on normal Claim paths would consume staged amendments without the
+    // accompanying state reset, causing quick-dev short-circuits to skip
+    // processing and lose staged feedback.
+    let drained_count = if origin == DispatchOrigin::PrReviewResume {
         let ws = config.workspace_root.clone();
         let tid = task_id.clone();
         let pid = project_id.clone();
         let wt = wt_path.clone();
         let is_quick = issue_labels.iter().any(|l| l == "ralph:quick");
-        let should_reset = origin == DispatchOrigin::PrReviewResume;
         let drained = spawn_blocking_op(move || {
             if !super::pr_review::has_staged_amendments(&ws, &tid) {
                 return Ok(0);
@@ -1472,7 +1472,7 @@ async fn dispatch_task(
             if project_dir.exists() {
                 let count =
                     super::pr_review::drain_staged_amendments(&ws, &tid, &project_dir)?;
-                if count > 0 && should_reset {
+                if count > 0 {
                     super::pr_review::reset_project_state_for_resume(&project_dir, is_quick)?;
                 }
                 Ok(count)
@@ -1487,6 +1487,8 @@ async fn dispatch_task(
             );
         }
         drained
+    } else {
+        0
     };
 
     if resume_existing_project {
